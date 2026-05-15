@@ -1,0 +1,457 @@
+"""Sync an IMAP account into PostgreSQL.
+
+Per-mailbox algorithm:
+    1. SELECT the mailbox; capture server UIDVALIDITY and UIDNEXT.
+    2. If UIDVALIDITY changed (or we've never synced this mailbox) -> drop the
+       message_labels rows for this mailbox and re-link by re-fetching all UIDs.
+    3. Otherwise fetch only UIDs > stored uidnext.
+    4. Per message: upsert into `messages` (per-account dedup by Message-Id, or
+       by raw SHA-256 when Message-Id is absent); upsert `message_labels` row;
+       on first insertion of a message that has attachments, write them under
+       the attachments root and store the JSONB index.
+    5. Checkpoint mailbox.uidnext every batch so a crash doesn't lose progress.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Iterable, Protocol
+
+import psycopg
+from psycopg.types.json import Jsonb
+
+from .attachments import write_attachments
+from .config import AccountConfig
+from .parser import ParsedMessage, parse_message
+
+log = logging.getLogger(__name__)
+
+BATCH_SIZE = 50
+
+
+# --- IMAP client surface we depend on ----------------------------------------
+
+
+class ImapLike(Protocol):
+    """The subset of imapclient.IMAPClient that sync.py actually calls.
+
+    Defined as a Protocol so tests can pass in an in-memory fake.
+    """
+
+    def list_folders(self) -> list[tuple]: ...
+    def select_folder(self, folder: str) -> dict: ...
+    def search(self, criteria) -> list[int]: ...
+    def fetch(self, uids: list[int], data: list) -> dict: ...
+
+
+# --- DB helpers ---------------------------------------------------------------
+
+
+@dataclass
+class MailboxRow:
+    id: int
+    name: str
+    uidvalidity: int | None
+    uidnext: int | None
+
+
+def upsert_account(conn: psycopg.Connection, account: AccountConfig) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO accounts
+                (name, email_address, imap_host, imap_port, auth_method, oauth_provider)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (name) DO UPDATE SET
+                email_address  = EXCLUDED.email_address,
+                imap_host      = EXCLUDED.imap_host,
+                imap_port      = EXCLUDED.imap_port,
+                auth_method    = EXCLUDED.auth_method,
+                oauth_provider = EXCLUDED.oauth_provider
+            RETURNING id
+            """,
+            (
+                account.name,
+                account.email,
+                account.imap_host,
+                account.imap_port,
+                account.auth_method,
+                account.oauth_provider,
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return row[0]
+
+
+def upsert_mailbox(
+    conn: psycopg.Connection,
+    *,
+    account_id: int,
+    name: str,
+    delimiter: str | None,
+    flags: list[str],
+) -> MailboxRow:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO mailboxes (account_id, name, delimiter, flags)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (account_id, name) DO UPDATE SET
+                delimiter = EXCLUDED.delimiter,
+                flags     = EXCLUDED.flags
+            RETURNING id, name, uidvalidity, uidnext
+            """,
+            (account_id, name, delimiter, flags),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return MailboxRow(id=row[0], name=row[1], uidvalidity=row[2], uidnext=row[3])
+
+
+def _existing_message_id(
+    cur: psycopg.Cursor, *, account_id: int, message_id: str | None, raw_sha256: bytes
+) -> int | None:
+    if message_id is not None:
+        cur.execute(
+            "SELECT id FROM messages WHERE account_id=%s AND message_id=%s",
+            (account_id, message_id),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id FROM messages
+            WHERE account_id=%s AND message_id IS NULL AND raw_sha256=%s
+            """,
+            (account_id, raw_sha256),
+        )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def upsert_message(
+    conn: psycopg.Connection, *, account_id: int, parsed: ParsedMessage
+) -> tuple[int, bool]:
+    """Return (message_db_id, inserted_now)."""
+    with conn.cursor() as cur:
+        existing = _existing_message_id(
+            cur,
+            account_id=account_id,
+            message_id=parsed.message_id,
+            raw_sha256=parsed.raw_sha256,
+        )
+        if existing is not None:
+            return existing, False
+
+        cur.execute(
+            """
+            INSERT INTO messages (
+                account_id, message_id, raw_sha256, in_reply_to, refs,
+                subject, from_addr, from_name, to_addrs, cc_addrs, bcc_addrs,
+                date_sent, headers, body_text, body_html, raw_bytes, size_bytes
+            )
+            VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s
+            )
+            RETURNING id
+            """,
+            (
+                account_id,
+                parsed.message_id,
+                parsed.raw_sha256,
+                parsed.in_reply_to,
+                parsed.refs,
+                parsed.subject,
+                parsed.from_addr,
+                parsed.from_name,
+                parsed.to_addrs,
+                parsed.cc_addrs,
+                parsed.bcc_addrs,
+                parsed.date_sent,
+                Jsonb(parsed.headers),
+                parsed.body_text,
+                parsed.body_html,
+                parsed.raw_bytes,
+                parsed.size_bytes,
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return row[0], True
+
+
+def upsert_label(
+    conn: psycopg.Connection,
+    *,
+    message_db_id: int,
+    mailbox_id: int,
+    uid: int,
+    flags: list[str],
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO message_labels (message_id, mailbox_id, uid, flags)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (message_id, mailbox_id) DO UPDATE SET
+                uid   = EXCLUDED.uid,
+                flags = EXCLUDED.flags
+            """,
+            (message_db_id, mailbox_id, uid, flags),
+        )
+
+
+def set_message_attachments(
+    conn: psycopg.Connection, *, message_db_id: int, rows: list[dict]
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE messages SET attachments = %s WHERE id = %s",
+            (Jsonb(rows), message_db_id),
+        )
+
+
+def update_mailbox_progress(
+    conn: psycopg.Connection,
+    *,
+    mailbox_id: int,
+    uidvalidity: int,
+    uidnext: int,
+    last_sync_at: datetime | None = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE mailboxes
+               SET uidvalidity  = %s,
+                   uidnext      = %s,
+                   last_sync_at = COALESCE(%s, last_sync_at)
+             WHERE id = %s
+            """,
+            (uidvalidity, uidnext, last_sync_at, mailbox_id),
+        )
+
+
+def clear_mailbox_labels(conn: psycopg.Connection, mailbox_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM message_labels WHERE mailbox_id = %s", (mailbox_id,))
+
+
+# --- folder filtering --------------------------------------------------------
+
+
+def folders_to_sync(
+    folders: Iterable[tuple],
+    *,
+    allow: list[str] | None,
+    deny: list[str] | None,
+    deny_flags: list[str] | None = None,
+) -> list[tuple[str, str | None, list[str]]]:
+    """Filter the IMAP LIST response into a set of folders we should sync.
+
+    - `\\Noselect` folders are always excluded (they can't be SELECTed).
+    - `allow` (if non-empty) restricts to exactly the named folders.
+    - `deny` excludes folders by exact name (case-sensitive).
+    - `deny_flags` excludes folders that carry any of these IMAP special-use
+      flags (RFC 6154). Robust to provider locale: e.g. Gmail Trash is
+      "[Gmail]/Bin" on en-AU but always carries `\\Trash`.
+    """
+    out: list[tuple[str, str | None, list[str]]] = []
+    deny_set = set(deny or [])
+    allow_set = set(allow or [])
+    deny_flag_set = set(deny_flags or [])
+    for entry in folders:
+        flags_raw, delimiter, name = entry
+        flag_strs = [
+            f.decode() if isinstance(f, (bytes, bytearray)) else str(f)
+            for f in (flags_raw or ())
+        ]
+        if "\\Noselect" in flag_strs:
+            continue
+        if deny_flag_set and any(f in deny_flag_set for f in flag_strs):
+            continue
+        if allow_set and name not in allow_set:
+            continue
+        if name in deny_set:
+            continue
+        delim = (
+            delimiter.decode() if isinstance(delimiter, (bytes, bytearray)) else delimiter
+        )
+        out.append((name, delim, flag_strs))
+    return out
+
+
+# --- sync core ---------------------------------------------------------------
+
+
+def _decode_flags(flags) -> list[str]:
+    if not flags:
+        return []
+    return [
+        f.decode() if isinstance(f, (bytes, bytearray)) else str(f) for f in flags
+    ]
+
+
+def _filter_new_uids(uids: list[int], known_uidnext: int | None) -> list[int]:
+    if known_uidnext is None:
+        return sorted(uids)
+    return sorted(u for u in uids if u >= known_uidnext)
+
+
+def sync_mailbox(
+    conn: psycopg.Connection,
+    imap: ImapLike,
+    *,
+    account_id: int,
+    mailbox: MailboxRow,
+    attachments_root: Path,
+    max_messages: int | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> int:
+    """Sync a single mailbox. Returns number of newly inserted messages.
+
+    If `max_messages` is set, fetch at most that many UIDs in this run. The
+    mailbox's `uidnext` checkpoint advances to the highest UID processed, so
+    the next run resumes where this one stopped.
+    """
+
+    def _emit(msg: str) -> None:
+        if progress is not None:
+            progress(msg)
+
+    status = imap.select_folder(mailbox.name)
+    server_uidvalidity = int(status.get(b"UIDVALIDITY") or status.get("UIDVALIDITY") or 0)
+    server_uidnext = int(status.get(b"UIDNEXT") or status.get("UIDNEXT") or 0)
+
+    full_sync = mailbox.uidvalidity != server_uidvalidity
+    if full_sync and mailbox.uidvalidity is not None:
+        log.info(
+            "uidvalidity changed for mailbox %s (%s -> %s); resyncing",
+            mailbox.name, mailbox.uidvalidity, server_uidvalidity,
+        )
+        clear_mailbox_labels(conn, mailbox.id)
+        conn.commit()
+
+    if full_sync:
+        uids = sorted(imap.search("ALL"))
+    else:
+        last = mailbox.uidnext or 1
+        # SEARCH "UID N:*" always returns at least one result on a non-empty
+        # mailbox, even if no messages have UID >= N. Filter manually below.
+        candidate = imap.search(["UID", f"{last}:*"])
+        uids = _filter_new_uids(candidate, last)
+
+    total_candidates = len(uids)
+    if max_messages is not None and total_candidates > max_messages:
+        uids = uids[:max_messages]
+
+    _emit(
+        f"  {mailbox.name}: {len(uids)} of {total_candidates} candidate UID(s) "
+        f"this run"
+    )
+
+    if not uids:
+        update_mailbox_progress(
+            conn,
+            mailbox_id=mailbox.id,
+            uidvalidity=server_uidvalidity,
+            uidnext=server_uidnext or (mailbox.uidnext or 1),
+            last_sync_at=datetime.now().astimezone(),
+        )
+        conn.commit()
+        return 0
+
+    inserted = 0
+    seen = 0
+    highest_seen = (mailbox.uidnext or 1) - 1
+    for chunk in _batches(uids, BATCH_SIZE):
+        fetched = imap.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS", b"INTERNALDATE"])
+        for uid in chunk:
+            data = fetched.get(uid) or fetched.get(int(uid)) or {}
+            raw = data.get(b"BODY[]") or data.get("BODY[]")
+            if not raw:
+                log.warning("UID %s in %s returned no body; skipping", uid, mailbox.name)
+                continue
+            parsed = parse_message(raw)
+            db_id, did_insert = upsert_message(
+                conn, account_id=account_id, parsed=parsed
+            )
+            upsert_label(
+                conn,
+                message_db_id=db_id,
+                mailbox_id=mailbox.id,
+                uid=int(uid),
+                flags=_decode_flags(data.get(b"FLAGS") or data.get("FLAGS")),
+            )
+            if did_insert:
+                inserted += 1
+                if parsed.attachments:
+                    rows = write_attachments(conn, parsed, root=attachments_root)
+                    set_message_attachments(conn, message_db_id=db_id, rows=rows)
+            highest_seen = max(highest_seen, int(uid))
+            seen += 1
+
+        update_mailbox_progress(
+            conn,
+            mailbox_id=mailbox.id,
+            uidvalidity=server_uidvalidity,
+            uidnext=highest_seen + 1,
+            last_sync_at=datetime.now().astimezone(),
+        )
+        conn.commit()
+        _emit(f"  {mailbox.name}: {seen}/{len(uids)} processed, +{inserted} new")
+
+    return inserted
+
+
+def sync_account(
+    conn: psycopg.Connection,
+    imap: ImapLike,
+    *,
+    account: AccountConfig,
+    attachments_root: Path,
+    max_messages: int | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, int]:
+    """Sync every mailbox of an account. Returns {mailbox_name: inserted}."""
+    account_id = upsert_account(conn, account)
+    conn.commit()
+
+    folders = imap.list_folders()
+    selectable = folders_to_sync(
+        folders,
+        allow=account.folder_allow,
+        deny=account.folder_deny,
+        deny_flags=account.folder_deny_flags,
+    )
+
+    results: dict[str, int] = {}
+    for name, delimiter, flags in selectable:
+        mailbox = upsert_mailbox(
+            conn,
+            account_id=account_id,
+            name=name,
+            delimiter=delimiter,
+            flags=flags,
+        )
+        conn.commit()
+        results[name] = sync_mailbox(
+            conn,
+            imap,
+            account_id=account_id,
+            mailbox=mailbox,
+            attachments_root=attachments_root,
+            max_messages=max_messages,
+            progress=progress,
+        )
+    return results
+
+
+def _batches(items: list[int], size: int) -> Iterable[list[int]]:
+    for i in range(0, len(items), size):
+        yield items[i : i + size]

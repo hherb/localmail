@@ -1,0 +1,39 @@
+# Copy to ~/.config/localmail/config.toml (or set LOCALMAIL_CONFIG env var to point elsewhere).
+#
+# Secrets (passwords, OAuth refresh tokens) are NOT stored here.
+# They live in the OS keyring under service "localmail", username "<account.name>"
+# (and "<account.name>:refresh" for OAuth2 refresh tokens).
+
+[database]
+dsn = "postgresql://localmail:local%40%40mail@localhost:5532/localmail"
+# URL-encode special characters in the password (e.g. '@' -> %40).
+
+[attachments]
+root = "~/localmail"
+
+[daemon]
+idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling
+poll_seconds       = 300    # poll non-INBOX folders every 5 minutes
+
+# Only required when at least one account uses auth_method = "oauth2".
+# See README.md for how to obtain this file from Google Cloud Console.
+[gmail_oauth]
+client_secrets_file = "~/.config/localmail/gmail_client_secret.json"
+
+# --- accounts -----------------------------------------------------------------
+
+# [[accounts]]
+# name           = "horst-gmail"
+# email          = "horst.herb@gmail.com"
+# imap_host      = "imap.gmail.com"
+# imap_port      = 993
+# auth_method    = "oauth2"
+# oauth_provider = "gmail"
+# folder_deny    = ["[Gmail]/All Mail", "[Gmail]/Trash", "[Gmail]/Spam"]
+
+# [[accounts]]
+# name        = "work-fastmail"
+# email       = "horst@example.com"
+# imap_host   = "imap.fastmail.com"
+# imap_port   = 993
+# auth_method = "password"

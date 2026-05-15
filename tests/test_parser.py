@@ -72,6 +72,26 @@ def test_headers_are_dict_of_lists_and_jsonable():
     json.dumps(p.headers)
 
 
+def test_nul_bytes_in_text_fields_are_stripped():
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "alice@example.com"
+    msg["To"] = "bob@example.com"
+    msg["Subject"] = "before\x00after"
+    msg["Date"] = "Wed, 01 Jan 2025 12:00:00 +0000"
+    msg["Message-Id"] = "<nul-1@example.com>"
+    msg.set_content("body before\x00body after")
+    raw = msg.as_bytes()
+
+    p = parse_message(raw)
+    # Postgres TEXT rejects NUL bytes; the parser is the right place to strip them.
+    assert "\x00" not in (p.subject or "")
+    assert p.subject == "beforeafter"
+    assert "\x00" not in (p.body_text or "")
+    assert "body before" in p.body_text and "body after" in p.body_text
+
+
 def test_two_attachments_same_filename_both_captured():
     p = parse_message(_eml.two_attachments_same_name())
     assert [a.filename for a in p.attachments] == ["note.txt", "note.txt"]

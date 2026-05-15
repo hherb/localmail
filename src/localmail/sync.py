@@ -367,6 +367,7 @@ def sync_mailbox(
         return 0
 
     inserted = 0
+    skipped = 0
     seen = 0
     highest_seen = (mailbox.uidnext or 1) - 1
     for chunk in _batches(uids, BATCH_SIZE):
@@ -376,23 +377,44 @@ def sync_mailbox(
             raw = data.get(b"BODY[]") or data.get("BODY[]")
             if not raw:
                 log.warning("UID %s in %s returned no body; skipping", uid, mailbox.name)
+                highest_seen = max(highest_seen, int(uid))
+                seen += 1
                 continue
-            parsed = parse_message(raw)
-            db_id, did_insert = upsert_message(
-                conn, account_id=account_id, parsed=parsed
-            )
-            upsert_label(
-                conn,
-                message_db_id=db_id,
-                mailbox_id=mailbox.id,
-                uid=int(uid),
-                flags=_decode_flags(data.get(b"FLAGS") or data.get("FLAGS")),
-            )
-            if did_insert:
-                inserted += 1
-                if parsed.attachments:
-                    rows = write_attachments(conn, parsed, root=attachments_root)
-                    set_message_attachments(conn, message_db_id=db_id, rows=rows)
+
+            # Per-message SAVEPOINT — a single poison-pill row (e.g. an
+            # unexpected encoding the parser/DB chokes on) only loses itself,
+            # not the surrounding 49 messages' worth of work.
+            with conn.cursor() as cur:
+                cur.execute("SAVEPOINT msg")
+            try:
+                parsed = parse_message(raw)
+                db_id, did_insert = upsert_message(
+                    conn, account_id=account_id, parsed=parsed
+                )
+                upsert_label(
+                    conn,
+                    message_db_id=db_id,
+                    mailbox_id=mailbox.id,
+                    uid=int(uid),
+                    flags=_decode_flags(data.get(b"FLAGS") or data.get("FLAGS")),
+                )
+                if did_insert:
+                    inserted += 1
+                    if parsed.attachments:
+                        rows = write_attachments(conn, parsed, root=attachments_root)
+                        set_message_attachments(conn, message_db_id=db_id, rows=rows)
+                with conn.cursor() as cur:
+                    cur.execute("RELEASE SAVEPOINT msg")
+            except Exception:
+                with conn.cursor() as cur:
+                    cur.execute("ROLLBACK TO SAVEPOINT msg")
+                    cur.execute("RELEASE SAVEPOINT msg")
+                log.exception(
+                    "skipping poison-pill UID %s in %s/%s",
+                    uid, account_id, mailbox.name,
+                )
+                skipped += 1
+
             highest_seen = max(highest_seen, int(uid))
             seen += 1
 
@@ -404,7 +426,11 @@ def sync_mailbox(
             last_sync_at=datetime.now().astimezone(),
         )
         conn.commit()
-        _emit(f"  {mailbox.name}: {seen}/{len(uids)} processed, +{inserted} new")
+        suffix = f", {skipped} skipped" if skipped else ""
+        _emit(
+            f"  {mailbox.name}: {seen}/{len(uids)} processed, "
+            f"+{inserted} new{suffix}"
+        )
 
     return inserted
 

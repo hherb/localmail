@@ -82,6 +82,19 @@ def _headers_dict(msg: EmailMessage) -> dict[str, list[str]]:
     return out
 
 
+def _no_nul(s: str | None) -> str | None:
+    """Strip NUL bytes — PostgreSQL TEXT rejects them. Real-world mail
+    occasionally contains \\x00 in subject/body when a sender mangles encodings
+    or attaches binary garbage to a text part."""
+    if s is None or "\x00" not in s:
+        return s
+    return s.replace("\x00", "")
+
+
+def _no_nul_list(xs: list[str]) -> list[str]:
+    return [x.replace("\x00", "") if "\x00" in x else x for x in xs]
+
+
 def _decode_part_text(part: EmailMessage) -> str | None:
     try:
         content = part.get_content()
@@ -143,21 +156,23 @@ def parse_message(raw: bytes) -> ParsedMessage:
     subject = msg.get("Subject")
     subject = str(subject) if subject is not None else None
 
+    headers = {k: _no_nul_list(vs) for k, vs in _headers_dict(msg).items()}
+
     return ParsedMessage(
-        message_id=message_id,
+        message_id=_no_nul(message_id),
         raw_sha256=hashlib.sha256(raw).digest(),
-        in_reply_to=in_reply_to,
-        refs=_refs_list(msg),
-        subject=subject,
-        from_addr=from_addr,
-        from_name=from_name,
-        to_addrs=_address_list(msg, "To"),
-        cc_addrs=_address_list(msg, "Cc"),
-        bcc_addrs=_address_list(msg, "Bcc"),
+        in_reply_to=_no_nul(in_reply_to),
+        refs=_no_nul_list(_refs_list(msg)),
+        subject=_no_nul(subject),
+        from_addr=_no_nul(from_addr),
+        from_name=_no_nul(from_name),
+        to_addrs=_no_nul_list(_address_list(msg, "To")),
+        cc_addrs=_no_nul_list(_address_list(msg, "Cc")),
+        bcc_addrs=_no_nul_list(_address_list(msg, "Bcc")),
         date_sent=_date_sent(msg),
-        headers=_headers_dict(msg),
-        body_text=text,
-        body_html=html,
+        headers=headers,
+        body_text=_no_nul(text),
+        body_html=_no_nul(html),
         raw_bytes=raw,
         size_bytes=len(raw),
         attachments=_attachments(msg),

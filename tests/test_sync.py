@@ -215,6 +215,41 @@ def test_same_attachment_in_two_messages_dedupes_to_one_blob(db_conn, tmp_path: 
         assert cur.fetchone()[0] == 1  # only one blob despite two attachments
 
 
+def test_poison_pill_message_is_skipped_without_breaking_the_batch(
+    db_conn, tmp_path: Path, monkeypatch
+):
+    from localmail import sync as sync_mod
+    from localmail.parser import parse_message
+
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())                               # UID 1: good
+    imap.append("INBOX", _eml.multipart_alt())                       # UID 2: poison
+    imap.append("INBOX", _eml.utf8_subject())                        # UID 3: good
+
+    real_upsert = sync_mod.upsert_message
+
+    def maybe_explode(conn, *, account_id, parsed):
+        if parsed.message_id == "<alt-456@example.com>":
+            raise ValueError("simulated psycopg.DataError on the poison message")
+        return real_upsert(conn, account_id=account_id, parsed=parsed)
+
+    monkeypatch.setattr(sync_mod, "upsert_message", maybe_explode)
+
+    results = sync_account(
+        db_conn, imap, account=make_account(), attachments_root=tmp_path
+    )
+    # UID 1 and UID 3 inserted; UID 2 skipped.
+    assert results == {"INBOX": 2}
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages")
+        assert cur.fetchone()[0] == 2
+        # uidnext must advance past the poison pill so we don't re-attempt forever.
+        cur.execute("SELECT uidnext FROM mailboxes WHERE name='INBOX'")
+        assert cur.fetchone()[0] == 4
+
+
 def test_max_messages_caps_inserts_and_next_run_resumes(db_conn, tmp_path: Path):
     imap = FakeIMAPClient()
     imap.add_folder("INBOX")

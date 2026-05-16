@@ -1,0 +1,12 @@
+{
+  "_doc": "Author 20 queries per language (10 for Norwegian) with the relevant message subjects as ground truth. Run `localmail eval` (Task 24) to compute recall@20 + MRR@20.",
+  "queries": [
+    {"lang": "de", "query": "Berlin", "relevant_subjects": ["Konferenz Berlin", "Konferenzprogramm anbei"]},
+    {"lang": "de", "query": "Mama Geburtstag", "relevant_subjects": ["Geburtstagsgeschenk Mama"]},
+    {"lang": "de", "query": "Heizung", "relevant_subjects": ["Heizung defekt"]},
+    {"lang": "en", "query": "Berlin conference", "relevant_subjects": ["Berlin conference next week", "Conference program attached"]},
+    {"lang": "en", "query": "Mom birthday", "relevant_subjects": ["Mom's 70th birthday"]},
+    {"lang": "es", "query": "conferencia Berlín", "relevant_subjects": ["Conferencia en Berlín", "Programa conferencia adjunto"]},
+    {"lang": "ja", "query": "ベルリン", "relevant_subjects": ["ベルリン会議", "会議プログラム添付"]}
+  ]
+}

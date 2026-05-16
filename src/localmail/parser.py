@@ -157,13 +157,30 @@ def parse_message(raw: bytes) -> ParsedMessage:
     subject = str(subject) if subject is not None else None
 
     headers = {k: _no_nul_list(vs) for k, vs in _headers_dict(msg).items()}
+    attachments = _attachments(msg)
+    # Normalize "" -> None so empty subjects/bodies land as SQL NULL rather
+    # than as an empty string the schema doesn't require.
+    subject_clean = _no_nul(subject) or None
+    text_clean = _no_nul(text) or None
+    html_clean = _no_nul(html) or None
+
+    # Attachment-only messages (no subject, no text body) would otherwise be
+    # invisible to FTS and to human browsers. Synthesize a placeholder so the
+    # message has something to surface on — the original attachments are still
+    # available verbatim via messages.attachments JSONB + the blobs tree.
+    if attachments:
+        if not subject_clean:
+            subject_clean = "{attachments only}"
+        if not text_clean:
+            names = [(_no_nul(a.filename) or "attachment") for a in attachments]
+            text_clean = "{attachments: " + ", ".join(names) + "}"
 
     return ParsedMessage(
         message_id=_no_nul(message_id),
         raw_sha256=hashlib.sha256(raw).digest(),
         in_reply_to=_no_nul(in_reply_to),
         refs=_no_nul_list(_refs_list(msg)),
-        subject=_no_nul(subject),
+        subject=subject_clean,
         from_addr=_no_nul(from_addr),
         from_name=_no_nul(from_name),
         to_addrs=_no_nul_list(_address_list(msg, "To")),
@@ -171,9 +188,9 @@ def parse_message(raw: bytes) -> ParsedMessage:
         bcc_addrs=_no_nul_list(_address_list(msg, "Bcc")),
         date_sent=_date_sent(msg),
         headers=headers,
-        body_text=_no_nul(text),
-        body_html=_no_nul(html),
+        body_text=text_clean,
+        body_html=html_clean,
         raw_bytes=raw,
         size_bytes=len(raw),
-        attachments=_attachments(msg),
+        attachments=attachments,
     )

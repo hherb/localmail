@@ -72,6 +72,52 @@ def test_headers_are_dict_of_lists_and_jsonable():
     json.dumps(p.headers)
 
 
+def test_attachment_only_message_gets_synthesized_subject_and_body():
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "alice@example.com"
+    msg["To"] = "bob@example.com"
+    msg["Date"] = "Wed, 01 Jan 2025 12:00:00 +0000"
+    msg["Message-Id"] = "<atts-only@example.com>"
+    # No Subject, no body text — only attachments.
+    msg.make_mixed()
+    msg.add_attachment(
+        b"pdfbytes", maintype="application", subtype="pdf", filename="invoice.pdf"
+    )
+    msg.add_attachment(
+        b"imgbytes", maintype="image", subtype="jpeg", filename="receipt.jpg"
+    )
+
+    p = parse_message(msg.as_bytes())
+
+    assert p.subject == "{attachments only}"
+    assert p.body_text == "{attachments: invoice.pdf, receipt.jpg}"
+    assert len(p.attachments) == 2  # real attachments still intact
+
+
+def test_attachments_present_but_subject_already_set_is_not_overwritten():
+    p = parse_message(_eml.with_attachment())  # has Subject: "Photo" + body "See attached."
+    assert p.subject == "Photo"
+    assert "See attached" in (p.body_text or "")
+
+
+def test_no_attachments_means_no_synthesis():
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "alice@example.com"
+    msg["To"] = "bob@example.com"
+    msg["Date"] = "Wed, 01 Jan 2025 12:00:00 +0000"
+    msg["Message-Id"] = "<empty@example.com>"
+    # Deliberately empty: no subject, no body, no attachments.
+    p = parse_message(msg.as_bytes())
+    # subject/body stay None — Postgres TEXT accepts NULL just fine.
+    assert p.subject is None
+    assert p.body_text is None
+    assert p.attachments == []
+
+
 def test_nul_bytes_in_text_fields_are_stripped():
     from email.message import EmailMessage
 

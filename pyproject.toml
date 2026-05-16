@@ -45,3 +45,6 @@ markers = [
 python_executable = ".venv/bin/python"
 mypy_path = "src"
 ignore_missing_imports = true
+
+[tool.uv.sources]
+fastembed = { git = "https://github.com/qdrant/fastembed.git", rev = "87678dd784272f8e5d9fba034d7852d4233e58fd" }

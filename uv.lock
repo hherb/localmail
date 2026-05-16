@@ -338,7 +338,7 @@ wheels = [
 [[package]]
 name = "fastembed"
 version = "0.8.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/qdrant/fastembed.git?rev=87678dd784272f8e5d9fba034d7852d4233e58fd#87678dd784272f8e5d9fba034d7852d4233e58fd" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "loguru" },
@@ -350,10 +350,6 @@ dependencies = [
     { name = "requests" },
     { name = "tokenizers" },
     { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/26/25/58865e36b6e8a9a0d0ff905b5601aa30db97956327c0df42ec4ed6accc21/fastembed-0.8.0.tar.gz", hash = "sha256:75966edfa8b006ee78514c726bd7f6a50721dadc89305279052be9db72fd53e8", size = 75115 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/e8/26b7d78bb8972498c467ca34cb12ee2e60d26ba5eae6d8443189a1af37a5/fastembed-0.8.0-py3-none-any.whl", hash = "sha256:40bee672657574a1009e35ec50030a55f2b426842cb011845379817641bbbbd0", size = 116572 },
 ]
 
 [[package]]
@@ -609,7 +605,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
-    { name = "fastembed", specifier = ">=0.8.0" },
+    { name = "fastembed", git = "https://github.com/qdrant/fastembed.git?rev=87678dd784272f8e5d9fba034d7852d4233e58fd" },
     { name = "google-auth", specifier = ">=2.30" },
     { name = "google-auth-oauthlib", specifier = ">=1.2" },
     { name = "imapclient", specifier = ">=3.0" },

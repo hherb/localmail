@@ -1229,8 +1229,9 @@ def test_fastembed_backend_embed_documents_shape():
 def test_fastembed_backend_embed_query_uses_query_path():
     be = FastEmbedBackend(cfg=SearchConfig(), inner=_StubInner(dim=768))
     v = be.embed_query("hello")
-    # query_embed seeds with i+7 vs documents i+1 — proves correct path
-    assert v[0] == pytest.approx(8 / 100.0)
+    # query_embed seeds with (i+7)/100.0 vs embed seeds with (i+1)/100.0 —
+    # a single-text call (i=0) returns 0.07, proving the query path fired.
+    assert v[0] == pytest.approx(7 / 100.0)
 
 
 def test_fastembed_backend_dim_mismatch_raises():

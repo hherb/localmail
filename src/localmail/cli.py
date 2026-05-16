@@ -15,7 +15,7 @@ from .daemon import Daemon
 from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
-from .sync import sync_account
+from .sync import retry_failed_messages, sync_account
 
 
 def _account_or_die(cfg: Config, name: str) -> AccountConfig:
@@ -188,6 +188,81 @@ def sync_cmd(
                 )
             for folder, n in results.items():
                 click.echo(f"  {folder}: +{n} new")
+
+
+@main.command("list-failed")
+@click.option("--account", "account_name", default=None,
+              help="Restrict to one account (default: all).")
+@click.option("--limit", type=int, default=50, show_default=True,
+              help="Maximum rows to display.")
+@click.pass_context
+def list_failed(ctx: click.Context, account_name: str | None, limit: int) -> None:
+    """Show messages that sync skipped due to errors (with raw bytes preserved)."""
+    cfg = load_config(ctx.obj["config_path"])
+    with psycopg.connect(cfg.database.dsn) as conn, conn.cursor() as cur:
+        if account_name:
+            cur.execute(
+                """
+                SELECT f.id, a.name, m.name, f.uid, f.error_class,
+                       left(f.error_message, 80), f.retry_count, f.failed_at
+                FROM failed_messages f
+                JOIN accounts a  ON a.id = f.account_id
+                JOIN mailboxes m ON m.id = f.mailbox_id
+                WHERE a.name = %s
+                ORDER BY f.failed_at DESC
+                LIMIT %s
+                """,
+                (account_name, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT f.id, a.name, m.name, f.uid, f.error_class,
+                       left(f.error_message, 80), f.retry_count, f.failed_at
+                FROM failed_messages f
+                JOIN accounts a  ON a.id = f.account_id
+                JOIN mailboxes m ON m.id = f.mailbox_id
+                ORDER BY f.failed_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+        rows = cur.fetchall()
+
+    if not rows:
+        click.echo("no failed messages")
+        return
+    for row in rows:
+        rid, acct, mbox, uid, ecls, emsg, retries, when = row
+        click.echo(
+            f"#{rid} {acct}/{mbox} uid={uid} retries={retries} "
+            f"{when:%Y-%m-%d %H:%M} {ecls}: {emsg}"
+        )
+
+
+@main.command("retry-failed")
+@click.option("--account", "account_name", default=None,
+              help="Restrict to one account (default: all).")
+@click.pass_context
+def retry_failed(ctx: click.Context, account_name: str | None) -> None:
+    """Re-attempt every failed message with the current parser. Successful
+    rows are deleted from failed_messages and inserted into messages."""
+    cfg = load_config(ctx.obj["config_path"])
+    with psycopg.connect(cfg.database.dsn) as conn:
+        acct_id: int | None = None
+        if account_name:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM accounts WHERE name = %s", (account_name,))
+                row = cur.fetchone()
+                if not row:
+                    raise click.ClickException(f"no such account: {account_name!r}")
+                acct_id = row[0]
+        ok, still = retry_failed_messages(
+            conn,
+            attachments_root=cfg.attachments.root,
+            account_id=acct_id,
+        )
+    click.echo(f"recovered: {ok}    still failing: {still}")
 
 
 @main.command("run")

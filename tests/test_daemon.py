@@ -53,7 +53,7 @@ def pool(db_dsn):
         with conn.cursor() as cur:
             cur.execute(
                 "TRUNCATE accounts, mailboxes, messages, message_labels, "
-                "attachment_blobs RESTART IDENTITY CASCADE"
+                "attachment_blobs, failed_messages RESTART IDENTITY CASCADE"
             )
         conn.commit()
     yield p

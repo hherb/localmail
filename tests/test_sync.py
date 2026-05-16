@@ -219,7 +219,6 @@ def test_poison_pill_message_is_skipped_without_breaking_the_batch(
     db_conn, tmp_path: Path, monkeypatch
 ):
     from localmail import sync as sync_mod
-    from localmail.parser import parse_message
 
     imap = FakeIMAPClient()
     imap.add_folder("INBOX")
@@ -248,6 +247,85 @@ def test_poison_pill_message_is_skipped_without_breaking_the_batch(
         # uidnext must advance past the poison pill so we don't re-attempt forever.
         cur.execute("SELECT uidnext FROM mailboxes WHERE name='INBOX'")
         assert cur.fetchone()[0] == 4
+
+        # The poison pill must be in failed_messages with full raw bytes,
+        # so a future `retry-failed` can re-attempt it after a fix.
+        cur.execute(
+            "SELECT uid, error_class, error_message, raw_bytes IS NOT NULL "
+            "FROM failed_messages"
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 1
+        uid, ecls, emsg, has_raw = rows[0]
+        assert uid == 2
+        assert ecls == "ValueError"
+        assert "poison" in emsg
+        assert has_raw is True
+
+
+def test_retry_failed_messages_recovers_after_parser_fix(
+    db_conn, tmp_path: Path, monkeypatch
+):
+    from localmail import sync as sync_mod
+    from localmail.sync import retry_failed_messages
+
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())              # UID 1: will fail then succeed
+
+    real_upsert = sync_mod.upsert_message
+    explode = {"on": True}
+
+    def maybe_explode(conn, *, account_id, parsed):
+        if explode["on"]:
+            raise ValueError("transient parser failure")
+        return real_upsert(conn, account_id=account_id, parsed=parsed)
+
+    monkeypatch.setattr(sync_mod, "upsert_message", maybe_explode)
+    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM failed_messages")
+        assert cur.fetchone()[0] == 1
+
+    # Now "fix" the parser and retry.
+    explode["on"] = False
+    ok, still = retry_failed_messages(db_conn, attachments_root=tmp_path)
+    assert (ok, still) == (1, 0)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM failed_messages")
+        assert cur.fetchone()[0] == 0
+
+
+def test_retry_still_failing_bumps_retry_count(db_conn, tmp_path: Path, monkeypatch):
+    from localmail import sync as sync_mod
+    from localmail.sync import retry_failed_messages
+
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())
+
+    def always_explode(conn, *, account_id, parsed):
+        raise ValueError("still broken")
+
+    monkeypatch.setattr(sync_mod, "upsert_message", always_explode)
+    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    ok, still = retry_failed_messages(db_conn, attachments_root=tmp_path)
+    assert (ok, still) == (0, 1)
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT retry_count, last_retry_at IS NOT NULL FROM failed_messages"
+        )
+        retry_count, has_last_retry = cur.fetchone()
+        assert retry_count >= 1
+        assert has_last_retry is True
 
 
 def test_max_messages_caps_inserts_and_next_run_resumes(db_conn, tmp_path: Path):

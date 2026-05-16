@@ -14,7 +14,9 @@ Per-mailbox algorithm:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -242,6 +244,151 @@ def clear_mailbox_labels(conn: psycopg.Connection, mailbox_id: int) -> None:
         cur.execute("DELETE FROM message_labels WHERE mailbox_id = %s", (mailbox_id,))
 
 
+# --- per-message processing (shared by live sync and retry) ------------------
+
+
+def process_one_message(
+    conn: psycopg.Connection,
+    *,
+    account_id: int,
+    mailbox_id: int,
+    uid: int,
+    raw: bytes,
+    flags: list[str],
+    attachments_root: Path,
+) -> tuple[int, bool]:
+    """Parse one IMAP message, upsert it, link the label, write attachments.
+
+    Returns `(message_db_id, did_insert)`. Caller is responsible for any
+    surrounding transaction / savepoint.
+    """
+    parsed = parse_message(raw)
+    db_id, did_insert = upsert_message(conn, account_id=account_id, parsed=parsed)
+    upsert_label(
+        conn,
+        message_db_id=db_id,
+        mailbox_id=mailbox_id,
+        uid=uid,
+        flags=flags,
+    )
+    if did_insert and parsed.attachments:
+        rows = write_attachments(conn, parsed, root=attachments_root)
+        set_message_attachments(conn, message_db_id=db_id, rows=rows)
+    return db_id, did_insert
+
+
+def record_failed_message(
+    conn: psycopg.Connection,
+    *,
+    account_id: int,
+    mailbox_id: int,
+    uid: int,
+    raw: bytes,
+    exc: BaseException,
+) -> None:
+    """Persist the raw bytes + exception details so a future `retry-failed`
+    can re-attempt the message after a parser/sync fix, without re-fetching
+    from IMAP.
+
+    Idempotent on `(account_id, mailbox_id, uid)`: a re-raised failure
+    overwrites the prior record and bumps `retry_count`.
+    """
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    sha = hashlib.sha256(raw).digest()
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT fail_log")
+        try:
+            cur.execute(
+                """
+                INSERT INTO failed_messages
+                    (account_id, mailbox_id, uid, raw_bytes, raw_sha256,
+                     error_class, error_message, error_traceback)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (account_id, mailbox_id, uid) DO UPDATE SET
+                    raw_bytes       = EXCLUDED.raw_bytes,
+                    raw_sha256      = EXCLUDED.raw_sha256,
+                    error_class     = EXCLUDED.error_class,
+                    error_message   = EXCLUDED.error_message,
+                    error_traceback = EXCLUDED.error_traceback,
+                    failed_at       = now(),
+                    retry_count     = failed_messages.retry_count + 1,
+                    last_retry_at   = now()
+                """,
+                (
+                    account_id, mailbox_id, uid, raw, sha,
+                    type(exc).__name__, str(exc), tb,
+                ),
+            )
+            cur.execute("RELEASE SAVEPOINT fail_log")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT fail_log")
+            cur.execute("RELEASE SAVEPOINT fail_log")
+            log.exception(
+                "could not record failed message UID %s in mailbox %s; "
+                "skipping log row",
+                uid, mailbox_id,
+            )
+
+
+def retry_failed_messages(
+    conn: psycopg.Connection,
+    *,
+    attachments_root: Path,
+    account_id: int | None = None,
+) -> tuple[int, int]:
+    """Re-attempt every row in `failed_messages` (optionally scoped to one
+    account). Successful re-imports DELETE the row; failures bump retry_count.
+    Returns `(succeeded, still_failing)`.
+    """
+    sql = """
+        SELECT id, account_id, mailbox_id, uid, raw_bytes
+        FROM failed_messages
+        {where}
+        ORDER BY id
+    """.format(where="WHERE account_id = %s" if account_id is not None else "")
+    params: tuple = (account_id,) if account_id is not None else ()
+
+    succeeded = 0
+    still_failing = 0
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+
+    for row_id, acct_id, mailbox_id, uid, raw in rows:
+        with conn.cursor() as cur:
+            cur.execute("SAVEPOINT retry")
+        try:
+            process_one_message(
+                conn,
+                account_id=acct_id,
+                mailbox_id=mailbox_id,
+                uid=int(uid),
+                raw=bytes(raw),
+                flags=[],  # flags weren't stored; safe default
+                attachments_root=attachments_root,
+            )
+            with conn.cursor() as cur:
+                cur.execute("RELEASE SAVEPOINT retry")
+                cur.execute("DELETE FROM failed_messages WHERE id = %s", (row_id,))
+            conn.commit()
+            succeeded += 1
+        except Exception as exc:
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT retry")
+                cur.execute("RELEASE SAVEPOINT retry")
+            record_failed_message(
+                conn,
+                account_id=acct_id,
+                mailbox_id=mailbox_id,
+                uid=int(uid),
+                raw=bytes(raw),
+                exc=exc,
+            )
+            conn.commit()
+            still_failing += 1
+    return succeeded, still_failing
+
+
 # --- folder filtering --------------------------------------------------------
 
 
@@ -381,37 +528,44 @@ def sync_mailbox(
                 seen += 1
                 continue
 
+            flags_list = _decode_flags(data.get(b"FLAGS") or data.get("FLAGS"))
             # Per-message SAVEPOINT — a single poison-pill row (e.g. an
             # unexpected encoding the parser/DB chokes on) only loses itself,
-            # not the surrounding 49 messages' worth of work.
+            # not the surrounding 49 messages' worth of work. On failure we
+            # persist the raw bytes to failed_messages so `localmail
+            # retry-failed` can re-attempt after a fix without re-fetching
+            # from IMAP.
             with conn.cursor() as cur:
                 cur.execute("SAVEPOINT msg")
             try:
-                parsed = parse_message(raw)
-                db_id, did_insert = upsert_message(
-                    conn, account_id=account_id, parsed=parsed
-                )
-                upsert_label(
+                _, did_insert = process_one_message(
                     conn,
-                    message_db_id=db_id,
+                    account_id=account_id,
                     mailbox_id=mailbox.id,
                     uid=int(uid),
-                    flags=_decode_flags(data.get(b"FLAGS") or data.get("FLAGS")),
+                    raw=raw,
+                    flags=flags_list,
+                    attachments_root=attachments_root,
                 )
-                if did_insert:
-                    inserted += 1
-                    if parsed.attachments:
-                        rows = write_attachments(conn, parsed, root=attachments_root)
-                        set_message_attachments(conn, message_db_id=db_id, rows=rows)
                 with conn.cursor() as cur:
                     cur.execute("RELEASE SAVEPOINT msg")
-            except Exception:
+                if did_insert:
+                    inserted += 1
+            except Exception as exc:
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")
                     cur.execute("RELEASE SAVEPOINT msg")
                 log.exception(
                     "skipping poison-pill UID %s in %s/%s",
                     uid, account_id, mailbox.name,
+                )
+                record_failed_message(
+                    conn,
+                    account_id=account_id,
+                    mailbox_id=mailbox.id,
+                    uid=int(uid),
+                    raw=raw,
+                    exc=exc,
                 )
                 skipped += 1
 

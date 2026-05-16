@@ -12,19 +12,23 @@ unit + integration tests passing (`unset VIRTUAL_ENV && uv run pytest -q`,
 slow test included now that EmbeddingGemma resolves). No known failing
 tests.
 
-**Next.** Two sequential steps, in order:
+**Phase 1 acceptance: PASS (2026-05-16).** All gated languages cleared the
+gate with room to spare:
+
+| lang | #q | recall@20 | MRR@20 | gate |
+|------|----|-----------|--------|------|
+| de   | 20 | 1.000     | 0.967  | PASS |
+| en   | 20 | 1.000     | 1.000  | PASS |
+| es   | 20 | 1.000     | 0.963  | PASS |
+| ja   | 20 | 1.000     | 0.938  | PASS |
+| no   | 10 | 1.000     | 0.950  | —    |
 
 1. ~~Fix the embedding-model registry mismatch~~ **DONE in commit
-   `128a398`** — fastembed pinned to upstream commit `87678dd...`, the
-   post-PR-592 merge that adds EmbeddingGemma support. Model verified to
-   download and produce 768d vectors. See Step 1 for rollback / reproduce
-   notes.
-2. **Author the multilingual ground-truth query set** at
-   `tests/fixtures/multilingual_queries.json` (20 queries each for
-   de/en/es/ja; Norwegian is not gated). See Step 2.
-3. **Run the Phase 1 acceptance harness**. If it passes the gate, the PR
-   is ready for the user to merge. If it doesn't, document the gap before
-   moving to Phase 2. See Step 3.
+   `128a398`**.
+2. ~~Author the multilingual ground-truth query set~~ **DONE** — see
+   `tests/fixtures/multilingual_queries.json` (90 queries: 20 de/en/es/ja
+   + 10 no). Schema in Step 2.
+3. ~~Run the Phase 1 acceptance harness~~ **DONE — PASS** (table above).
 
 After acceptance: Phase 2 (attachment extraction + Arm 4) gets its own
 brainstorm → spec → plan cycle. Don't start coding Phase 2 work yet.
@@ -224,6 +228,12 @@ Re-run the suite to confirm no regression, then commit the
 
 ## Step 2 — author the multilingual ground-truth query set
 
+> **Status: DONE.** `tests/fixtures/multilingual_queries.json` shipped
+> with 90 queries (20 de/en/es/ja + 10 no), authored against the
+> synthetic corpus in `tests/_multilingual_corpus.py::_SEED`. Mix:
+> subject-term lexical, body-only, and paraphrase/conceptual. Step 3 ran
+> against this file and PASSed all gates.
+
 The acceptance harness needs a `tests/fixtures/multilingual_queries.json`
 file (NOT the `.example.json` one, which is a template). The user authors
 this — they know which messages in their own archive should be findable
@@ -263,6 +273,12 @@ The example file (`tests/fixtures/multilingual_queries.example.json`) has
 `multilingual_queries.json` (no `.example` infix).
 
 ## Step 3 — run the Phase 1 acceptance harness
+
+> **Status: DONE — PASS (2026-05-16).** Embed worker converged in 2
+> passes (chunk pass, then embed pass). Per-language results in the TL;DR
+> table at the top. MRR@20 ranged 0.938 (ja) to 1.000 (en); recall@20 was
+> 1.000 across the board. The Japanese result confirms Gemma's vector arm
+> fully carries CJK despite the deferred tsvector `'simple'` concern.
 
 Once the queries file exists and Step 1 is committed:
 

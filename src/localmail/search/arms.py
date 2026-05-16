@@ -55,6 +55,12 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
             " WHERE ml.message_id = m.id AND mb.name = ANY(%s))"
         )
         params.append(filters.folders)
+    if filters.label:
+        parts.append(
+            "EXISTS (SELECT 1 FROM message_labels ml JOIN mailboxes mb ON mb.id = ml.mailbox_id"
+            " WHERE ml.message_id = m.id AND mb.name ILIKE %s)"
+        )
+        params.append(filters.label)
     if not parts:
         return "", []
     return " AND " + " AND ".join(parts), params

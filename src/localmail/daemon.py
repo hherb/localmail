@@ -124,4 +124,9 @@ class Daemon:
             for t in self.threads:
                 t.join(timeout=10)
             self.pool.close()
+            if getattr(self, "_embed_pool", None) is not None:
+                try:
+                    self._embed_pool.close()
+                except Exception:
+                    pass
             log.info("daemon stopped")

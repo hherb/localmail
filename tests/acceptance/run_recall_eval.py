@@ -2,7 +2,7 @@
 
 Usage:
     LOCALMAIL_TEST_DSN=postgresql://... \\
-      uv run python tests/acceptance/run_recall_eval.py \\
+      PYTHONPATH=src:. uv run python tests/acceptance/run_recall_eval.py \\
       --queries tests/fixtures/multilingual_queries.json \\
       --k 20
 

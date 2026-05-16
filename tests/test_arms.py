@@ -112,3 +112,43 @@ def test_arms_respect_account_filter(db_conn):
     parsed.filters.__dict__["accounts"] = [a2]  # resolved by Searcher in prod
     hits = arm_bm25_messages(db_conn, parsed, cfg, limit=10)
     assert all(h.message_id != ids[0] for h in hits)
+
+
+def test_arms_respect_label_filter(db_conn):
+    ids = _seed_corpus(db_conn)
+    cfg = SearchConfig()
+    run_embed_worker_once(db_conn, cfg, _SeedEmbedder())
+
+    # Create two mailboxes and assign each message to exactly one
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT account_id FROM messages WHERE id = %s", (ids[0],)
+        )
+        acct_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO mailboxes (account_id, name) VALUES (%s, 'Work') RETURNING id",
+            (acct_id,),
+        )
+        mbox_work = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO mailboxes (account_id, name) VALUES (%s, 'Personal') RETURNING id",
+            (acct_id,),
+        )
+        mbox_personal = cur.fetchone()[0]
+        # ids[0] → Work, ids[1] → Personal
+        cur.execute(
+            "INSERT INTO message_labels (message_id, mailbox_id, uid) VALUES (%s, %s, 1)",
+            (ids[0], mbox_work),
+        )
+        cur.execute(
+            "INSERT INTO message_labels (message_id, mailbox_id, uid) VALUES (%s, %s, 2)",
+            (ids[1], mbox_personal),
+        )
+    db_conn.commit()
+
+    # Searching "conference" with label:Work should return ids[0] but not ids[1]
+    parsed = parse_query("conference label:Work")
+    hits = arm_bm25_messages(db_conn, parsed, cfg, limit=10)
+    msg_ids = [h.message_id for h in hits]
+    assert ids[0] in msg_ids
+    assert ids[1] not in msg_ids

@@ -426,10 +426,12 @@ def _make_backend(cfg):
 
 
 @main.command("embed-backfill")
-@click.option("--account", "account_name")
 @click.option("--no-progress", is_flag=True)
-def embed_backfill(account_name, no_progress):
-    """Drain the embedding queue in the foreground; exit when empty."""
+def embed_backfill(no_progress):
+    """Drain the embedding queue in the foreground; exit when empty.
+
+    Account-agnostic — fills embeddings for all accounts.
+    """
     from localmail.db import open_pool
     from localmail.search.embed_worker import run_embed_worker_once
     cfg = load_config()

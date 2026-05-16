@@ -277,7 +277,7 @@ extraction or search code.**
 
 ```python
 # Extraction worker
-extract_worker_enabled: bool = True
+run_extract_worker: bool = True
 extract_worker_poll_interval_s: int = 30
 extract_worker_batch_size: int = 20
 extract_worker_max_retries: int = 3
@@ -553,7 +553,7 @@ agnostic, like `embed_worker`). Lifecycle:
 - Exponential backoff on connection errors: 1s → 60s cap (same as
   IDLE / poll / embed threads).
 - SIGTERM / SIGINT clean shutdown via the existing handlers.
-- `cfg.extract_worker_enabled = False` lets users disable extraction
+- `cfg.run_extract_worker = False` lets users disable extraction
   entirely (e.g. on a low-resource machine while keeping vector
   search over message bodies).
 

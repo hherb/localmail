@@ -34,9 +34,12 @@ uv run pytest                    # full test suite (skips DB tests if PG unreach
 uv run localmail init-db         # apply pending migrations
 uv run localmail list-accounts   # show config'd accounts and whether a secret is stored
 uv run localmail add-account N   # store password for account N (must exist in config.toml)
+uv run localmail remove-account N  # drop stored secrets for account N
 uv run localmail oauth-login N   # Gmail desktop OAuth flow → refresh token in keyring
 uv run localmail sync [--account N] [--limit-per-folder K]   # one-shot incremental sync
 uv run localmail run             # foreground daemon (IDLE on INBOX + periodic poll)
+uv run localmail list-failed [--account N] [--limit K]   # show messages sync skipped
+uv run localmail retry-failed [--account N]    # re-attempt every failed message
 ```
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
@@ -53,14 +56,15 @@ src/localmail/
   secrets.py        # keyring wrapper
   oauth_gmail.py    # OAuth2 desktop flow + token refresh
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
-  parser.py         # bytes -> ParsedMessage (pure; no IO)
-  attachments.py    # write_attachments(parsed, root, msg_db_id) -> JSONB rows
-  sync.py           # upsert_*, sync_mailbox, sync_account, folders_to_sync
+  parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
+  attachments.py    # write_attachments(conn, parsed, root) -> JSONB rows (content-addressable)
+  sync.py           # upsert_*, process_one_message, sync_mailbox, sync_account,
+                    #   record_failed_message, retry_failed_messages, folders_to_sync
   worker.py         # WorkerContext shared by daemon threads
   idle.py           # run_inbox_idle_loop, _one_inbox_session, _idle_step
   poller.py         # run_poll_loop, _one_poll_pass
   daemon.py         # Daemon class: signal handling, per-account thread spawn
-migrations/         # 0001_init.sql, ...
+migrations/         # 0001_init.sql, 0002_attachment_blobs.sql, 0003_failed_messages.sql
 tests/
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
   _eml.py           # MIME fixture builders (no .eml files on disk)
@@ -75,7 +79,7 @@ User-facing config lives at `~/.config/localmail/config.toml` (override with
 ## Schema essentials
 
 Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
-`attachment_blobs`, `schema_migrations`. Dedup model:
+`attachment_blobs`, `failed_messages`, `schema_migrations`. Dedup model:
 
 - **Messages — per-account, by `Message-Id`**: same Message-Id in INBOX + 3
   Gmail labels produces one `messages` row + four `message_labels` rows. The
@@ -96,6 +100,12 @@ On-disk path: `<attachments.root>/blobs/<aa>/<bb>/<full-sha256-hex>` (two-level
 hex fan-out). The path is opaque — never derive filenames from it; always go
 through the JSONB.
 
+**Nullability**: only `raw_bytes`, `size_bytes`, `headers`, and `attachments`
+are `NOT NULL` on `messages`. `subject`, `body_text`, `body_html`, `from_addr`,
+`to_addrs`, etc. are all nullable — real mail occasionally lacks any of them.
+The parser normalizes empty strings to NULL so `WHERE body_text IS NULL` is
+the canonical "no body" query.
+
 Folder filtering supports `folder_allow`, `folder_deny`, and **`folder_deny_flags`**
 (by RFC 6154 IMAP special-use flag, e.g. `\Trash`, `\Junk`, `\All`). Prefer
 flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
@@ -115,6 +125,31 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
 a crash mid-run loses at most one batch of progress. Re-running is safe — the
 existing-id check + `ON CONFLICT DO NOTHING` make inserts idempotent.
 
+### Failure handling (poison-pill messages)
+
+Per-message work runs inside a Postgres `SAVEPOINT msg` so a single bad row
+(unexpected encoding, NUL byte the parser missed, etc.) only loses itself,
+not the surrounding 49 messages in the batch. On exception:
+
+1. `ROLLBACK TO SAVEPOINT msg` — discards just this message's writes.
+2. `record_failed_message` inserts the full RFC822 bytes + error class +
+   message + traceback into `failed_messages` (its own nested SAVEPOINT so a
+   logging failure can't kill the outer transaction). Re-failures upsert and
+   bump `retry_count`.
+3. `mailboxes.uidnext` still advances past the failed UID — we don't get
+   stuck retrying the same poison pill on every run.
+
+Recovery flow: fix the parser bug, run `localmail retry-failed`. The retry
+path calls the same `process_one_message` as live sync, so any fix that works
+for new messages also works for the backlog.
+
+The parser itself does two pre-emptive sanitizations to keep poison pills
+rare: NUL bytes are stripped from every text field (Postgres `TEXT` rejects
+them), and attachment-only messages get synthesized
+`subject = "{attachments only}"` / `body_text = "{attachments: name1, name2}"`
+so they remain searchable and visible (original bytes/filenames are intact
+in `messages.attachments` + the blobs tree).
+
 ## Conventions
 
 - **No comments unless the WHY is non-obvious.** Don't restate the SQL or the
@@ -126,9 +161,9 @@ existing-id check + `ON CONFLICT DO NOTHING` make inserts idempotent.
   Tests must work against the live test DB; never `DROP TABLE`.
 - **No `cur.fetchone()[0]` without `assert row is not None` first** — mypy is
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
-- New SQL goes in a new numbered migration file. **Don't edit
-  `migrations/0001_init.sql`** once a downstream user has applied it; add
-  `0002_*.sql` instead.
+- New SQL goes in a new numbered migration file. **Never edit a migration
+  that has been applied anywhere** — add the next-numbered file instead.
+  Latest is `0003_failed_messages.sql`; next would be `0004_*.sql`.
 
 ## Testing notes
 

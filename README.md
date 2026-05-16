@@ -38,14 +38,14 @@ uv run localmail init-db
 uv run localmail add-account work-fastmail           # password account
 uv run localmail oauth-login horst-gmail             # Gmail OAuth (browser opens)
 
-# 5. Run a one-shot sync (cron-friendly)
+# 5a. One-shot sync (good for cron, smoke testing, initial backfill)
 uv run localmail sync
 uv run localmail sync --account horst-gmail
-```
+uv run localmail sync --account horst-gmail --limit-per-folder 10   # smoke test
 
-Daemon mode (IMAP IDLE on INBOX + periodic poll on other folders) is the
-intended long-running mode but is not yet implemented — track step 7 of the
-build plan.
+# 5b. Or run the daemon (IDLE on INBOX + periodic poll on other folders)
+uv run localmail run        # foreground; supervise via systemd / launchd
+```
 
 ## CLI
 
@@ -56,7 +56,10 @@ build plan.
 | `localmail add-account NAME` | Prompt for an IMAP password and store it in the keyring. |
 | `localmail oauth-login NAME` | Run the Gmail OAuth desktop consent flow. Stores the refresh token in the keyring. |
 | `localmail remove-account NAME` | Drop any stored secrets (password + refresh token) for an account. |
-| `localmail sync [--account NAME] [--no-ssl]` | One-shot incremental sync. |
+| `localmail sync [--account NAME] [--limit-per-folder K] [--no-ssl]` | One-shot incremental sync. |
+| `localmail run [--log-level …] [--no-ssl]` | Foreground daemon: per-account IDLE thread on INBOX + periodic poll thread for other folders. SIGTERM/SIGINT shut down cleanly. |
+| `localmail list-failed [--account NAME] [--limit K]` | Show messages that sync skipped due to errors. |
+| `localmail retry-failed [--account NAME]` | Re-attempt every failed message. Successful retries move from `failed_messages` to `messages`. |
 
 ## Gmail OAuth2 setup
 
@@ -100,12 +103,14 @@ Gmail requires OAuth2 for IMAP since 2022. To configure an OAuth2 account:
    client_secrets_file = "~/.config/localmail/gmail_client_secret.json"
 
    [[accounts]]
-   name           = "horst-gmail"
-   email          = "you@gmail.com"
-   imap_host      = "imap.gmail.com"
-   auth_method    = "oauth2"
-   oauth_provider = "gmail"
-   folder_deny    = ["[Gmail]/All Mail", "[Gmail]/Trash", "[Gmail]/Spam"]
+   name              = "horst-gmail"
+   email             = "you@gmail.com"
+   imap_host         = "imap.gmail.com"
+   auth_method       = "oauth2"
+   oauth_provider    = "gmail"
+   # Flag-based denial (RFC 6154) — survives locale renames (e.g. Bin vs Trash)
+   # and provider differences. Prefer this over folder_deny by name.
+   folder_deny_flags = ["\\Trash", "\\Junk", "\\All"]
    ```
 
 6. **Run the consent flow once**:
@@ -119,22 +124,42 @@ Gmail requires OAuth2 for IMAP since 2022. To configure an OAuth2 account:
    tokens — no further interaction required unless you revoke access at
    <https://myaccount.google.com/permissions>.
 
-### Why deny `[Gmail]/All Mail`?
+### Why deny `\All`?
 
 Gmail surfaces every message under both its INBOX/label folders *and* under
-`[Gmail]/All Mail`. localmail dedups by Message-Id per account, so the same
-message in INBOX and All Mail produces one `messages` row with two
-`message_labels` rows. That's fine, but `All Mail` adds no new information.
-Excluding it roughly halves the upfront sync time.
+`[Gmail]/All Mail` (the `\All` special-use folder). localmail dedups by
+Message-Id per account, so the same message in INBOX and All Mail produces
+one `messages` row with two `message_labels` rows. That's fine, but
+`All Mail` adds no new information. Excluding it roughly halves the upfront
+sync time.
+
+## Recovering from failed messages
+
+Sync wraps each message in a Postgres SAVEPOINT. If a single message hits an
+unexpected exception (a poison-pill encoding, an edge case the parser
+chokes on, etc.) only that message is rolled back — the surrounding batch
+keeps going. The raw RFC822 bytes + error details are stored in the
+`failed_messages` table for later recovery:
+
+```bash
+uv run localmail list-failed                # show the queue
+uv run localmail retry-failed               # re-attempt with current parser
+uv run localmail retry-failed --account N   # one account only
+```
+
+Successful retries delete the `failed_messages` row and insert the message
+into `messages` via the same code path live sync uses. Persistent failures
+bump `retry_count` and `last_retry_at`.
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest                # 36 tests; needs Postgres reachable at TEST_DSN
+uv run pytest                # full suite (~56 tests); skipped if no Postgres
 uv run localmail --help
 ```
 
-`tests/conftest.py` will auto-skip DB-dependent tests if no Postgres is
-reachable at `LOCALMAIL_TEST_DSN` (defaults to
-`postgresql://localmail:local%40%40mail@localhost:5532/localmail`).
+`tests/conftest.py` auto-skips DB-dependent tests if no Postgres is reachable
+at `LOCALMAIL_TEST_DSN` (defaults to
+`postgresql://localmail:local%40%40mail@localhost:5532/localmail_test` — a
+separate database from the live archive, so tests can't clobber real data).

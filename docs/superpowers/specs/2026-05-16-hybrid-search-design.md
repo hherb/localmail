@@ -57,7 +57,7 @@ These shaped every decision below.
 |---|---|---|
 | Embedding model | EmbeddingGemma-300M @ 768d | snowflake-arctic-embed2 (Apache-2.0), bge-m3 |
 | Embedding backend | `fastembed` (in-process ONNX) | `ollama` (HTTP, added in Phase 4) |
-| BM25 backend | `pg_search` (ParadeDB, AGPL-3.0) | `tsvector + ts_rank_cd` (fallback) |
+| BM25 backend | `tsvector + ts_rank_cd` (PG built-in, with `setweight` A/B/C/D field weights) | `pg_search` (ParadeDB) as a Phase 5+ upgrade if recall demands it |
 | Vector index | `pgvector` HNSW + `halfvec(768)` | — |
 | Fusion | Reciprocal Rank Fusion, k=60 | weighted score combo (future) |
 | Reranker | `bge-reranker-v2-m3` via `fastembed` | `mxbai-rerank-large-v2` (GPU) |
@@ -66,12 +66,18 @@ These shaped every decision below.
 | Surfaces | CLI + Python API + MCP server | — |
 
 License confirmations performed during design:
-- `pg_search` (ParadeDB) is AGPL-3.0; supports Postgres 15–18 with prebuilt
-  binaries (verified against v0.23.4 release notes, 2026-05-06). PG18 fully
-  supported.
 - `fastembed` Apache-2.0, `docling` MIT, `bge-m3` MIT, EmbeddingGemma under
   Gemma Terms of Use (weights downloaded at runtime, README NOTICE entry
   required, no field-of-use restriction affecting this project).
+
+BM25-backend decision (revised 2026-05-16): Original spec selected
+`pg_search` (ParadeDB, AGPL-3.0, verified PG18-compatible). Switched to
+PG built-in `tsvector` after install fragility surfaced — ParadeDB
+prebuilt binaries don't cover current macOS releases, and the pgrx
+source build re-breaks on each PG upgrade. Net quality cost is small
+(<3% recall in expectation) once the reranker is on top of the candidate
+pool. `pg_search` remains documented as a Phase 5+ upgrade path if
+acceptance recall ever proves limited by BM25 quality.
 
 ## Architecture overview
 
@@ -105,7 +111,7 @@ src/localmail/
 migrations/
   0004_search_chunks.sql
   0005_attachment_text.sql                # Phase 2
-  0006_search_indexes.sql                 # pg_search BM25 + HNSW for messages
+  0006_search_indexes.sql                 # multilingual tsvector FTS + HNSW for messages
   0007_failed_embeddings.sql
   0008_failed_extractions.sql             # Phase 2
   0009_search_state.sql                   # embedding_models registry
@@ -235,26 +241,58 @@ regardless of how many messages reference it.
 ### `0006_search_indexes.sql` (`@non-transactional`)
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS pg_search;
+-- @non-transactional
+SET maintenance_work_mem = '2048MB';
 
-CREATE INDEX messages_bm25_idx ON messages
-USING bm25 (id, subject, body_text, from_addr, from_name, to_addrs)
-WITH (key_field='id');
+-- Drop the original 'english'-only FTS index from 0001; replaced by the
+-- multi-field multilingual generated column below.
+DROP INDEX IF EXISTS messages_fts_idx;
 
-CREATE INDEX message_chunks_bm25_idx ON message_chunks
-USING bm25 (id, text) WITH (key_field='id');
+-- Weighted multilingual tsvector per message:
+--   A = subject (highest weight)   B = from address + display name
+--   C = body text                  D = to addresses (lowest weight)
+-- The 'simple' configuration tokenizes by Unicode word boundaries without
+-- per-language stemming — works across DE/EN/ES/JA/NO uniformly.
+ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS fts_v2 tsvector
+    GENERATED ALWAYS AS (
+        setweight(to_tsvector('simple', coalesce(subject, '')), 'A') ||
+        setweight(to_tsvector('simple',
+            coalesce(from_addr, '') || ' ' || coalesce(from_name, '')), 'B') ||
+        setweight(to_tsvector('simple', coalesce(body_text, '')), 'C') ||
+        setweight(to_tsvector('simple',
+            coalesce(array_to_string(to_addrs, ' '), '')), 'D')
+    ) STORED;
 
-CREATE INDEX CONCURRENTLY message_chunks_embedding_v1_hnsw
+CREATE INDEX IF NOT EXISTS messages_fts_v2_idx ON messages USING GIN (fts_v2);
+
+-- Per-chunk tsvector for the chunk-level BM25-ish arm.
+ALTER TABLE message_chunks
+    ADD COLUMN IF NOT EXISTS fts tsvector
+    GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED;
+
+CREATE INDEX IF NOT EXISTS message_chunks_fts_idx ON message_chunks USING GIN (fts);
+
+-- pgvector HNSW (concurrent so live writes don't block).
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_chunks_embedding_v1_hnsw
     ON message_chunks USING hnsw (embedding_v1 halfvec_cosine_ops)
     WITH (m=16, ef_construction=64);
 ```
 
 This migration is marked non-transactional so the runner can use
 `CREATE INDEX CONCURRENTLY` for HNSW (which is incompatible with explicit
-transactions). The runner sets
-`SET LOCAL maintenance_work_mem = '<index_build_maintenance_work_mem_mb>MB'`
-before HNSW creation; rule of thumb for halfvec(768) and 500k chunks: 2 GB
-suffices.
+transactions). The runner sets `maintenance_work_mem` at the session level
+before applying the file (per Task 11 in the Phase 1 plan); 2 GB is enough
+for halfvec(768) at ~500 k chunks.
+
+`tsvector` with the `'simple'` configuration is used instead of `pg_search`
+to keep Phase 1 install-portable across macOS/Linux without external
+extensions. `setweight()` gives the arm field-level boosting via
+`ts_rank_cd(ARRAY[D_w, C_w, B_w, A_w]::float4[], fts_v2, query)`, which is
+how `SearchConfig.bm25_field_boosts` is passed through. CJK content
+(Japanese) tokenizes per Unicode word boundaries — adequate for most
+queries; vector arm carries CJK semantic match weight. `pg_search` swap-in
+is a Phase 5+ option if recall acceptance falls short.
 
 ### `0007_failed_embeddings.sql`, `0008_failed_extractions.sql`
 
@@ -326,7 +364,7 @@ For ~100 k messages, average ~5 chunks/message, ~30 k unique attachment blobs
 - `message_chunks`: 500 k rows × (avg 600 B text + 1536 B halfvec + overhead) ≈ 1.1 GB
 - `attachment_chunks`: 240 k rows × similar ≈ 540 MB
 - HNSW indexes (halfvec, m=16): ~30% of vector storage ≈ ~500 MB
-- pg_search indexes: ~10–20% of indexed text size ≈ ~200 MB
+- tsvector GIN indexes (messages.fts_v2 + message_chunks.fts): ~8–15 % of indexed text ≈ ~150 MB
 
 **Total search overhead: ~2.5 GB** on top of the existing archive.
 
@@ -700,29 +738,34 @@ including malformed inputs (raises `QueryParseError` with column number).
 Each arm is a pure function `(conn, parsed, cfg) -> list[ArmHit]`. SQL
 sketches:
 
-**Arm 1 — BM25 over messages:**
+**Arm 1 — tsvector full-text over messages** (`fts_v2` is the weighted
+multi-field generated column from migration 0006):
 ```sql
 SELECT m.id AS message_id, NULL::bigint AS chunk_id, 'message' AS chunk_table,
-       paradedb.score(m.id) AS score,
-       ROW_NUMBER() OVER (ORDER BY paradedb.score(m.id) DESC) AS rank
+       ts_rank_cd(
+           ARRAY[%(d_w)s, %(c_w)s, %(b_w)s, %(a_w)s]::float4[],
+           m.fts_v2,
+           plainto_tsquery('simple', %(q)s)
+       ) AS score,
+       ROW_NUMBER() OVER (ORDER BY score DESC) AS rank
 FROM messages m
-WHERE m.id @@@ paradedb.boolean(must => ARRAY[
-    paradedb.parse(%(q)s, boost => %(subj_b)s, fields => ARRAY['subject']),
-    paradedb.parse(%(q)s, boost => %(from_b)s, fields => ARRAY['from_addr','from_name']),
-    paradedb.parse(%(q)s, boost => %(body_b)s, fields => ARRAY['body_text']),
-])
+WHERE m.fts_v2 @@ plainto_tsquery('simple', %(q)s)
   AND <filters>
 ORDER BY score DESC LIMIT %(k)s;
 ```
+Weight order is PG-standard `[D, C, B, A]`. Searcher maps
+`SearchConfig.bm25_field_boosts["to"|"body"|"from"|"subject"]` onto the
+four float4 slots; A=subject is the strongest signal by default (3.0).
 
-**Arm 2 — BM25 over message_chunks:**
+**Arm 2 — tsvector full-text over message_chunks** (per-chunk `fts`
+column from migration 0006):
 ```sql
 SELECT mc.message_id, mc.id AS chunk_id, 'message_chunks' AS chunk_table,
-       paradedb.score(mc.id) AS score,
-       ROW_NUMBER() OVER (ORDER BY paradedb.score(mc.id) DESC) AS rank
+       ts_rank_cd(mc.fts, plainto_tsquery('simple', %(q)s)) AS score,
+       ROW_NUMBER() OVER (ORDER BY score DESC) AS rank
 FROM message_chunks mc
 JOIN messages m ON m.id = mc.message_id
-WHERE mc.text @@@ %(q)s
+WHERE mc.fts @@ plainto_tsquery('simple', %(q)s)
   AND <filters on m>
 ORDER BY score DESC LIMIT %(k)s;
 ```
@@ -1149,10 +1192,13 @@ deliberately not resolved (premature without code in hand):
    expose `TextCrossEncoder`; older expose `Reranker`. Verify against
    the installed version at implementation start (Rule 9). Wrap behind
    `FastEmbedReranker` so the choice is internal.
-2. **`pg_search` query-builder ergonomics.** The `paradedb.boolean` /
-   `paradedb.parse` syntax sketched in the SQL examples reflects current
-   docs; verify against pinned version before writing migrations. May
-   want to introduce a small Python helper for query construction.
+2. **`tsvector` multilingual coverage in practice.** The `'simple'`
+   configuration tokenizes on Unicode word boundaries without stemming —
+   this works well for DE/EN/ES/NO but is suboptimal for CJK. Japanese
+   queries depend more heavily on the vector arm + reranker; if recall
+   is unacceptable, add a `pg_trgm` substring-similarity arm as a
+   Phase 5 enhancement, or revisit `pg_search` (deferred from Phase 1
+   due to install fragility on current macOS).
 3. **`tiktoken` vs model-native tokenizer for chunk-size budgeting.**
    Going with `tiktoken` for portability; if chunk sizes systematically
    over/undershoot the embedding model's true token budget by > 10 %,

@@ -47,6 +47,25 @@ def _is_non_transactional(sql: str) -> bool:
     return False
 
 
+def _split_statements(sql: str) -> list[str]:
+    """Split a SQL file into individual statements on semicolons.
+
+    Strips comment-only lines and blank lines. Needed for non-transactional
+    migrations where each statement must be executed separately (e.g.
+    CREATE INDEX CONCURRENTLY cannot share a multi-statement execute call).
+    """
+    stmts = []
+    for raw in sql.split(";"):
+        stmt = raw.strip()
+        # Remove comment lines, keep actual SQL
+        non_comment = "\n".join(
+            line for line in stmt.splitlines() if not line.strip().startswith("--")
+        ).strip()
+        if non_comment:
+            stmts.append(stmt)
+    return stmts
+
+
 def apply_migrations(dsn: str) -> list[str]:
     """Apply any unapplied .sql migrations. Returns the revisions newly applied.
 
@@ -77,7 +96,9 @@ def apply_migrations(dsn: str) -> list[str]:
         if _is_non_transactional(sql):
             with psycopg.connect(dsn, autocommit=True) as nc:
                 with nc.cursor() as cur:
-                    cur.execute(sql)
+                    cur.execute("SET maintenance_work_mem = '2048MB'")
+                    for stmt in _split_statements(sql):
+                        cur.execute(stmt)
                     cur.execute(
                         "INSERT INTO schema_migrations (revision) VALUES (%s)",
                         (revision,),

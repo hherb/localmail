@@ -283,6 +283,78 @@ class Searcher:
             ))
         return out
 
+    def continue_page(self, search_token: str, page: int) -> SearchPage:
+        """Serve subsequent pages from the cached pool. Raises if past pool's end."""
+        import math
+        entry = self._cache.get(search_token)  # may raise CacheMissError
+        page_size = entry["page_size"]
+        pool_size = len(entry["hydrated"])
+        max_page = max(1, math.ceil(pool_size / page_size))
+        if page < 1 or page > max_page:
+            raise PageOutOfPoolError(
+                f"page {page} out of pool (pool_size={pool_size}, page_size={page_size}); "
+                "call grow_pool to widen the candidate pool"
+            )
+        results = self._build_results(
+            entry["hydrated"], entry["parsed"], entry["scores"], page, page_size,
+        )
+        return SearchPage(
+            results=results, page=page, page_size=page_size, pool_size=pool_size,
+            candidates_per_arm=entry["candidates_per_arm"],
+            has_more_in_pool=pool_size > page * page_size,
+            can_grow_pool=True,
+            search_token=search_token, query=entry["parsed"],
+            timing_ms={"cache_hit": 0.0},
+        )
+
+    def grow_pool(self, search_token: str, candidates_per_arm: int) -> SearchPage:
+        """Re-run the pipeline with a larger candidate pool. Returns page 1."""
+        entry = self._cache.get(search_token)
+        parsed = entry["parsed"]
+        self._cache.invalidate(search_token)
+        # rerank pool grows proportionally so the larger arm output isn't wasted
+        rps = max(candidates_per_arm, entry["rerank_pool_size"])
+        page = self._search_with_parsed(parsed, page_size=entry["page_size"],
+                                        candidates_per_arm=candidates_per_arm,
+                                        rerank_pool_size=rps, use_cache=True)
+        return page
+
+    def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
+                            rerank_pool_size, use_cache):
+        """Variant of search() that takes an already-parsed query."""
+        import time, uuid
+        t0 = time.monotonic()
+        timing: dict[str, float] = {"parse": 0.0}
+        with self._pool.connection() as conn:
+            parsed = self._resolve_account_names(conn, parsed)
+            t = time.monotonic()
+            fused = self._retrieve_pool(conn, parsed, candidates_per_arm, rerank_pool_size)
+            timing["retrieve"] = (time.monotonic() - t) * 1000
+            hydrated = self._hydrate(conn, fused)
+        t = time.monotonic()
+        if self._reranker and hydrated:
+            snippets = [item["snippet_source_text"][: self._cfg.snippet_width_chars * 4]
+                        for item in hydrated]
+            scores = self._reranker.rerank(parsed.rewritten_text or parsed.free_text, snippets)
+        else:
+            scores = [item["fused"].rrf_score for item in hydrated]
+        timing["rerank"] = (time.monotonic() - t) * 1000
+        results = self._build_results(hydrated, parsed, scores, page=1, page_size=page_size)
+        timing["total"] = (time.monotonic() - t0) * 1000
+        token = uuid.uuid4().hex[:16] if use_cache else None
+        if token:
+            self._cache.put(token, {
+                "parsed": parsed, "hydrated": hydrated, "scores": scores,
+                "candidates_per_arm": candidates_per_arm,
+                "rerank_pool_size": rerank_pool_size, "page_size": page_size,
+            })
+        return SearchPage(
+            results=results, page=1, page_size=page_size, pool_size=len(hydrated),
+            candidates_per_arm=candidates_per_arm,
+            has_more_in_pool=len(hydrated) > page_size, can_grow_pool=True,
+            search_token=token, query=parsed, timing_ms=timing,
+        )
+
     def search(
         self,
         query: str,

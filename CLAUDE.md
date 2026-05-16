@@ -64,11 +64,24 @@ src/localmail/
   idle.py           # run_inbox_idle_loop, _one_inbox_session, _idle_step
   poller.py         # run_poll_loop, _one_poll_pass
   daemon.py         # Daemon class: signal handling, per-account thread spawn
-migrations/         # 0001_init.sql, 0002_attachment_blobs.sql, 0003_failed_messages.sql
+  search/           # hybrid search subsystem (Phase 1)
+    __init__.py     # public API: create_searcher, Searcher, SearchPage, SearchResult
+    arms.py         # retrieval arms: arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks
+    chunking.py     # chunk_message() -> ChunkSpec list
+    embed_worker.py # run_embed_worker_once, run_embed_worker (background thread)
+    embeddings.py   # FastEmbedBackend + EmbeddingBackend ABC
+    page_cache.py   # in-process LRU cache for paginated result pools
+    query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
+    reranker.py     # FastEmbedReranker + Reranker ABC
+    searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
+migrations/         # 0001_init.sql … 0009_search_state.sql
 tests/
+  acceptance/       # standalone eval harness (run_recall_eval.py)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
   _eml.py           # MIME fixture builders (no .eml files on disk)
   _fake_imap.py     # in-memory IMAP fake with IDLE support
+  _multilingual_corpus.py  # synthetic 50-message corpus for multilingual eval
+  fixtures/         # multilingual_queries.example.json
   test_*.py
 config.example.toml
 ```
@@ -150,6 +163,59 @@ them), and attachment-only messages get synthesized
 so they remain searchable and visible (original bytes/filenames are intact
 in `messages.attachments` + the blobs tree).
 
+## Search subsystem (Phase 1 shipped)
+
+Hybrid lexical (tsvector) + vector (pgvector) search over messages. See
+[docs/superpowers/specs/2026-05-16-hybrid-search-design.md](docs/superpowers/specs/2026-05-16-hybrid-search-design.md)
+for the full design and
+[docs/superpowers/plans/2026-05-16-hybrid-search-phase1.md](docs/superpowers/plans/2026-05-16-hybrid-search-phase1.md)
+for the Phase 1 implementation plan.
+
+- Code lives under `src/localmail/search/` — `chunking.py`, `embeddings.py`,
+  `reranker.py`, `query.py`, `searcher.py`, `arms.py`, `page_cache.py`,
+  `embed_worker.py`. Public API: `localmail.search.create_searcher`.
+- All numeric tunables in `LocalmailConfig.search` (`SearchConfig`).
+  **No magic numbers elsewhere in search code.**
+- Lexical retrieval via PostgreSQL built-in `tsvector` + `ts_rank_cd` with
+  `setweight()` — no third-party extension required. Arms 1 and 2 (whole-message
+  and chunk-level FTS) use `plainto_tsquery('simple', ...)` for language-neutral
+  tokenisation. The docstrings in `arms.py` still use "BM25" as shorthand;
+  the actual implementation is `tsvector`/`ts_rank_cd` throughout.
+- Vector retrieval via pgvector HNSW + `halfvec(768)`. Default embedder:
+  EmbeddingGemma-300M via fastembed (Gemma Terms — runtime download).
+- One embed_worker thread per process (account-agnostic; backend-bound).
+  Lazily chunks messages it sees without chunks; per-chunk SAVEPOINT
+  isolates poison chunks into `failed_embeddings`.
+- Phase 2 (attachment search), Phase 3 (MCP), Phase 4 (--smart),
+  Phase 5 (polish) — separate design + plans.
+
+**`bm25_field_boosts` weight normalization**: `arms.py` normalises the raw
+boost values by `max(raw)` to satisfy `ts_rank_cd`'s `[0, 1]` weight
+requirement. Config values above 1.0 are therefore treated as *relative*
+weights, not absolute — e.g. `{"subject": 3.0, "from": 2.0, "body": 1.0,
+"to": 0.5}` is equivalent to `{"subject": 1.0, "from": 0.67, "body": 0.33,
+"to": 0.17}` after normalization.
+
+**`body_html` in FTS (migration 0006)**: the generated column `fts_v2` on
+`messages` includes `body_html` concatenated with `body_text` at weight C.
+This deviates slightly from the plan (which had only `body_text`). HTML
+markup tokens (tags, attribute names) may dilute ranking slightly for
+heavily-marked-up messages; this can be revisited in a later migration if
+needed. The current approach is fine for plain-text–heavy archives.
+
+**`_split_statements` in `db.py`**: the migration runner splits SQL on every
+`;` character. This is safe for all migrations we ship today (none contain
+semicolons inside string literals or dollar-quoted blocks). If a future
+migration requires either, `_split_statements` must be made smarter — a naive
+split will produce broken statement fragments.
+
+**Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
+synthetic multilingual corpus, runs the embed worker, and reports recall@K +
+MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for
+de/en/es/ja. Norwegian is reported but not gated. Requires the fastembed model
+to be installed (known deferred concern: `google/embeddinggemma-300m` must be
+in the fastembed registry).
+
 ## Conventions
 
 - **No comments unless the WHY is non-obvious.** Don't restate the SQL or the
@@ -163,7 +229,7 @@ in `messages.attachments` + the blobs tree).
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0003_failed_messages.sql`; next would be `0004_*.sql`.
+  Latest is `0009_search_state.sql`; next would be `0010_*.sql`.
 
 ## Testing notes
 

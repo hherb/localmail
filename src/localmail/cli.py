@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json as _json
+import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import click
@@ -15,6 +18,7 @@ from .daemon import Daemon
 from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
+from .search import create_searcher
 from .sync import retry_failed_messages, sync_account
 
 
@@ -286,6 +290,99 @@ def run_cmd(ctx: click.Context, no_ssl: bool, log_level: str) -> None:
     cfg = load_config(ctx.obj["config_path"])
     daemon = Daemon(cfg, ssl=not no_ssl)
     daemon.run_forever()
+
+
+def _page_to_dict(page) -> dict:
+    """Convert a SearchPage into a JSON-serializable dict."""
+    out = asdict(page)
+    return _json.loads(_json.dumps(out, default=str))
+
+
+def _print_text_page(page) -> None:
+    if not page.results:
+        click.echo("no results")
+        return
+    for r in page.results:
+        click.echo(f"[{r.rank}] {r.date_sent or '-'}  {r.from_addr or '-':40.40s}  "
+                   f"{r.subject or '(no subject)':60.60s}")
+        click.echo(f"    score={r.score:.3f} (rrf={r.rrf_score:.4f})  {r.snippet_source}")
+        if r.attachment_filename:
+            click.echo(f"    [{r.attachment_filename}]")
+        click.echo(f"    {r.snippet}")
+        click.echo("")
+    if page.search_token:
+        click.echo(f"token: {page.search_token}   "
+                   f"(page {page.page}, pool {page.pool_size})")
+        if page.has_more_in_pool:
+            click.echo(f"hint: localmail search-page {page.search_token} {page.page + 1}")
+        if page.can_grow_pool:
+            click.echo(f"hint: localmail search-grow {page.search_token} --candidates 200")
+
+
+@main.command()
+@click.argument("query", nargs=-1, required=True)
+@click.option("--account", "accounts", multiple=True, help="restrict to account name(s)")
+@click.option("--folder", "folders", multiple=True)
+@click.option("--after", type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--before", type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--from", "from_substr")
+@click.option("--to", "to_substr")
+@click.option("--subject", "subject_substr")
+@click.option("--has-attachment", is_flag=True, default=None)
+@click.option("--label")
+@click.option("--page-size", type=int)
+@click.option("--candidates-per-arm", type=int)
+@click.option("--rerank-pool", type=int)
+@click.option("--no-rerank", is_flag=True)
+@click.option("--smart", is_flag=True)
+@click.option("--no-cache", is_flag=True)
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.option("--verbose", is_flag=True)
+def search(query, accounts, folders, after, before, from_substr, to_substr,
+           subject_substr, has_attachment, label, page_size, candidates_per_arm,
+           rerank_pool, no_rerank, smart, no_cache, fmt, verbose):
+    """Hybrid BM25 + vector search over the local archive."""
+    text_q = " ".join(query)
+    extra: list[str] = []
+    for a in accounts:
+        extra.append(f"account:{a}")
+    for f in folders:
+        extra.append(f'folder:"{f}"')
+    if from_substr:
+        extra.append(f'from:"{from_substr}"')
+    if to_substr:
+        extra.append(f'to:"{to_substr}"')
+    if subject_substr:
+        extra.append(f'subject:"{subject_substr}"')
+    if after:
+        extra.append(f"after:{after.date().isoformat()}")
+    if before:
+        extra.append(f"before:{before.date().isoformat()}")
+    if has_attachment:
+        extra.append("has:attachment")
+    if label:
+        extra.append(f"label:{label}")
+    if extra:
+        text_q = f"{text_q} {' '.join(extra)}".strip()
+
+    searcher = create_searcher()
+    try:
+        if no_rerank:
+            searcher._reranker = None  # documented internal — Phase 5 can promote
+        page = searcher.search(
+            text_q, page_size=page_size, candidates_per_arm=candidates_per_arm,
+            rerank_pool_size=rerank_pool, use_cache=not no_cache, smart=smart,
+        )
+    except RuntimeError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(2)
+
+    if verbose:
+        click.echo(f"timing(ms): {page.timing_ms}", err=True)
+    if fmt == "json":
+        click.echo(_json.dumps(_page_to_dict(page), default=str))
+    else:
+        _print_text_page(page)
 
 
 if __name__ == "__main__":

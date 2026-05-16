@@ -7,16 +7,18 @@ plan, and CLAUDE.md as you go. Don't skip the "Key reading" section.
 
 **Done.** Phase 1 of the hybrid search subsystem shipped on branch
 `worktree-phase1-hybrid-search`, opened as
-[PR #1](https://github.com/hherb/localmail/pull/1). 30 commits, 148 unit +
-integration tests passing (`unset VIRTUAL_ENV && uv run pytest -q -m "not slow"`).
-1 slow opt-in test fails — the only known issue, fix is documented in
-"Step 1" below.
+[PR #1](https://github.com/hherb/localmail/pull/1). 32 commits, **149**
+unit + integration tests passing (`unset VIRTUAL_ENV && uv run pytest -q`,
+slow test included now that EmbeddingGemma resolves). No known failing
+tests.
 
-**Next.** Three sequential steps, in order:
+**Next.** Two sequential steps, in order:
 
-1. **Fix the embedding-model registry mismatch** so the slow test passes
-   (1 small commit). The current default `embeddinggemma` isn't in the
-   installed fastembed 0.8.0 catalog. See Step 1.
+1. ~~Fix the embedding-model registry mismatch~~ **DONE in commit
+   `128a398`** — fastembed pinned to upstream commit `87678dd...`, the
+   post-PR-592 merge that adds EmbeddingGemma support. Model verified to
+   download and produce 768d vectors. See Step 1 for rollback / reproduce
+   notes.
 2. **Author the multilingual ground-truth query set** at
    `tests/fixtures/multilingual_queries.json` (20 queries each for
    de/en/es/ja; Norwegian is not gated). See Step 2.
@@ -61,7 +63,13 @@ interpreter. The prefix is mandatory for every pytest / localmail invocation.
 
 ## Step 1 — install fastembed from source so EmbeddingGemma resolves
 
-### Why this needs doing
+> **Status: DONE in commit `128a398`.** fastembed pinned to upstream
+> commit `87678dd...`, model verified to download (768d), full test suite
+> now reports **149 passed** (the previously-failing slow test passes).
+> The "Why" and "What to do" below are kept for reference / future
+> rollback. Skip to Step 2 if you're picking up the work as-is.
+
+### Why this needed doing
 
 Phase 1's `SearchConfig.embedding_model` defaults to `"embeddinggemma"`,
 which `src/localmail/search/embeddings.py::_build_fastembed_inner` remaps

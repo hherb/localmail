@@ -4,9 +4,11 @@
 
 **Goal:** Ship hybrid BM25 + vector search over localmail messages (no attachments yet), exposed via Python API and CLI, with a background embed worker filling vectors as new mail arrives.
 
-**Architecture:** Per-arm Python-orchestrated retrieval (4 SQL queries — Phase 1 ships 3 arms over messages only) → RRF fusion → cross-encoder rerank → bounded LRU page cache. All numeric tunables in `SearchConfig`. Embeddings via fastembed (EmbeddingGemma-300M @ 768d, halfvec storage). BM25 via pg_search (ParadeDB). Vector index: pgvector HNSW.
+**Architecture:** Per-arm Python-orchestrated retrieval (4 SQL queries — Phase 1 ships 3 arms over messages only) → RRF fusion → cross-encoder rerank → bounded LRU page cache. All numeric tunables in `SearchConfig`. Embeddings via fastembed (EmbeddingGemma-300M @ 768d, halfvec storage). BM25-ish lexical retrieval via PG built-in `tsvector + ts_rank_cd` with `setweight()` field weights (A=subject, B=from, C=body, D=to). Vector index: pgvector HNSW.
 
-**Tech Stack:** Python 3.12, psycopg v3 + raw SQL, pgvector + pg_search Postgres extensions, fastembed (ONNX), tiktoken (chunk-size budgeting), click, pydantic v2, structlog, pytest.
+**Tech Stack:** Python 3.12, psycopg v3 + raw SQL, pgvector Postgres extension, fastembed (ONNX), tiktoken (chunk-size budgeting), click, pydantic v2, structlog, pytest.
+
+**BM25 backend note (2026-05-16):** Original design selected `pg_search` (ParadeDB). Switched to PG built-in `tsvector` after ParadeDB install fragility on current macOS releases surfaced (prebuilt binaries cover only older macOS versions; pgrx source build re-breaks on each PG upgrade). Expected recall cost is <3% after cross-encoder rerank — see spec doc "BM25-backend decision" note. `pg_search` remains a Phase 5+ upgrade option if quality demands it.
 
 **Spec:** [docs/superpowers/specs/2026-05-16-hybrid-search-design.md](../specs/2026-05-16-hybrid-search-design.md)
 
@@ -15,14 +17,16 @@
 ## Prerequisites (one-time, before starting)
 
 ```bash
-# Install pg_search extension (ParadeDB) for your Postgres 18 install.
-# macOS Homebrew Postgres 18:
-#   curl -L -o /tmp/pg_search.tar.gz https://github.com/paradedb/paradedb/releases/download/v0.23.4/postgresql-18-pg-search_0.23.4-1.macos.13_amd64.deb
-# Linux/Ubuntu: install the .deb directly via apt.
-# Verify: psql -c 'CREATE EXTENSION pg_search;' in localmail_test.
-
-# pgvector should already be present (used by other Postgres users).
-# Verify: psql -c 'CREATE EXTENSION vector;' in localmail_test.
+# pgvector must be present in both localmail and localmail_test databases.
+# On macOS Postgres.app the extension is bundled; just enable it (one-time,
+# as a superuser since CREATE EXTENSION requires it the first time):
+#   psql localmail_test -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+#   psql localmail      -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+# On Linux you may need to install pgvector via apt or build from source
+# first; see https://github.com/pgvector/pgvector.
+#
+# No other PG extensions are required for Phase 1. (Original design called
+# for pg_search; replaced with PG built-in tsvector for install portability.)
 ```
 
 Then add the test integration marker so existing pytest runs skip slow fastembed tests by default:
@@ -214,7 +218,8 @@ def test_search_config_has_sane_defaults():
 
 
 def test_search_config_attached_to_localmail_config():
-    cfg = LocalmailConfig(accounts=[])
+    # NOTE: top-level config requires `database`; construct via model_validate.
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": "x"}})
     assert isinstance(cfg.search, SearchConfig)
     assert cfg.search.embedding_backend == "fastembed"
 
@@ -354,7 +359,7 @@ git commit -m "feat(config): add SearchConfig with all search tunables"
 - Create: `migrations/0004_search_chunks.sql`, `migrations/0007_failed_embeddings.sql`, `migrations/0009_search_state.sql`
 - Test: `tests/test_search_schema.py`
 
-(Migration 0006 — pg_search BM25 + HNSW — comes in Task 12, after we know the BM25 / vector code shape. Migrations 0005/0008/0010/0011 are Phase 2.)
+(Migration 0006 — multilingual tsvector FTS + HNSW — comes in Task 11, after we know the lexical / vector code shape. Migrations 0005/0008/0010/0011 are Phase 2.)
 
 - [ ] **Step 1: Write failing test** — `tests/test_search_schema.py`:
 
@@ -1224,8 +1229,9 @@ def test_fastembed_backend_embed_documents_shape():
 def test_fastembed_backend_embed_query_uses_query_path():
     be = FastEmbedBackend(cfg=SearchConfig(), inner=_StubInner(dim=768))
     v = be.embed_query("hello")
-    # query_embed seeds with i+7 vs documents i+1 — proves correct path
-    assert v[0] == pytest.approx(8 / 100.0)
+    # query_embed seeds with (i+7)/100.0 vs embed seeds with (i+1)/100.0 —
+    # a single-text call (i=0) returns 0.07, proving the query path fired.
+    assert v[0] == pytest.approx(7 / 100.0)
 
 
 def test_fastembed_backend_dim_mismatch_raises():
@@ -1743,35 +1749,65 @@ git commit -m "feat(search): make_snippet term-centered windowing"
 
 ---
 
-## Task 11: Migration 0006 — pg_search BM25 indexes + HNSW vector index
+## Task 11: Migration 0006 — multilingual tsvector FTS + pgvector HNSW
 
 **Files:**
 - Create: `migrations/0006_search_indexes.sql`
+- Modify: `src/localmail/db.py` (per-session `maintenance_work_mem` in the autocommit branch)
 - Test: `tests/test_search_schema.py` (extend)
+
+The migration replaces the original `'english'`-only `messages_fts_idx` (from `0001_init.sql`) with a multi-field, multilingual generated `tsvector` column (`fts_v2`) on `messages`, plus a generated `tsvector` column on `message_chunks`. It also creates the pgvector HNSW index on `message_chunks.embedding_v1`. `'simple'` is the chosen tsvector configuration so the index works across DE/EN/ES/JA/NO without per-language stemming setup.
 
 - [ ] **Step 1: Write failing tests** — append to `tests/test_search_schema.py`:
 
 ```python
-def test_pg_search_extension_installed(db_conn) -> None:
+def test_messages_fts_v2_column_is_generated_tsvector(db_conn) -> None:
     with db_conn.cursor() as cur:
-        cur.execute("SELECT extname FROM pg_extension WHERE extname = 'pg_search'")
-        assert cur.fetchone() is not None, "pg_search extension required (install ParadeDB)"
+        cur.execute("""
+            SELECT data_type, is_generated FROM information_schema.columns
+            WHERE table_name = 'messages' AND column_name = 'fts_v2'
+        """)
+        row = cur.fetchone()
+    assert row is not None, "messages.fts_v2 column missing"
+    assert row[0] in ("tsvector", "USER-DEFINED")
+    assert row[1] == "ALWAYS"
 
 
-def test_messages_bm25_index_exists(db_conn) -> None:
+def test_messages_fts_v2_index_exists(db_conn) -> None:
     with db_conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM pg_indexes WHERE indexname = 'messages_bm25_idx'"
+            "SELECT 1 FROM pg_indexes WHERE indexname = 'messages_fts_v2_idx'"
         )
         assert cur.fetchone() is not None
 
 
-def test_message_chunks_bm25_index_exists(db_conn) -> None:
+def test_message_chunks_fts_column_is_generated_tsvector(db_conn) -> None:
+    with db_conn.cursor() as cur:
+        cur.execute("""
+            SELECT data_type, is_generated FROM information_schema.columns
+            WHERE table_name = 'message_chunks' AND column_name = 'fts'
+        """)
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] in ("tsvector", "USER-DEFINED")
+    assert row[1] == "ALWAYS"
+
+
+def test_message_chunks_fts_index_exists(db_conn) -> None:
     with db_conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM pg_indexes WHERE indexname = 'message_chunks_bm25_idx'"
+            "SELECT 1 FROM pg_indexes WHERE indexname = 'message_chunks_fts_idx'"
         )
         assert cur.fetchone() is not None
+
+
+def test_old_messages_fts_idx_dropped(db_conn) -> None:
+    """The 'english'-only FTS index from 0001 is removed by 0006."""
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_indexes WHERE indexname = 'messages_fts_idx'"
+        )
+        assert cur.fetchone() is None
 
 
 def test_message_chunks_hnsw_index_exists(db_conn) -> None:
@@ -1780,6 +1816,29 @@ def test_message_chunks_hnsw_index_exists(db_conn) -> None:
             "SELECT 1 FROM pg_indexes WHERE indexname = 'message_chunks_embedding_v1_hnsw'"
         )
         assert cur.fetchone() is not None
+
+
+def test_fts_v2_finds_subject_match(db_conn) -> None:
+    """End-to-end smoke: insert a message, verify the generated column populates."""
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES ('a', 'a@x', 'h', 'password') RETURNING id"
+        )
+        acct = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " body_text, headers, raw_bytes, size_bytes)"
+            " VALUES (%s, '<m>', %s, 'Berlin conference', 'meeting in Berlin',"
+            " '{}'::jsonb, 'r', 1) RETURNING id",
+            (acct, b"\x01" * 32),
+        )
+        mid = cur.fetchone()[0]
+        cur.execute(
+            "SELECT id FROM messages WHERE fts_v2 @@ plainto_tsquery('simple', 'Berlin')"
+        )
+        rows = cur.fetchall()
+    assert any(r[0] == mid for r in rows)
 ```
 
 - [ ] **Step 2: Verify failing**
@@ -1792,31 +1851,51 @@ unset VIRTUAL_ENV && uv run pytest tests/test_search_schema.py -v
 
 ```sql
 -- @non-transactional
--- BM25 (pg_search) on messages + message_chunks, plus HNSW (pgvector) on
--- message_chunks.embedding_v1. The @non-transactional header (Task 1) lets
--- the runner switch to autocommit so CREATE INDEX CONCURRENTLY works.
+-- Multilingual full-text search via tsvector + GIN on messages and
+-- message_chunks, plus pgvector HNSW on message_chunks.embedding_v1.
+-- The @non-transactional header (Task 1) lets the runner switch to
+-- autocommit so CREATE INDEX CONCURRENTLY works for HNSW.
 
-CREATE EXTENSION IF NOT EXISTS pg_search;
+-- 1) Drop the original 'english'-only FTS index from 0001_init.sql.
+--    Replaced by the multi-field multilingual generated column below.
+DROP INDEX IF EXISTS messages_fts_idx;
 
-SET LOCAL maintenance_work_mem = '2048MB';
+-- 2) Weighted multilingual tsvector per message:
+--      A = subject (highest weight in ts_rank_cd)
+--      B = from_addr + from_name
+--      C = body_text
+--      D = to_addrs (lowest weight)
+--    The 'simple' configuration tokenizes by Unicode word boundaries
+--    without per-language stemming, working uniformly across DE/EN/ES/NO/JA.
+ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS fts_v2 tsvector
+    GENERATED ALWAYS AS (
+        setweight(to_tsvector('simple', coalesce(subject, '')), 'A') ||
+        setweight(to_tsvector('simple',
+            coalesce(from_addr, '') || ' ' || coalesce(from_name, '')), 'B') ||
+        setweight(to_tsvector('simple', coalesce(body_text, '')), 'C') ||
+        setweight(to_tsvector('simple',
+            coalesce(array_to_string(to_addrs, ' '), '')), 'D')
+    ) STORED;
 
-CREATE INDEX IF NOT EXISTS messages_bm25_idx ON messages
-USING bm25 (id, subject, body_text, from_addr, from_name, to_addrs)
-WITH (key_field='id');
+CREATE INDEX IF NOT EXISTS messages_fts_v2_idx ON messages USING GIN (fts_v2);
 
-CREATE INDEX IF NOT EXISTS message_chunks_bm25_idx ON message_chunks
-USING bm25 (id, text) WITH (key_field='id');
+-- 3) Per-chunk unweighted tsvector for the chunk-level lexical arm.
+ALTER TABLE message_chunks
+    ADD COLUMN IF NOT EXISTS fts tsvector
+    GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED;
 
+CREATE INDEX IF NOT EXISTS message_chunks_fts_idx ON message_chunks USING GIN (fts);
+
+-- 4) pgvector HNSW (concurrent so live writes don't block the build).
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_chunks_embedding_v1_hnsw
     ON message_chunks USING hnsw (embedding_v1 halfvec_cosine_ops)
     WITH (m=16, ef_construction=64);
 ```
 
-NOTE: `SET LOCAL maintenance_work_mem` requires being inside a transaction; for the autocommit path the runner sets it per-session before applying the file. Update the autocommit branch in `apply_migrations`:
-
 - [ ] **Step 4: Modify `apply_migrations` to raise `maintenance_work_mem` for non-transactional migrations**
 
-In `src/localmail/db.py`, in the `if _is_non_transactional(sql):` branch, replace with:
+In `src/localmail/db.py`, in the autocommit branch of `apply_migrations`, set the session memory budget before executing the migration SQL. Replace the existing autocommit block with:
 
 ```python
 if _is_non_transactional(sql):
@@ -1830,20 +1909,21 @@ if _is_non_transactional(sql):
             )
 ```
 
-(Future Phase 2 will parameterize this from `SearchConfig.index_build_maintenance_work_mem_mb`; Phase 1 hard-codes 2 GB matching the SQL.)
+(Phase 2 will parameterize the literal from `SearchConfig.index_build_maintenance_work_mem_mb`; Phase 1 hard-codes 2 GB matching what the migration assumes.)
 
 - [ ] **Step 5: Verify passing**
 
 ```bash
 unset VIRTUAL_ENV && uv run pytest tests/test_search_schema.py -v
+unset VIRTUAL_ENV && uv run pytest -q     # full suite — no regressions
 ```
-Expected: all 8 tests pass. If `test_pg_search_extension_installed` fails: install pg_search per Prerequisites section.
+Expected: 4 prior schema tests + 7 new tests = 11 schema tests passing; full suite 66 + 7 = 73 passing.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add migrations/0006_search_indexes.sql src/localmail/db.py tests/test_search_schema.py
-git commit -m "feat(schema): pg_search BM25 + pgvector HNSW indexes on messages + chunks"
+git commit -m "feat(schema): multilingual tsvector FTS + pgvector HNSW indexes"
 ```
 
 ---
@@ -2205,9 +2285,10 @@ git commit -m "feat(search): embed_worker with lazy chunking + per-chunk SAVEPOI
 ```python
 """Integration tests for the three Phase-1 retrieval arms.
 
-These rely on real Postgres + pg_search + pgvector, so all are integration
-tests. They populate a tiny corpus, embed deterministically, and verify
-each arm returns the expected hit shape and ordering.
+These rely on real Postgres + pgvector (no pg_search needed — lexical arms
+use built-in tsvector). They populate a tiny corpus, embed
+deterministically, and verify each arm returns the expected hit shape and
+ordering.
 """
 
 from __future__ import annotations
@@ -2324,10 +2405,12 @@ def test_arms_respect_account_filter(db_conn):
 - [ ] **Step 3: Implement** — `src/localmail/search/arms.py`:
 
 ```python
-"""SQL retrieval arms for Phase 1: BM25 (messages, chunks) + vector (chunks).
+"""SQL retrieval arms for Phase 1: tsvector lexical (messages, chunks) + vector (chunks).
 
 Each arm is a pure function `(conn, parsed_query, cfg, ...) -> list[ArmHit]`.
-Arm 4 (vector over attachment_chunks) lands in Phase 2.
+Arm 4 (vector over attachment_chunks) lands in Phase 2. Lexical arms use
+PG built-in tsvector + ts_rank_cd instead of pg_search/BM25 — see plan
+header for the rationale and the upgrade path.
 """
 
 from __future__ import annotations
@@ -2389,28 +2472,38 @@ def arm_bm25_messages(
     cfg: SearchConfig,
     limit: int,
 ) -> list[ArmHit]:
-    """BM25 over messages: subject + from + body with per-field boosts."""
+    """tsvector full-text over messages with weighted ts_rank_cd.
+
+    Uses the `messages.fts_v2` generated tsvector column (subject=A,
+    from=B, body=C, to=D). `ts_rank_cd` accepts a 4-element weight
+    vector in [D, C, B, A] order — we feed it from
+    SearchConfig.bm25_field_boosts so per-field tuning stays in config.
+    """
     if not parsed.free_text.strip():
         return []
     where_extra, where_params = _filter_sql(parsed.filters)
-    q = parsed.free_text
+    weights = [
+        cfg.bm25_field_boosts.get("to", 0.5),
+        cfg.bm25_field_boosts.get("body", 1.0),
+        cfg.bm25_field_boosts.get("from", 2.0),
+        cfg.bm25_field_boosts.get("subject", 3.0),
+    ]
     sql = f"""
         WITH ranked AS (
-            SELECT m.id, paradedb.score(m.id) AS score
+            SELECT m.id,
+                   ts_rank_cd(
+                       %s::float4[],
+                       m.fts_v2,
+                       plainto_tsquery('simple', %s)
+                   ) AS score
             FROM messages m
-            WHERE m.id @@@ paradedb.boolean(must => ARRAY[
-                paradedb.parse(%s, boost => %s, fields => ARRAY['subject']),
-                paradedb.parse(%s, boost => %s, fields => ARRAY['from_addr','from_name']),
-                paradedb.parse(%s, boost => %s, fields => ARRAY['body_text'])
-            ]) {where_extra}
+            WHERE m.fts_v2 @@ plainto_tsquery('simple', %s) {where_extra}
             ORDER BY score DESC LIMIT %s
         )
         SELECT id, score, ROW_NUMBER() OVER (ORDER BY score DESC) FROM ranked
     """
     params: list[Any] = [
-        q, cfg.bm25_field_boosts.get("subject", 1.0),
-        q, cfg.bm25_field_boosts.get("from", 1.0),
-        q, cfg.bm25_field_boosts.get("body", 1.0),
+        weights, parsed.free_text, parsed.free_text,
         *where_params, limit,
     ]
     with conn.cursor() as cur:
@@ -2429,21 +2522,22 @@ def arm_bm25_chunks(
     cfg: SearchConfig,
     limit: int,
 ) -> list[ArmHit]:
-    """BM25 over message_chunks.text."""
+    """tsvector full-text over message_chunks.text via the `fts` column."""
     if not parsed.free_text.strip():
         return []
     where_extra, where_params = _filter_sql(parsed.filters)
     sql = f"""
         WITH ranked AS (
-            SELECT mc.message_id, mc.id AS chunk_id, paradedb.score(mc.id) AS score
+            SELECT mc.message_id, mc.id AS chunk_id,
+                   ts_rank_cd(mc.fts, plainto_tsquery('simple', %s)) AS score
             FROM message_chunks mc JOIN messages m ON m.id = mc.message_id
-            WHERE mc.id @@@ %s {where_extra}
+            WHERE mc.fts @@ plainto_tsquery('simple', %s) {where_extra}
             ORDER BY score DESC LIMIT %s
         )
         SELECT message_id, chunk_id, score,
                ROW_NUMBER() OVER (ORDER BY score DESC) FROM ranked
     """
-    params: list[Any] = [parsed.free_text, *where_params, limit]
+    params: list[Any] = [parsed.free_text, parsed.free_text, *where_params, limit]
     with conn.cursor() as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -3230,7 +3324,8 @@ def test_create_searcher_returns_searcher(db_dsn):
         def embed_query(self, t): return [0.0]*768
         def health_check(self): pass
 
-    cfg = LocalmailConfig(accounts=[])
+    # NOTE: top-level config requires `database`; construct via model_validate.
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     s = create_searcher(cfg=cfg, dsn=db_dsn, embeddings=_E(), reranker=None)
     assert isinstance(s, Searcher)
     s._pool.close()
@@ -3912,7 +4007,7 @@ class _E:
 
 
 def test_daemon_starts_embed_worker_when_enabled(db_dsn):
-    cfg = LocalmailConfig(accounts=[])
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_embed_worker = True
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
     d.start()
@@ -3926,7 +4021,7 @@ def test_daemon_starts_embed_worker_when_enabled(db_dsn):
 
 
 def test_daemon_skips_embed_worker_when_disabled(db_dsn):
-    cfg = LocalmailConfig(accounts=[])
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_embed_worker = False
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
     d.start()
@@ -4312,9 +4407,10 @@ Expected: harness runs end-to-end (model download takes time first call). The ex
 ```markdown
 ## Search (Phase 1)
 
-`localmail` ships a hybrid BM25 + vector search subsystem. Once initial
-backfill completes, you can search the local archive from the CLI or
-from Python.
+`localmail` ships a hybrid lexical + vector search subsystem (PG
+`tsvector` full-text combined with pgvector HNSW embeddings, fused via
+RRF and reranked by a cross-encoder). Once initial backfill completes,
+you can search the local archive from the CLI or from Python.
 
 ### Setup
 
@@ -4397,8 +4493,11 @@ for the Phase 1 implementation plan.
   `embed_worker.py`. Public API: `localmail.search.create_searcher`.
 - All numeric tunables in `LocalmailConfig.search` (`SearchConfig`).
   **No magic numbers elsewhere in search code.**
-- BM25 via `pg_search` (ParadeDB) — AGPL-3, PG18-compatible. Required
-  extension; install via the ParadeDB prebuilt binaries.
+- Lexical retrieval via PG built-in `tsvector + ts_rank_cd` with
+  `setweight()` field weights (A=subject, B=from, C=body, D=to). No
+  third-party Postgres extension required. `pg_search` (ParadeDB) was
+  the original choice but was dropped for install portability;
+  documented as a Phase 5+ upgrade if recall ever proves limited.
 - Vector via pgvector HNSW + `halfvec(768)`. Default embedder:
   EmbeddingGemma-300M via fastembed (Gemma Terms — runtime download).
 - One embed_worker thread per process (account-agnostic; backend-bound).

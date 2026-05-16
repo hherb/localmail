@@ -163,3 +163,92 @@ uv run localmail --help
 at `LOCALMAIL_TEST_DSN` (defaults to
 `postgresql://localmail:local%40%40mail@localhost:5532/localmail_test` — a
 separate database from the live archive, so tests can't clobber real data).
+
+## Search (Phase 1)
+
+`localmail` ships a hybrid lexical (tsvector) + vector (pgvector) search
+subsystem. Once initial backfill completes, you can search the local archive
+from the CLI or from Python.
+
+### Setup
+
+```bash
+# Apply migrations (creates message_chunks, indexes, etc.)
+uv run localmail init-db
+
+# Backfill embeddings for an existing archive. First run downloads
+# ~250 MB of model weights to ~/.cache/fastembed/ (one-time).
+uv run localmail embed-backfill
+```
+
+### Search from the CLI
+
+```bash
+uv run localmail search "Berlin conference"
+uv run localmail search "invoice has:attachment after:2025-01-01 from:anna"
+uv run localmail search "Heizung" --format json | jq
+```
+
+### Search from Python
+
+```python
+from localmail.search import create_searcher
+
+searcher = create_searcher()
+page = searcher.search("Berlin conference", page_size=20)
+for r in page.results:
+    print(r.rank, r.score, r.subject, r.snippet)
+
+# Page 2:
+page2 = searcher.continue_page(page.search_token, page=2)
+
+# Needle-in-haystack — widen the candidate pool:
+deeper = searcher.grow_pool(page.search_token, candidates_per_arm=200)
+```
+
+### Embedding model
+
+The default model is **EmbeddingGemma-300M** (`google/embeddinggemma-300m`),
+distributed under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms).
+The model weights are downloaded at runtime by fastembed; by using the
+default you accept those terms.
+
+For a strictly Apache-2.0 alternative:
+
+```toml
+[search]
+embedding_model = "Snowflake/snowflake-arctic-embed-l-v2.0"
+embedding_dim = 1024
+```
+
+Re-run `localmail embed-backfill` after switching models (the design
+supports coexisting `embedding_v1` / `embedding_v2` columns for in-place
+migration — see Phase 5).
+
+### Tuning
+
+All knobs live in `[search]` in `~/.config/localmail/config.toml`. The
+defaults are calibrated for hundreds of thousands of messages on a
+modern laptop. The most likely knobs to touch:
+
+- `candidates_per_arm` (default 50) — increase for hard queries
+- `rerank_pool_size` (default 50) — match `candidates_per_arm`
+- `chunk_size_tokens` (default 512) — smaller for short messages
+
+### Acceptance evaluation
+
+The Phase-1 acceptance harness lives at `tests/acceptance/run_recall_eval.py`.
+It seeds a synthetic multilingual corpus, runs the embed worker, then evaluates
+recall@K and MRR@K against a ground-truth query set:
+
+```bash
+LOCALMAIL_TEST_DSN=postgresql://... \
+  PYTHONPATH=src:. uv run python tests/acceptance/run_recall_eval.py \
+  --queries tests/fixtures/multilingual_queries.json \
+  --k 20
+```
+
+Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for de/en/es/ja.
+Norwegian is reported but not gated. Author 20 queries per language in
+`tests/fixtures/multilingual_queries.json` (see the `.example.json` for
+format) before running the gate.

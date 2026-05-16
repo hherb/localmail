@@ -7,6 +7,8 @@ import signal
 import threading
 from typing import Any
 
+from psycopg_pool import ConnectionPool
+
 from .config import Config
 from .db import open_pool
 from .idle import run_inbox_idle_loop
@@ -17,16 +19,26 @@ log = logging.getLogger(__name__)
 
 
 class Daemon:
-    def __init__(self, cfg: Config, *, ssl: bool = True) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        ssl: bool = True,
+        dsn: str | None = None,
+        embedding_backend_factory=None,
+    ) -> None:
         self.cfg = cfg
         self.ssl = ssl
-        self.stop = threading.Event()
-        self.pool = open_pool(cfg.database.dsn, min_size=1, max_size=max(4, 2 * len(cfg.accounts)))
+        self._dsn = dsn or cfg.database.dsn
+        self._stop_event = threading.Event()
+        self.pool = open_pool(self._dsn, min_size=1, max_size=max(4, 2 * len(cfg.accounts)))
         self.threads: list[threading.Thread] = []
+        self._embedding_backend_factory = embedding_backend_factory
+        self._embed_pool: ConnectionPool | None = None
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("received signal %s; stopping daemon", signum)
-        self.stop.set()
+        self._stop_event.set()
 
     def start_workers(self) -> None:
         gmail_secrets = (
@@ -40,7 +52,7 @@ class Daemon:
                 idle_renew_seconds=self.cfg.daemon.idle_renew_seconds,
                 poll_seconds=account.poll_seconds or self.cfg.daemon.poll_seconds,
                 gmail_client_secrets=gmail_secrets,
-                stop=self.stop,
+                stop=self._stop_event,
                 ssl=self.ssl,
             )
             t_idle = threading.Thread(
@@ -60,6 +72,50 @@ class Daemon:
             self.threads += [t_idle, t_poll]
             log.info("started workers for %s", account.name)
 
+        if self.cfg.search.run_embed_worker:
+            from localmail.search.embed_worker import run_embed_worker  # noqa: PLC0415
+
+            if self._embedding_backend_factory is None:
+                from localmail.search.embeddings import FastEmbedBackend  # noqa: PLC0415
+
+                backend = FastEmbedBackend(self.cfg.search)
+            else:
+                backend = self._embedding_backend_factory(self.cfg.search)
+            embed_pool = open_pool(self._dsn)
+            self._embed_pool = embed_pool
+            t_embed = threading.Thread(
+                target=run_embed_worker,
+                args=(self._stop_event, embed_pool, self.cfg.search, backend),
+                name="embed_worker",
+                daemon=True,
+            )
+            t_embed.start()
+            self.threads.append(t_embed)
+            log.info("started embed_worker thread")
+
+    def start(self) -> None:
+        """Start all worker threads without blocking."""
+        self.start_workers()
+
+    def stop(self) -> None:
+        """Signal all threads to stop."""
+        self._stop_event.set()
+
+    def _close_embed_pool(self) -> None:
+        """Close the embed worker's connection pool, logging any error."""
+        if self._embed_pool is None:
+            return
+        try:
+            self._embed_pool.close()
+        except Exception as exc:  # noqa: BLE001 — shutdown best-effort
+            log.warning("error closing embed pool: %s", exc, exc_info=True)
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait for all worker threads to finish and close pools."""
+        for t in self.threads:
+            t.join(timeout=timeout)
+        self._close_embed_pool()
+
     def run_forever(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -68,11 +124,12 @@ class Daemon:
             return
         self.start_workers()
         try:
-            while not self.stop.is_set():
-                self.stop.wait(60)
+            while not self._stop_event.is_set():
+                self._stop_event.wait(60)
         finally:
             log.info("waiting for worker threads to finish")
             for t in self.threads:
                 t.join(timeout=10)
             self.pool.close()
+            self._close_embed_pool()
             log.info("daemon stopped")

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from localmail.config import Config, load_config
+from localmail.config import Config, LocalmailConfig, SearchConfig, load_config
 
 
 def write(path: Path, body: str) -> Path:
@@ -86,3 +86,36 @@ def test_model_default_daemon_values():
     cfg = Config.model_validate({"database": {"dsn": "x"}})
     assert cfg.daemon.idle_renew_seconds == 1740
     assert cfg.daemon.poll_seconds == 300
+
+
+def test_search_config_has_sane_defaults():
+    cfg = SearchConfig()
+    assert cfg.embedding_backend == "fastembed"
+    assert cfg.embedding_model == "embeddinggemma"
+    assert cfg.embedding_dim == 768
+    assert cfg.candidates_per_arm == 50
+    assert cfg.rrf_k == 60
+    assert cfg.rerank_pool_size == 50
+    assert cfg.page_size_default == 20
+    assert cfg.page_size_max == 200
+    assert cfg.snippet_width_chars == 200
+    assert cfg.run_embed_worker is True
+    assert cfg.chunk_size_tokens == 512
+    assert cfg.chunk_overlap_tokens == 64
+
+
+def test_search_config_attached_to_localmail_config():
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": "x"}})
+    assert isinstance(cfg.search, SearchConfig)
+    assert cfg.search.embedding_backend == "fastembed"
+
+
+def test_search_config_overrides_via_dict():
+    cfg = SearchConfig.model_validate({
+        "embedding_backend": "ollama",
+        "candidates_per_arm": 100,
+        "bm25_field_boosts": {"subject": 5.0},
+    })
+    assert cfg.embedding_backend == "ollama"
+    assert cfg.candidates_per_arm == 100
+    assert cfg.bm25_field_boosts["subject"] == 5.0

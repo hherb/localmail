@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json as _json
+import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import click
@@ -15,6 +18,7 @@ from .daemon import Daemon
 from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
+from .search import create_searcher
 from .sync import retry_failed_messages, sync_account
 
 
@@ -48,7 +52,10 @@ def main(ctx: click.Context, config_path: Path | None) -> None:
 def init_db(ctx: click.Context) -> None:
     """Apply pending schema migrations to the database."""
     cfg = load_config(ctx.obj["config_path"])
-    applied = apply_migrations(cfg.database.dsn)
+    applied = apply_migrations(
+        cfg.database.dsn,
+        index_build_work_mem_mb=cfg.search.index_build_maintenance_work_mem_mb,
+    )
     if applied:
         for rev in applied:
             click.echo(f"applied {rev}")
@@ -286,6 +293,231 @@ def run_cmd(ctx: click.Context, no_ssl: bool, log_level: str) -> None:
     cfg = load_config(ctx.obj["config_path"])
     daemon = Daemon(cfg, ssl=not no_ssl)
     daemon.run_forever()
+
+
+def _page_to_dict(page) -> dict:
+    """Convert a SearchPage into a JSON-serializable dict."""
+    out = asdict(page)
+    return _json.loads(_json.dumps(out, default=str))
+
+
+def _print_text_page(page) -> None:
+    if not page.results:
+        click.echo("no results")
+        return
+    for r in page.results:
+        click.echo(f"[{r.rank}] {r.date_sent or '-'}  {r.from_addr or '-':40.40s}  "
+                   f"{r.subject or '(no subject)':60.60s}")
+        click.echo(f"    score={r.score:.3f} (rrf={r.rrf_score:.4f})  {r.snippet_source}")
+        if r.attachment_filename:
+            click.echo(f"    [{r.attachment_filename}]")
+        click.echo(f"    {r.snippet}")
+        click.echo("")
+    if page.search_token:
+        click.echo(f"token: {page.search_token}   "
+                   f"(page {page.page}, pool {page.pool_size})")
+        if page.has_more_in_pool or page.can_grow_pool:
+            click.echo(
+                "hint: pagination/grow is in-process only — for follow-up pages, "
+                "use the Python API (localmail.search.create_searcher) or the "
+                "MCP server (Phase 3). To widen this query in one shot, re-run "
+                "with --candidates-per-arm 200 --rerank-pool 200."
+            )
+
+
+@main.command()
+@click.argument("query", nargs=-1, required=True)
+@click.option("--account", "accounts", multiple=True, help="restrict to account name(s)")
+@click.option("--folder", "folders", multiple=True)
+@click.option("--after", type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--before", type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--from", "from_substr")
+@click.option("--to", "to_substr")
+@click.option("--subject", "subject_substr")
+@click.option("--has-attachment", is_flag=True, default=None)
+@click.option("--label")
+@click.option("--page-size", type=int)
+@click.option("--candidates-per-arm", type=int)
+@click.option("--rerank-pool", type=int)
+@click.option("--no-rerank", is_flag=True)
+@click.option("--smart", is_flag=True)
+@click.option("--no-cache", is_flag=True)
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.option("--verbose", is_flag=True)
+def search(query, accounts, folders, after, before, from_substr, to_substr,
+           subject_substr, has_attachment, label, page_size, candidates_per_arm,
+           rerank_pool, no_rerank, smart, no_cache, fmt, verbose):
+    """Hybrid BM25 + vector search over the local archive."""
+    text_q = " ".join(query)
+    extra: list[str] = []
+    for a in accounts:
+        extra.append(f"account:{a}")
+    for f in folders:
+        extra.append(f'folder:"{f}"')
+    if from_substr:
+        extra.append(f'from:"{from_substr}"')
+    if to_substr:
+        extra.append(f'to:"{to_substr}"')
+    if subject_substr:
+        extra.append(f'subject:"{subject_substr}"')
+    if after:
+        extra.append(f"after:{after.date().isoformat()}")
+    if before:
+        extra.append(f"before:{before.date().isoformat()}")
+    if has_attachment:
+        extra.append("has:attachment")
+    if label:
+        extra.append(f"label:{label}")
+    if extra:
+        text_q = f"{text_q} {' '.join(extra)}".strip()
+
+    searcher = create_searcher()
+    try:
+        page = searcher.search(
+            text_q, page_size=page_size, candidates_per_arm=candidates_per_arm,
+            rerank_pool_size=rerank_pool, use_cache=not no_cache, smart=smart,
+            disable_rerank=no_rerank,
+        )
+    except RuntimeError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(2)
+
+    if verbose:
+        click.echo(f"timing(ms): {page.timing_ms}", err=True)
+    if fmt == "json":
+        click.echo(_json.dumps(_page_to_dict(page), default=str))
+    else:
+        _print_text_page(page)
+
+
+def _dsn() -> str:
+    """Resolve DSN from the existing localmail config."""
+    return load_config().database.dsn
+
+
+def _make_backend(cfg):
+    """Build the configured EmbeddingBackend. Override via monkeypatch in tests."""
+    from localmail.search.embeddings import FastEmbedBackend
+    return FastEmbedBackend(cfg.search)
+
+
+@main.command("embed-backfill")
+@click.option("--no-progress", is_flag=True)
+def embed_backfill(no_progress):
+    """Drain the embedding queue in the foreground; exit when empty.
+
+    Account-agnostic — fills embeddings for all accounts.
+    """
+    from localmail.db import open_pool
+    from localmail.search.embed_worker import run_embed_worker_once
+    cfg = load_config()
+    backend = _make_backend(cfg)
+    pool = open_pool(_dsn())
+    try:
+        total = 0
+        while True:
+            with pool.connection() as conn:
+                wrote = run_embed_worker_once(conn, cfg.search, backend)
+            if wrote == 0:
+                break
+            total += wrote
+            if not no_progress:
+                click.echo(f"embedded {wrote} chunks (total {total})", err=True)
+    finally:
+        pool.close()
+    click.echo(f"done: {total} chunks embedded")
+
+
+@main.command("search-status")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+def search_status(fmt):
+    """Show progress: how many chunks remain to be embedded, failures, etc."""
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM messages")
+            row = cur.fetchone()
+            assert row is not None
+            messages_total = row[0]
+            cur.execute("SELECT COUNT(*) FROM message_chunks")
+            row = cur.fetchone()
+            assert row is not None
+            chunks_total = row[0]
+            cur.execute("SELECT COUNT(*) FROM message_chunks WHERE embedding_v1 IS NOT NULL")
+            row = cur.fetchone()
+            assert row is not None
+            chunks_embedded = row[0]
+            cur.execute("SELECT COUNT(*) FROM failed_embeddings")
+            row = cur.fetchone()
+            assert row is not None
+            failed = row[0]
+    finally:
+        pool.close()
+    payload = {
+        "messages_total": messages_total,
+        "chunks_total": chunks_total,
+        "chunks_embedded": chunks_embedded,
+        "chunks_pending": chunks_total - chunks_embedded,
+        "failed_embeddings": failed,
+    }
+    if fmt == "json":
+        click.echo(_json.dumps(payload))
+    else:
+        for k, v in payload.items():
+            click.echo(f"{k:24s} {v}")
+
+
+@main.command("list-failed-embeddings")
+@click.option("--limit", type=int, default=50)
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+def list_failed_embeddings(limit, fmt):
+    """Show recent failed_embeddings rows."""
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, chunk_table, chunk_id, error_class, error_message,"
+                " retry_count, failed_at, last_retry_at FROM failed_embeddings"
+                " ORDER BY failed_at DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.close()
+    cols = ["id", "chunk_table", "chunk_id", "error_class", "error_message",
+            "retry_count", "failed_at", "last_retry_at"]
+    payload = [dict(zip(cols, r, strict=True)) for r in rows]
+    if fmt == "json":
+        click.echo(_json.dumps(payload, default=str))
+    else:
+        for p in payload:
+            click.echo(f"#{p['id']:6d}  {p['chunk_table']}:{p['chunk_id']}  "
+                       f"{p['error_class']}  retries={p['retry_count']}  "
+                       f"{p['failed_at']}")
+            click.echo(f"        {p['error_message']}")
+
+
+@main.command("retry-failed-embeddings")
+@click.option("--chunk-table", default=None,
+              help="restrict to message_chunks or attachment_chunks")
+def retry_failed_embeddings(chunk_table):
+    """Clear failed_embeddings rows so the embed worker re-attempts them."""
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            if chunk_table:
+                cur.execute("DELETE FROM failed_embeddings WHERE chunk_table = %s",
+                            (chunk_table,))
+            else:
+                cur.execute("DELETE FROM failed_embeddings")
+            n = cur.rowcount
+        conn.commit()
+    finally:
+        pool.close()
+    click.echo(f"cleared {n} failed_embeddings rows")
 
 
 if __name__ == "__main__":

@@ -28,8 +28,32 @@ def list_migrations() -> list[Path]:
     return sorted(p for p in d.iterdir() if p.suffix == ".sql")
 
 
+def _is_non_transactional(sql: str) -> bool:
+    """True if the migration's leading comment block contains the marker.
+
+    Format expected at the very top of a .sql file:
+        -- @non-transactional
+    Lines after the first non-comment, non-blank line are ignored — the
+    marker is treated as a directive, not a free-floating comment.
+    """
+    for raw in sql.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if not line.startswith("--"):
+            return False
+        if "@non-transactional" in line:
+            return True
+    return False
+
+
 def apply_migrations(dsn: str) -> list[str]:
-    """Apply any unapplied .sql migrations. Returns the revisions newly applied."""
+    """Apply any unapplied .sql migrations. Returns the revisions newly applied.
+
+    A migration whose first comment block contains '@non-transactional'
+    runs in autocommit mode on its own connection so it can use
+    CREATE INDEX CONCURRENTLY or other transaction-incompatible DDL.
+    """
     applied: list[str] = []
     with psycopg.connect(dsn, autocommit=False) as conn:
         with conn.cursor() as cur:
@@ -45,17 +69,28 @@ def apply_migrations(dsn: str) -> list[str]:
             done = {row[0] for row in cur.fetchall()}
         conn.commit()
 
-        for path in list_migrations():
-            revision = path.stem  # e.g. "0001_init"
-            if revision in done:
-                continue
-            sql = path.read_text()
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                cur.execute(
-                    "INSERT INTO schema_migrations (revision) VALUES (%s)",
-                    (revision,),
-                )
-            conn.commit()
-            applied.append(revision)
+    for path in list_migrations():
+        revision = path.stem
+        if revision in done:
+            continue
+        sql = path.read_text()
+        if _is_non_transactional(sql):
+            with psycopg.connect(dsn, autocommit=True) as nc:
+                with nc.cursor() as cur:
+                    cur.execute(sql)
+                    cur.execute(
+                        "INSERT INTO schema_migrations (revision) VALUES (%s)",
+                        (revision,),
+                    )
+        else:
+            with psycopg.connect(dsn, autocommit=False) as tc:
+                with tc.cursor() as cur:
+                    cur.execute(sql)
+                    cur.execute(
+                        "INSERT INTO schema_migrations (revision) VALUES (%s)",
+                        (revision,),
+                    )
+                tc.commit()
+        applied.append(revision)
+
     return applied

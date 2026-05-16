@@ -90,6 +90,7 @@ class SearchConfig(BaseModel):
     reranker_enabled: bool = True
     reranker_backend: Literal["fastembed"] = "fastembed"
     reranker_model: str = "Xenova/bge-reranker-v2-m3"
+    rerank_max_chars: int = 4000
 
     # --- query rewriter (Phase 4) ---
     rewriter_enabled_by_default: bool = False

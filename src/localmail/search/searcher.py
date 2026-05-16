@@ -7,6 +7,7 @@ top.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import uuid
@@ -22,8 +23,10 @@ from localmail.search.embeddings import EmbeddingBackend
 from localmail.search.page_cache import (
     CacheMissError, PageCache, PageOutOfPoolError,
 )
-from localmail.search.query import ParsedQuery, SearchFilters, parse_query
+from localmail.search.query import ParsedQuery, parse_query
 from localmail.search.reranker import Reranker
+
+log = logging.getLogger("localmail.search.searcher")
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,14 @@ def rrf_fuse(arms: list[list[ArmHit]], k: int) -> list[FusedHit]:
     Output is one FusedHit per message_id, keeping the chunk whose own
     single-arm contribution is largest (so the snippet later comes from
     the chunk that 'earned' the rank). Sorted by descending rrf_score.
+
+    Note on the winner-chunk pick: Arm 1 (whole-message BM25) contributes
+    `(message_id, chunk_id=None)`; Arms 2/3 contribute `(message_id, chunk_id=X)`.
+    When Arm 1 dominates the score for a message, `best_chunk_id` will be
+    None and the snippet path falls back to `messages.body_text`. That's
+    fine for header-driven hits but means a chunk-level match might be
+    displayed with the leading body window rather than its own chunk text;
+    re-ranking still considers all hydrated candidates.
 
     `k` is the standard RRF dampening constant (default 60).
     """
@@ -190,10 +201,17 @@ class Searcher:
             return parsed
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM accounts WHERE name = ANY(%s)",
+                "SELECT name, id FROM accounts WHERE name = ANY(%s)",
                 (parsed.filters.account_names,),
             )
-            ids = [r[0] for r in cur.fetchall()]
+            found: dict[str, int] = dict(cur.fetchall())
+        unknown = [n for n in parsed.filters.account_names if n not in found]
+        if unknown:
+            log.warning(
+                "search: account name(s) %s do not exist; matching no rows for that filter",
+                unknown,
+            )
+        ids = list(found.values())
         from dataclasses import replace
         return replace(parsed, filters=replace(parsed.filters, accounts=ids))
 
@@ -229,17 +247,26 @@ class Searcher:
                 msgs[mid] = {"account_id": acct, "subject": subj, "from_addr": fa,
                              "from_name": fn, "date_sent": ds, "body_text": body}
             chunk_ids = [h.best_chunk_id for h in fused if h.best_chunk_id]
-            chunks: dict[int, str] = {}
+            chunks: dict[int, tuple[str, str]] = {}
             if chunk_ids:
-                cur.execute("SELECT id, text FROM message_chunks WHERE id = ANY(%s)",
-                            (chunk_ids,))
-                chunks = {cid: t for cid, t in cur.fetchall()}
+                cur.execute(
+                    "SELECT id, text, kind FROM message_chunks WHERE id = ANY(%s)",
+                    (chunk_ids,),
+                )
+                chunks = {cid: (t, k) for cid, t, k in cur.fetchall()}
         out = []
         for h in fused:
             m = msgs.get(h.message_id, {})
-            snip_text = chunks.get(h.best_chunk_id) if h.best_chunk_id else (m.get("body_text") or "")
+            if h.best_chunk_id and h.best_chunk_id in chunks:
+                snip_text, chunk_kind = chunks[h.best_chunk_id]
+            else:
+                snip_text = m.get("body_text") or ""
+                chunk_kind = None
             out.append({
-                "fused": h, "msg": m, "snippet_source_text": snip_text or "",
+                "fused": h,
+                "msg": m,
+                "snippet_source_text": snip_text or "",
+                "chunk_kind": chunk_kind,
             })
         return out
 
@@ -266,12 +293,12 @@ class Searcher:
                 item["snippet_source_text"], terms,
                 width=self._cfg.snippet_width_chars,
             )
-            source: Literal["header", "body", "attachment"] = (
-                "header" if h.best_chunk_table == "message_chunks" and h.best_chunk_id else
-                "body" if h.best_chunk_table == "message_chunks" else
-                "attachment" if h.best_chunk_table == "attachment_chunks" else
-                "header"
-            )
+            if h.best_chunk_table == "attachment_chunks":
+                source: Literal["header", "body", "attachment"] = "attachment"
+            elif item.get("chunk_kind") == "body":
+                source = "body"
+            else:
+                source = "header"
             out.append(SearchResult(
                 message_id=h.message_id, account_id=m.get("account_id", 0),
                 rank=i, score=float(score), rrf_score=h.rrf_score,
@@ -322,7 +349,6 @@ class Searcher:
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
                             rerank_pool_size, use_cache):
         """Variant of search() that takes an already-parsed query."""
-        import time, uuid
         t0 = time.monotonic()
         timing: dict[str, float] = {"parse": 0.0}
         with self._pool.connection() as conn:
@@ -333,8 +359,8 @@ class Searcher:
             hydrated = self._hydrate(conn, fused)
         t = time.monotonic()
         if self._reranker and hydrated:
-            snippets = [item["snippet_source_text"][: self._cfg.snippet_width_chars * 4]
-                        for item in hydrated]
+            cap = self._cfg.rerank_max_chars
+            snippets = [item["snippet_source_text"][:cap] for item in hydrated]
             scores = self._reranker.rerank(parsed.rewritten_text or parsed.free_text, snippets)
         else:
             scores = [item["fused"].rrf_score for item in hydrated]
@@ -364,12 +390,17 @@ class Searcher:
         rerank_pool_size: int | None = None,
         use_cache: bool = True,
         smart: bool = False,
+        disable_rerank: bool = False,
     ) -> SearchPage:
-        """Run the full search pipeline and return page 1."""
+        """Run the full search pipeline and return page 1.
+
+        `disable_rerank=True` short-circuits the cross-encoder and ranks by
+        RRF score only. Useful for low-latency or debugging paths.
+        """
         t0 = time.monotonic()
         cfg = self._cfg
-        page_size = page_size or cfg.page_size_default
-        page_size = min(page_size, cfg.page_size_max)
+        effective_page_size: int = min(page_size or cfg.page_size_default,
+                                       cfg.page_size_max)
         cpa = candidates_per_arm or cfg.candidates_per_arm
         rps = rerank_pool_size or cfg.rerank_pool_size
         if smart and self._rewriter is None:
@@ -388,19 +419,21 @@ class Searcher:
             hydrated = self._hydrate(conn, fused)
 
         t = time.monotonic()
-        if self._reranker and hydrated:
+        reranker = None if disable_rerank else self._reranker
+        if reranker is not None and hydrated:
             snippets_for_rerank = [
-                item["snippet_source_text"][: cfg.snippet_width_chars * 4]
+                item["snippet_source_text"][: cfg.rerank_max_chars]
                 for item in hydrated
             ]
-            scores = self._reranker.rerank(
+            scores = reranker.rerank(
                 parsed.rewritten_text or parsed.free_text, snippets_for_rerank,
             )
         else:
             scores = [item["fused"].rrf_score for item in hydrated]
         timing["rerank"] = (time.monotonic() - t) * 1000
 
-        results = self._build_results(hydrated, parsed, scores, page=1, page_size=page_size)
+        results = self._build_results(hydrated, parsed, scores, page=1,
+                                      page_size=effective_page_size)
         timing["total"] = (time.monotonic() - t0) * 1000
 
         token: str | None = None
@@ -409,13 +442,14 @@ class Searcher:
             self._cache.put(token, {
                 "parsed": parsed, "hydrated": hydrated, "scores": scores,
                 "candidates_per_arm": cpa, "rerank_pool_size": rps,
-                "page_size": page_size,
+                "page_size": effective_page_size,
             })
         pool_size = len(hydrated)
         return SearchPage(
-            results=results, page=1, page_size=page_size, pool_size=pool_size,
+            results=results, page=1, page_size=effective_page_size,
+            pool_size=pool_size,
             candidates_per_arm=cpa,
-            has_more_in_pool=pool_size > page_size,
+            has_more_in_pool=pool_size > effective_page_size,
             can_grow_pool=True,
             search_token=token, query=parsed, timing_ms=timing,
         )

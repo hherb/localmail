@@ -66,13 +66,21 @@ def _split_statements(sql: str) -> list[str]:
     return stmts
 
 
-def apply_migrations(dsn: str) -> list[str]:
+def apply_migrations(
+    dsn: str,
+    *,
+    index_build_work_mem_mb: int = 2048,
+) -> list[str]:
     """Apply any unapplied .sql migrations. Returns the revisions newly applied.
 
     A migration whose first comment block contains '@non-transactional'
     runs in autocommit mode on its own connection so it can use
     CREATE INDEX CONCURRENTLY or other transaction-incompatible DDL.
+
+    `index_build_work_mem_mb` is set as `maintenance_work_mem` for the
+    non-transactional session — HNSW + GIN builds benefit from a large value.
     """
+    work_mem_mb = int(index_build_work_mem_mb)
     applied: list[str] = []
     with psycopg.connect(dsn, autocommit=False) as conn:
         with conn.cursor() as cur:
@@ -96,7 +104,7 @@ def apply_migrations(dsn: str) -> list[str]:
         if _is_non_transactional(sql):
             with psycopg.connect(dsn, autocommit=True) as nc:
                 with nc.cursor() as cur:
-                    cur.execute("SET maintenance_work_mem = '2048MB'")
+                    cur.execute(f"SET maintenance_work_mem = '{work_mem_mb}MB'")
                     for stmt in _split_statements(sql):
                         cur.execute(stmt)
                     cur.execute(

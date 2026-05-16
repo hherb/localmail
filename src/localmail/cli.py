@@ -52,7 +52,10 @@ def main(ctx: click.Context, config_path: Path | None) -> None:
 def init_db(ctx: click.Context) -> None:
     """Apply pending schema migrations to the database."""
     cfg = load_config(ctx.obj["config_path"])
-    applied = apply_migrations(cfg.database.dsn)
+    applied = apply_migrations(
+        cfg.database.dsn,
+        index_build_work_mem_mb=cfg.search.index_build_maintenance_work_mem_mb,
+    )
     if applied:
         for rev in applied:
             click.echo(f"applied {rev}")
@@ -313,10 +316,13 @@ def _print_text_page(page) -> None:
     if page.search_token:
         click.echo(f"token: {page.search_token}   "
                    f"(page {page.page}, pool {page.pool_size})")
-        if page.has_more_in_pool:
-            click.echo(f"hint: localmail search-page {page.search_token} {page.page + 1}")
-        if page.can_grow_pool:
-            click.echo(f"hint: localmail search-grow {page.search_token} --candidates 200")
+        if page.has_more_in_pool or page.can_grow_pool:
+            click.echo(
+                "hint: pagination/grow is in-process only — for follow-up pages, "
+                "use the Python API (localmail.search.create_searcher) or the "
+                "MCP server (Phase 3). To widen this query in one shot, re-run "
+                "with --candidates-per-arm 200 --rerank-pool 200."
+            )
 
 
 @main.command()
@@ -367,11 +373,10 @@ def search(query, accounts, folders, after, before, from_substr, to_substr,
 
     searcher = create_searcher()
     try:
-        if no_rerank:
-            searcher._reranker = None  # documented internal — Phase 5 can promote
         page = searcher.search(
             text_q, page_size=page_size, candidates_per_arm=candidates_per_arm,
             rerank_pool_size=rerank_pool, use_cache=not no_cache, smart=smart,
+            disable_rerank=no_rerank,
         )
     except RuntimeError as exc:
         click.echo(f"error: {exc}", err=True)
@@ -383,35 +388,6 @@ def search(query, accounts, folders, after, before, from_substr, to_substr,
         click.echo(_json.dumps(_page_to_dict(page), default=str))
     else:
         _print_text_page(page)
-
-
-_CACHE_HINT = (
-    "the page cache lives in-process and isn't shared across CLI invocations. "
-    "For deep pagination, use the Python API (localmail.search.create_searcher) "
-    "or the MCP server (Phase 3). For one-shot follow-up, re-run with "
-    "`localmail search ... --candidates-per-arm 200 --rerank-pool 200`."
-)
-
-
-@main.command("search-page")
-@click.argument("token")
-@click.argument("page", type=int)
-def search_page(token, page):
-    """Fetch a follow-up page from an earlier `localmail search` token.
-
-    Not supported across separate CLI invocations — see message.
-    """
-    click.echo(_CACHE_HINT, err=True)
-    sys.exit(2)
-
-
-@main.command("search-grow")
-@click.argument("token")
-@click.option("--candidates", type=int, required=True)
-def search_grow(token, candidates):
-    """Re-run with a larger candidate pool — see CLI cache limitation."""
-    click.echo(_CACHE_HINT, err=True)
-    sys.exit(2)
 
 
 def _dsn() -> str:

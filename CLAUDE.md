@@ -74,7 +74,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0009_search_state.sql
+migrations/         # 0001_init.sql … 0010_failed_chunkings.sql
 tests/
   acceptance/       # standalone eval harness (run_recall_eval.py)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
@@ -184,8 +184,20 @@ for the Phase 1 implementation plan.
 - Vector retrieval via pgvector HNSW + `halfvec(768)`. Default embedder:
   EmbeddingGemma-300M via fastembed (Gemma Terms — runtime download).
 - One embed_worker thread per process (account-agnostic; backend-bound).
-  Lazily chunks messages it sees without chunks; per-chunk SAVEPOINT
-  isolates poison chunks into `failed_embeddings`.
+  Lazily chunks messages it sees without chunks. Failure model mirrors
+  `sync.py`:
+    - **Per-message SAVEPOINT** around chunking — poison messages land in
+      `failed_chunkings` (keyed on `message_id`) and are skipped on
+      subsequent sweeps once `retry_count >= embed_worker_max_chunk_retries`.
+    - **Per-chunk SAVEPOINT** around the embedding UPDATE — poison chunks
+      land in `failed_embeddings` and are skipped likewise.
+    - **Both failure-recording paths use a nested SAVEPOINT** so a logging
+      failure can't abort the outer transaction.
+    - **Batch-level backend errors do NOT mark chunks as failed.** Transient
+      errors (network blips, model load failures) just roll back and back
+      off; chunks get re-claimed next sweep. Permanently-broken backends
+      surface via repeated WARNINGs rather than silently poisoning the
+      entire queue.
 - Phase 2 (attachment search), Phase 3 (MCP), Phase 4 (--smart),
   Phase 5 (polish) — separate design + plans.
 
@@ -229,7 +241,7 @@ in the fastembed registry).
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0009_search_state.sql`; next would be `0010_*.sql`.
+  Latest is `0010_failed_chunkings.sql`; next would be `0011_*.sql`.
 
 ## Testing notes
 

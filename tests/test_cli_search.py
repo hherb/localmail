@@ -63,15 +63,15 @@ def test_cli_search_json_output_is_valid_search_page(monkeypatch, db_dsn, db_con
     assert payload["page"] == 1
 
 
-def test_cli_search_page_explains_in_process_cache_limitation():
-    runner = CliRunner()
-    result = runner.invoke(main, ["search-page", "deadbeef", "2"])
-    assert result.exit_code == 2
-    assert "in-process" in result.output.lower() or "cache" in result.output.lower()
+def test_cli_search_page_and_grow_are_not_registered():
+    """search-page / search-grow were removed — they were process-local stubs.
 
-
-def test_cli_search_grow_same_limitation():
+    Verify that invoking them is now a "no such command" error so anyone
+    still calling them from a script sees a clear failure rather than a
+    silently misleading exit.
+    """
     runner = CliRunner()
-    result = runner.invoke(main, ["search-grow", "deadbeef", "--candidates", "200"])
-    assert result.exit_code == 2
-    assert "in-process" in result.output.lower() or "cache" in result.output.lower()
+    for argv in (["search-page", "deadbeef", "2"],
+                 ["search-grow", "deadbeef", "--candidates", "200"]):
+        result = runner.invoke(main, argv)
+        assert result.exit_code != 0

@@ -7,6 +7,8 @@ import signal
 import threading
 from typing import Any
 
+from psycopg_pool import ConnectionPool
+
 from .config import Config
 from .db import open_pool
 from .idle import run_inbox_idle_loop
@@ -32,7 +34,7 @@ class Daemon:
         self.pool = open_pool(self._dsn, min_size=1, max_size=max(4, 2 * len(cfg.accounts)))
         self.threads: list[threading.Thread] = []
         self._embedding_backend_factory = embedding_backend_factory
-        self._embed_pool = None
+        self._embed_pool: ConnectionPool | None = None
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("received signal %s; stopping daemon", signum)
@@ -99,15 +101,20 @@ class Daemon:
         """Signal all threads to stop."""
         self._stop_event.set()
 
+    def _close_embed_pool(self) -> None:
+        """Close the embed worker's connection pool, logging any error."""
+        if self._embed_pool is None:
+            return
+        try:
+            self._embed_pool.close()
+        except Exception as exc:  # noqa: BLE001 — shutdown best-effort
+            log.warning("error closing embed pool: %s", exc, exc_info=True)
+
     def join(self, timeout: float | None = None) -> None:
         """Wait for all worker threads to finish and close pools."""
         for t in self.threads:
             t.join(timeout=timeout)
-        if self._embed_pool is not None:
-            try:
-                self._embed_pool.close()
-            except Exception:
-                pass
+        self._close_embed_pool()
 
     def run_forever(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -124,9 +131,5 @@ class Daemon:
             for t in self.threads:
                 t.join(timeout=10)
             self.pool.close()
-            if getattr(self, "_embed_pool", None) is not None:
-                try:
-                    self._embed_pool.close()
-                except Exception:
-                    pass
+            self._close_embed_pool()
             log.info("daemon stopped")

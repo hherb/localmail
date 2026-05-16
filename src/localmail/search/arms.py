@@ -87,8 +87,11 @@ def arm_bm25_messages(
         boosts.get("subject", 3.0),
     ]
     # ts_rank_cd requires all weights in [0, 1]; normalize by the max value.
-    max_w = max(raw) or 1.0
-    weights = [w / max_w for w in raw]
+    # If all boosts are <= 0 (degenerate config), fall back to all-ones so
+    # the arm still ranks by match strength rather than returning 0 for
+    # every row.
+    max_w = max(raw)
+    weights = [1.0] * len(raw) if max_w <= 0 else [w / max_w for w in raw]
     where_extra, where_params = _filter_sql(parsed.filters)
     sql = f"""
         WITH ranked AS (
@@ -171,6 +174,9 @@ def arm_vector_chunks(
     """
     params: list[Any] = [query_vector, *where_params, query_vector, limit]
     with conn.cursor() as cur:
+        # SET LOCAL requires an open transaction. psycopg_pool connections
+        # are non-autocommit by default; if you ever wrap this call in an
+        # autocommit context, the SET silently has no effect.
         cur.execute(f"SET LOCAL hnsw.ef_search = {int(cfg.hnsw_ef_search)}")
         cur.execute(sql, params)
         rows = cur.fetchall()

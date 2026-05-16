@@ -77,8 +77,7 @@ def test_record_failed_embedding_inserts_row(db_conn):
     try:
         raise RuntimeError("boom")
     except RuntimeError as exc:
-        with db_conn.cursor() as cur:
-            record_failed_embedding(cur, "message_chunks", cid, exc)
+        record_failed_embedding(db_conn, "message_chunks", cid, exc)
         db_conn.commit()
     with db_conn.cursor() as cur:
         cur.execute(
@@ -102,8 +101,7 @@ def test_record_failed_embedding_bumps_retry_count(db_conn):
         try:
             raise ValueError("again")
         except ValueError as exc:
-            with db_conn.cursor() as cur:
-                record_failed_embedding(cur, "message_chunks", cid, exc)
+            record_failed_embedding(db_conn, "message_chunks", cid, exc)
             db_conn.commit()
     with db_conn.cursor() as cur:
         cur.execute(
@@ -111,19 +109,84 @@ def test_record_failed_embedding_bumps_retry_count(db_conn):
         assert cur.fetchone()[0] == 2  # 0 on insert, +1 each subsequent
 
 
-def test_run_embed_worker_skips_chunks_past_max_retries(db_conn):
+def test_claim_filter_skips_chunks_past_max_retries(db_conn):
+    """Chunks with retry_count >= max are excluded from claim selection."""
     mid = _seed_message(db_conn, body="x")
-    cfg = SearchConfig(embed_worker_max_chunk_retries=1)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO message_chunks (message_id, kind, chunk_idx, text, token_count)"
+            " VALUES (%s, 'body', 0, 'x', 1) RETURNING id", (mid,))
+        cid = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO failed_embeddings (chunk_table, chunk_id, error_class,"
+            " error_message, retry_count) VALUES ('message_chunks', %s, 'X', 'X', 5)",
+            (cid,),
+        )
+    db_conn.commit()
+
+    cfg = SearchConfig(embed_worker_max_chunk_retries=3)
+    embedded = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+    assert embedded == 0
+
+
+def test_batch_failure_does_not_poison_queue(db_conn):
+    """A transient backend error rolls back without marking chunks failed."""
+    _seed_message(db_conn, body="hello world")
 
     class _Boom:
         name = "boom"; model = "boom"; dimension = 768
-        def embed_documents(self, texts): raise RuntimeError("boom")
-        def embed_query(self, t): return [0.0]*768
+        def embed_documents(self, texts): raise RuntimeError("transient blip")
+        def embed_query(self, t): return [0.0] * 768
         def health_check(self): pass
 
-    # First sweep: chunks are created (lazy), embeddings fail, recorded as failed.
-    run_embed_worker_once(db_conn, cfg, _Boom())
-    run_embed_worker_once(db_conn, cfg, _Boom())
-    # Now retry_count >= 1 → excluded next time. Sweep with a working embedder:
+    cfg = SearchConfig(embed_worker_max_chunk_retries=3)
+    # First sweep chunks the message but the batch embedding raises.
+    embedded = run_embed_worker_once(db_conn, cfg, _Boom())
+    assert embedded == 0
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM failed_embeddings")
+        assert cur.fetchone()[0] == 0
+
+    # A subsequent sweep with a working backend embeds the same chunks.
     embedded = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
-    assert embedded == 0  # nothing claimed because excluded by retry filter
+    assert embedded >= 1
+
+
+def test_chunking_failure_records_failed_chunking_and_skips_message(db_conn, monkeypatch):
+    """A poison message lands in failed_chunkings and is excluded next sweep."""
+    from localmail.search import embed_worker as ew
+
+    mid = _seed_message(db_conn, body="poisonous content")
+
+    real_chunk_message = ew.chunk_message
+    calls = {"n": 0}
+
+    def boom_chunk_message(msg, cfg):
+        calls["n"] += 1
+        if msg.id == mid:
+            raise RuntimeError("cannot chunk this message")
+        return real_chunk_message(msg, cfg)
+
+    monkeypatch.setattr(ew, "chunk_message", boom_chunk_message)
+
+    cfg = SearchConfig(embed_worker_max_chunk_retries=1)
+    # Sweep 1: failure recorded with retry_count = 0.
+    run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+    # Sweep 2: row still selectable (0 < 1); retry bumps to 1.
+    run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT error_class, retry_count FROM failed_chunkings WHERE message_id=%s",
+            (mid,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "RuntimeError"
+    assert row[1] == 1
+
+    calls_before = calls["n"]
+    # Sweep 3: 1 >= 1 → message excluded, chunk_message not invoked again.
+    run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+    assert calls["n"] == calls_before

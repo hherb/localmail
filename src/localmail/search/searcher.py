@@ -8,8 +8,22 @@ top.
 from __future__ import annotations
 
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
-from typing import Literal
+from datetime import datetime
+from typing import Any, Literal
+
+import psycopg
+from psycopg_pool import ConnectionPool
+
+from localmail.config import SearchConfig
+from localmail.search.embeddings import EmbeddingBackend
+from localmail.search.page_cache import (
+    CacheMissError, PageCache, PageOutOfPoolError,
+)
+from localmail.search.query import ParsedQuery, SearchFilters, parse_query
+from localmail.search.reranker import Reranker
 
 
 @dataclass(frozen=True)
@@ -110,3 +124,226 @@ def make_snippet(chunk_text: str, query_terms: list[str], width: int) -> str:
     prefix = "…" if start > 0 else ""
     suffix = "…" if end < len(chunk_text) else ""
     return f"{prefix}{snippet}{suffix}".strip()
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """One ranked search hit, with the snippet that earned the rank."""
+    message_id: int
+    account_id: int
+    rank: int
+    score: float
+    rrf_score: float
+    subject: str | None
+    from_addr: str | None
+    from_name: str | None
+    date_sent: datetime | None
+    snippet: str
+    snippet_source: Literal["header", "body", "attachment"]
+    attachment_filename: str | None
+    matched_chunk_id: int | None
+    matched_chunk_table: Literal["message", "message_chunks", "attachment_chunks"]
+
+
+@dataclass(frozen=True)
+class SearchPage:
+    """One page of results plus pagination metadata."""
+    results: list[SearchResult]
+    page: int
+    page_size: int
+    pool_size: int
+    candidates_per_arm: int
+    has_more_in_pool: bool
+    can_grow_pool: bool
+    search_token: str | None
+    query: ParsedQuery
+    timing_ms: dict[str, float]
+
+
+class Searcher:
+    """Orchestrates the hybrid search pipeline.
+
+    Created once per process and reused — holds long-lived backend handles
+    and the page cache. Methods:
+      - search(query, ...) -> SearchPage  (the entry point)
+      - continue_page(token, page) -> SearchPage  (Task 16)
+      - grow_pool(token, candidates_per_arm) -> SearchPage  (Task 16)
+    """
+
+    def __init__(
+        self,
+        pool: ConnectionPool,
+        cfg: SearchConfig,
+        embeddings: EmbeddingBackend,
+        reranker: Reranker | None,
+        rewriter: Any | None = None,  # QueryRewriter type lands Phase 4
+    ) -> None:
+        self._pool = pool
+        self._cfg = cfg
+        self._embeddings = embeddings
+        self._reranker = reranker
+        self._rewriter = rewriter
+        self._cache = PageCache(maxsize=cfg.page_cache_size, ttl_s=cfg.page_cache_ttl_s)
+
+    def _resolve_account_names(self, conn: psycopg.Connection, parsed: ParsedQuery) -> ParsedQuery:
+        if not parsed.filters.account_names:
+            return parsed
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM accounts WHERE name = ANY(%s)",
+                (parsed.filters.account_names,),
+            )
+            ids = [r[0] for r in cur.fetchall()]
+        from dataclasses import replace
+        return replace(parsed, filters=replace(parsed.filters, accounts=ids))
+
+    def _retrieve_pool(
+        self,
+        conn: psycopg.Connection,
+        parsed: ParsedQuery,
+        candidates_per_arm: int,
+        rerank_pool_size: int,
+    ) -> list[FusedHit]:
+        # Lazy import to avoid circular dependency (arms imports ArmHit from this module)
+        from localmail.search.arms import (
+            arm_bm25_chunks, arm_bm25_messages, arm_vector_chunks,
+        )
+        a1 = arm_bm25_messages(conn, parsed, self._cfg, limit=candidates_per_arm)
+        a2 = arm_bm25_chunks(conn, parsed, self._cfg, limit=candidates_per_arm)
+        qvec = self._embeddings.embed_query(parsed.rewritten_text or parsed.free_text)
+        a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
+        fused = rrf_fuse([a1, a2, a3], k=self._cfg.rrf_k)
+        return fused[:rerank_pool_size]
+
+    def _hydrate(self, conn: psycopg.Connection, fused: list[FusedHit]) -> list[dict]:
+        """Pull message + chunk text for each fused hit, returned in fused order."""
+        if not fused:
+            return []
+        msg_ids = [h.message_id for h in fused]
+        msgs: dict[int, dict] = {}
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, account_id, subject, from_addr, from_name, date_sent,"
+                " body_text FROM messages WHERE id = ANY(%s)", (msg_ids,))
+            for mid, acct, subj, fa, fn, ds, body in cur.fetchall():
+                msgs[mid] = {"account_id": acct, "subject": subj, "from_addr": fa,
+                             "from_name": fn, "date_sent": ds, "body_text": body}
+            chunk_ids = [h.best_chunk_id for h in fused if h.best_chunk_id]
+            chunks: dict[int, str] = {}
+            if chunk_ids:
+                cur.execute("SELECT id, text FROM message_chunks WHERE id = ANY(%s)",
+                            (chunk_ids,))
+                chunks = {cid: t for cid, t in cur.fetchall()}
+        out = []
+        for h in fused:
+            m = msgs.get(h.message_id, {})
+            snip_text = chunks.get(h.best_chunk_id) if h.best_chunk_id else (m.get("body_text") or "")
+            out.append({
+                "fused": h, "msg": m, "snippet_source_text": snip_text or "",
+            })
+        return out
+
+    def _build_results(
+        self,
+        hydrated: list[dict],
+        parsed: ParsedQuery,
+        rerank_scores: list[float],
+        page: int,
+        page_size: int,
+    ) -> list[SearchResult]:
+        terms = parsed.free_text.split()
+        ordered = sorted(
+            zip(hydrated, rerank_scores, strict=True),
+            key=lambda x: x[1], reverse=True,
+        )
+        start = (page - 1) * page_size
+        end = start + page_size
+        out: list[SearchResult] = []
+        for i, (item, score) in enumerate(ordered[start:end], start=1):
+            h = item["fused"]
+            m = item["msg"]
+            snip = make_snippet(
+                item["snippet_source_text"], terms,
+                width=self._cfg.snippet_width_chars,
+            )
+            source: Literal["header", "body", "attachment"] = (
+                "header" if h.best_chunk_table == "message_chunks" and h.best_chunk_id else
+                "body" if h.best_chunk_table == "message_chunks" else
+                "attachment" if h.best_chunk_table == "attachment_chunks" else
+                "header"
+            )
+            out.append(SearchResult(
+                message_id=h.message_id, account_id=m.get("account_id", 0),
+                rank=i, score=float(score), rrf_score=h.rrf_score,
+                subject=m.get("subject"), from_addr=m.get("from_addr"),
+                from_name=m.get("from_name"), date_sent=m.get("date_sent"),
+                snippet=snip, snippet_source=source, attachment_filename=None,
+                matched_chunk_id=h.best_chunk_id,
+                matched_chunk_table=h.best_chunk_table,
+            ))
+        return out
+
+    def search(
+        self,
+        query: str,
+        *,
+        page_size: int | None = None,
+        candidates_per_arm: int | None = None,
+        rerank_pool_size: int | None = None,
+        use_cache: bool = True,
+        smart: bool = False,
+    ) -> SearchPage:
+        """Run the full search pipeline and return page 1."""
+        t0 = time.monotonic()
+        cfg = self._cfg
+        page_size = page_size or cfg.page_size_default
+        page_size = min(page_size, cfg.page_size_max)
+        cpa = candidates_per_arm or cfg.candidates_per_arm
+        rps = rerank_pool_size or cfg.rerank_pool_size
+        if smart and self._rewriter is None:
+            raise RuntimeError("--smart requires a configured rewriter (Phase 4)")
+
+        timing: dict[str, float] = {}
+        t = time.monotonic()
+        parsed = parse_query(query)
+        timing["parse"] = (time.monotonic() - t) * 1000
+
+        with self._pool.connection() as conn:
+            parsed = self._resolve_account_names(conn, parsed)
+            t = time.monotonic()
+            fused = self._retrieve_pool(conn, parsed, cpa, rps)
+            timing["retrieve"] = (time.monotonic() - t) * 1000
+            hydrated = self._hydrate(conn, fused)
+
+        t = time.monotonic()
+        if self._reranker and hydrated:
+            snippets_for_rerank = [
+                item["snippet_source_text"][: cfg.snippet_width_chars * 4]
+                for item in hydrated
+            ]
+            scores = self._reranker.rerank(
+                parsed.rewritten_text or parsed.free_text, snippets_for_rerank,
+            )
+        else:
+            scores = [item["fused"].rrf_score for item in hydrated]
+        timing["rerank"] = (time.monotonic() - t) * 1000
+
+        results = self._build_results(hydrated, parsed, scores, page=1, page_size=page_size)
+        timing["total"] = (time.monotonic() - t0) * 1000
+
+        token: str | None = None
+        if use_cache:
+            token = uuid.uuid4().hex[:16]
+            self._cache.put(token, {
+                "parsed": parsed, "hydrated": hydrated, "scores": scores,
+                "candidates_per_arm": cpa, "rerank_pool_size": rps,
+                "page_size": page_size,
+            })
+        pool_size = len(hydrated)
+        return SearchPage(
+            results=results, page=1, page_size=page_size, pool_size=pool_size,
+            candidates_per_arm=cpa,
+            has_more_in_pool=pool_size > page_size,
+            can_grow_pool=True,
+            search_token=token, query=parsed, timing_ms=timing,
+        )

@@ -7,6 +7,7 @@ top.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -69,3 +70,43 @@ def rrf_fuse(arms: list[list[ArmHit]], k: int) -> list[FusedHit]:
         ))
     out.sort(key=lambda h: h.rrf_score, reverse=True)
     return out
+
+
+_WORD = re.compile(r"\w+", re.UNICODE)
+
+
+def make_snippet(chunk_text: str, query_terms: list[str], width: int) -> str:
+    """Return a ~`width`-char window around the strongest query-term match.
+
+    - If chunk is shorter than width, returned in full.
+    - If no query term matches, returns the leading window.
+    - Match is case-insensitive, word-boundary-aware.
+    """
+    if not chunk_text:
+        return ""
+    if len(chunk_text) <= width:
+        return chunk_text
+
+    best_pos: int | None = None
+    lowered = chunk_text.lower()
+    for term in query_terms:
+        if not term:
+            continue
+        idx = lowered.find(term.lower())
+        if idx != -1 and (best_pos is None or idx < best_pos):
+            best_pos = idx
+    if best_pos is None:
+        # Leading window, snapped to word boundary
+        cut = chunk_text[:width]
+        m = list(_WORD.finditer(cut))
+        if m and m[-1].end() < len(cut):
+            cut = cut[: m[-1].end()]
+        return cut
+
+    half = width // 2
+    start = max(0, best_pos - half)
+    end = min(len(chunk_text), start + width)
+    snippet = chunk_text[start:end]
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(chunk_text) else ""
+    return f"{prefix}{snippet}{suffix}".strip()

@@ -214,7 +214,8 @@ def test_search_config_has_sane_defaults():
 
 
 def test_search_config_attached_to_localmail_config():
-    cfg = LocalmailConfig(accounts=[])
+    # NOTE: top-level config requires `database`; construct via model_validate.
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": "x"}})
     assert isinstance(cfg.search, SearchConfig)
     assert cfg.search.embedding_backend == "fastembed"
 
@@ -3230,7 +3231,8 @@ def test_create_searcher_returns_searcher(db_dsn):
         def embed_query(self, t): return [0.0]*768
         def health_check(self): pass
 
-    cfg = LocalmailConfig(accounts=[])
+    # NOTE: top-level config requires `database`; construct via model_validate.
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     s = create_searcher(cfg=cfg, dsn=db_dsn, embeddings=_E(), reranker=None)
     assert isinstance(s, Searcher)
     s._pool.close()
@@ -3912,7 +3914,7 @@ class _E:
 
 
 def test_daemon_starts_embed_worker_when_enabled(db_dsn):
-    cfg = LocalmailConfig(accounts=[])
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_embed_worker = True
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
     d.start()
@@ -3926,7 +3928,7 @@ def test_daemon_starts_embed_worker_when_enabled(db_dsn):
 
 
 def test_daemon_skips_embed_worker_when_disabled(db_dsn):
-    cfg = LocalmailConfig(accounts=[])
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_embed_worker = False
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
     d.start()

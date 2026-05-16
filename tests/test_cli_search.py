@@ -61,3 +61,17 @@ def test_cli_search_json_output_is_valid_search_page(monkeypatch, db_dsn, db_con
     payload = json.loads(result.output)
     assert "results" in payload
     assert payload["page"] == 1
+
+
+def test_cli_search_page_explains_in_process_cache_limitation():
+    runner = CliRunner()
+    result = runner.invoke(main, ["search-page", "deadbeef", "2"])
+    assert result.exit_code == 2
+    assert "in-process" in result.output.lower() or "cache" in result.output.lower()
+
+
+def test_cli_search_grow_same_limitation():
+    runner = CliRunner()
+    result = runner.invoke(main, ["search-grow", "deadbeef", "--candidates", "200"])
+    assert result.exit_code == 2
+    assert "in-process" in result.output.lower() or "cache" in result.output.lower()

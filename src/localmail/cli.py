@@ -385,5 +385,162 @@ def search(query, accounts, folders, after, before, from_substr, to_substr,
         _print_text_page(page)
 
 
+_CACHE_HINT = (
+    "the page cache lives in-process and isn't shared across CLI invocations. "
+    "For deep pagination, use the Python API (localmail.search.create_searcher) "
+    "or the MCP server (Phase 3). For one-shot follow-up, re-run with "
+    "`localmail search ... --candidates-per-arm 200 --rerank-pool 200`."
+)
+
+
+@main.command("search-page")
+@click.argument("token")
+@click.argument("page", type=int)
+def search_page(token, page):
+    """Fetch a follow-up page from an earlier `localmail search` token.
+
+    Not supported across separate CLI invocations — see message.
+    """
+    click.echo(_CACHE_HINT, err=True)
+    sys.exit(2)
+
+
+@main.command("search-grow")
+@click.argument("token")
+@click.option("--candidates", type=int, required=True)
+def search_grow(token, candidates):
+    """Re-run with a larger candidate pool — see CLI cache limitation."""
+    click.echo(_CACHE_HINT, err=True)
+    sys.exit(2)
+
+
+def _dsn() -> str:
+    """Resolve DSN from the existing localmail config."""
+    return load_config().database.dsn
+
+
+def _make_backend(cfg):
+    """Build the configured EmbeddingBackend. Override via monkeypatch in tests."""
+    from localmail.search.embeddings import FastEmbedBackend
+    return FastEmbedBackend(cfg.search)
+
+
+@main.command("embed-backfill")
+@click.option("--account", "account_name")
+@click.option("--no-progress", is_flag=True)
+def embed_backfill(account_name, no_progress):
+    """Drain the embedding queue in the foreground; exit when empty."""
+    from localmail.db import open_pool
+    from localmail.search.embed_worker import run_embed_worker_once
+    cfg = load_config()
+    backend = _make_backend(cfg)
+    pool = open_pool(_dsn())
+    try:
+        total = 0
+        while True:
+            with pool.connection() as conn:
+                wrote = run_embed_worker_once(conn, cfg.search, backend)
+            if wrote == 0:
+                break
+            total += wrote
+            if not no_progress:
+                click.echo(f"embedded {wrote} chunks (total {total})", err=True)
+    finally:
+        pool.close()
+    click.echo(f"done: {total} chunks embedded")
+
+
+@main.command("search-status")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+def search_status(fmt):
+    """Show progress: how many chunks remain to be embedded, failures, etc."""
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM messages")
+            row = cur.fetchone()
+            assert row is not None
+            messages_total = row[0]
+            cur.execute("SELECT COUNT(*) FROM message_chunks")
+            row = cur.fetchone()
+            assert row is not None
+            chunks_total = row[0]
+            cur.execute("SELECT COUNT(*) FROM message_chunks WHERE embedding_v1 IS NOT NULL")
+            row = cur.fetchone()
+            assert row is not None
+            chunks_embedded = row[0]
+            cur.execute("SELECT COUNT(*) FROM failed_embeddings")
+            row = cur.fetchone()
+            assert row is not None
+            failed = row[0]
+    finally:
+        pool.close()
+    payload = {
+        "messages_total": messages_total,
+        "chunks_total": chunks_total,
+        "chunks_embedded": chunks_embedded,
+        "chunks_pending": chunks_total - chunks_embedded,
+        "failed_embeddings": failed,
+    }
+    if fmt == "json":
+        click.echo(_json.dumps(payload))
+    else:
+        for k, v in payload.items():
+            click.echo(f"{k:24s} {v}")
+
+
+@main.command("list-failed-embeddings")
+@click.option("--limit", type=int, default=50)
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+def list_failed_embeddings(limit, fmt):
+    """Show recent failed_embeddings rows."""
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, chunk_table, chunk_id, error_class, error_message,"
+                " retry_count, failed_at, last_retry_at FROM failed_embeddings"
+                " ORDER BY failed_at DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.close()
+    cols = ["id", "chunk_table", "chunk_id", "error_class", "error_message",
+            "retry_count", "failed_at", "last_retry_at"]
+    payload = [dict(zip(cols, r, strict=True)) for r in rows]
+    if fmt == "json":
+        click.echo(_json.dumps(payload, default=str))
+    else:
+        for p in payload:
+            click.echo(f"#{p['id']:6d}  {p['chunk_table']}:{p['chunk_id']}  "
+                       f"{p['error_class']}  retries={p['retry_count']}  "
+                       f"{p['failed_at']}")
+            click.echo(f"        {p['error_message']}")
+
+
+@main.command("retry-failed-embeddings")
+@click.option("--chunk-table", default=None,
+              help="restrict to message_chunks or attachment_chunks")
+def retry_failed_embeddings(chunk_table):
+    """Clear failed_embeddings rows so the embed worker re-attempts them."""
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            if chunk_table:
+                cur.execute("DELETE FROM failed_embeddings WHERE chunk_table = %s",
+                            (chunk_table,))
+            else:
+                cur.execute("DELETE FROM failed_embeddings")
+            n = cur.rowcount
+        conn.commit()
+    finally:
+        pool.close()
+    click.echo(f"cleared {n} failed_embeddings rows")
+
+
 if __name__ == "__main__":
     main()

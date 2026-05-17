@@ -135,6 +135,12 @@ class LightweightExtractor:
 
         if mt == "application/pdf" or ext == ".pdf":
             return self._extract_pdf(blob_path)
+        if "wordprocessingml" in mt or ext == ".docx":
+            return self._extract_docx(blob_path)
+        if "spreadsheetml" in mt or ext == ".xlsx":
+            return self._extract_xlsx(blob_path)
+        if "presentationml" in mt or ext == ".pptx":
+            return self._extract_pptx(blob_path)
 
         raise NotImplementedError(
             f"per-format dispatch for {mt!r}/{ext!r} added in subsequent tasks"
@@ -172,5 +178,80 @@ class LightweightExtractor:
         return ExtractedText(
             text=text,
             page_count=len(reader.pages),
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_docx(self, blob_path: Path) -> ExtractedText:
+        """Extract text from a DOCX blob using python-docx.
+
+        Logging deferred to extract_worker (Task 13): silent on success
+        and on raise; the worker catches ExtractorError and reports.
+        """
+        import docx
+        try:
+            d = docx.Document(str(blob_path))
+        except Exception as exc:
+            raise ExtractorError(f"python-docx failed to open: {exc}") from exc
+        paras = [p.text for p in d.paragraphs if p.text]
+        text = "\n".join(paras).strip()
+        return ExtractedText(
+            text=text, page_count=None,
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_xlsx(self, blob_path: Path) -> ExtractedText:
+        """Extract text from an XLSX blob using openpyxl.
+
+        Reads all sheets; each row is joined into a single text line.
+        Logging deferred to extract_worker (Task 13).
+        """
+        import openpyxl
+        try:
+            wb = openpyxl.load_workbook(
+                str(blob_path), read_only=True, data_only=True
+            )
+        except Exception as exc:
+            raise ExtractorError(f"openpyxl failed to open: {exc}") from exc
+
+        parts: list[str] = []
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(values_only=True):
+                row_text = " ".join(str(c) for c in row if c is not None)
+                if row_text:
+                    parts.append(row_text)
+        text = "\n".join(parts).strip()
+        return ExtractedText(
+            text=text, page_count=None,
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_pptx(self, blob_path: Path) -> ExtractedText:
+        """Extract text from a PPTX blob using python-pptx.
+
+        Captures shape-frame text plus speaker notes. Logging deferred
+        to extract_worker (Task 13).
+        """
+        from pptx import Presentation
+        try:
+            prs = Presentation(str(blob_path))
+        except Exception as exc:
+            raise ExtractorError(f"python-pptx failed to open: {exc}") from exc
+
+        parts: list[str] = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        for run in para.runs:
+                            if run.text:
+                                parts.append(run.text)
+            if slide.has_notes_slide:
+                notes = slide.notes_slide.notes_text_frame.text
+                if notes:
+                    parts.append(notes)
+
+        text = "\n".join(parts).strip()
+        return ExtractedText(
+            text=text, page_count=None,
             extractor=f"{self.name}@{self.version}",
         )

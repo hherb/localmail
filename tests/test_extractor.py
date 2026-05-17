@@ -112,3 +112,62 @@ def test_lightweight_raises_on_encrypted_pdf(tmp_path) -> None:
     lw = LightweightExtractor()
     with pytest.raises(ExtractorError):
         lw.extract(enc, "application/pdf")
+
+
+def test_lightweight_extracts_docx(tmp_path) -> None:
+    import docx
+    p = tmp_path / "a.docx"
+    d = docx.Document()
+    d.add_paragraph("docx paragraph one")
+    d.add_paragraph("docx paragraph two")
+    d.save(str(p))
+
+    lw = LightweightExtractor()
+    result = lw.extract(
+        p,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    assert "docx paragraph one" in result.text
+    assert "docx paragraph two" in result.text
+    assert result.extractor == "lightweight@1.0"
+
+
+def test_lightweight_extracts_xlsx(tmp_path) -> None:
+    import openpyxl
+    p = tmp_path / "a.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "row one cell A"
+    ws["B1"] = "row one cell B"
+    ws2 = wb.create_sheet(title="Sheet2")
+    ws2["A1"] = "second sheet content"
+    wb.save(str(p))
+
+    lw = LightweightExtractor()
+    result = lw.extract(
+        p,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    assert "row one cell A" in result.text
+    assert "row one cell B" in result.text
+    assert "second sheet content" in result.text
+
+
+def test_lightweight_extracts_pptx(tmp_path) -> None:
+    from pptx import Presentation
+    p = tmp_path / "a.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])  # title only
+    slide.shapes.title.text = "Slide title here"
+    notes = slide.notes_slide.notes_text_frame
+    notes.text = "speaker note content"
+    prs.save(str(p))
+
+    lw = LightweightExtractor()
+    result = lw.extract(
+        p,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    assert "Slide title here" in result.text
+    assert "speaker note content" in result.text

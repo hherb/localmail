@@ -119,3 +119,12 @@ export async function getMessage(messageId: string): Promise<MessageDetail> {
 export async function runSearch(req: SearchRequest): Promise<SearchResponse> {
   return invoke<SearchResponse>("run_search_cmd", { req });
 }
+
+export interface DownloadResult {
+  bytes_written: number;
+  path: string;
+}
+
+export async function downloadAttachment(sha256: string, dest: string): Promise<DownloadResult> {
+  return invoke<DownloadResult>("download_attachment_cmd", { sha256, dest });
+}

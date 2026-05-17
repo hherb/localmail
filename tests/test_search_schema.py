@@ -145,7 +145,7 @@ def test_fts_v2_finds_subject_match(db_conn) -> None:
     assert row is not None, "fts_v2 generated column did not match 'Berlin' in subject"
 
 
-def test_attachment_text_and_chunks_tables_exist(db_conn):
+def test_attachment_text_and_chunks_tables_exist(db_conn) -> None:
     """Verify migration 0011 created attachment_text and attachment_chunks with correct schema.
 
     Checks column names, nullability, unique constraint on (sha256, chunk_idx),
@@ -198,7 +198,7 @@ def test_attachment_text_and_chunks_tables_exist(db_conn):
     assert "WHERE (embedding_v1 IS NULL)" in row[0]
 
 
-def test_failed_extractions_table_exists(db_conn):
+def test_failed_extractions_table_exists(db_conn) -> None:
     """Verify migration 0012 created failed_extractions with correct schema.
 
     Checks column names in order, nullability of key columns, and that the
@@ -238,7 +238,7 @@ def test_failed_extractions_table_exists(db_conn):
     assert pk_cols == ["sha256"]
 
 
-def test_failed_extractions_cascade_on_blob_delete(db_conn):
+def test_failed_extractions_cascade_on_blob_delete(db_conn) -> None:
     """Deleting an attachment_blobs row cascades to failed_extractions."""
     sha = b"\x55" * 32
     with db_conn.cursor() as cur:
@@ -266,7 +266,7 @@ def test_failed_extractions_cascade_on_blob_delete(db_conn):
         assert row[0] == 0
 
 
-def test_attachment_arm4_indexes_exist(db_conn):
+def test_attachment_arm4_indexes_exist(db_conn) -> None:
     """Verify migration 0013 created HNSW on attachment_chunks.embedding_v1
     and GIN on messages.attachments for Arm 4 vector + JSONB retrieval.
 
@@ -284,15 +284,9 @@ def test_attachment_arm4_indexes_exist(db_conn):
     assert row is not None, "attachment_chunks_embedding_v1_hnsw index missing"
     assert "USING hnsw" in row[0]
     assert "halfvec_cosine_ops" in row[0]
-    # WITH-clause parameters: Postgres normalises to m='16', ef_construction='64'.
-    # Accept quoted or unquoted forms so the test survives across PG versions.
-    indexdef = row[0]
-    assert "m='16'" in indexdef or "m = 16" in indexdef or "m=16" in indexdef
-    assert (
-        "ef_construction='64'" in indexdef
-        or "ef_construction = 64" in indexdef
-        or "ef_construction=64" in indexdef
-    )
+    # Postgres normalises WITH-clause params to quoted integers in indexdef.
+    assert "m='16'" in row[0]
+    assert "ef_construction='64'" in row[0]
 
     with db_conn.cursor() as cur:
         cur.execute(
@@ -308,7 +302,7 @@ def test_attachment_arm4_indexes_exist(db_conn):
     assert "using gin (attachments)" in row[0].lower()
 
 
-def test_attachment_text_and_chunks_cascade_on_blob_delete(db_conn):
+def test_attachment_text_and_chunks_cascade_on_blob_delete(db_conn) -> None:
     """Deleting an attachment_blobs row cascades to both attachment_text
     and attachment_chunks rows referencing the same sha256."""
     sha = b"\x42" * 32

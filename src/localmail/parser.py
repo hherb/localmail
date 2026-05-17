@@ -130,7 +130,7 @@ def _bodies(msg: EmailMessage) -> tuple[str | None, str | None]:
 
 
 def _content_id(part: EmailMessage) -> str | None:
-    raw = part.get("Content-Id") or part.get("Content-ID")
+    raw = part.get("Content-Id")
     if not raw:
         return None
     cid = str(raw).strip()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import psycopg
+import sqlparse
 from psycopg_pool import ConnectionPool
 
 
@@ -60,8 +61,6 @@ def _split_statements(sql: str) -> list[str]:
     leading/trailing whitespace removed; pure-comment / blank fragments are
     dropped.
     """
-    import sqlparse
-
     stmts: list[str] = []
     for raw in sqlparse.split(sql):
         stmt = raw.strip()

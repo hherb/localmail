@@ -104,10 +104,12 @@ Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
 - **Attachments — content-addressable, global**: identical bytes appear on
   disk and in `attachment_blobs` exactly once across the whole archive
   regardless of account/message. `messages.attachments` JSONB stores
-  `[{"filename": "<original-name-from-this-email>", "sha256": "<hex>"}, …]` —
-  the original filename is preserved per-message so files can be restored with
-  the names they had when received; the bytes, mime type, size, and on-disk
-  path live on the `attachment_blobs` row.
+  `[{"filename": "<original-name-from-this-email>", "sha256": "<hex>",
+    "content_id": "<cid-without-brackets>"}, …]` — `content_id` is only
+  present on inline parts (HTML bodies reference them via `cid:`), omitted
+  otherwise. The original filename is preserved per-message so files can be
+  restored with the names they had when received; the bytes, mime type, size,
+  and on-disk path live on the `attachment_blobs` row.
 
 On-disk path: `<attachments.root>/blobs/<aa>/<bb>/<full-sha256-hex>` (two-level
 hex fan-out). The path is opaque — never derive filenames from it; always go

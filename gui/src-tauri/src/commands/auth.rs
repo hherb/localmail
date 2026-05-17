@@ -15,6 +15,8 @@ use crate::http::client::{build_pinned_client, http_get_json, http_post_empty, h
 use crate::http::errors::HttpError;
 use crate::storage::keyring::{KeyringStore, Slot};
 
+use super::session::read_endpoint;
+
 #[derive(Debug, Error, Serialize)]
 #[serde(tag = "kind", content = "detail")]
 pub enum AuthError {
@@ -52,20 +54,8 @@ pub struct WhoamiResponse {
     pub user_id: String,
 }
 
-fn read_connection(store: &KeyringStore) -> Result<(String, String), AuthError> {
-    let url = store
-        .get(Slot::ServerUrl)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .ok_or(AuthError::NotConnected)?;
-    let pin = store
-        .get(Slot::CertPin)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .ok_or(AuthError::NotConnected)?;
-    Ok((url, pin))
-}
-
 pub async fn login(store: &KeyringStore, username: &str, password: &str) -> Result<LoginSummary, AuthError> {
-    let (url, pin) = read_connection(store)?;
+    let (url, pin) = read_endpoint(store)?;
     let client = build_pinned_client(&pin)?;
     let body = LoginRequest { username, password };
     let endpoint = format!("{url}v1/auth/login");
@@ -81,7 +71,7 @@ pub async fn login(store: &KeyringStore, username: &str, password: &str) -> Resu
 }
 
 pub async fn logout(store: &KeyringStore) -> Result<(), AuthError> {
-    let (url, pin) = read_connection(store)?;
+    let (url, pin) = read_endpoint(store)?;
     let token_opt = store.get(Slot::BearerToken).map_err(|e| AuthError::Keyring(e.to_string()))?;
 
     if let Some(tok) = &token_opt {
@@ -99,7 +89,7 @@ pub async fn logout(store: &KeyringStore) -> Result<(), AuthError> {
 }
 
 pub async fn refresh(store: &KeyringStore) -> Result<LoginSummary, AuthError> {
-    let (url, pin) = read_connection(store)?;
+    let (url, pin) = read_endpoint(store)?;
     let token = store
         .get(Slot::BearerToken)
         .map_err(|e| AuthError::Keyring(e.to_string()))?
@@ -119,7 +109,7 @@ pub async fn refresh(store: &KeyringStore) -> Result<LoginSummary, AuthError> {
 }
 
 pub async fn whoami(store: &KeyringStore) -> Result<WhoamiResponse, AuthError> {
-    let (url, pin) = read_connection(store)?;
+    let (url, pin) = read_endpoint(store)?;
     let token = store
         .get(Slot::BearerToken)
         .map_err(|e| AuthError::Keyring(e.to_string()))?

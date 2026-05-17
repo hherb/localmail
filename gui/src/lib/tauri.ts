@@ -4,6 +4,27 @@
  * Each exported function corresponds to one #[tauri::command] in src-tauri/.
  */
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  AccountSummary,
+  ChangesResponse,
+  FolderSummary,
+  MessageDetail,
+} from "./api/types";
+
+export type {
+  AccountCapabilities,
+  AccountSummary,
+  ChangesResponse,
+  FolderSummary,
+  MessageAccount,
+  MessageAddress,
+  MessageAttachment,
+  MessageDetail,
+  MessageDetailAccount,
+  MessageFolder,
+  MessageSummary,
+  Selection,
+} from "./api/types";
 
 export interface Greeting {
   message: string;
@@ -65,4 +86,20 @@ export async function whoami(): Promise<WhoamiResponse> {
 
 export async function getCapabilities(): Promise<Capabilities> {
   return invoke<Capabilities>("get_capabilities_cmd");
+}
+
+export async function listAccounts(): Promise<AccountSummary[]> {
+  return invoke<AccountSummary[]>("list_accounts_cmd");
+}
+
+export async function listFolders(accountId: string): Promise<FolderSummary[]> {
+  return invoke<FolderSummary[]>("list_folders_cmd", { accountId });
+}
+
+export async function listRecentMessages(): Promise<ChangesResponse> {
+  return invoke<ChangesResponse>("list_recent_messages_cmd");
+}
+
+export async function getMessage(messageId: string): Promise<MessageDetail> {
+  return invoke<MessageDetail>("get_message_cmd", { messageId });
 }

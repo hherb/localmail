@@ -69,6 +69,10 @@ pub fn run() {
             crate::commands::auth::refresh_cmd,
             crate::commands::auth::whoami_cmd,
             crate::commands::capabilities::get_capabilities_cmd,
+            crate::commands::accounts::list_accounts_cmd,
+            crate::commands::accounts::list_folders_cmd,
+            crate::commands::changes::list_recent_messages_cmd,
+            crate::commands::messages::get_message_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

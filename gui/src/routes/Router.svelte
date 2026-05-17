@@ -3,7 +3,7 @@
   import { auth } from "../lib/stores/auth.svelte";
   import ConnectScreen from "../screens/ConnectScreen.svelte";
   import LoginScreen from "../screens/LoginScreen.svelte";
-  import AuthenticatedShell from "../screens/AuthenticatedShell.svelte";
+  import MainView from "../screens/MainView.svelte";
 
   onMount(async () => {
     await auth.refreshState();
@@ -15,5 +15,5 @@
 {:else if auth.snapshot.phase === "logged_out"}
   <LoginScreen />
 {:else if auth.snapshot.phase === "logged_in"}
-  <AuthenticatedShell />
+  <MainView />
 {/if}

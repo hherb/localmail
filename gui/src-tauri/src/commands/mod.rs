@@ -2,9 +2,11 @@
 //! registers them all via `tauri::generate_handler!`.
 
 pub mod accounts;
+pub mod attachments;
 pub mod auth;
 pub mod capabilities;
 pub mod changes;
 pub mod connect;
 pub mod messages;
+pub mod search;
 pub mod session;

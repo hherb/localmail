@@ -144,6 +144,59 @@ Acceptance steps:
 If any step fails, capture the DevTools console output AND the `npm run
 tauri dev` terminal output, then report.
 
+## Manual smoke (Sub-plan 4 acceptance)
+
+Prereqs: server from Phase A (`account_ids`/`folder_ids` filter wiring) must be
+running. If you see a `ValidationFailed: filter 'account_ids' is accepted by
+the API schema but not yet wired through to the search backend` chip in the
+GUI, Phase A has not been merged into the server build you're hitting.
+
+```bash
+cd gui
+npm run tauri dev
+```
+
+Acceptance steps:
+
+1. Log in (Sub-plan 2 flow).
+2. **Tree narrowing is now server-side.** Click an account — the middle pane
+   updates to show the server-returned, account-narrowed result set (not a
+   client-side filter over the 200-message changes load).
+3. Click a folder under an account. Same — server-narrowed.
+4. Click "📥 All Mail" — clears `accountIds` / `folderIds` and submits an
+   empty query; the middle pane shows the most-recent across-all-accounts
+   results.
+5. **Search bar.** Type `school` and press Enter — results with subject text
+   matching "school" appear, snippets highlight matches with yellow `<mark>`
+   background. Caption above the list shows "Search took N ms — M result(s)".
+6. **DSL.** Type `from:anna has:attachment after:2024-01-01` — only matching
+   messages appear. Chips below the search bar show `From: anna`,
+   `After: 2024-01-01`, `Has attachment` — click `×` on the "From: anna" chip
+   to remove that one.
+7. **Filter popover.** Click "🔧 Filters" — popover opens. Set
+   `Subject = invoice`, click Apply. Results filter accordingly; a
+   `Subject: invoice` chip appears.
+8. **HTML body.** Click any message with an HTML body — reading pane renders
+   the HTML inside a sandboxed iframe. External images (if any) are blocked:
+   a "Load images for this message" button appears above the body. Click it —
+   images load.
+9. **Body toggle.** Click "Plain" — switches to plain-text rendering. Click
+   "HTML" — switches back. "Raw" shows the deferred placeholder for now.
+10. **Attachment download.** Open a message with attachments. Each
+    attachment shows as a chip with a Download button. Click Download — save
+    dialog appears, choose a destination, file is written.
+11. **Image preview.** Open a message with an image attachment, click the 👁
+    button on it — modal opens, image is rendered inline. Click backdrop or
+    press Escape to close.
+12. **PDF preview.** Same with a PDF — first page renders in the modal
+    canvas. (Full multi-page paginated view is a Sub-plan 5 polish item.)
+13. **Switch messages** — confirm the per-message "Load images" allowance
+    resets (a new HTML message starts with images blocked again).
+14. Log out and back in — the search store resets, tree clears narrowing.
+
+If any step fails, capture the DevTools console output and `npm run tauri
+dev` terminal output, then report.
+
 ## Talking to the server
 
 The client expects a `localmail serve` HTTPS endpoint. The connection URL, username, password, and TLS cert pin are stored in the OS keyring — landed in Sub-plan 2 (not in this scaffolding).

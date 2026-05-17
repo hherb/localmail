@@ -53,6 +53,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|_app| {
             // rustls requires exactly one crypto provider per process.
             rustls::crypto::ring::default_provider()
@@ -73,6 +74,9 @@ pub fn run() {
             crate::commands::accounts::list_folders_cmd,
             crate::commands::changes::list_recent_messages_cmd,
             crate::commands::messages::get_message_cmd,
+            crate::commands::search::run_search_cmd,
+            crate::commands::attachments::download_attachment_cmd,
+            crate::commands::attachments::fetch_attachment_bytes_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

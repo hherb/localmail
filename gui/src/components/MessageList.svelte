@@ -1,18 +1,48 @@
 <script lang="ts">
-  /**
-   * Middle pane. Filters the loaded message list by current selection,
-   * renders one MessageListRow per visible message, dispatches clicks to
-   * the mail store.
-   */
   import MessageListRow from "./MessageListRow.svelte";
-  import { selectionMatches } from "../lib/format";
   import { mail } from "../lib/stores/mail.svelte";
+  import { search } from "../lib/stores/search.svelte";
 
-  function visibleMessages() {
-    return mail.snapshot.messages.filter((m) =>
-      selectionMatches(mail.snapshot.selection, m),
-    );
+  let searchActive = $derived(search.snapshot.tookMs !== null);
+
+  interface ListRow {
+    id: string;
+    subject: string | null;
+    from: { address: string | null; name: string | null };
+    date: string | null;
+    account: { id: string; name: string | null };
+    snippet: string | null;
   }
+
+  let rows: ListRow[] = $derived(
+    searchActive
+      ? search.snapshot.results.map((r) => ({
+          id: r.message_id,
+          subject: r.subject,
+          from: r.from,
+          date: r.date,
+          account: r.account,
+          snippet: r.snippet_html,
+        }))
+      : mail.snapshot.messages.map((m) => ({
+          id: m.message_id,
+          subject: m.subject,
+          from: m.from,
+          date: m.date,
+          account: m.account,
+          snippet: null,
+        })),
+  );
+
+  let visible = $derived(
+    searchActive
+      ? rows
+      : rows.filter((r) => {
+          const sel = mail.snapshot.selection;
+          if (sel.kind === "all") return true;
+          return r.account.id === sel.accountId;
+        }),
+  );
 
   async function openMessage(id: string): Promise<void> {
     await mail.openMessage(id);
@@ -20,24 +50,36 @@
 </script>
 
 <section class="list">
-  {#if mail.snapshot.loadingMessages}
-    <div class="hint">Loading…</div>
-  {:else}
-    {@const items = visibleMessages()}
-    {#if items.length === 0}
-      <div class="hint">No messages.</div>
-    {:else}
-      {#each items as msg (msg.message_id)}
-        <MessageListRow
-          message={msg}
-          selected={mail.snapshot.selectedMessage?.id === msg.message_id}
-          onClick={() => openMessage(msg.message_id)}
-        />
-      {/each}
-    {/if}
+  {#if searchActive}
+    <div class="caption">
+      Search took {Math.round(search.snapshot.tookMs ?? 0)} ms — {search.snapshot.results.length} result(s)
+    </div>
   {/if}
-  {#if mail.snapshot.errorMessage}
+  {#if search.snapshot.errorMessage}
+    <div class="error">{search.snapshot.errorMessage}</div>
+  {:else if mail.snapshot.errorMessage}
     <div class="error">{mail.snapshot.errorMessage}</div>
+  {/if}
+  {#if mail.snapshot.loadingMessages && !searchActive}
+    <div class="hint">Loading…</div>
+  {:else if visible.length === 0}
+    {#if searchActive}
+      <div class="hint">No matches.</div>
+    {:else}
+      <div class="hint">No messages.</div>
+    {/if}
+  {:else}
+    {#each visible as r (r.id)}
+      <MessageListRow
+        subject={r.subject}
+        from={r.from}
+        date={r.date}
+        account={r.account}
+        snippet={r.snippet}
+        selected={mail.snapshot.selectedMessage?.id === r.id}
+        onSelect={() => openMessage(r.id)}
+      />
+    {/each}
   {/if}
 </section>
 
@@ -53,6 +95,13 @@
     text-align: center;
     color: #888;
     font-size: 13px;
+  }
+  .caption {
+    padding: 4px 12px;
+    font-size: 11px;
+    color: #666;
+    background: #fafbfd;
+    border-bottom: 1px solid #eee;
   }
   .error {
     margin: 12px;

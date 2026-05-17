@@ -12,7 +12,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.1.1"
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "pdfjs-dist": "^4.10.38"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.1",

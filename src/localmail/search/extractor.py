@@ -227,12 +227,18 @@ class LightweightExtractor:
 
         Reads all sheets; each row is joined into a single text line.
         Logging deferred to extract_worker (Task 13).
+
+        Note: blob paths have no extension (SHA-256 hex names), so we pass
+        the bytes via io.BytesIO rather than the file path — openpyxl uses
+        the filename extension to detect the format when given a path string,
+        which would raise an error for extensionless blob files.
         """
         import contextlib
+        import io
         import openpyxl
         try:
             wb = openpyxl.load_workbook(
-                str(blob_path), read_only=True, data_only=True
+                io.BytesIO(blob_path.read_bytes()), read_only=True, data_only=True
             )
         except Exception as exc:
             raise ExtractorError(f"openpyxl failed to open: {exc}") from exc

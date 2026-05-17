@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -14,7 +16,7 @@ import psycopg
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError, VerificationError
 
-from localmail.api.errors import AuthenticationFailed, InvalidToken
+from localmail.api.errors import AuthenticationFailed, InvalidToken, RateLimited
 
 _HASHER = PasswordHasher()
 
@@ -35,6 +37,40 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 TOKEN_TTL_DAYS = 30
+
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 60
+
+_LOGIN_FAILURES_LOCK = threading.Lock()
+_LOGIN_FAILURES: dict[str, list[float]] = {}
+
+
+def reset_login_rate_limiter() -> None:
+    """Clear all per-username failure history. Test-only helper."""
+    with _LOGIN_FAILURES_LOCK:
+        _LOGIN_FAILURES.clear()
+
+
+def _check_login_rate_limit(username: str) -> None:
+    cutoff = _time.monotonic() - LOGIN_LOCKOUT_SECONDS
+    with _LOGIN_FAILURES_LOCK:
+        recent = [t for t in _LOGIN_FAILURES.get(username, []) if t > cutoff]
+        _LOGIN_FAILURES[username] = recent
+        if len(recent) >= LOGIN_MAX_FAILURES:
+            raise RateLimited(
+                f"too many failed login attempts; try again in "
+                f"{LOGIN_LOCKOUT_SECONDS} seconds"
+            )
+
+
+def _record_login_failure(username: str) -> None:
+    with _LOGIN_FAILURES_LOCK:
+        _LOGIN_FAILURES.setdefault(username, []).append(_time.monotonic())
+
+
+def _clear_login_failures(username: str) -> None:
+    with _LOGIN_FAILURES_LOCK:
+        _LOGIN_FAILURES.pop(username, None)
 
 
 @dataclass(frozen=True)
@@ -114,7 +150,13 @@ def create_user(conn: psycopg.Connection, username: str, password: str) -> int:
 
 
 def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, datetime]:
-    """Verify credentials and mint a token. Raises AuthenticationFailed."""
+    """Verify credentials and mint a token.
+
+    Raises:
+      RateLimited if the per-username failure threshold was hit.
+      AuthenticationFailed for bad credentials or disabled users.
+    """
+    _check_login_rate_limit(username)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash FROM api_users "
@@ -123,7 +165,9 @@ def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, 
         )
         row = cur.fetchone()
     if row is None or not verify_password(password, row[1]):
+        _record_login_failure(username)
         raise AuthenticationFailed("invalid username or password")
+    _clear_login_failures(username)
     return issue_token(conn, row[0])
 
 

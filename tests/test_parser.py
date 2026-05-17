@@ -143,3 +143,20 @@ def test_two_attachments_same_filename_both_captured():
     assert [a.filename for a in p.attachments] == ["note.txt", "note.txt"]
     assert p.attachments[0].payload == b"file-one"
     assert p.attachments[1].payload == b"file-two"
+
+
+def test_inline_image_content_id_is_captured():
+    """Inline images carry a Content-Id header — the parser must preserve it
+    (sans angle brackets) so HTML rendering can rewrite cid: references."""
+    p = parse_message(_eml.html_with_inline_image())
+    assert len(p.attachments) == 1
+    att = p.attachments[0]
+    assert att.content_id == "inline-pixel@example"
+    assert att.mime_type == "image/png"
+    assert att.payload.startswith(b"\x89PNG")
+
+
+def test_non_inline_attachment_has_none_content_id():
+    p = parse_message(_eml.with_attachment())
+    assert len(p.attachments) == 1
+    assert p.attachments[0].content_id is None

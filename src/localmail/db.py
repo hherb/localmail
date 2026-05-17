@@ -48,21 +48,33 @@ def _is_non_transactional(sql: str) -> bool:
 
 
 def _split_statements(sql: str) -> list[str]:
-    """Split a SQL file into individual statements on semicolons.
+    """Split a SQL file into individual statements.
 
-    Strips comment-only lines and blank lines. Needed for non-transactional
-    migrations where each statement must be executed separately (e.g.
+    Uses sqlparse so dollar-quoted bodies ($$ ... $$ / $tag$ ... $tag$),
+    single-quoted string literals, and -- / /* */ comments don't trip the
+    splitter on embedded semicolons. Needed for non-transactional migrations
+    where each statement must be executed separately (e.g.
     CREATE INDEX CONCURRENTLY cannot share a multi-statement execute call).
+
+    Returns each statement with its trailing semicolon stripped and any
+    leading/trailing whitespace removed; pure-comment / blank fragments are
+    dropped.
     """
-    stmts = []
-    for raw in sql.split(";"):
+    import sqlparse
+
+    stmts: list[str] = []
+    for raw in sqlparse.split(sql):
         stmt = raw.strip()
-        # Remove comment lines, keep actual SQL
+        if stmt.endswith(";"):
+            stmt = stmt[:-1].rstrip()
+        if not stmt:
+            continue
         non_comment = "\n".join(
             line for line in stmt.splitlines() if not line.strip().startswith("--")
         ).strip()
-        if non_comment:
-            stmts.append(stmt)
+        if not non_comment:
+            continue
+        stmts.append(stmt)
     return stmts
 
 

@@ -215,11 +215,11 @@ markup tokens (tags, attribute names) may dilute ranking slightly for
 heavily-marked-up messages; this can be revisited in a later migration if
 needed. The current approach is fine for plain-text–heavy archives.
 
-**`_split_statements` in `db.py`**: the migration runner splits SQL on every
-`;` character. This is safe for all migrations we ship today (none contain
-semicolons inside string literals or dollar-quoted blocks). If a future
-migration requires either, `_split_statements` must be made smarter — a naive
-split will produce broken statement fragments.
+**`_split_statements` in `db.py`**: the migration runner delegates to
+`sqlparse.split` so dollar-quoted bodies (`$$ ... $$` / `$tag$ ... $tag$`),
+single-quoted string literals, and `--` / `/* */` comments don't trip the
+splitter on embedded semicolons. Pure-comment fragments after the final
+statement are dropped; comments attached to a real statement are preserved.
 
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +

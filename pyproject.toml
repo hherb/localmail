@@ -17,6 +17,7 @@ dependencies = [
     "click>=8.1",
     "tiktoken>=0.13.0",
     "fastembed>=0.8.0",
+    "sqlparse>=0.5",
 ]
 
 [dependency-groups]

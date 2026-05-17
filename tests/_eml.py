@@ -81,3 +81,32 @@ def two_attachments_same_name() -> bytes:
     msg.add_attachment(b"file-one", maintype="text", subtype="plain", filename="note.txt")
     msg.add_attachment(b"file-two", maintype="text", subtype="plain", filename="note.txt")
     return msg.as_bytes()
+
+
+def html_with_inline_image() -> bytes:
+    """HTML message with an inline image referenced by Content-Id."""
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\x00\x01"
+        b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    msg = EmailMessage()
+    msg["From"] = "alice@example.com"
+    msg["To"] = "bob@example.com"
+    msg["Subject"] = "Inline image"
+    msg["Date"] = "Wed, 15 Jan 2025 09:30:00 +0000"
+    msg["Message-Id"] = "<inline-1@example.com>"
+    msg.set_content("plain text fallback")
+    msg.add_alternative(
+        '<html><body><img src="cid:inline-pixel@example"></body></html>',
+        subtype="html",
+    )
+    msg.add_attachment(
+        png_bytes,
+        maintype="image",
+        subtype="png",
+        filename="inline.png",
+        cid="<inline-pixel@example>",
+        disposition="inline",
+    )
+    return msg.as_bytes()

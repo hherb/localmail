@@ -16,6 +16,10 @@ class Attachment:
     filename: str
     mime_type: str
     payload: bytes
+    # Content-ID header value with the angle brackets stripped (e.g.
+    # "image1@example"), or None for non-inline attachments. Used downstream
+    # to rewrite `<img src="cid:…">` in HTML bodies to the actual blob URL.
+    content_id: str | None = None
 
 
 @dataclass
@@ -125,6 +129,16 @@ def _bodies(msg: EmailMessage) -> tuple[str | None, str | None]:
     return text, html
 
 
+def _content_id(part: EmailMessage) -> str | None:
+    raw = part.get("Content-Id") or part.get("Content-ID")
+    if not raw:
+        return None
+    cid = str(raw).strip()
+    if cid.startswith("<") and cid.endswith(">"):
+        cid = cid[1:-1]
+    return _no_nul(cid) or None
+
+
 def _attachments(msg: EmailMessage) -> list[Attachment]:
     out: list[Attachment] = []
     for part in msg.iter_attachments():
@@ -135,6 +149,7 @@ def _attachments(msg: EmailMessage) -> list[Attachment]:
                 filename=filename,
                 mime_type=part.get_content_type(),
                 payload=payload,
+                content_id=_content_id(part),
             )
         )
     return out

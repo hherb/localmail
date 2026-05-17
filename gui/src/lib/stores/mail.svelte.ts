@@ -18,6 +18,8 @@
  *   loadRecentMessages()                                 fetch /v1/changes
  *   setSelection(sel)                                    update the left-rail selection
  *   openMessage(id)                                      fetch + store detail; no-op if same id
+ *   setBodyMode(mode)                                    switch html/plain/raw; sticky
+ *   setExternalImagesAllowed(v)                          allow/block external images; resets per-message
  *   reset()                                              clear all state (used on logout)
  */
 import {
@@ -41,6 +43,8 @@ export interface MailState {
   loadingMessages: boolean;
   loadingDetail: boolean;
   errorMessage: string | null;
+  bodyMode: "html" | "plain" | "raw";
+  externalImagesAllowed: boolean;
 }
 
 function initialState(): MailState {
@@ -53,6 +57,8 @@ function initialState(): MailState {
     loadingMessages: false,
     loadingDetail: false,
     errorMessage: null,
+    bodyMode: "html",
+    externalImagesAllowed: false,
   };
 }
 
@@ -106,10 +112,19 @@ class MailStore {
     this.#state.selection = sel;
   }
 
+  setBodyMode(mode: "html" | "plain" | "raw"): void {
+    this.#state.bodyMode = mode;
+  }
+
+  setExternalImagesAllowed(v: boolean): void {
+    this.#state.externalImagesAllowed = v;
+  }
+
   async openMessage(messageId: string): Promise<void> {
     if (this.#state.selectedMessage?.id === messageId) return;
     this.#state.loadingDetail = true;
     this.#state.errorMessage = null;
+    this.#state.externalImagesAllowed = false;
     try {
       const detail = await getMessage(messageId);
       this.#state.selectedMessage = detail;

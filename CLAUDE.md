@@ -42,6 +42,17 @@ uv run localmail list-failed [--account N] [--limit K]   # show messages sync sk
 uv run localmail retry-failed [--account N]    # re-attempt every failed message
 ```
 
+GUI server (Phase: gui-server):
+
+```bash
+uv run localmail add-api-user USERNAME       # create an API user
+uv run localmail list-api-users
+uv run localmail remove-api-user USERNAME
+uv run localmail rotate-tls --cert PATH --key PATH
+uv run localmail serve [--bind 127.0.0.1] [--port 8443] \
+                       [--tls-cert PATH] [--tls-key PATH] [--no-tls]
+```
+
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)
 pick the wrong interpreter. Prefix with `unset VIRTUAL_ENV && …` to be safe.
@@ -227,6 +238,22 @@ MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for
 de/en/es/ja. Norwegian is reported but not gated. Requires the fastembed model
 to be installed (known deferred concern: `google/embeddinggemma-300m` must be
 in the fastembed registry).
+
+## GUI server (Phase 1 of GUI)
+
+Network-reachable HTTPS API exposing the same functionality as the search
+subsystem, plus account/folder/message/attachment read paths and bearer-token
+auth. See [docs/superpowers/specs/2026-05-17-localmail-gui-design.md](docs/superpowers/specs/2026-05-17-localmail-gui-design.md)
+for the full design.
+
+- Code lives under `src/localmail/api/` (transport-free service library) and
+  `src/localmail/serve/` (FastAPI HTTP wrapper).
+- The MCP server (planned) will import `localmail.api` directly — no HTTP hop.
+- Migration `0014_api_users.sql` adds `api_users` + `api_tokens`. Tokens are
+  stored as SHA-256 hashes; raw bearer is only returned at login/refresh.
+- TLS is on by default; `--no-tls` is only accepted with `--bind 127.0.0.1`.
+- The HTTP server and the sync daemon never call each other — they share
+  Postgres and can run independently.
 
 ## Conventions
 

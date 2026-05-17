@@ -6,3 +6,4 @@ pub mod auth;
 pub mod capabilities;
 pub mod changes;
 pub mod connect;
+pub mod messages;

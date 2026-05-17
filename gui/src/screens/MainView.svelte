@@ -11,6 +11,8 @@
   import AccountTree from "../components/AccountTree.svelte";
   import MessageList from "../components/MessageList.svelte";
   import ReadingPane from "../components/ReadingPane.svelte";
+  import SearchBar from "../components/SearchBar.svelte";
+  import ActiveFilterChips from "../components/ActiveFilterChips.svelte";
   import { auth } from "../lib/stores/auth.svelte";
   import { mail } from "../lib/stores/mail.svelte";
 
@@ -60,6 +62,8 @@
         <button onclick={onLogout} disabled={pending}>Log out</button>
       </div>
     </header>
+    <SearchBar />
+    <ActiveFilterChips />
     <main class="panes">
       <AccountTree />
       <MessageList />
@@ -72,7 +76,7 @@
   .app {
     height: 100vh;
     display: grid;
-    grid-template-rows: auto 1fr;
+    grid-template-rows: auto auto auto 1fr;
   }
   .bar {
     display: flex;

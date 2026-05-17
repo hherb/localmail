@@ -160,9 +160,13 @@ class LightweightExtractor:
             return self._extract_csv(blob_path)
         if mt == "application/rtf" or ext == ".rtf":
             return self._extract_rtf(blob_path)
+        if "opendocument.text" in mt or ext == ".odt":
+            return self._extract_odt(blob_path)
+        if mt == "text/calendar" or ext == ".ics":
+            return self._extract_ics(blob_path)
 
         raise NotImplementedError(
-            f"per-format dispatch for {mt!r}/{ext!r} added in subsequent tasks"
+            f"no extractor for {mt!r}/{ext!r}"
         )
 
     def _extract_pdf(self, blob_path: Path) -> ExtractedText:
@@ -396,5 +400,68 @@ class LightweightExtractor:
         return ExtractedText(
             text=text.strip(),
             page_count=None,
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_odt(self, blob_path: Path) -> ExtractedText:
+        """Extract text from an ODT blob using odfpy.
+
+        Walks all <text:p> paragraph elements and concatenates their
+        character data. Logging deferred to extract_worker (Task 13).
+        """
+        from odf.opendocument import load
+        from odf.text import P
+        try:
+            doc = load(str(blob_path))
+        except Exception as exc:
+            raise ExtractorError(f"odfpy failed to load: {exc}") from exc
+        paras = doc.getElementsByType(P)
+        text = "\n".join(
+            "".join(node.data for node in p.childNodes if hasattr(node, "data"))
+            for p in paras
+        ).strip()
+        return ExtractedText(
+            text=text, page_count=None,
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_ics(self, blob_path: Path) -> ExtractedText:
+        """Extract text from an ICS calendar blob using icalendar.
+
+        For each VEVENT, concatenates SUMMARY, DESCRIPTION, LOCATION,
+        DTSTART, and ATTENDEE values as text. page_count carries the
+        event count (or None when no events). Logging deferred to
+        extract_worker (Task 13).
+        """
+        from icalendar import Calendar
+        try:
+            raw = blob_path.read_bytes()
+            cal = Calendar.from_ical(raw)
+        except Exception as exc:
+            raise ExtractorError(f"icalendar parse failed: {exc}") from exc
+
+        parts: list[str] = []
+        event_count = 0
+        for component in cal.walk():
+            if component.name == "VEVENT":
+                event_count += 1
+                for field in ("SUMMARY", "DESCRIPTION", "LOCATION"):
+                    val = component.get(field)
+                    if val:
+                        parts.append(str(val))
+                dtstart = component.get("DTSTART")
+                if dtstart:
+                    parts.append(str(dtstart.dt))
+                attendees = component.get("ATTENDEE", [])
+                if attendees:
+                    # ATTENDEE may be a single value or a list
+                    if not isinstance(attendees, list):
+                        attendees = [attendees]
+                    for attendee in attendees:
+                        parts.append(str(attendee))
+
+        return ExtractedText(
+            text="\n".join(parts).strip(),
+            page_count=event_count or None,
             extractor=f"{self.name}@{self.version}",
         )

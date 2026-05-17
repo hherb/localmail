@@ -237,3 +237,41 @@ def test_lightweight_extracts_rtf(tmp_path) -> None:
     lw = LightweightExtractor()
     result = lw.extract(p, "application/rtf")
     assert "RTF body content here" in result.text
+
+
+def test_lightweight_extracts_odt(tmp_path) -> None:
+    from odf.opendocument import OpenDocumentText
+    from odf.text import P
+    p = tmp_path / "a.odt"
+    doc = OpenDocumentText()
+    doc.text.addElement(P(text="odt paragraph one"))
+    doc.text.addElement(P(text="odt paragraph two"))
+    doc.save(str(p))
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "application/vnd.oasis.opendocument.text")
+    assert "odt paragraph one" in result.text
+    assert "odt paragraph two" in result.text
+
+
+def test_lightweight_extracts_ics(tmp_path) -> None:
+    import datetime as dt
+    from icalendar import Calendar, Event
+    cal = Calendar()
+    cal.add("prodid", "-//Test//Test//EN")
+    cal.add("version", "2.0")
+    ev = Event()
+    ev.add("summary", "Annual review")
+    ev.add("description", "Discuss quarterly bonus criteria")
+    ev.add("location", "Conf room Berlin")
+    ev.add("dtstart", dt.datetime(2026, 6, 1, 14, 0, tzinfo=dt.timezone.utc))
+    cal.add_component(ev)
+
+    p = tmp_path / "a.ics"
+    p.write_bytes(cal.to_ical())
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "text/calendar")
+    assert "Annual review" in result.text
+    assert "quarterly bonus criteria" in result.text
+    assert "Conf room Berlin" in result.text

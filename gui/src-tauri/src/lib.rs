@@ -3,6 +3,10 @@
 //! Sub-plan 1 ships only the `greet` demo command. Subsequent sub-plans add
 //! HTTP, keyring, TOFU, and the API surface the Svelte UI calls into.
 
+pub mod commands;
+pub mod http;
+pub mod storage;
+
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -49,7 +53,23 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .setup(|_app| {
+            // rustls requires exactly one crypto provider per process.
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .ok();
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            crate::commands::connect::probe_server_cmd,
+            crate::commands::connect::confirm_trust_cmd,
+            crate::commands::auth::login_cmd,
+            crate::commands::auth::logout_cmd,
+            crate::commands::auth::refresh_cmd,
+            crate::commands::auth::whoami_cmd,
+            crate::commands::capabilities::get_capabilities_cmd,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

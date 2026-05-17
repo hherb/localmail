@@ -439,7 +439,8 @@ def run_extract_worker(
                     break
             if stop_event.is_set():
                 break
-            stop_event.wait(timeout=cfg.extract_worker_poll_interval_s)
+            if stop_event.wait(timeout=cfg.extract_worker_poll_interval_s):
+                break
         except Exception:
             _LOG.exception("extract_worker: error during sweep")
             if stop_event.wait(timeout=backoff):

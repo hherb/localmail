@@ -8,8 +8,8 @@ each arm returns the expected hit shape and ordering.
 from __future__ import annotations
 
 from localmail.config import SearchConfig
-from localmail.search.arms import arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks
-from localmail.search.query import parse_query
+from localmail.search.arms import arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
+from localmail.search.query import parse_query, ParsedQuery, SearchFilters
 from localmail.search.embed_worker import run_embed_worker_once
 
 
@@ -160,9 +160,6 @@ def test_arm_vector_attachment_chunks_returns_message_ids(db_conn) -> None:
     Arm 4 should return the message_id."""
     import hashlib
     import json
-    from localmail.config import SearchConfig
-    from localmail.search.arms import arm_vector_attachment_chunks
-    from localmail.search.query import ParsedQuery, SearchFilters
 
     sha = hashlib.sha256(b"blob xyz").digest()
     sha_hex = sha.hex()
@@ -222,9 +219,6 @@ def test_arm_vector_attachment_chunks_returns_message_ids(db_conn) -> None:
 def test_arm_vector_attachment_chunks_fanout_cap_honored(db_conn) -> None:
     """A blob attached to N messages fans out to at most arm4_fanout_cap rows."""
     import hashlib, json
-    from localmail.config import SearchConfig
-    from localmail.search.arms import arm_vector_attachment_chunks
-    from localmail.search.query import ParsedQuery, SearchFilters
 
     sha = hashlib.sha256(b"popular blob").digest()
     sha_hex = sha.hex()
@@ -271,10 +265,6 @@ def test_arm_vector_attachment_chunks_fanout_cap_honored(db_conn) -> None:
 
 def test_arm_vector_attachment_chunks_no_chunks_returns_empty(db_conn) -> None:
     """No attachment_chunks rows in DB → empty result, no error."""
-    from localmail.config import SearchConfig
-    from localmail.search.arms import arm_vector_attachment_chunks
-    from localmail.search.query import ParsedQuery, SearchFilters
-
     cfg = SearchConfig()
     parsed = ParsedQuery(free_text="x", filters=SearchFilters())
     unit = [0.0] * 768

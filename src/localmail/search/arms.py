@@ -271,6 +271,7 @@ def arm_vector_attachment_chunks(
     ]
 
     with conn.cursor() as cur:
+        cur.execute(f"SET LOCAL hnsw.ef_search = {int(cfg.hnsw_ef_search)}")
         cur.execute(sql, params)
         rows = cur.fetchall()
 

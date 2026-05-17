@@ -4,6 +4,7 @@
 //! HTTP, keyring, TOFU, and the API surface the Svelte UI calls into.
 
 pub mod http;
+pub mod storage;
 
 use serde::Serialize;
 

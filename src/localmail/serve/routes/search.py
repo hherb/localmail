@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from localmail.api.errors import FeatureUnavailable
 from localmail.api.search import run_search
 from localmail.serve.middleware import get_authenticated_user
 
@@ -43,10 +44,7 @@ def search_endpoint(
 ) -> dict[str, Any]:
     searcher = request.app.state.searcher
     if searcher is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="search not configured on this server",
-        )
+        raise FeatureUnavailable("search not configured on this server")
     filters_dict = req.filters.model_dump(by_alias=True, exclude_none=True)
     return run_search(
         searcher=searcher,

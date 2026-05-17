@@ -1,19 +1,47 @@
 """Unauthenticated /v1/version and /v1/health endpoints + /v1/capabilities."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import logging
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
+from fastapi import APIRouter, Depends, Request
+
+from localmail.api.errors import FeatureUnavailable
 from localmail.serve.middleware import get_authenticated_user
 
-SERVER_VERSION = "0.1.0"
 API_MAJOR = 1
 API_MINOR = 0
+
+logger = logging.getLogger("localmail.serve")
+
+
+def _server_version() -> str:
+    try:
+        return _pkg_version("localmail")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+SERVER_VERSION = _server_version()
 
 router = APIRouter()
 
 
 @router.get("/health")
-def health() -> dict[str, str]:
+def health(request: Request) -> dict[str, str]:
+    """Liveness + DB-reachability check for load balancers.
+
+    Returns 503 (via FastAPI's response model) only when the DB is unreachable;
+    a 200 means the server can both accept connections and round-trip a SELECT.
+    """
+    pool = request.app.state.pool
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+    except Exception as exc:
+        logger.warning("health check db ping failed: %s", exc)
+        raise FeatureUnavailable("database unreachable") from exc
     return {"status": "ok"}
 
 

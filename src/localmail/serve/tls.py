@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,15 +43,27 @@ def ensure_self_signed_cert(*, cert_path: Path, key_path: Path, hostname: str) -
     )
 
     cert_path.parent.mkdir(parents=True, exist_ok=True)
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     key_bytes = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    key_path.write_bytes(key_bytes)
-    key_path.chmod(0o600)
-    cert_path.chmod(0o644)
+    _write_atomic(key_path, key_bytes, 0o600)
+    _write_atomic(cert_path, cert.public_bytes(serialization.Encoding.PEM), 0o644)
+
+
+def _write_atomic(path: Path, data: bytes, mode: int) -> None:
+    """Create-or-fail write that sets file mode atomically.
+
+    Using write_bytes + chmod leaves a window where the file exists at the
+    process umask. O_EXCL guarantees we don't truncate an existing key, and
+    os.open's mode argument is applied before any data is written.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
 
 
 def cert_fingerprint_sha256_hex(*, cert_path: Path) -> str:

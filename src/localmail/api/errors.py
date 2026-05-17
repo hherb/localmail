@@ -54,3 +54,9 @@ class ValidationFailed(APIError):
     http_status = 400
     problem_type = "/problems/validation-failed"
     title = "Validation failed"
+
+
+class FeatureUnavailable(APIError):
+    http_status = 503
+    problem_type = "/problems/feature-unavailable"
+    title = "Feature unavailable"

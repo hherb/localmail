@@ -536,16 +536,34 @@ def _dsn_from_ctx(ctx: click.Context) -> str:
               help="If omitted, prompt with hidden input.")
 @click.pass_context
 def add_api_user(ctx: click.Context, username: str, password_opt: str | None) -> None:
-    """Create a new API user. Password is hashed with argon2id."""
+    """Create a new API user. Password is hashed with argon2id.
+
+    Note: until the per-account ACL lands, every API user has read access to
+    every account and message in the archive. Adding a second user is
+    therefore a sharing decision, not a permissions one — a warning prints
+    when that happens.
+    """
     from localmail.api.auth import create_user
     password = password_opt or click.prompt("Password", hide_input=True, confirmation_prompt=True)
     with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM api_users")
+            row = cur.fetchone()
+            assert row is not None
+            existing = int(row[0])
         try:
             uid = create_user(conn, username, password)
             conn.commit()
         except psycopg.errors.UniqueViolation:
             raise click.ClickException(f"user {username!r} already exists")
     click.echo(f"created user {username!r} (id={uid})")
+    if existing >= 1:
+        click.echo(
+            f"warning: {existing + 1} API users now exist. The current build has "
+            f"no per-account ACL, so {username!r} can read every account's mail. "
+            f"Only add multiple users if that is intended.",
+            err=True,
+        )
 
 
 @main.command("remove-api-user")

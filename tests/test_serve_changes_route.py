@@ -56,3 +56,14 @@ def test_changes_with_cursor_filters(db_dsn: str, api_token: str, db_conn) -> No
     body = r2.json()
     assert all(m["message_id"] != str(mid_old) for m in body["new_messages"])
     assert len(body["new_messages"]) == 1
+
+
+def test_changes_with_bogus_cursor_400(db_dsn: str, api_token: str) -> None:
+    """A non-integer ?since= should surface as problem+json 400, not silently
+    return the entire archive."""
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get("/v1/changes?since=not-a-number", headers={"Authorization": f"Bearer {api_token}"})
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["type"] == "/problems/validation-failed"

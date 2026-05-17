@@ -13,7 +13,7 @@ def test_build_query_string_includes_dsl_for_filters() -> None:
         filters={"from": "anna@", "after": "2024-01-01", "has_attachment": True},
     )
     assert "invoice" in q
-    assert "from:anna@" in q
+    assert 'from:"anna@"' in q
     assert "after:2024-01-01" in q
     assert "has:attachment" in q
 
@@ -21,6 +21,31 @@ def test_build_query_string_includes_dsl_for_filters() -> None:
 def test_build_query_string_validates_date_format() -> None:
     with pytest.raises(ValidationFailed):
         build_query_string(free_text="x", filters={"after": "not-a-date"})
+
+
+def test_filter_value_with_dsl_injection_is_quoted() -> None:
+    """Regression: a filter value containing `account:other` must not break
+    out into an additional operator. Quoting forces the parser to treat the
+    whole value as one token."""
+    from localmail.search.query import parse_query
+
+    q = build_query_string(
+        free_text="hello",
+        filters={"from": "alice OR account:other"},
+    )
+    parsed = parse_query(q)
+    assert parsed.filters.from_substr == "alice OR account:other"
+    assert parsed.filters.account_names == []
+
+
+def test_filter_value_with_embedded_quote_is_stripped() -> None:
+    """The DSL tokenizer has no escape syntax. We strip embedded quotes
+    rather than try to escape them — substring filters don't need them."""
+    q = build_query_string(
+        free_text="x",
+        filters={"subject": 'has "quotes" in it'},
+    )
+    assert 'subject:"has quotes in it"' in q
 
 
 def test_build_query_string_accounts_become_account_dsl_tokens() -> None:

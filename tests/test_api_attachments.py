@@ -9,7 +9,7 @@ from localmail.api.attachments import (
     get_attachment_text,
     open_attachment_bytes,
 )
-from localmail.api.errors import NotFound
+from localmail.api.errors import NotFound, ValidationFailed
 
 
 def _seed_blob(conn: psycopg.Connection, tmp_path: Path, sha_hex: str, payload: bytes,
@@ -93,3 +93,21 @@ def test_get_attachment_text_not_extracted(db_conn: psycopg.Connection, tmp_path
     db_conn.commit()
     with pytest.raises(NotFound):
         get_attachment_text(db_conn, sha)
+
+
+@pytest.mark.parametrize("bad_sha", [
+    "not-hex",
+    "",
+    "ab" * 31,
+    "ab" * 33,
+    "zz" * 32,
+])
+def test_malformed_sha256_raises_validation(db_conn: psycopg.Connection, bad_sha: str) -> None:
+    """A non-hex or wrong-length sha256 path param surfaces as 400, not 500.
+
+    Without this, a request like GET /v1/attachments/foo would crash with
+    bytes.fromhex ValueError and the user would see an opaque 500.
+    """
+    for fn in (get_attachment_metadata, get_attachment_text, open_attachment_bytes):
+        with pytest.raises(ValidationFailed):
+            fn(db_conn, bad_sha)

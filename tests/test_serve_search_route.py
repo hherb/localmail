@@ -72,3 +72,7 @@ def test_search_unavailable_when_no_searcher(db_dsn: str, api_token: str) -> Non
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 503
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["type"] == "/problems/feature-unavailable"
+    assert body["status"] == 503

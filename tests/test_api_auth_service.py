@@ -93,3 +93,47 @@ def test_refresh_token_issues_new_and_revokes_old(db_conn: psycopg.Connection) -
         whoami(db_conn, old_token)
     user = whoami(db_conn, new_token)
     assert user.username == "alice"
+
+
+def test_login_timing_unknown_user_vs_wrong_password(db_conn: psycopg.Connection) -> None:
+    """Login latency for an unknown username must be comparable to login
+    latency for a known user with a wrong password.
+
+    Without the dummy-hash branch in api/auth.login, the unknown-user path
+    skips argon2 verify and returns in microseconds while wrong-password
+    spends ~50-200 ms hashing. The ratio reveals which usernames exist.
+    """
+    import time
+
+    from localmail.api.auth import reset_login_rate_limiter
+
+    _seed_user(db_conn, "alice", "hunter2")
+    db_conn.commit()
+
+    samples_unknown: list[float] = []
+    samples_wrong_pw: list[float] = []
+    for i in range(3):
+        reset_login_rate_limiter()
+        t0 = time.perf_counter()
+        try:
+            login(db_conn, f"ghost_{i}", "any-password")
+        except AuthenticationFailed:
+            pass
+        samples_unknown.append(time.perf_counter() - t0)
+
+        reset_login_rate_limiter()
+        t0 = time.perf_counter()
+        try:
+            login(db_conn, "alice", "wrong-password")
+        except AuthenticationFailed:
+            pass
+        samples_wrong_pw.append(time.perf_counter() - t0)
+    reset_login_rate_limiter()
+
+    med_unknown = sorted(samples_unknown)[len(samples_unknown) // 2]
+    med_wrong_pw = sorted(samples_wrong_pw)[len(samples_wrong_pw) // 2]
+    ratio = max(med_unknown, med_wrong_pw) / max(min(med_unknown, med_wrong_pw), 1e-9)
+    assert ratio < 5.0, (
+        f"login timing diverges: unknown-user median={med_unknown*1000:.1f}ms "
+        f"vs wrong-password median={med_wrong_pw*1000:.1f}ms (ratio={ratio:.2f})"
+    )

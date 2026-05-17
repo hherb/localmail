@@ -30,11 +30,11 @@ def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
 def _filter_tokens(filters: dict[str, Any]) -> list[str]:
     out: list[str] = []
     if (v := filters.get("from")):
-        out.append(f"from:{v}")
+        out.append(f'from:{_quote_value(v)}')
     if (v := filters.get("to")):
-        out.append(f"to:{v}")
+        out.append(f'to:{_quote_value(v)}')
     if (v := filters.get("subject")):
-        out.append(f"subject:{v}")
+        out.append(f'subject:{_quote_value(v)}')
     if (v := filters.get("after")):
         _validate_date(v, "after")
         out.append(f"after:{v}")
@@ -44,6 +44,19 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
     if filters.get("has_attachment") is True:
         out.append("has:attachment")
     return out
+
+
+def _quote_value(v: Any) -> str:
+    """Wrap a free-form filter value in double quotes so the DSL tokenizer
+    treats it as a single token.
+
+    Without this, a value like 'alice OR account:other' would tokenize into
+    three tokens and inject an extra `account:` operator, bypassing the
+    requested scope. Embedded quotes and newlines have no useful meaning for
+    substring filters and are stripped — the DSL has no escape syntax.
+    """
+    s = str(v).replace('"', "").replace("\n", " ").replace("\r", " ")
+    return f'"{s}"'
 
 
 def _validate_date(value: str, key: str) -> None:

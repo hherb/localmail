@@ -20,6 +20,12 @@ from localmail.api.errors import AuthenticationFailed, InvalidToken, RateLimited
 
 _HASHER = PasswordHasher()
 
+# Pre-computed argon2id hash exercised on the missing-user login path so
+# the response time for unknown usernames matches the verify-mismatch path.
+# Without this, an unauthenticated attacker can enumerate valid usernames by
+# measuring how long /v1/auth/login takes (argon2 verify is ~50-200 ms).
+_DUMMY_PASSWORD_HASH = _HASHER.hash("dummy-password-for-timing-parity")
+
 
 def hash_password(password: str) -> str:
     """Hash a password with argon2id. Raises ValueError on empty input."""
@@ -81,7 +87,12 @@ class AuthenticatedUser:
 
 
 def generate_token() -> str:
-    """Return a fresh 32-byte URL-safe base64 token (no padding)."""
+    """Return a fresh 32-byte URL-safe base64 token.
+
+    32 bytes of os.urandom = 256 bits of entropy. SHA-256 of this is
+    indistinguishable from random for any feasible attacker, which is why
+    `hash_token` does not need HMAC or a per-row salt.
+    """
     return secrets.token_urlsafe(32)
 
 
@@ -110,10 +121,15 @@ def issue_token(
     return token, expires_at
 
 
+LAST_USED_REFRESH_SECONDS = 60
+
+
 def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | None:
     """Look up a bearer token; return user or None for invalid/expired/disabled.
 
-    Updates last_used_at on success.
+    Updates last_used_at on success, but at most once per
+    LAST_USED_REFRESH_SECONDS per token — polling clients (e.g. /v1/changes)
+    would otherwise produce one DB write per request on the same row.
     """
     h = hash_token(token)
     with conn.cursor() as cur:
@@ -130,8 +146,11 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
         if row is None:
             return None
         cur.execute(
-            "UPDATE api_tokens SET last_used_at = now() WHERE token_sha256 = %s",
-            (h,),
+            "UPDATE api_tokens SET last_used_at = now() "
+            "WHERE token_sha256 = %s "
+            "  AND (last_used_at IS NULL "
+            "       OR last_used_at < now() - make_interval(secs => %s))",
+            (h, LAST_USED_REFRESH_SECONDS),
         )
     return AuthenticatedUser(id=row[0], username=row[1])
 
@@ -164,7 +183,11 @@ def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, 
             (username,),
         )
         row = cur.fetchone()
-    if row is None or not verify_password(password, row[1]):
+    if row is None:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        _record_login_failure(username)
+        raise AuthenticationFailed("invalid username or password")
+    if not verify_password(password, row[1]):
         _record_login_failure(username)
         raise AuthenticationFailed("invalid username or password")
     _clear_login_failures(username)
@@ -188,8 +211,9 @@ def logout(conn: psycopg.Connection, token: str) -> None:
 def refresh_token(conn: psycopg.Connection, token: str) -> tuple[str, datetime]:
     """Issue a new token and revoke the presenting one atomically.
 
-    Both writes happen inside whatever transaction the caller is already in,
-    so a commit failure leaves both old and new state intact.
+    The insert and delete happen inside the caller's open transaction. On
+    commit failure the new token never becomes valid and the old one is not
+    revoked, so the client can simply retry with the same bearer.
     """
     user = verify_token(conn, token)
     if user is None:

@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 
+from localmail.api.errors import ValidationFailed
 from localmail.serve.middleware import get_authenticated_user
 
 router = APIRouter()
@@ -22,10 +23,21 @@ def changes(
 
     Cursor is the highest `messages.id` from the previous response.
     """
+    since_id: int | None
+    if since is None:
+        since_id = None
+    else:
+        try:
+            since_id = int(since)
+        except ValueError as exc:
+            raise ValidationFailed(
+                f"since cursor must be a base-10 integer, got {since!r}"
+            ) from exc
+
     pool = request.app.state.pool
     new_messages: list[dict[str, Any]] = []
     with pool.connection() as conn, conn.cursor() as cur:
-        if since is None:
+        if since_id is None:
             cur.execute(
                 """SELECT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
                           m.account_id, a.name
@@ -35,10 +47,6 @@ def changes(
                 (_DEFAULT_LIMIT,),
             )
         else:
-            try:
-                since_id = int(since)
-            except ValueError:
-                since_id = 0
             cur.execute(
                 """SELECT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
                           m.account_id, a.name

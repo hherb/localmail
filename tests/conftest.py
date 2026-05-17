@@ -81,3 +81,34 @@ def db_conn(db_dsn):
         yield conn
     finally:
         conn.close()
+
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SeededUser:
+    id: int
+    username: str
+    password: str
+
+
+@pytest.fixture
+def api_user(db_conn):
+    """Create a single API user, return SeededUser."""
+    from localmail.api.auth import create_user, reset_login_rate_limiter
+    reset_login_rate_limiter()
+    username = "alice"
+    password = "hunter2"
+    uid = create_user(db_conn, username, password)
+    db_conn.commit()
+    return SeededUser(id=uid, username=username, password=password)
+
+
+@pytest.fixture
+def api_token(db_conn, api_user):
+    """Mint a valid bearer token for `api_user`."""
+    from localmail.api.auth import login
+    token, _expires = login(db_conn, api_user.username, api_user.password)
+    db_conn.commit()
+    return token

@@ -158,7 +158,16 @@ Three processes, two hosts (or one host in the single-machine case):
 |---|---|---|
 | `POST` | `/v1/auth/login` | `{username, password}` → `{token, expires_at}`. Rate-limited per username: 5 failures → 60s lockout (in-process sliding window). |
 | `POST` | `/v1/auth/logout` | Revoke current token. |
+| `POST` | `/v1/auth/refresh` | Auth required. Returns `{token, expires_at}` — issues a new token with a fresh 30-day window and revokes the presenting token. Used for silent renewal by the client. |
 | `GET` | `/v1/auth/whoami` | Token introspection (username, expiry, granted accounts in v1.x). |
+
+**Silent renewal**: the client calls `/v1/auth/refresh` automatically when
+the current token's remaining lifetime drops below 7 days, on the next
+authenticated request. New token is written to the OS keyring; the old
+token is revoked server-side as part of the same call. The user is never
+prompted unless `/v1/auth/refresh` itself fails (e.g., token was revoked
+out-of-band, server unreachable past the original expiry), at which point
+the standard login screen appears with the current view preserved.
 
 #### Accounts & folders
 
@@ -332,8 +341,9 @@ migrations/
   0014_api_users.sql
 ```
 
-Tauri client lives in its own repository or top-level directory (TBD during
-the implementation plan — see Open questions):
+Tauri client lives in a top-level `gui/` directory in this repository.
+Same-repo keeps API and client changes atomic during v1; can be split
+into its own repo later if release cadences diverge.
 
 ```
 gui/                  # NEW — Tauri 2 + Svelte client
@@ -495,26 +505,17 @@ like `localmail run`. No new daemonization code, no PID files.
 These do not need answers to start; they need answers somewhere in the
 implementation plan.
 
-1. **GUI repo location.** Top-level `gui/` directory in this repo, or a
-   separate `localmail-gui` repository? Same-repo is simpler for v1 (atomic
-   API/client changes); separate repo is cleaner for independent release
-   cadence. Recommendation: same-repo for v1, split later if release
-   cadences diverge.
-2. **Token expiry and renewal.** Default 30 days; should the client
-   silently renew when expiry is < 7 days away, or always re-prompt at
-   expiry? Recommendation: silent renewal endpoint (`POST /v1/auth/refresh`)
-   added if the v1 experience proves annoying.
-3. **`accounts.is_shared` semantics.** v1 ships with this flag always
+1. **`accounts.is_shared` semantics.** v1 ships with this flag always
    `false`. Define what it means before v1.x adds the ACL feature so the
    flag isn't a leaky abstraction.
-4. **Self-signed cert lifetime.** 1 year, 10 years, indefinite? `localmail
+2. **Self-signed cert lifetime.** 1 year, 10 years, indefinite? `localmail
    rotate-tls` exists either way. Recommendation: 10 years (it's
    self-signed, the lifetime is administrative not security).
-5. **First-run UX when no `api_users` exist.** Should `localmail serve`
+3. **First-run UX when no `api_users` exist.** Should `localmail serve`
    refuse to start, or accept connections and return a "no users
    configured" error from `/v1/auth/login`? Recommendation: start
    normally, return a clear error from login attempts; the CLI message
    on `serve` startup tells the operator to run `add-api-user`.
-6. **Body HTML vs text default.** Spec says HTML by default. Some users
+4. **Body HTML vs text default.** Spec says HTML by default. Some users
    may prefer plain-text by default for security/aesthetic reasons. A
    single Settings toggle covers it; mention in v1 release notes.

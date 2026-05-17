@@ -7,6 +7,7 @@ from psycopg_pool import ConnectionPool
 
 from localmail.api.errors import APIError
 from localmail.serve.middleware import APIErrorHandlerMiddleware, RequestIdMiddleware
+from localmail.serve.routes import auth as auth_routes
 from localmail.serve.routes import version as version_routes
 
 
@@ -46,4 +47,5 @@ def create_app(*, db_dsn: str, searcher=None) -> FastAPI:
         return response
 
     app.include_router(version_routes.router, prefix="/v1")
+    app.include_router(auth_routes.router, prefix="/v1/auth")
     return app

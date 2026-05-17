@@ -231,7 +231,8 @@ def test_failed_extractions_table_exists(db_conn):
             "JOIN pg_attribute a ON a.attrelid = i.indrelid "
             "AND a.attnum = ANY(i.indkey) "
             "WHERE i.indrelid = 'failed_extractions'::regclass "
-            "AND i.indisprimary"
+            "AND i.indisprimary "
+            "ORDER BY a.attnum"
         )
         pk_cols = [r[0] for r in cur.fetchall()]
     assert pk_cols == ["sha256"]

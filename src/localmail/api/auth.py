@@ -1,8 +1,7 @@
-"""Authentication primitives: password hashing, token issuance, verification.
+"""Authentication primitives: password hashing, token issuance, verification,
+and higher-level service functions (login, refresh, whoami, logout).
 
-Higher-level service functions (login, refresh, whoami) are added in
-subsequent tasks. This module is transport-free; HTTP concerns live in
-localmail.serve.
+This module is transport-free; HTTP concerns live in localmail.serve.
 """
 from __future__ import annotations
 
@@ -14,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError, VerificationError
+
+from localmail.api.errors import AuthenticationFailed, InvalidToken
 
 _HASHER = PasswordHasher()
 
@@ -97,3 +98,59 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
             (h,),
         )
     return AuthenticatedUser(id=row[0], username=row[1])
+
+
+def create_user(conn: psycopg.Connection, username: str, password: str) -> int:
+    """Insert a new api_users row. Caller commits."""
+    pw_hash = hash_password(password)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash) VALUES (%s, %s) RETURNING id",
+            (username, pw_hash),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return row[0]
+
+
+def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, datetime]:
+    """Verify credentials and mint a token. Raises AuthenticationFailed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, password_hash FROM api_users "
+            "WHERE username = %s AND disabled_at IS NULL",
+            (username,),
+        )
+        row = cur.fetchone()
+    if row is None or not verify_password(password, row[1]):
+        raise AuthenticationFailed("invalid username or password")
+    return issue_token(conn, row[0])
+
+
+def whoami(conn: psycopg.Connection, token: str) -> AuthenticatedUser:
+    """Look up the user behind a token. Raises InvalidToken on failure."""
+    user = verify_token(conn, token)
+    if user is None:
+        raise InvalidToken("token is invalid, expired, or revoked")
+    return user
+
+
+def logout(conn: psycopg.Connection, token: str) -> None:
+    """Revoke a single token. Idempotent — bogus tokens do not raise."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM api_tokens WHERE token_sha256 = %s", (hash_token(token),))
+
+
+def refresh_token(conn: psycopg.Connection, token: str) -> tuple[str, datetime]:
+    """Issue a new token and revoke the presenting one atomically.
+
+    Both writes happen inside whatever transaction the caller is already in,
+    so a commit failure leaves both old and new state intact.
+    """
+    user = verify_token(conn, token)
+    if user is None:
+        raise InvalidToken("token is invalid, expired, or revoked")
+    new_token, expires_at = issue_token(conn, user.id)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM api_tokens WHERE token_sha256 = %s", (hash_token(token),))
+    return new_token, expires_at

@@ -184,9 +184,8 @@ def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch
     for sha256_bytes, text in rows:
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT chunk_blob")
-        try:
-            specs = chunk_attachment_text(sha256_bytes, text, cfg)
-            with conn.cursor() as cur:
+            try:
+                specs = chunk_attachment_text(sha256_bytes, text, cfg)
                 for spec in specs:
                     cur.execute(
                         "INSERT INTO attachment_chunks"
@@ -196,14 +195,13 @@ def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch
                         (sha256_bytes, spec.chunk_idx, spec.text, spec.token_count),
                     )
                 cur.execute("RELEASE SAVEPOINT chunk_blob")
-        except Exception as exc:  # noqa: BLE001 — poison-pill isolation
-            with conn.cursor() as cur:
+            except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT chunk_blob")
-            log.warning(
-                "chunking failed for attachment blob %s: %s",
-                sha256_bytes.hex() if isinstance(sha256_bytes, (bytes, bytearray)) else sha256_bytes,
-                exc,
-            )
+                log.warning(
+                    "chunking failed for attachment blob %s: %s",
+                    sha256_bytes.hex() if isinstance(sha256_bytes, (bytes, bytearray)) else sha256_bytes,
+                    exc,
+                )
     conn.commit()
     return len(rows)
 

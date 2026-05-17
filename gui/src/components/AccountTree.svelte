@@ -6,6 +6,7 @@
    * Set; selection lives in the `mail` store so changes drive the message list.
    */
   import { mail } from "../lib/stores/mail.svelte";
+  import { search } from "../lib/stores/search.svelte";
 
   let expanded: Set<string> = $state(new Set());
   // Plain (non-reactive) Set: tracks accounts whose first-ever folder load is
@@ -13,8 +14,10 @@
   // already-flipped `expanded` and collapse the tree before folders arrive.
   const expansionsInFlight = new Set<string>();
 
-  function selectAll(): void {
+  async function selectAll(): Promise<void> {
     mail.setSelection({ kind: "all" });
+    search.setFilters({ ...search.snapshot.filters, accountIds: [], folderIds: [] });
+    await search.submit();
   }
 
   async function selectAccount(accountId: string): Promise<void> {
@@ -35,10 +38,14 @@
     } finally {
       expansionsInFlight.delete(accountId);
     }
+    search.setFilters({ ...search.snapshot.filters, accountIds: [accountId], folderIds: [] });
+    await search.submit();
   }
 
-  function selectFolder(accountId: string, folderId: string): void {
+  async function selectFolder(accountId: string, folderId: string): Promise<void> {
     mail.setSelection({ kind: "folder", accountId, folderId });
+    search.setFilters({ ...search.snapshot.filters, accountIds: [accountId], folderIds: [folderId] });
+    await search.submit();
   }
 
   function isSelected(accountId: string | null, folderId: string | null): boolean {

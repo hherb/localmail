@@ -98,24 +98,59 @@ class SearchConfig(BaseModel):
     rewriter_model: str = "qwen2.5:3b"
     rewriter_timeout_s: float = 10.0
 
-    # --- attachment extraction (Phase 2) ---
-    extractor_backend: Literal["docling", "lightweight"] = "docling"
-    extractor_max_file_size_mb: int = 100
-    extractor_per_blob_timeout_s: int = 300
-    extractor_ocr_languages: list[str] = Field(
-        default_factory=lambda: ["eng", "deu", "spa", "nor", "jpn"]
-    )
-
-    # --- workers ---
+    # --- Phase 1 embed worker ---
+    # Controls the background thread that chunks messages and writes embeddings.
     run_embed_worker: bool = True
     embed_worker_batch_size: int = 100
     embed_worker_poll_interval_s: float = 5.0
     embed_worker_max_chunk_retries: int = 3
 
+    # --- Phase 2: extraction worker ---
+    # Controls the background thread that extracts text from attachment blobs and
+    # writes the results to attachment_text for Arm 4 retrieval.
     run_extract_worker: bool = True
-    extract_worker_batch_size: int = 4
-    extract_worker_poll_interval_s: float = 30.0
-    extract_worker_max_blob_retries: int = 2
+    extract_worker_poll_interval_s: int = 30
+    extract_worker_batch_size: int = 20
+    extract_worker_max_retries: int = 3
+
+    # --- Phase 2: extractor policy ---
+    # Allowlists control which blobs are eligible for text extraction; blobs
+    # outside these sets are silently skipped rather than attempted and failed.
+    extractor_mime_allowlist: list[str] = Field(
+        default_factory=lambda: [
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.oasis.opendocument.text",
+            "application/rtf",
+            "text/plain",
+            "text/markdown",
+            "text/html",
+            "text/csv",
+            "text/calendar",
+        ]
+    )
+    extractor_extension_allowlist: list[str] = Field(
+        default_factory=lambda: [
+            ".pdf", ".docx", ".xlsx", ".pptx", ".odt", ".rtf",
+            ".txt", ".md", ".html", ".htm", ".csv", ".ics",
+        ]
+    )
+    extractor_max_blob_bytes: int = 50 * 1024 * 1024
+    extractor_max_extracted_chars: int = 1_000_000
+    extractor_docling_max_pages: int = 200
+    extractor_ocr_languages: list[str] = Field(default_factory=lambda: ["en"])
+
+    # --- attachment extraction backend (Phase 2) ---
+    extractor_backend: Literal["docling", "lightweight"] = "docling"
+    extractor_max_file_size_mb: int = 100
+    extractor_per_blob_timeout_s: int = 300
+
+    # --- Phase 2: Arm 4 ---
+    # arm4_fanout_cap limits how many blob rows Arm 4 fetches per query so that
+    # a single message with many attachments cannot dominate the result pool.
+    arm4_fanout_cap: int = 10
 
     # --- index build ---
     index_build_maintenance_work_mem_mb: int = 2048

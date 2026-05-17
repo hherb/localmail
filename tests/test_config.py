@@ -119,3 +119,45 @@ def test_search_config_overrides_via_dict():
     assert cfg.embedding_backend == "ollama"
     assert cfg.candidates_per_arm == 100
     assert cfg.bm25_field_boosts["subject"] == 5.0
+
+
+def test_search_config_phase2_defaults() -> None:
+    """Verify all Phase 2 SearchConfig fields exist and carry the correct defaults."""
+    from localmail.config import SearchConfig
+    cfg = SearchConfig()
+
+    # Extraction worker
+    assert cfg.run_extract_worker is True
+    assert cfg.extract_worker_poll_interval_s == 30
+    assert cfg.extract_worker_batch_size == 20
+    assert cfg.extract_worker_max_retries == 3
+
+    # Extractor policy
+    assert "application/pdf" in cfg.extractor_mime_allowlist
+    assert "text/calendar" in cfg.extractor_mime_allowlist
+    assert ".pdf" in cfg.extractor_extension_allowlist
+    assert ".ics" in cfg.extractor_extension_allowlist
+    assert cfg.extractor_max_blob_bytes == 50 * 1024 * 1024
+    assert cfg.extractor_max_extracted_chars == 1_000_000
+    assert cfg.extractor_docling_max_pages == 200
+    assert cfg.extractor_ocr_languages == ["en"]
+
+    # Arm 4
+    assert cfg.arm4_fanout_cap == 10
+
+
+def test_search_config_phase2_custom_overrides() -> None:
+    """Pydantic accepts overrides for the Phase 2 fields with correct types."""
+    from localmail.config import SearchConfig
+    cfg = SearchConfig(
+        run_extract_worker=False,
+        extract_worker_batch_size=100,
+        extractor_max_blob_bytes=10 * 1024 * 1024,
+        extractor_ocr_languages=["en", "de", "ja"],
+        arm4_fanout_cap=25,
+    )
+    assert cfg.run_extract_worker is False
+    assert cfg.extract_worker_batch_size == 100
+    assert cfg.extractor_max_blob_bytes == 10 * 1024 * 1024
+    assert cfg.extractor_ocr_languages == ["en", "de", "ja"]
+    assert cfg.arm4_fanout_cap == 25

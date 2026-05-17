@@ -229,7 +229,7 @@ def arm_vector_attachment_chunks(
     # Fetch 3x the requested limit of chunks before fan-out so that after
     # expanding each chunk to its carrying messages and applying the per-chunk
     # cap, there are still enough candidates to fill the output budget.
-    chunk_limit = max(limit, 1) * 3
+    chunk_limit = max(limit, 1) * cfg.arm4_chunk_prefetch_multiplier
 
     sql = f"""
     WITH ranked_chunks AS (

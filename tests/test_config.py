@@ -146,6 +146,16 @@ def test_search_config_phase2_defaults() -> None:
     assert cfg.arm4_fanout_cap == 10
 
 
+def test_search_config_embed_worker_chunk_batch_size_default() -> None:
+    cfg = SearchConfig()
+    assert cfg.embed_worker_chunk_batch_size == 50
+
+
+def test_search_config_arm4_chunk_prefetch_default() -> None:
+    cfg = SearchConfig()
+    assert cfg.arm4_chunk_prefetch_multiplier == 3
+
+
 def test_search_config_phase2_custom_overrides() -> None:
     """Pydantic accepts overrides for the Phase 2 fields with correct types."""
     cfg = SearchConfig(

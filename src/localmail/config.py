@@ -104,6 +104,10 @@ class SearchConfig(BaseModel):
     embed_worker_batch_size: int = 100
     embed_worker_poll_interval_s: float = 5.0
     embed_worker_max_chunk_retries: int = 3
+    # Floor for the chunk-pass batch so that embed_worker_batch_size (the
+    # embedding batch) can be tuned smaller without accidentally starving the
+    # chunking pass — chunking is cheap relative to embedding.
+    embed_worker_chunk_batch_size: int = 50
 
     # --- Phase 2: extraction worker ---
     # Controls the background thread that extracts text from attachment blobs and
@@ -154,6 +158,11 @@ class SearchConfig(BaseModel):
     # arm4_fanout_cap limits how many blob rows Arm 4 fetches per query so that
     # a single message with many attachments cannot dominate the result pool.
     arm4_fanout_cap: int = 10
+    # arm4_chunk_prefetch_multiplier: how many times the per-message limit to
+    # fetch from attachment_chunks before fan-out to messages. A multiplier > 1
+    # gives headroom so that after fan-out and capping, there are still enough
+    # distinct message candidates to fill the output budget.
+    arm4_chunk_prefetch_multiplier: int = 3
 
     # --- index build ---
     index_build_maintenance_work_mem_mb: int = 2048

@@ -353,7 +353,7 @@ def run_embed_worker_once(
     see the WARNING and intervene; the worker doesn't silently poison every
     queued chunk.
     """
-    chunk_batch = max(cfg.embed_worker_batch_size, 50)
+    chunk_batch = max(cfg.embed_worker_batch_size, cfg.embed_worker_chunk_batch_size)
     _chunk_messages_lazily(conn, cfg, batch=chunk_batch)
     _chunk_attachments_lazily(conn, cfg, batch=chunk_batch)
     embedded_msg = _embed_table(conn, cfg, backend, "message_chunks")

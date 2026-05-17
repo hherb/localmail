@@ -291,7 +291,8 @@ class Searcher:
             if h.best_chunk_table == "attachment_chunks" and h.best_chunk_id in att_chunks:
                 snip_text, sha_bytes = att_chunks[h.best_chunk_id]
                 attachment_sha256_hex = sha_bytes.hex()
-            elif h.best_chunk_id and h.best_chunk_id in msg_chunks:
+            elif (h.best_chunk_table != "attachment_chunks"
+                  and h.best_chunk_id and h.best_chunk_id in msg_chunks):
                 snip_text, chunk_kind = msg_chunks[h.best_chunk_id]
             else:
                 snip_text = m.get("body_text") or ""
@@ -377,23 +378,35 @@ class Searcher:
     def continue_page(self, search_token: str, page: int) -> SearchPage:
         """Serve subsequent pages from the cached pool. Raises if past pool's end.
 
-        Opens a short-lived connection only when the page slice contains attachment
-        hits that need filename resolution; otherwise returns immediately from cache.
+        Zero DB round-trips when the page slice contains no attachment hits.
+        Opens a short-lived connection only when filename resolution is needed
+        (i.e. at least one hit in the hydrated pool has best_chunk_table ==
+        'attachment_chunks').
         """
         import math
         entry = self._cache.get(search_token)  # may raise CacheMissError
         page_size = entry["page_size"]
-        pool_size = len(entry["hydrated"])
+        hydrated = entry["hydrated"]
+        pool_size = len(hydrated)
         max_page = max(1, math.ceil(pool_size / page_size))
         if page < 1 or page > max_page:
             raise PageOutOfPoolError(
                 f"page {page} out of pool (pool_size={pool_size}, page_size={page_size}); "
                 "call grow_pool to widen the candidate pool"
             )
-        with self._pool.connection() as conn:
+        needs_filename = any(
+            item["fused"].best_chunk_table == "attachment_chunks" for item in hydrated
+        )
+        if needs_filename:
+            with self._pool.connection() as conn:
+                results = self._build_results(
+                    hydrated, entry["parsed"], entry["scores"], page, page_size,
+                    conn=conn,
+                )
+        else:
             results = self._build_results(
-                entry["hydrated"], entry["parsed"], entry["scores"], page, page_size,
-                conn=conn,
+                hydrated, entry["parsed"], entry["scores"], page, page_size,
+                conn=None,
             )
         return SearchPage(
             results=results, page=page, page_size=page_size, pool_size=pool_size,
@@ -418,7 +431,13 @@ class Searcher:
 
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
                             rerank_pool_size, use_cache):
-        """Variant of search() that takes an already-parsed query."""
+        """Variant of search() that takes an already-parsed query.
+
+        Connection scope: retrieval + hydrate inside one 'with' block. The
+        connection is released before the reranker runs (the ML pass can be
+        slow). A second short-lived connection opens only when the page needs
+        attachment filename resolution.
+        """
         t0 = time.monotonic()
         timing: dict[str, float] = {"parse": 0.0}
         with self._pool.connection() as conn:
@@ -427,16 +446,25 @@ class Searcher:
             fused = self._retrieve_pool(conn, parsed, candidates_per_arm, rerank_pool_size)
             timing["retrieve"] = (time.monotonic() - t) * 1000
             hydrated = self._hydrate(conn, fused)
-            t = time.monotonic()
-            if self._reranker and hydrated:
-                cap = self._cfg.rerank_max_chars
-                snippets = [item["snippet_source_text"][:cap] for item in hydrated]
-                scores = self._reranker.rerank(parsed.rewritten_text or parsed.free_text, snippets)
-            else:
-                scores = [item["fused"].rrf_score for item in hydrated]
-            timing["rerank"] = (time.monotonic() - t) * 1000
-            results = self._build_results(hydrated, parsed, scores, page=1, page_size=page_size,
-                                          conn=conn)
+        # Connection released. Reranker runs without holding a pool connection.
+        t = time.monotonic()
+        if self._reranker and hydrated:
+            cap = self._cfg.rerank_max_chars
+            snippets = [item["snippet_source_text"][:cap] for item in hydrated]
+            scores = self._reranker.rerank(parsed.rewritten_text or parsed.free_text, snippets)
+        else:
+            scores = [item["fused"].rrf_score for item in hydrated]
+        timing["rerank"] = (time.monotonic() - t) * 1000
+        needs_filename = any(
+            item["fused"].best_chunk_table == "attachment_chunks" for item in hydrated
+        )
+        if needs_filename:
+            with self._pool.connection() as conn:
+                results = self._build_results(hydrated, parsed, scores, page=1,
+                                              page_size=page_size, conn=conn)
+        else:
+            results = self._build_results(hydrated, parsed, scores, page=1,
+                                          page_size=page_size, conn=None)
         timing["total"] = (time.monotonic() - t0) * 1000
         token = uuid.uuid4().hex[:16] if use_cache else None
         if token:
@@ -488,23 +516,31 @@ class Searcher:
             fused = self._retrieve_pool(conn, parsed, cpa, rps)
             timing["retrieve"] = (time.monotonic() - t) * 1000
             hydrated = self._hydrate(conn, fused)
+        # Connection released. Reranker runs without holding a pool connection.
+        t = time.monotonic()
+        reranker = None if disable_rerank else self._reranker
+        if reranker is not None and hydrated:
+            snippets_for_rerank = [
+                item["snippet_source_text"][: cfg.rerank_max_chars]
+                for item in hydrated
+            ]
+            scores = reranker.rerank(
+                parsed.rewritten_text or parsed.free_text, snippets_for_rerank,
+            )
+        else:
+            scores = [item["fused"].rrf_score for item in hydrated]
+        timing["rerank"] = (time.monotonic() - t) * 1000
 
-            t = time.monotonic()
-            reranker = None if disable_rerank else self._reranker
-            if reranker is not None and hydrated:
-                snippets_for_rerank = [
-                    item["snippet_source_text"][: cfg.rerank_max_chars]
-                    for item in hydrated
-                ]
-                scores = reranker.rerank(
-                    parsed.rewritten_text or parsed.free_text, snippets_for_rerank,
-                )
-            else:
-                scores = [item["fused"].rrf_score for item in hydrated]
-            timing["rerank"] = (time.monotonic() - t) * 1000
-
+        needs_filename = any(
+            item["fused"].best_chunk_table == "attachment_chunks" for item in hydrated
+        )
+        if needs_filename:
+            with self._pool.connection() as conn:
+                results = self._build_results(hydrated, parsed, scores, page=1,
+                                              page_size=effective_page_size, conn=conn)
+        else:
             results = self._build_results(hydrated, parsed, scores, page=1,
-                                          page_size=effective_page_size, conn=conn)
+                                          page_size=effective_page_size, conn=None)
         timing["total"] = (time.monotonic() - t0) * 1000
 
         token: str | None = None

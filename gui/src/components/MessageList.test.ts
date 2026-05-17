@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, fireEvent } from "@testing-library/svelte";
+import { render, fireEvent, screen } from "@testing-library/svelte";
 
 const mocks = vi.hoisted(() => ({
   listAccounts: vi.fn(),
@@ -12,9 +12,12 @@ vi.mock("../lib/tauri", () => mocks);
 
 import MessageList from "./MessageList.svelte";
 import { mail } from "../lib/stores/mail.svelte";
+import { search } from "../lib/stores/search.svelte";
+import { __setSearchResultsForTest } from "../lib/stores/search.svelte";
 
 beforeEach(() => {
   mail.reset();
+  search.reset();
   vi.clearAllMocks();
 });
 
@@ -115,5 +118,40 @@ describe("MessageList", () => {
     const { getByText } = render(MessageList);
     await fireEvent.click(getByText("click me"));
     expect(mocks.getMessage).toHaveBeenCalledWith("42");
+  });
+});
+
+describe("MessageList with search results", () => {
+  it("renders search.results when present, with snippet text", () => {
+    search.setQuery("hello");
+    __setSearchResultsForTest(
+      [
+        {
+          message_id: "1",
+          account: { id: "1", name: "gmail" },
+          folder: null,
+          subject: "Re: school",
+          from: { name: "Anna", address: "a@x" },
+          to: [],
+          date: null,
+          snippet_html: "…leaves at <mark>7:30</mark>…",
+          has_attachments: false,
+          score: 0.5,
+          matched_arms: ["bm25"],
+        },
+      ],
+      42.0,
+    );
+    render(MessageList);
+    expect(screen.getByText(/Re: school/)).toBeTruthy();
+    expect(screen.getByText(/Search took/)).toBeTruthy();
+    expect(screen.getByText(/7:30/).tagName.toLowerCase()).toBe("mark");
+  });
+
+  it("renders 'no matches' when results is empty and a query was submitted", () => {
+    search.setQuery("xyz");
+    __setSearchResultsForTest([], 5.0);
+    render(MessageList);
+    expect(screen.getByText(/no matches/i)).toBeTruthy();
   });
 });

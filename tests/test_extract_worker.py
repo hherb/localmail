@@ -139,6 +139,49 @@ def test_extract_worker_records_failure_on_corrupt_pdf(
     assert row[0] in ("lightweight", "docling")
 
 
+def test_extract_worker_batch_isolation_on_unexpected_exception(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """When _process_blob raises unexpectedly on blob A, blob B in the
+    same batch still gets processed. Verifies SAVEPOINT discipline."""
+    import localmail.search.extract_worker as ew_mod
+
+    sha_a = _seed_blob(db_conn, b"poison", "text/plain", tmp_path, "a.txt")
+    sha_b = _seed_blob(db_conn, b"good text", "text/plain", tmp_path, "b.txt")
+    cfg = SearchConfig()
+
+    real_process = ew_mod._process_blob
+
+    def _maybe_poison(conn, sha256, *args, **kwargs):
+        if sha256 == sha_a:
+            raise RuntimeError("synthetic poison")
+        return real_process(conn, sha256, *args, **kwargs)
+
+    monkeypatch.setattr(ew_mod, "_process_blob", _maybe_poison)
+
+    ew_mod.run_extract_worker_once(db_conn, cfg)
+
+    # Blob A should land in failed_extractions with extractor="unexpected".
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extractor FROM failed_extractions WHERE sha256 = %s",
+            (sha_a,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "unexpected"
+
+    # Blob B should still have an attachment_text row.
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s",
+            (sha_b,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert "good text" in row[0]
+
+
 def test_extract_worker_excludes_blobs_at_max_retries(
     db_conn, tmp_path
 ) -> None:

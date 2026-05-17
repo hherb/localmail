@@ -120,8 +120,7 @@ def _record_failure(
     On conflict (same sha256 already failed previously) the row is updated
     with the latest error details and ``retry_count`` is incremented by 1.
 
-    The caller is responsible for wrapping this in a nested SAVEPOINT so that
-    a failure here cannot abort the outer per-blob transaction.
+    Must be called inside a nested SAVEPOINT (see ``_record_failure_safely``).
 
     Args:
         conn: Active psycopg connection with an open transaction.
@@ -161,6 +160,34 @@ def _record_failure(
                 ),
             ),
         )
+
+
+def _record_failure_safely(
+    conn: psycopg.Connection,
+    sha256: bytes,
+    extractor_name: str,
+    exc: BaseException,
+) -> bool:
+    """Wrap ``_record_failure`` in a nested SAVEPOINT.
+
+    Returns True on success, False if even the failure-recording itself
+    failed (in which case a single ``_LOG.exception`` line is the only
+    evidence of the failure).
+    """
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT extract_fail_log")
+    try:
+        _record_failure(conn, sha256, extractor_name, exc)
+        with conn.cursor() as cur:
+            cur.execute("RELEASE SAVEPOINT extract_fail_log")
+        return True
+    except Exception:  # noqa: BLE001
+        with conn.cursor() as cur:
+            cur.execute("ROLLBACK TO SAVEPOINT extract_fail_log")
+        _LOG.exception(
+            "failed to record extraction failure for blob %s", sha256.hex()
+        )
+        return False
 
 
 def _insert_attachment_text(
@@ -256,7 +283,7 @@ def _process_blob(
             dl_text = dl.extract(blob_path, mime_type)
         except Exception as exc:
             # Docling raised → record docling failure.
-            _record_failure(conn, sha256, dl.name, exc)
+            _record_failure_safely(conn, sha256, dl.name, exc)
             return False
 
         if dl_text.text:
@@ -267,7 +294,7 @@ def _process_blob(
         # Docling returned empty.
         if lw_raised is not None:
             # Lightweight had raised earlier — record lightweight failure.
-            _record_failure(conn, sha256, lw.name, lw_raised)
+            _record_failure_safely(conn, sha256, lw.name, lw_raised)
             return False
 
         # Both extractors returned empty — insert lightweight-empty sentinel.
@@ -286,7 +313,7 @@ def _process_blob(
 
     if lw_raised is not None:
         # Lightweight raised — record failure (no fallback available).
-        _record_failure(conn, sha256, lw.name, lw_raised)
+        _record_failure_safely(conn, sha256, lw.name, lw_raised)
         return False
 
     # Lightweight returned empty — insert sentinel.
@@ -357,19 +384,8 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
         except Exception as exc:  # noqa: BLE001 — outer safety net
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT extract_blob")
-                cur.execute("SAVEPOINT extract_fail_log")
-            try:
-                _record_failure(conn, sha256, lw.name, exc)
-                with conn.cursor() as cur:
-                    cur.execute("RELEASE SAVEPOINT extract_fail_log")
+            if _record_failure_safely(conn, sha256, "unexpected", exc):
                 touched += 1
-            except Exception:  # noqa: BLE001 — nested safety net
-                with conn.cursor() as cur:
-                    cur.execute("ROLLBACK TO SAVEPOINT extract_fail_log")
-                _LOG.exception(
-                    "failed to record extraction failure for blob %s",
-                    sha256.hex(),
-                )
 
     conn.commit()
     return touched

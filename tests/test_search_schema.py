@@ -143,3 +143,53 @@ def test_fts_v2_finds_subject_match(db_conn) -> None:
         )
         row = cur.fetchone()
     assert row is not None, "fts_v2 generated column did not match 'Berlin' in subject"
+
+
+def test_attachment_text_and_chunks_tables_exist(db_conn):
+    """Verify migration 0011 created attachment_text and attachment_chunks with correct schema.
+
+    Checks column names, nullability, unique constraint on (sha256, chunk_idx),
+    and the partial pending index on attachment_chunks.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name, is_nullable, data_type "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'attachment_text' ORDER BY ordinal_position"
+        )
+        cols = cur.fetchall()
+    names = [c[0] for c in cols]
+    assert names == ["sha256", "extractor", "extracted_text", "page_count", "extracted_at"]
+
+    nullable = {c[0]: c[1] for c in cols}
+    assert nullable["extracted_text"] == "NO"
+    assert nullable["page_count"] == "YES"
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'attachment_chunks' ORDER BY ordinal_position"
+        )
+        names = [r[0] for r in cur.fetchall()]
+    assert names == [
+        "id", "sha256", "chunk_idx", "text", "token_count", "embedding_v1", "embedded_at"
+    ]
+
+    # Unique (sha256, chunk_idx)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_indexes "
+            "WHERE tablename = 'attachment_chunks' "
+            "AND indexdef ILIKE '%UNIQUE%(sha256, chunk_idx)%'"
+        )
+        assert cur.fetchone() is not None
+
+    # Partial pending index
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'attachment_chunks_pending_idx'"
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert "WHERE (embedding_v1 IS NULL)" in row[0]

@@ -72,7 +72,9 @@ def db_conn(db_dsn):
             cur.execute(
                 "TRUNCATE accounts, mailboxes, messages, message_labels, "
                 "attachment_blobs, failed_messages, message_chunks, "
-                "failed_embeddings, embedding_models RESTART IDENTITY CASCADE"
+                "failed_embeddings, embedding_models, failed_chunkings, "
+                "attachment_text, attachment_chunks "
+                "RESTART IDENTITY CASCADE"
             )
         conn.commit()
         yield conn

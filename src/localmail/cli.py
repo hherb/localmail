@@ -576,5 +576,26 @@ def list_api_users(ctx: click.Context) -> None:
         click.echo(f"{username}{marker}")
 
 
+@main.command("rotate-tls")
+@click.option("--cert", "cert_path", required=True, type=click.Path(path_type=Path))
+@click.option("--key", "key_path", required=True, type=click.Path(path_type=Path))
+@click.option("--hostname", default="localhost", show_default=True)
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite existing cert/key without prompting.")
+def rotate_tls(cert_path: Path, key_path: Path, hostname: str, force: bool) -> None:
+    """Generate (or regenerate with --force) a self-signed TLS cert + key."""
+    from localmail.serve.tls import cert_fingerprint_sha256_hex, ensure_self_signed_cert
+    if force:
+        if cert_path.exists():
+            cert_path.unlink()
+        if key_path.exists():
+            key_path.unlink()
+    ensure_self_signed_cert(cert_path=cert_path, key_path=key_path, hostname=hostname)
+    fp = cert_fingerprint_sha256_hex(cert_path=cert_path)
+    click.echo(f"cert: {cert_path}")
+    click.echo(f"key:  {key_path}")
+    click.echo(f"sha256 fingerprint: {fp}")
+
+
 if __name__ == "__main__":
     main()

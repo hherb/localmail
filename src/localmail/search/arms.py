@@ -30,6 +30,9 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
     if filters.accounts:
         parts.append("m.account_id = ANY(%s)")
         params.append(filters.accounts)
+    if filters.account_ids:
+        parts.append("m.account_id = ANY(%s)")
+        params.append(filters.account_ids)
     if filters.from_substr:
         parts.append("(m.from_addr ILIKE %s OR m.from_name ILIKE %s)")
         like = f"%{filters.from_substr}%"
@@ -56,6 +59,13 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
             " WHERE ml.message_id = m.id AND mb.name = ANY(%s))"
         )
         params.append(filters.folders)
+    if filters.folder_ids:
+        # No join to mailboxes needed — we have the PKs directly.
+        parts.append(
+            "EXISTS (SELECT 1 FROM message_labels ml"
+            " WHERE ml.message_id = m.id AND ml.mailbox_id = ANY(%s))"
+        )
+        params.append(filters.folder_ids)
     if filters.label:
         parts.append(
             "EXISTS (SELECT 1 FROM message_labels ml JOIN mailboxes mb ON mb.id = ml.mailbox_id"

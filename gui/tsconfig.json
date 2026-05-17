@@ -15,7 +15,7 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "skipLibCheck": true,
-    "types": ["svelte", "vitest/globals", "@testing-library/jest-dom"]
+    "types": ["svelte", "vitest/globals"]
   },
   "include": ["src/**/*.ts", "src/**/*.svelte"],
   "references": [{ "path": "./tsconfig.node.json" }]

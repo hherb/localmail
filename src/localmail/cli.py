@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -518,6 +519,61 @@ def retry_failed_embeddings(chunk_table):
     finally:
         pool.close()
     click.echo(f"cleared {n} failed_embeddings rows")
+
+
+def _dsn_from_ctx(ctx: click.Context) -> str:
+    """DSN resolver: env override wins over config (useful for tests)."""
+    override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
+    if override:
+        return override
+    cfg = load_config(ctx.obj["config_path"])
+    return cfg.database.dsn
+
+
+@main.command("add-api-user")
+@click.argument("username")
+@click.option("--password", "password_opt", default=None,
+              help="If omitted, prompt with hidden input.")
+@click.pass_context
+def add_api_user(ctx: click.Context, username: str, password_opt: str | None) -> None:
+    """Create a new API user. Password is hashed with argon2id."""
+    from localmail.api.auth import create_user
+    password = password_opt or click.prompt("Password", hide_input=True, confirmation_prompt=True)
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        try:
+            uid = create_user(conn, username, password)
+            conn.commit()
+        except psycopg.errors.UniqueViolation:
+            raise click.ClickException(f"user {username!r} already exists")
+    click.echo(f"created user {username!r} (id={uid})")
+
+
+@main.command("remove-api-user")
+@click.argument("username")
+@click.pass_context
+def remove_api_user(ctx: click.Context, username: str) -> None:
+    """Delete an API user and all its tokens."""
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM api_users WHERE username = %s", (username,))
+        if cur.rowcount == 0:
+            raise click.ClickException(f"no such user: {username!r}")
+        conn.commit()
+    click.echo(f"removed user {username!r}")
+
+
+@main.command("list-api-users")
+@click.pass_context
+def list_api_users(ctx: click.Context) -> None:
+    """List configured API users (and whether each is disabled)."""
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn, conn.cursor() as cur:
+        cur.execute("SELECT username, disabled_at FROM api_users ORDER BY username")
+        rows = cur.fetchall()
+    if not rows:
+        click.echo("(no users)")
+        return
+    for username, disabled_at in rows:
+        marker = " [disabled]" if disabled_at else ""
+        click.echo(f"{username}{marker}")
 
 
 if __name__ == "__main__":

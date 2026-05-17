@@ -51,6 +51,58 @@ After `npm run tauri dev`:
 
 If any of those fail, that's a Sub-plan 1 regression worth fixing before moving on.
 
+## Manual smoke (Sub-plan 2 acceptance)
+
+Requires `localmail serve` running on your machine. Easiest setup:
+
+```bash
+# In a separate terminal, from the localmail repo root:
+cd .claude/worktrees/phase2-hybrid-search   # or wherever your server checkout lives
+unset VIRTUAL_ENV && uv run localmail add-api-user alice         # if alice doesn't exist
+unset VIRTUAL_ENV && uv run localmail serve --bind 127.0.0.1     # listens on https://127.0.0.1:8443
+```
+
+Then from the gui client worktree:
+
+```bash
+cd gui
+npm run tauri dev
+```
+
+Acceptance steps:
+
+1. App opens to **Connect** screen with `https://localhost:8443` pre-filled.
+2. Click "Connect". After ~1s the screen shows the cert SHA-256 fingerprint.
+   The fingerprint should be 64 lowercase hex chars.
+3. Click "Trust this certificate". App moves to **Login** screen.
+4. Enter `alice` / `hunter2` (whatever password you set in step 0 above) and submit.
+   App moves to **Authenticated Shell**.
+5. Header shows `alice` and capability pills: `search`, `attachments`, `attachment_text`
+   light up green; `threading`, `send` are struck-through grey.
+6. Click "Refresh token". UI stays on the same screen; no error.
+7. Click "Log out". App moves back to Login.
+8. Quit the app (Cmd+Q on macOS). Re-launch (`npm run tauri dev` again).
+   App should bypass Connect (pin saved) and go straight to Login (token cleared at logout).
+9. Log in again. Should land on AuthShell as before.
+10. Quit. Re-launch. Should now go straight to AuthShell (token still valid).
+
+If any step fails, capture the offending console output (DevTools → Console) AND the
+output of `npm run tauri dev` from the terminal, then report.
+
+### Inspecting the keyring
+
+After successful login, on macOS:
+
+```bash
+security find-generic-password -s localmail-gui -a server_url -w
+security find-generic-password -s localmail-gui -a username -w
+security find-generic-password -s localmail-gui -a cert_sha256_pin -w
+security find-generic-password -s localmail-gui -a bearer_token -w
+```
+
+These should show your stored values. After logout, only `server_url`, `cert_sha256_pin`
+should remain — `username` and `bearer_token` cleared.
+
 ## Talking to the server
 
 The client expects a `localmail serve` HTTPS endpoint. The connection URL, username, password, and TLS cert pin are stored in the OS keyring — landed in Sub-plan 2 (not in this scaffolding).

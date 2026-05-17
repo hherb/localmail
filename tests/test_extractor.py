@@ -7,6 +7,7 @@ asserts the type contracts and the .supports() allowlist behavior.
 from __future__ import annotations
 
 import dataclasses
+import io
 from pathlib import Path
 
 import pytest
@@ -44,9 +45,6 @@ def test_extractor_protocol_runtime_checkable() -> None:
     a configured class implements the interface."""
     lw = LightweightExtractor()
     assert isinstance(lw, AttachmentExtractor)
-
-
-import io
 
 
 def _build_native_pdf(text: str) -> bytes:

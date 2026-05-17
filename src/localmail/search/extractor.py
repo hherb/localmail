@@ -148,6 +148,10 @@ class LightweightExtractor:
         on encrypted/password-protected PDFs and on irrecoverable parse
         failures.
         """
+        # Logging deferred to extract_worker (Task 13): it catches
+        # ExtractorError, records the blob in failed_extractions, and
+        # emits the log line. Keeping this method silent matches the
+        # Phase 1 chunking.py / embed_worker.py separation of concerns.
         import pypdf
         try:
             reader = pypdf.PdfReader(str(blob_path))

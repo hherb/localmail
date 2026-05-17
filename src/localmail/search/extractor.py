@@ -112,6 +112,15 @@ class LightweightExtractor:
     name = "lightweight"
     version = "1.0"
 
+    def __init__(self, cfg: "SearchConfig | None" = None) -> None:
+        """Construct with an optional SearchConfig.
+
+        If cfg is None, defaults to SearchConfig(). Configs are only
+        read for numeric tunables (e.g. chardet confidence threshold) —
+        extractor behaviour otherwise stays config-agnostic.
+        """
+        self._cfg = cfg if cfg is not None else SearchConfig()
+
     def supports(self, mime_type: str | None, filename: str | None) -> bool:
         """True iff the MIME type or filename extension is allowlisted."""
         if mime_type and mime_type.lower() in _LW_MIME_PREFIXES:
@@ -290,15 +299,17 @@ class LightweightExtractor:
         """
         import chardet
 
-        _CHARDET_CONFIDENCE_MIN = 0.5
-
         raw = blob_path.read_bytes()
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             det = chardet.detect(raw) or {}
             conf = det.get("confidence") or 0.0
-            enc = det.get("encoding") if conf >= _CHARDET_CONFIDENCE_MIN else None
+            enc = (
+                det.get("encoding")
+                if conf >= self._cfg.extractor_chardet_confidence_min
+                else None
+            )
             encoding = enc or "latin-1"
             try:
                 text = raw.decode(encoding, errors="replace")

@@ -141,6 +141,9 @@ class SearchConfig(BaseModel):
     extractor_max_extracted_chars: int = 1_000_000
     extractor_docling_max_pages: int = 200
     extractor_ocr_languages: list[str] = Field(default_factory=lambda: ["en"])
+    # Chardet confidence threshold for text-encoding detection. Below
+    # this, fall back to latin-1 rather than trust a low-confidence guess.
+    extractor_chardet_confidence_min: float = 0.5
 
     # --- Pre-existing placeholder fields, will be consumed by extract_worker.py in Task 13.
     # Not part of the Phase 2 spec field set; kept for forward compatibility.

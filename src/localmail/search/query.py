@@ -25,7 +25,9 @@ class QueryParseError(ValueError):
 class SearchFilters:
     account_names: list[str] = field(default_factory=list)
     accounts: list[int] | None = None  # resolved by Searcher from account_names
+    account_ids: list[int] | None = None  # set directly from the API layer; bypasses name resolution
     folders: list[str] | None = None
+    folder_ids: list[int] | None = None  # mailbox PKs from the API layer
     from_substr: str | None = None
     to_substr: str | None = None
     subject_substr: str | None = None

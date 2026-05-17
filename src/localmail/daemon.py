@@ -93,6 +93,25 @@ class Daemon:
             self.threads.append(t_embed)
             log.info("started embed_worker thread")
 
+        if self.cfg.search.run_extract_worker:
+            import psycopg  # noqa: PLC0415
+            from localmail.search.extract_worker import run_extract_worker  # noqa: PLC0415
+
+            dsn = self._dsn
+            t_extract = threading.Thread(
+                target=run_extract_worker,
+                kwargs={
+                    "conn_factory": lambda: psycopg.connect(dsn),
+                    "cfg": self.cfg.search,
+                    "stop_event": self._stop_event,
+                },
+                name="extract_worker",
+                daemon=True,
+            )
+            t_extract.start()
+            self.threads.append(t_extract)
+            log.info("started extract_worker thread")
+
     def start(self) -> None:
         """Start all worker threads without blocking."""
         self.start_workers()

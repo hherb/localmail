@@ -402,6 +402,36 @@ def _make_backend(cfg):
     return FastEmbedBackend(cfg.search)
 
 
+@main.command("extract-backfill")
+@click.option("--no-progress", is_flag=True)
+def extract_backfill(no_progress: bool) -> None:
+    """Drain the attachment-extraction queue in the foreground; exit when empty.
+
+    Account-agnostic — extracts text from all eligible blobs whose MIME type or
+    file extension matches the configured allowlists.
+    """
+    from localmail.db import open_pool
+    from localmail.search.extract_worker import run_extract_worker_once
+    cfg = load_config()
+    pool = open_pool(_dsn())
+    try:
+        total = 0
+        while True:
+            with pool.connection() as conn:
+                touched = run_extract_worker_once(conn, cfg.search)
+            if touched == 0:
+                break
+            total += touched
+            if not no_progress:
+                click.echo(
+                    f"extracted {touched} blobs (total {total})",
+                    err=True,
+                )
+    finally:
+        pool.close()
+    click.echo(f"done: {total} blobs processed")
+
+
 @main.command("embed-backfill")
 @click.option("--no-progress", is_flag=True)
 def embed_backfill(no_progress):
@@ -432,8 +462,13 @@ def embed_backfill(no_progress):
 @main.command("search-status")
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def search_status(fmt):
-    """Show progress: how many chunks remain to be embedded, failures, etc."""
+    """Show progress: how many chunks remain to be embedded, failures, etc.
+
+    Reports message embedding status (Phase 1) and attachment extraction /
+    embedding status (Phase 2), plus failure counts for both subsystems.
+    """
     from localmail.db import open_pool
+    cfg = load_config()
     pool = open_pool(_dsn())
     try:
         with pool.connection() as conn, conn.cursor() as cur:
@@ -453,6 +488,41 @@ def search_status(fmt):
             row = cur.fetchone()
             assert row is not None
             failed = row[0]
+            cur.execute(
+                "SELECT count(*) FROM attachment_blobs b "
+                "WHERE b.mime_type = ANY(%s) "
+                "   OR lower(substring(b.path FROM '\\.[^.]+$')) = ANY(%s)",
+                (
+                    cfg.search.extractor_mime_allowlist,
+                    cfg.search.extractor_extension_allowlist,
+                ),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            blobs_eligible = row[0]
+            cur.execute(
+                "SELECT count(*) FROM attachment_text "
+                "WHERE extracted_text <> ''"
+            )
+            row = cur.fetchone()
+            assert row is not None
+            blobs_extracted = row[0]
+            blobs_pending = max(0, blobs_eligible - blobs_extracted)
+            cur.execute("SELECT count(*) FROM attachment_chunks")
+            row = cur.fetchone()
+            assert row is not None
+            attachment_chunks_total = row[0]
+            cur.execute(
+                "SELECT count(*) FROM attachment_chunks "
+                "WHERE embedding_v1 IS NOT NULL"
+            )
+            row = cur.fetchone()
+            assert row is not None
+            attachment_chunks_embedded = row[0]
+            cur.execute("SELECT count(*) FROM failed_extractions")
+            row = cur.fetchone()
+            assert row is not None
+            failed_extractions_count = row[0]
     finally:
         pool.close()
     payload = {
@@ -461,6 +531,12 @@ def search_status(fmt):
         "chunks_embedded": chunks_embedded,
         "chunks_pending": chunks_total - chunks_embedded,
         "failed_embeddings": failed,
+        "blobs_eligible": blobs_eligible,
+        "blobs_extracted": blobs_extracted,
+        "blobs_pending": blobs_pending,
+        "attachment_chunks_total": attachment_chunks_total,
+        "attachment_chunks_embedded": attachment_chunks_embedded,
+        "failed_extractions": failed_extractions_count,
     }
     if fmt == "json":
         click.echo(_json.dumps(payload))
@@ -668,6 +744,78 @@ def serve_cmd(
         app, host=bind, port=port, log_level="info",
         ssl_certfile=str(cert_path), ssl_keyfile=str(key_path),
     )
+
+
+@main.command("list-failed-extractions")
+@click.option("--limit", type=int, default=50)
+@click.option(
+    "--format", "fmt",
+    type=click.Choice(["text", "json"]), default="text",
+)
+def list_failed_extractions(limit: int, fmt: str) -> None:
+    """Show recent failed_extractions rows.
+
+    Each row represents a blob for which text extraction failed.  Use
+    ``retry-failed-extractions`` to clear rows so the worker re-attempts them.
+    """
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT encode(sha256,'hex'), extractor, error_class, "
+                "error_message, retry_count, failed_at, last_retry_at "
+                "FROM failed_extractions "
+                "ORDER BY failed_at DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.close()
+    cols = ["sha256_hex", "extractor", "error_class", "error_message",
+            "retry_count", "failed_at", "last_retry_at"]
+    payload = [dict(zip(cols, r, strict=True)) for r in rows]
+    if fmt == "json":
+        click.echo(_json.dumps(payload, default=str))
+    else:
+        for p in payload:
+            click.echo(
+                f"{p['sha256_hex'][:12]}  {p['extractor']}  "
+                f"{p['error_class']}  retries={p['retry_count']}  "
+                f"{p['failed_at']}"
+            )
+            click.echo(f"    {p['error_message']}")
+
+
+@main.command("retry-failed-extractions")
+@click.option(
+    "--sha256", "sha256_hex", default=None,
+    help="Restrict to one blob (full hex sha256); clears all rows when omitted.",
+)
+def retry_failed_extractions(sha256_hex: str | None) -> None:
+    """Clear failed_extractions rows so the extract worker re-attempts them.
+
+    Without ``--sha256`` every failed_extractions row is removed so the
+    extract worker will attempt all previously-failed blobs on its next
+    sweep.  With ``--sha256 HEX`` only the single matching row is removed.
+    """
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            if sha256_hex:
+                cur.execute(
+                    "DELETE FROM failed_extractions "
+                    "WHERE sha256 = decode(%s,'hex')",
+                    (sha256_hex,),
+                )
+            else:
+                cur.execute("DELETE FROM failed_extractions")
+            n = cur.rowcount
+        conn.commit()
+    finally:
+        pool.close()
+    click.echo(f"cleared {n} failed_extractions rows")
 
 
 if __name__ == "__main__":

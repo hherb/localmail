@@ -140,9 +140,20 @@ def test_search_config_phase2_defaults() -> None:
     assert cfg.extractor_max_extracted_chars == 1_000_000
     assert cfg.extractor_docling_max_pages == 200
     assert cfg.extractor_ocr_languages == ["en"]
+    assert cfg.extractor_chardet_confidence_min == 0.5
 
     # Arm 4
     assert cfg.arm4_fanout_cap == 10
+
+
+def test_search_config_embed_worker_chunk_batch_size_default() -> None:
+    cfg = SearchConfig()
+    assert cfg.embed_worker_chunk_batch_size == 50
+
+
+def test_search_config_arm4_chunk_prefetch_default() -> None:
+    cfg = SearchConfig()
+    assert cfg.arm4_chunk_prefetch_multiplier == 3
 
 
 def test_search_config_phase2_custom_overrides() -> None:

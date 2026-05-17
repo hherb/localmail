@@ -43,3 +43,80 @@ def test_create_searcher_returns_searcher(db_dsn):
     searcher = create_searcher(cfg=cfg, embeddings=_StubEmbedder(), reranker=None)
     assert isinstance(searcher, Searcher)
     searcher._pool.close()
+
+
+def test_searcher_returns_attachment_snippet(db_conn) -> None:
+    """When a query is best answered by attachment content, Searcher returns
+    a SearchResult with snippet_source='attachment' and attachment_filename
+    populated from the carrying message's JSONB attachments."""
+    import hashlib
+    import json
+    from localmail.config import SearchConfig
+    from localmail.db import open_pool
+    from localmail.search.embeddings import FastEmbedBackend
+    from localmail.search.searcher import Searcher
+    from tests.conftest import TEST_DSN
+
+    sha = hashlib.sha256(b"contract details").digest()
+    sha_hex = sha.hex()
+    attachments = json.dumps(
+        [{"filename": "contract.pdf", "sha256": sha_hex}]
+    )
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method) "
+            "VALUES ('c','e@z','h','password') RETURNING id"
+        )
+        row = cur.fetchone(); assert row is not None
+        acct_id = row[0]
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "/p", "application/pdf", 100),
+        )
+        cur.execute(
+            "INSERT INTO messages "
+            "(account_id, message_id, raw_sha256, subject, body_text, "
+            " headers, raw_bytes, size_bytes, attachments) "
+            "VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, %s, %s, %s::jsonb) "
+            "RETURNING id",
+            (acct_id, "<contract@z>", b"\x20" * 32, "FYI", "see attached",
+             b"r", 1, attachments),
+        )
+
+    cfg = SearchConfig()
+    backend = FastEmbedBackend(cfg)
+
+    qvec = backend.embed_query(
+        "non-disclosure obligations under section 5"
+    )
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_chunks (sha256, chunk_idx, text, "
+            "token_count, embedding_v1, embedded_at) "
+            "VALUES (%s, 0, %s, 10, %s::halfvec, now())",
+            (sha, "non-disclosure obligations under section 5", qvec),
+        )
+    db_conn.commit()
+
+    pool = open_pool(TEST_DSN)
+    try:
+        searcher = Searcher(
+            pool=pool, cfg=cfg, embeddings=backend,
+            reranker=None, rewriter=None,
+        )
+        page = searcher.search(
+            "non-disclosure obligations", page_size=10
+        )
+    finally:
+        pool.close()
+
+    att_results = [
+        r for r in page.results if r.snippet_source == "attachment"
+    ]
+    assert att_results, (
+        f"expected at least one attachment snippet; "
+        f"got {[(r.subject, r.snippet_source) for r in page.results]}"
+    )
+    assert att_results[0].attachment_filename == "contract.pdf"

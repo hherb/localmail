@@ -109,7 +109,7 @@ class SearchConfig(BaseModel):
     # Controls the background thread that extracts text from attachment blobs and
     # writes the results to attachment_text for Arm 4 retrieval.
     run_extract_worker: bool = True
-    extract_worker_poll_interval_s: int = 30
+    extract_worker_poll_interval_s: float = 30.0
     extract_worker_batch_size: int = 20
     extract_worker_max_retries: int = 3
 
@@ -142,9 +142,9 @@ class SearchConfig(BaseModel):
     extractor_docling_max_pages: int = 200
     extractor_ocr_languages: list[str] = Field(default_factory=lambda: ["en"])
 
-    # --- attachment extraction backend (Phase 2) ---
+    # --- Pre-existing placeholder fields, will be consumed by extract_worker.py in Task 13.
+    # Not part of the Phase 2 spec field set; kept for forward compatibility.
     extractor_backend: Literal["docling", "lightweight"] = "docling"
-    extractor_max_file_size_mb: int = 100
     extractor_per_blob_timeout_s: int = 300
 
     # --- Phase 2: Arm 4 ---

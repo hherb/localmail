@@ -123,12 +123,11 @@ def test_search_config_overrides_via_dict():
 
 def test_search_config_phase2_defaults() -> None:
     """Verify all Phase 2 SearchConfig fields exist and carry the correct defaults."""
-    from localmail.config import SearchConfig
     cfg = SearchConfig()
 
     # Extraction worker
     assert cfg.run_extract_worker is True
-    assert cfg.extract_worker_poll_interval_s == 30
+    assert cfg.extract_worker_poll_interval_s == 30.0
     assert cfg.extract_worker_batch_size == 20
     assert cfg.extract_worker_max_retries == 3
 
@@ -148,7 +147,6 @@ def test_search_config_phase2_defaults() -> None:
 
 def test_search_config_phase2_custom_overrides() -> None:
     """Pydantic accepts overrides for the Phase 2 fields with correct types."""
-    from localmail.config import SearchConfig
     cfg = SearchConfig(
         run_extract_worker=False,
         extract_worker_batch_size=100,

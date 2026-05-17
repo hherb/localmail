@@ -17,3 +17,6 @@ __pycache__/
 
 # User config (kept under ~/.config/localmail/, never in the repo)
 config.toml
+
+# Superpowers brainstorming scratch
+.superpowers/

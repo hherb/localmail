@@ -478,7 +478,7 @@ class LightweightExtractor:
 _DOCLING_WARNED = False
 
 
-def _try_import_docling():
+def _try_import_docling() -> "type | None":
     """Return docling's `DocumentConverter` class, or `None` if docling
     is not installed.
 
@@ -523,6 +523,15 @@ class DoclingExtractor:
     name = "docling"
     version = "1.0"  # overwritten by importlib.metadata at extract time.
 
+    def __init__(self, cfg: "SearchConfig | None" = None) -> None:
+        """Construct with an optional SearchConfig.
+
+        Defaults to SearchConfig() when omitted. The configured
+        extractor_docling_max_pages and extractor_ocr_languages are read
+        when .extract() builds the docling pipeline.
+        """
+        self._cfg = cfg if cfg is not None else SearchConfig()
+
     def supports(self, mime_type: str | None, filename: str | None) -> bool:
         """True iff the blob is a PDF (by MIME or by filename extension)."""
         ext = Path(filename).suffix.lower() if filename else ""
@@ -537,6 +546,12 @@ class DoclingExtractor:
         Raises ExtractorError when docling is not installed. Returns
         ExtractedText with text='' when docling produces no text (e.g.,
         the OCR pipeline fails to find any glyphs on a blank scan).
+
+        Passes extractor_docling_max_pages and extractor_ocr_languages
+        from SearchConfig into PdfPipelineOptions when the installed
+        docling version exposes those option classes. Falls back to a
+        default DocumentConverter() when they are unavailable (older
+        docling builds) — the page cap and language list are best-effort.
         """
         DocumentConverter = _try_import_docling()
         if DocumentConverter is None:
@@ -544,14 +559,48 @@ class DoclingExtractor:
                 "docling not installed; install via "
                 "`uv sync --extra extraction`"
             )
+
         try:
-            from importlib.metadata import version as pkg_version
-            self_version = pkg_version("docling")
+            from importlib.metadata import PackageNotFoundError, version as pkg_version
+            try:
+                self_version = pkg_version("docling")
+            except PackageNotFoundError:
+                self_version = self.version
         except Exception:
             self_version = self.version
 
+        # Build pipeline options if the docling option-classes are importable.
+        # If the installed docling version doesn't expose these names, fall back
+        # to default DocumentConverter() so older builds still work.
+        converter = None
         try:
+            from docling.datamodel.base_models import InputFormat
+            from docling.datamodel.pipeline_options import (
+                EasyOcrOptions,
+                PdfPipelineOptions,
+            )
+            from docling.document_converter import PdfFormatOption
+
+            pipeline_options = PdfPipelineOptions(
+                do_ocr=True,
+                ocr_options=EasyOcrOptions(lang=self._cfg.extractor_ocr_languages),
+            )
+            try:
+                pipeline_options.max_num_pages = self._cfg.extractor_docling_max_pages
+            except Exception:
+                # Older docling versions may not expose this attribute.
+                pass
+
+            converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+                },
+            )
+        except Exception:
+            # Fall back to default converter if option classes are unavailable.
             converter = DocumentConverter()
+
+        try:
             result = converter.convert(str(blob_path))
         except Exception as exc:
             raise ExtractorError(f"docling.convert failed: {exc}") from exc

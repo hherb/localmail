@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import logging
 from pathlib import Path
 
 import pytest
@@ -275,9 +276,6 @@ def test_lightweight_extracts_ics(tmp_path: Path) -> None:
     assert result.extractor == "lightweight@1.0"
 
 
-import logging
-
-
 def test_docling_import_warning_one_shot(caplog, monkeypatch) -> None:
     """When docling is missing, warn_docling_missing() emits exactly one
     WARN per process, even when called multiple times."""
@@ -321,3 +319,23 @@ def test_docling_extractor_raises_when_missing(monkeypatch, tmp_path) -> None:
     de = DoclingExtractor()
     with pytest.raises(ExtractorError):
         de.extract(p, "application/pdf")
+
+
+def test_docling_extractor_accepts_config() -> None:
+    """DoclingExtractor.__init__ accepts a SearchConfig; defaults to
+    SearchConfig() when omitted. The config is stored on the instance
+    for the pipeline-options builder."""
+    from localmail.config import SearchConfig
+    from localmail.search.extractor import DoclingExtractor
+
+    de = DoclingExtractor()
+    assert de._cfg.extractor_docling_max_pages == 200
+    assert de._cfg.extractor_ocr_languages == ["en"]
+
+    custom = SearchConfig(
+        extractor_docling_max_pages=50,
+        extractor_ocr_languages=["en", "de", "ja"],
+    )
+    de2 = DoclingExtractor(custom)
+    assert de2._cfg.extractor_docling_max_pages == 50
+    assert de2._cfg.extractor_ocr_languages == ["en", "de", "ja"]

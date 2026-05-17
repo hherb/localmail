@@ -225,16 +225,25 @@ class Searcher:
         # Lazy import to avoid circular dependency (arms imports ArmHit from this module)
         from localmail.search.arms import (
             arm_bm25_chunks, arm_bm25_messages, arm_vector_chunks,
+            arm_vector_attachment_chunks,
         )
         a1 = arm_bm25_messages(conn, parsed, self._cfg, limit=candidates_per_arm)
         a2 = arm_bm25_chunks(conn, parsed, self._cfg, limit=candidates_per_arm)
         qvec = self._embeddings.embed_query(parsed.rewritten_text or parsed.free_text)
         a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
-        fused = rrf_fuse([a1, a2, a3], k=self._cfg.rrf_k)
+        a4 = arm_vector_attachment_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
+        fused = rrf_fuse([a1, a2, a3, a4], k=self._cfg.rrf_k)
         return fused[:rerank_pool_size]
 
     def _hydrate(self, conn: psycopg.Connection, fused: list[FusedHit]) -> list[dict]:
-        """Pull message + chunk text for each fused hit, returned in fused order."""
+        """Pull message + chunk text for each fused hit, returned in fused order.
+
+        For message_chunks hits, also fetches the chunk text and kind so that
+        the snippet reflects the exact matched chunk rather than the message body.
+        For attachment_chunks hits, fetches chunk text and the sha256 (bytes) so
+        that _build_results can later resolve attachment_filename from the carrying
+        message's JSONB attachments column.
+        """
         if not fused:
             return []
         msg_ids = [h.message_id for h in fused]
@@ -246,27 +255,53 @@ class Searcher:
             for mid, acct, subj, fa, fn, ds, body in cur.fetchall():
                 msgs[mid] = {"account_id": acct, "subject": subj, "from_addr": fa,
                              "from_name": fn, "date_sent": ds, "body_text": body}
-            chunk_ids = [h.best_chunk_id for h in fused if h.best_chunk_id]
-            chunks: dict[int, tuple[str, str]] = {}
-            if chunk_ids:
+
+            # Fetch message_chunks text+kind for Arms 2 and 3 hits.
+            msg_chunk_ids = [
+                h.best_chunk_id for h in fused
+                if h.best_chunk_id and h.best_chunk_table == "message_chunks"
+            ]
+            msg_chunks: dict[int, tuple[str, str]] = {}
+            if msg_chunk_ids:
                 cur.execute(
                     "SELECT id, text, kind FROM message_chunks WHERE id = ANY(%s)",
-                    (chunk_ids,),
+                    (msg_chunk_ids,),
                 )
-                chunks = {cid: (t, k) for cid, t, k in cur.fetchall()}
+                msg_chunks = {cid: (t, k) for cid, t, k in cur.fetchall()}
+
+            # Fetch attachment_chunks text+sha256 for Arm 4 hits.
+            att_chunk_ids = [
+                h.best_chunk_id for h in fused
+                if h.best_chunk_id and h.best_chunk_table == "attachment_chunks"
+            ]
+            att_chunks: dict[int, tuple[str, bytes]] = {}
+            if att_chunk_ids:
+                cur.execute(
+                    "SELECT id, text, sha256 FROM attachment_chunks WHERE id = ANY(%s)",
+                    (att_chunk_ids,),
+                )
+                att_chunks = {cid: (t, sha) for cid, t, sha in cur.fetchall()}
+
         out = []
         for h in fused:
             m = msgs.get(h.message_id, {})
-            if h.best_chunk_id and h.best_chunk_id in chunks:
-                snip_text, chunk_kind = chunks[h.best_chunk_id]
+            chunk_kind: str | None = None
+            attachment_sha256_hex: str | None = None
+
+            if h.best_chunk_table == "attachment_chunks" and h.best_chunk_id in att_chunks:
+                snip_text, sha_bytes = att_chunks[h.best_chunk_id]
+                attachment_sha256_hex = sha_bytes.hex()
+            elif h.best_chunk_id and h.best_chunk_id in msg_chunks:
+                snip_text, chunk_kind = msg_chunks[h.best_chunk_id]
             else:
                 snip_text = m.get("body_text") or ""
-                chunk_kind = None
+
             out.append({
                 "fused": h,
                 "msg": m,
                 "snippet_source_text": snip_text or "",
                 "chunk_kind": chunk_kind,
+                "attachment_sha256_hex": attachment_sha256_hex,
             })
         return out
 
@@ -277,7 +312,15 @@ class Searcher:
         rerank_scores: list[float],
         page: int,
         page_size: int,
+        conn: psycopg.Connection | None = None,
     ) -> list[SearchResult]:
+        """Assemble SearchResult objects for one page from the ordered hydrated pool.
+
+        `conn` is required when any hydrated item has snippet_source='attachment' so
+        that attachment_filename can be resolved via a JSONB lookup. It is optional
+        (and unused) when no attachment hits are present, preserving backward
+        compatibility with callers that hold no live connection at this point.
+        """
         terms = parsed.free_text.split()
         ordered = sorted(
             zip(hydrated, rerank_scores, strict=True),
@@ -299,19 +342,44 @@ class Searcher:
                 source = "body"
             else:
                 source = "header"
+
+            attachment_filename: str | None = None
+            if source == "attachment":
+                sha_hex = item.get("attachment_sha256_hex")
+                if sha_hex and conn is not None:
+                    # Resolve the original filename from the carrying message's
+                    # JSONB attachments column. The N+1 lookup is bounded by
+                    # page_size, so it's acceptable here.
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT elem ->> 'filename' "
+                            "FROM messages, jsonb_array_elements(attachments) elem "
+                            "WHERE messages.id = %s AND elem ->> 'sha256' = %s "
+                            "LIMIT 1",
+                            (h.message_id, sha_hex),
+                        )
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            attachment_filename = row[0]
+
             out.append(SearchResult(
                 message_id=h.message_id, account_id=m.get("account_id", 0),
                 rank=i, score=float(score), rrf_score=h.rrf_score,
                 subject=m.get("subject"), from_addr=m.get("from_addr"),
                 from_name=m.get("from_name"), date_sent=m.get("date_sent"),
-                snippet=snip, snippet_source=source, attachment_filename=None,
+                snippet=snip, snippet_source=source,
+                attachment_filename=attachment_filename,
                 matched_chunk_id=h.best_chunk_id,
                 matched_chunk_table=h.best_chunk_table,
             ))
         return out
 
     def continue_page(self, search_token: str, page: int) -> SearchPage:
-        """Serve subsequent pages from the cached pool. Raises if past pool's end."""
+        """Serve subsequent pages from the cached pool. Raises if past pool's end.
+
+        Opens a short-lived connection only when the page slice contains attachment
+        hits that need filename resolution; otherwise returns immediately from cache.
+        """
         import math
         entry = self._cache.get(search_token)  # may raise CacheMissError
         page_size = entry["page_size"]
@@ -322,9 +390,11 @@ class Searcher:
                 f"page {page} out of pool (pool_size={pool_size}, page_size={page_size}); "
                 "call grow_pool to widen the candidate pool"
             )
-        results = self._build_results(
-            entry["hydrated"], entry["parsed"], entry["scores"], page, page_size,
-        )
+        with self._pool.connection() as conn:
+            results = self._build_results(
+                entry["hydrated"], entry["parsed"], entry["scores"], page, page_size,
+                conn=conn,
+            )
         return SearchPage(
             results=results, page=page, page_size=page_size, pool_size=pool_size,
             candidates_per_arm=entry["candidates_per_arm"],
@@ -357,15 +427,16 @@ class Searcher:
             fused = self._retrieve_pool(conn, parsed, candidates_per_arm, rerank_pool_size)
             timing["retrieve"] = (time.monotonic() - t) * 1000
             hydrated = self._hydrate(conn, fused)
-        t = time.monotonic()
-        if self._reranker and hydrated:
-            cap = self._cfg.rerank_max_chars
-            snippets = [item["snippet_source_text"][:cap] for item in hydrated]
-            scores = self._reranker.rerank(parsed.rewritten_text or parsed.free_text, snippets)
-        else:
-            scores = [item["fused"].rrf_score for item in hydrated]
-        timing["rerank"] = (time.monotonic() - t) * 1000
-        results = self._build_results(hydrated, parsed, scores, page=1, page_size=page_size)
+            t = time.monotonic()
+            if self._reranker and hydrated:
+                cap = self._cfg.rerank_max_chars
+                snippets = [item["snippet_source_text"][:cap] for item in hydrated]
+                scores = self._reranker.rerank(parsed.rewritten_text or parsed.free_text, snippets)
+            else:
+                scores = [item["fused"].rrf_score for item in hydrated]
+            timing["rerank"] = (time.monotonic() - t) * 1000
+            results = self._build_results(hydrated, parsed, scores, page=1, page_size=page_size,
+                                          conn=conn)
         timing["total"] = (time.monotonic() - t0) * 1000
         token = uuid.uuid4().hex[:16] if use_cache else None
         if token:
@@ -418,22 +489,22 @@ class Searcher:
             timing["retrieve"] = (time.monotonic() - t) * 1000
             hydrated = self._hydrate(conn, fused)
 
-        t = time.monotonic()
-        reranker = None if disable_rerank else self._reranker
-        if reranker is not None and hydrated:
-            snippets_for_rerank = [
-                item["snippet_source_text"][: cfg.rerank_max_chars]
-                for item in hydrated
-            ]
-            scores = reranker.rerank(
-                parsed.rewritten_text or parsed.free_text, snippets_for_rerank,
-            )
-        else:
-            scores = [item["fused"].rrf_score for item in hydrated]
-        timing["rerank"] = (time.monotonic() - t) * 1000
+            t = time.monotonic()
+            reranker = None if disable_rerank else self._reranker
+            if reranker is not None and hydrated:
+                snippets_for_rerank = [
+                    item["snippet_source_text"][: cfg.rerank_max_chars]
+                    for item in hydrated
+                ]
+                scores = reranker.rerank(
+                    parsed.rewritten_text or parsed.free_text, snippets_for_rerank,
+                )
+            else:
+                scores = [item["fused"].rrf_score for item in hydrated]
+            timing["rerank"] = (time.monotonic() - t) * 1000
 
-        results = self._build_results(hydrated, parsed, scores, page=1,
-                                      page_size=effective_page_size)
+            results = self._build_results(hydrated, parsed, scores, page=1,
+                                          page_size=effective_page_size, conn=conn)
         timing["total"] = (time.monotonic() - t0) * 1000
 
         token: str | None = None

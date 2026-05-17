@@ -102,7 +102,6 @@ impl KeyringStore {
         }
     }
 
-    #[cfg(test)]
     pub fn with_backend(backend: impl KeyringBackend + 'static) -> Self {
         Self {
             backend: Box::new(backend),
@@ -130,43 +129,53 @@ impl KeyringStore {
 }
 
 // ---------------------------------------------------------------------------
+// In-process test backend
+// ---------------------------------------------------------------------------
+
+/// In-process HashMap backend — used by tests to avoid touching the OS keyring.
+/// Exposed publicly so other modules' tests can inject it via
+/// `KeyringStore::with_backend(MemKeyring::new())`.
+pub struct MemKeyring {
+    map: std::sync::Mutex<std::collections::HashMap<Slot, String>>,
+}
+
+impl MemKeyring {
+    pub fn new() -> Self {
+        Self {
+            map: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl Default for MemKeyring {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KeyringBackend for MemKeyring {
+    fn put(&self, slot: Slot, value: &str) -> Result<()> {
+        self.map.lock().unwrap().insert(slot, value.to_owned());
+        Ok(())
+    }
+
+    fn get(&self, slot: Slot) -> Result<Option<String>> {
+        Ok(self.map.lock().unwrap().get(&slot).cloned())
+    }
+
+    fn delete(&self, slot: Slot) -> Result<()> {
+        self.map.lock().unwrap().remove(&slot);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    /// In-process HashMap backend — no OS keyring involved.
-    struct MemKeyring {
-        map: Mutex<HashMap<Slot, String>>,
-    }
-
-    impl MemKeyring {
-        fn new() -> Self {
-            Self {
-                map: Mutex::new(HashMap::new()),
-            }
-        }
-    }
-
-    impl KeyringBackend for MemKeyring {
-        fn put(&self, slot: Slot, value: &str) -> Result<()> {
-            self.map.lock().unwrap().insert(slot, value.to_owned());
-            Ok(())
-        }
-
-        fn get(&self, slot: Slot) -> Result<Option<String>> {
-            Ok(self.map.lock().unwrap().get(&slot).cloned())
-        }
-
-        fn delete(&self, slot: Slot) -> Result<()> {
-            self.map.lock().unwrap().remove(&slot);
-            Ok(())
-        }
-    }
 
     fn store() -> KeyringStore {
         KeyringStore::with_backend(MemKeyring::new())

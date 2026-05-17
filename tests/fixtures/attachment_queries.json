@@ -1,0 +1,39 @@
+{
+  "_doc": "Phase-2 acceptance query suite. 25 queries targeting attachment-only content in the synthetic fixture corpus (tests/_attachment_corpus.py). Each query's relevant_subjects are the subjects of the synthetic emails whose attachments contain the query target. Gates: recall@20 >= 0.80, MRR@20 >= 0.50.",
+  "queries": [
+    {"lang": "en", "query": "non-disclosure obligations section 5", "relevant_subjects": ["Quarterly review attachment"]},
+    {"lang": "en", "query": "NDA contract clauses", "relevant_subjects": ["Quarterly review attachment"]},
+
+    {"lang": "en", "query": "annual revenue growth fourteen percent", "relevant_subjects": ["Scanned report"]},
+    {"lang": "en", "query": "revenue growth 14% report", "relevant_subjects": ["Scanned report"]},
+
+    {"lang": "en", "query": "probation period three months start date", "relevant_subjects": ["Onboarding pack"]},
+    {"lang": "en", "query": "onboarding probation rules", "relevant_subjects": ["Onboarding pack"]},
+
+    {"lang": "en", "query": "marketing line item Berlin office Q4", "relevant_subjects": ["Budget spreadsheet"]},
+    {"lang": "en", "query": "Berlin marketing budget fourth quarter", "relevant_subjects": ["Budget spreadsheet"]},
+
+    {"lang": "en", "query": "company-wide hackathon mid October", "relevant_subjects": ["All-hands deck"]},
+    {"lang": "en", "query": "hackathon scheduled October", "relevant_subjects": ["All-hands deck"]},
+
+    {"lang": "en", "query": "transformer attention sparsity research", "relevant_subjects": ["Notes"]},
+    {"lang": "en", "query": "ML research attention sparsity", "relevant_subjects": ["Notes"]},
+
+    {"lang": "en", "query": "vendor SLA monthly recurring fee adjustment", "relevant_subjects": ["Quick note"]},
+    {"lang": "en", "query": "SLA fee adjustment vendor", "relevant_subjects": ["Quick note"]},
+
+    {"lang": "en", "query": "rollout plan Tuesday wave one customers", "relevant_subjects": ["Doc"]},
+    {"lang": "en", "query": "Tuesday wave one rollout", "relevant_subjects": ["Doc"]},
+
+    {"lang": "en", "query": "policy update privacy controls fourth quarter", "relevant_subjects": ["Web archive"]},
+    {"lang": "en", "query": "privacy policy Q4 changes", "relevant_subjects": ["Web archive"]},
+
+    {"lang": "en", "query": "compliance audit findings critical severity", "relevant_subjects": ["Tabular data"]},
+    {"lang": "en", "query": "critical audit finding", "relevant_subjects": ["Tabular data"]},
+
+    {"lang": "en", "query": "interview panel candidate ML researcher", "relevant_subjects": ["Invite"]},
+    {"lang": "en", "query": "ML researcher screening interview", "relevant_subjects": ["Invite"]},
+
+    {"lang": "en", "query": "Berlin office Q4 budget hackathon October", "relevant_subjects": ["Budget spreadsheet", "All-hands deck"]}
+  ]
+}

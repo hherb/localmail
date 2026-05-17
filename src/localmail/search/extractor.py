@@ -15,11 +15,14 @@ Exports:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, cast, runtime_checkable
 
 from localmail.config import SearchConfig
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -461,4 +464,114 @@ class LightweightExtractor:
             text="\n".join(parts).strip(),
             page_count=event_count or None,
             extractor=f"{self.name}@{self.version}",
+        )
+
+
+# --- Docling (optional, OCR-capable) -----------------------------------------
+#
+# Docling is in the [extraction] uv extra — installed via
+# `uv sync --extra extraction`. The extractor lazy-imports it on first
+# call. When not installed, `warn_docling_missing()` emits exactly one
+# WARN per process pointing at the install hint, and .extract() raises
+# ExtractorError so the extract_worker records the failure cleanly.
+
+_DOCLING_WARNED = False
+
+
+def _try_import_docling():
+    """Return docling's `DocumentConverter` class, or `None` if docling
+    is not installed.
+
+    Indirected for test monkeypatching: tests replace this function to
+    simulate the "missing" state without uninstalling docling.
+    """
+    try:
+        from docling.document_converter import DocumentConverter
+        return DocumentConverter
+    except ImportError:
+        return None
+
+
+def warn_docling_missing() -> None:
+    """Emit a one-shot WARN per process pointing at the docling install hint.
+
+    The extract_worker calls this on the first PDF where
+    lightweight extraction returned empty/raised AND docling is not
+    importable. Subsequent calls in the same process are silent so a
+    large archive sync doesn't flood the log.
+    """
+    global _DOCLING_WARNED
+    if _DOCLING_WARNED:
+        return
+    _DOCLING_WARNED = True
+    _LOG.warning(
+        "docling is not installed; PDFs that lightweight cannot read "
+        "will be marked as lightweight-empty. Install with "
+        "`uv sync --extra extraction` to enable OCR fallback for "
+        "scanned PDFs."
+    )
+
+
+class DoclingExtractor:
+    """PDF-only extractor using docling for OCR + complex-PDF layout.
+
+    Triggered by the extract_worker only when LightweightExtractor
+    returned empty text or raised on a PDF. Lazy-imports docling so
+    the package stays in the [extraction] optional dependency group.
+    """
+
+    name = "docling"
+    version = "1.0"  # overwritten by importlib.metadata at extract time.
+
+    def supports(self, mime_type: str | None, filename: str | None) -> bool:
+        """True iff the blob is a PDF (by MIME or by filename extension)."""
+        ext = Path(filename).suffix.lower() if filename else ""
+        mt = (mime_type or "").lower()
+        return mt == "application/pdf" or ext == ".pdf"
+
+    def extract(
+        self, blob_path: Path, mime_type: str | None
+    ) -> ExtractedText:
+        """Extract text from a PDF blob via docling.
+
+        Raises ExtractorError when docling is not installed. Returns
+        ExtractedText with text='' when docling produces no text (e.g.,
+        the OCR pipeline fails to find any glyphs on a blank scan).
+        """
+        DocumentConverter = _try_import_docling()
+        if DocumentConverter is None:
+            raise ExtractorError(
+                "docling not installed; install via "
+                "`uv sync --extra extraction`"
+            )
+        try:
+            from importlib.metadata import version as pkg_version
+            self_version = pkg_version("docling")
+        except Exception:
+            self_version = self.version
+
+        try:
+            converter = DocumentConverter()
+            result = converter.convert(str(blob_path))
+        except Exception as exc:
+            raise ExtractorError(f"docling.convert failed: {exc}") from exc
+
+        try:
+            text = result.document.export_to_markdown()
+        except Exception as exc:
+            raise ExtractorError(
+                f"docling export_to_markdown failed: {exc}"
+            ) from exc
+
+        page_count = None
+        if hasattr(result.document, "pages"):
+            try:
+                page_count = len(result.document.pages)
+            except Exception:
+                page_count = None
+
+        return ExtractedText(
+            text=(text or "").strip(),
+            page_count=page_count,
+            extractor=f"{self.name}@{self_version}",
         )

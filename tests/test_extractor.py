@@ -273,3 +273,51 @@ def test_lightweight_extracts_ics(tmp_path: Path) -> None:
     assert "Conf room Berlin" in result.text
     assert result.page_count == 1
     assert result.extractor == "lightweight@1.0"
+
+
+import logging
+
+
+def test_docling_import_warning_one_shot(caplog, monkeypatch) -> None:
+    """When docling is missing, warn_docling_missing() emits exactly one
+    WARN per process, even when called multiple times."""
+    import localmail.search.extractor as ext_mod
+
+    monkeypatch.setattr(ext_mod, "_DOCLING_WARNED", False, raising=False)
+    monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: None)
+
+    with caplog.at_level(logging.WARNING, logger="localmail.search.extractor"):
+        ext_mod.warn_docling_missing()
+        ext_mod.warn_docling_missing()
+        ext_mod.warn_docling_missing()
+
+    warn_messages = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "extraction" in r.getMessage().lower()
+    ]
+    assert len(warn_messages) == 1
+
+
+def test_docling_extractor_supports_pdf_only() -> None:
+    """DoclingExtractor.supports() matches PDFs by MIME or extension only."""
+    from localmail.search.extractor import DoclingExtractor
+    de = DoclingExtractor()
+    assert de.supports("application/pdf", "x.pdf")
+    assert de.supports(None, "x.pdf")
+    assert not de.supports("text/plain", "x.txt")
+    assert not de.supports("image/png", "x.png")
+
+
+def test_docling_extractor_raises_when_missing(monkeypatch, tmp_path) -> None:
+    """If docling is not importable, .extract() raises ExtractorError."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import DoclingExtractor
+
+    monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: None)
+    p = tmp_path / "x.pdf"
+    p.write_bytes(b"%PDF-1.4 dummy")
+
+    de = DoclingExtractor()
+    with pytest.raises(ExtractorError):
+        de.extract(p, "application/pdf")

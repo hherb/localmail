@@ -63,6 +63,17 @@ def test_search_requires_auth(db_dsn: str) -> None:
     assert r.status_code == 401
 
 
+def test_search_account_ids_filter_returns_200(db_dsn: str, api_token: str) -> None:
+    app = create_app(db_dsn=db_dsn, searcher=_fake_searcher_returning_one_hit())
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "", "filters": {"account_ids": ["1"]}, "limit": 5},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+
+
 def test_search_unavailable_when_no_searcher(db_dsn: str, api_token: str) -> None:
     app = create_app(db_dsn=db_dsn, searcher=None)
     c = TestClient(app)

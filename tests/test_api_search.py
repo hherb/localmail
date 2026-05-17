@@ -49,18 +49,12 @@ def test_filter_value_with_embedded_quote_is_stripped() -> None:
 
 
 @pytest.mark.parametrize("unsupported_key, value", [
-    ("account_ids", ["1", "3"]),
-    ("folder_ids", ["10"]),
     ("date_from", "2024-01-01"),
     ("date_to", "2024-12-31"),
     ("lang", "en"),
 ])
 def test_unsupported_filter_keys_raise_validation(unsupported_key, value) -> None:
-    """Filters in the API schema but not wired to the searcher must 400.
-
-    Without this, a client requesting `account_ids: ["1"]` gets cross-account
-    results back, silently — the worst possible outcome for a search API.
-    """
+    """Filters in the API schema but not wired to the searcher must 400."""
     with pytest.raises(ValidationFailed):
         build_query_string(free_text="x", filters={unsupported_key: value})
 
@@ -71,6 +65,42 @@ def test_empty_unsupported_filter_values_do_not_raise() -> None:
     build_query_string(free_text="x", filters={"account_ids": []})
     build_query_string(free_text="x", filters={"date_from": ""})
     build_query_string(free_text="x", filters={"lang": None})
+
+
+def test_build_query_string_emits_account_id_tokens():
+    out = build_query_string(
+        free_text="hello",
+        filters={"account_ids": ["5", "7"]},
+    )
+    assert "account_id:5" in out
+    assert "account_id:7" in out
+    assert out.startswith("hello")
+
+
+def test_build_query_string_emits_folder_id_tokens():
+    out = build_query_string(
+        free_text="invoices",
+        filters={"folder_ids": ["42"]},
+    )
+    assert "folder_id:42" in out
+    assert out.startswith("invoices")
+
+
+def test_build_query_string_account_ids_handles_int_or_str():
+    """The API layer accepts both — Pydantic models may coerce to str."""
+    out = build_query_string(free_text="", filters={"account_ids": [5, "7"]})
+    assert "account_id:5" in out
+    assert "account_id:7" in out
+
+
+def test_build_query_string_empty_account_ids_is_no_op():
+    out = build_query_string(free_text="hello", filters={"account_ids": []})
+    assert out == "hello"
+
+
+def test_build_query_string_malformed_account_id_raises():
+    with pytest.raises(ValidationFailed):
+        build_query_string(free_text="", filters={"account_ids": ["foo"]})
 
 
 def test_run_search_calls_searcher_and_maps_results() -> None:

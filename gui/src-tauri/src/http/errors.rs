@@ -27,18 +27,28 @@ pub enum HttpError {
 }
 
 impl HttpError {
-    pub fn from_reqwest(err: reqwest::Error) -> Self {
+    pub fn from_reqwest(err: reqwest::Error, timeout_secs: u64) -> Self {
         if err.is_timeout() {
-            Self::Timeout { seconds: 0 }
+            Self::Timeout {
+                seconds: timeout_secs,
+            }
         } else if err.is_decode() {
             Self::Decode(err.to_string())
+        } else if is_rustls_cert_error(&err) {
+            Self::CertMismatch
         } else {
-            let s = err.to_string();
-            if s.contains("ApplicationVerificationFailure") || s.contains("certificate") {
-                Self::CertMismatch
-            } else {
-                Self::Network(s)
-            }
+            Self::Network(err.to_string())
         }
     }
+}
+
+fn is_rustls_cert_error(err: &reqwest::Error) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = current {
+        if let Some(rustls_err) = e.downcast_ref::<rustls::Error>() {
+            return matches!(rustls_err, rustls::Error::InvalidCertificate(_));
+        }
+        current = e.source();
+    }
+    false
 }

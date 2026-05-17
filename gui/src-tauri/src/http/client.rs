@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::http::errors::HttpError;
 use crate::http::verifier::{TofuMode, TofuVerifier};
 
-const REQUEST_TIMEOUT_SECS: u64 = 15;
+pub const REQUEST_TIMEOUT_SECS: u64 = 15;
 
 pub struct ProbeClient {
     pub client: Client,
@@ -45,7 +45,7 @@ fn build_reqwest_with_verifier(verifier: Arc<TofuVerifier>) -> Result<Client, Ht
         .use_preconfigured_tls(tls_config)
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .build()
-        .map_err(HttpError::from_reqwest)
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))
 }
 
 pub async fn http_get_json<T: DeserializeOwned>(
@@ -57,7 +57,10 @@ pub async fn http_get_json<T: DeserializeOwned>(
     if let Some(tok) = bearer {
         req = req.bearer_auth(tok);
     }
-    let resp = req.send().await.map_err(HttpError::from_reqwest)?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -66,7 +69,9 @@ pub async fn http_get_json<T: DeserializeOwned>(
             body,
         });
     }
-    resp.json::<T>().await.map_err(HttpError::from_reqwest)
+    resp.json::<T>()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))
 }
 
 pub async fn http_post_json<B: Serialize, T: DeserializeOwned>(
@@ -79,7 +84,10 @@ pub async fn http_post_json<B: Serialize, T: DeserializeOwned>(
     if let Some(tok) = bearer {
         req = req.bearer_auth(tok);
     }
-    let resp = req.send().await.map_err(HttpError::from_reqwest)?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -88,7 +96,9 @@ pub async fn http_post_json<B: Serialize, T: DeserializeOwned>(
             body,
         });
     }
-    resp.json::<T>().await.map_err(HttpError::from_reqwest)
+    resp.json::<T>()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))
 }
 
 pub async fn http_post_empty(
@@ -100,7 +110,10 @@ pub async fn http_post_empty(
     if let Some(tok) = bearer {
         req = req.bearer_auth(tok);
     }
-    let resp = req.send().await.map_err(HttpError::from_reqwest)?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() && status.as_u16() != 204 {
         let body = resp.text().await.unwrap_or_default();

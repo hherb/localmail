@@ -10,13 +10,17 @@
 //! - `TofuMode::Pinned(sha256)`: accept ONLY if the leaf cert's SHA-256
 //!   matches `sha256`. Anything else returns `TlsError::InvalidCertificate`.
 //!
-//! Neither mode performs hostname verification, expiry checking, or chain
-//! validation. The pin is what authenticates the server — a TOFU pin is
-//! all-or-nothing.
+//! Neither mode performs hostname verification, expiry checking, or CA-chain
+//! validation. The pin authenticates *which* certificate is the server's; the
+//! TLS handshake signature (validated below via rustls' built-in helpers using
+//! the cert's public key) is what proves the peer holds the matching private
+//! key. Skipping the latter would let anyone with a copy of the public cert
+//! impersonate the server.
 
 use std::sync::{Arc, Mutex};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
@@ -33,11 +37,17 @@ pub enum TofuMode {
 pub struct TofuVerifier {
     mode: TofuMode,
     captured: Mutex<Option<String>>,
+    crypto_provider: Arc<CryptoProvider>,
 }
 
 impl TofuVerifier {
     pub fn new(mode: TofuMode) -> Arc<Self> {
-        Arc::new(Self { mode, captured: Mutex::new(None) })
+        let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
+        Arc::new(Self {
+            mode,
+            captured: Mutex::new(None),
+            crypto_provider,
+        })
     }
 
     /// Returns the SHA-256 (lowercase hex) of the leaf cert seen during the
@@ -80,35 +90,36 @@ impl ServerCertVerifier for TofuVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.crypto_provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.crypto_provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-        ]
+        self.crypto_provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 

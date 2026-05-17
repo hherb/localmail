@@ -70,8 +70,10 @@ pub async fn login(store: &KeyringStore, username: &str, password: &str) -> Resu
     let body = LoginRequest { username, password };
     let endpoint = format!("{url}v1/auth/login");
     let tok: TokenResponse = http_post_json(&client, &endpoint, &body, None).await?;
-    store.put(Slot::Username, username).map_err(|e| AuthError::Keyring(e.to_string()))?;
+    // Token first: if this write fails, we abort before mutating Username, so the
+    // store does not end up advertising a new identity with no token to back it.
     store.put(Slot::BearerToken, &tok.token).map_err(|e| AuthError::Keyring(e.to_string()))?;
+    store.put(Slot::Username, username).map_err(|e| AuthError::Keyring(e.to_string()))?;
     Ok(LoginSummary {
         username: username.to_string(),
         expires_at: tok.expires_at,
@@ -85,7 +87,11 @@ pub async fn logout(store: &KeyringStore) -> Result<(), AuthError> {
     if let Some(tok) = &token_opt {
         let client = build_pinned_client(&pin)?;
         let endpoint = format!("{url}v1/auth/logout");
-        let _ = http_post_empty(&client, &endpoint, Some(tok)).await;
+        if let Err(e) = http_post_empty(&client, &endpoint, Some(tok)).await {
+            eprintln!(
+                "[localmail-gui] logout: server-side token invalidation failed ({e}); clearing local keyring anyway"
+            );
+        }
     }
     store.delete(Slot::BearerToken).map_err(|e| AuthError::Keyring(e.to_string()))?;
     store.delete(Slot::Username).map_err(|e| AuthError::Keyring(e.to_string()))?;
@@ -98,14 +104,14 @@ pub async fn refresh(store: &KeyringStore) -> Result<LoginSummary, AuthError> {
         .get(Slot::BearerToken)
         .map_err(|e| AuthError::Keyring(e.to_string()))?
         .ok_or(AuthError::NotLoggedIn)?;
+    let username = store
+        .get(Slot::Username)
+        .map_err(|e| AuthError::Keyring(e.to_string()))?
+        .ok_or(AuthError::NotLoggedIn)?;
     let client = build_pinned_client(&pin)?;
     let endpoint = format!("{url}v1/auth/refresh");
     let tok: TokenResponse = http_post_json(&client, &endpoint, &serde_json::json!({}), Some(&token)).await?;
     store.put(Slot::BearerToken, &tok.token).map_err(|e| AuthError::Keyring(e.to_string()))?;
-    let username = store
-        .get(Slot::Username)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .unwrap_or_default();
     Ok(LoginSummary {
         username,
         expires_at: tok.expires_at,
@@ -181,6 +187,19 @@ mod tests {
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = refresh(&store).await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
+    }
+
+    #[tokio::test]
+    async fn refresh_without_username_returns_not_logged_in() {
+        let store = fake_store();
+        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store.put(Slot::CertPin, "deadbeef").unwrap();
+        store.put(Slot::BearerToken, "stale-token").unwrap();
+        let err = refresh(&store).await.unwrap_err();
+        assert!(
+            matches!(err, AuthError::NotLoggedIn),
+            "expected NotLoggedIn for missing username, got {err:?}"
+        );
     }
 
     #[tokio::test]

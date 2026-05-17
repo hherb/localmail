@@ -45,6 +45,10 @@ function initialState(): SearchState {
 
 class SearchStore {
   #state: SearchState = $state(initialState());
+  // Monotonic submit counter. Each submit() captures the next value and
+  // ignores its response if a later submit has run in the meantime — without
+  // this guard a slower first response would clobber a newer second one.
+  #submitSeq = 0;
 
   get snapshot(): SearchState { return this.#state; }
 
@@ -52,9 +56,13 @@ class SearchStore {
 
   setFilters(f: SearchFiltersUI): void { this.#state.filters = f; }
 
-  reset(): void { this.#state = initialState(); }
+  reset(): void {
+    this.#state = initialState();
+    this.#submitSeq++;
+  }
 
   async submit(): Promise<void> {
+    const seq = ++this.#submitSeq;
     this.#state.loading = true;
     this.#state.errorMessage = null;
     try {
@@ -64,12 +72,19 @@ class SearchStore {
         limit: DEFAULT_LIMIT,
         cursor: null,
       });
+      if (seq !== this.#submitSeq) return;
       this.#state.results = resp.results;
       this.#state.tookMs = resp.took_ms;
     } catch (err: unknown) {
+      if (seq !== this.#submitSeq) return;
+      // Clear stale results so the UI does not show prior query's matches
+      // alongside the new error banner; searchActive (tookMs !== null) flips
+      // off so MessageList reverts to its non-search rendering path.
+      this.#state.results = [];
+      this.#state.tookMs = null;
       this.#state.errorMessage = formatError(err);
     } finally {
-      this.#state.loading = false;
+      if (seq === this.#submitSeq) this.#state.loading = false;
     }
   }
 }

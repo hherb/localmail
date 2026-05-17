@@ -33,4 +33,18 @@ describe("sanitizeSnippet", () => {
     expect(sanitizeSnippet("…leaves at <mark>7:30</mark> on Tue…"))
       .toBe("…leaves at <mark>7:30</mark> on Tue…");
   });
+
+  it("does not let placeholder-string text smuggle <mark> tags through", () => {
+    // The implementation uses LOCALMAIL_MARK_OPEN_<nonce> internally; the
+    // literal prefix in adversarial input must not be restored to <mark>.
+    const out = sanitizeSnippet("LOCALMAIL_MARK_OPEN evil");
+    expect(out).not.toContain("<mark>");
+    expect(out).toContain("LOCALMAIL_MARK_OPEN");
+  });
+
+  it("escapes excess unpaired </mark>", () => {
+    // One open, two closes: the second </mark> must fall through to escaping.
+    const out = sanitizeSnippet("<mark>a</mark></mark>");
+    expect(out).toBe("<mark>a</mark>&lt;/mark&gt;");
+  });
 });

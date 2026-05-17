@@ -6,8 +6,6 @@
 
 const MARK_OPEN = /<mark>/g;
 const MARK_CLOSE = /<\/mark>/g;
-const MARK_OPEN_PLACEHOLDER = "LOCALMAIL_MARK_OPEN";
-const MARK_CLOSE_PLACEHOLDER = "LOCALMAIL_MARK_CLOSE";
 
 function escapeHtml(s: string): string {
   return s
@@ -18,24 +16,31 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+// Per-call nonce so a server payload that contains the literal placeholder
+// string cannot smuggle <mark> tags through the restore step.
+function makeNonce(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const buf = new Uint8Array(8);
+    crypto.getRandomValues(buf);
+    return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  return Math.random().toString(36).slice(2, 18).padEnd(16, "0");
+}
+
 export function sanitizeSnippet(snippet: string | null): string {
   if (!snippet) return "";
-  // 1. Replace exact-match <mark>/</mark> with placeholders so escaping
-  //    doesn't touch them. Anything else (attrs, weird casing, other tags)
-  //    falls through and gets escaped.
+  const nonce = makeNonce();
+  const openPh = `LOCALMAIL_MARK_OPEN_${nonce}`;
+  const closePh = `LOCALMAIL_MARK_CLOSE_${nonce}`;
   // Count opens first so we only restore as many closes as there are paired opens.
   const openCount = (snippet.match(MARK_OPEN) ?? []).length;
   let closesReplaced = 0;
   const guarded = snippet
-    .replace(MARK_OPEN, MARK_OPEN_PLACEHOLDER)
+    .replace(MARK_OPEN, openPh)
     .replace(MARK_CLOSE, (_) => {
-      if (closesReplaced < openCount) { closesReplaced++; return MARK_CLOSE_PLACEHOLDER; }
+      if (closesReplaced < openCount) { closesReplaced++; return closePh; }
       return "</mark>";
     });
-  // 2. Escape everything.
   const escaped = escapeHtml(guarded);
-  // 3. Restore the placeholders as real tags.
-  return escaped
-    .split(MARK_OPEN_PLACEHOLDER).join("<mark>")
-    .split(MARK_CLOSE_PLACEHOLDER).join("</mark>");
+  return escaped.split(openPh).join("<mark>").split(closePh).join("</mark>");
 }

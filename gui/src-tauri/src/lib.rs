@@ -3,6 +3,8 @@
 //! Sub-plan 1 ships only the `greet` demo command. Subsequent sub-plans add
 //! HTTP, keyring, TOFU, and the API surface the Svelte UI calls into.
 
+pub mod http;
+
 use serde::Serialize;
 
 #[derive(Serialize)]

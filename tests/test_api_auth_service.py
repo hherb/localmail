@@ -110,16 +110,20 @@ def test_login_timing_unknown_user_vs_wrong_password(db_conn: psycopg.Connection
     _seed_user(db_conn, "alice", "hunter2")
     db_conn.commit()
 
+    # 7 samples + a discarded warmup keeps the median robust to a single GC
+    # pause or DB latency spike on a loaded CI host. With 3 samples, one
+    # outlier swings the median directly and the ratio test flaked.
     samples_unknown: list[float] = []
     samples_wrong_pw: list[float] = []
-    for i in range(3):
+    n_samples = 7
+    for i in range(n_samples + 1):
         reset_login_rate_limiter()
         t0 = time.perf_counter()
         try:
             login(db_conn, f"ghost_{i}", "any-password")
         except AuthenticationFailed:
             pass
-        samples_unknown.append(time.perf_counter() - t0)
+        elapsed_unknown = time.perf_counter() - t0
 
         reset_login_rate_limiter()
         t0 = time.perf_counter()
@@ -127,7 +131,12 @@ def test_login_timing_unknown_user_vs_wrong_password(db_conn: psycopg.Connection
             login(db_conn, "alice", "wrong-password")
         except AuthenticationFailed:
             pass
-        samples_wrong_pw.append(time.perf_counter() - t0)
+        elapsed_wrong_pw = time.perf_counter() - t0
+
+        if i == 0:
+            continue  # discard warmup (first-call argon2 / JIT / page cache)
+        samples_unknown.append(elapsed_unknown)
+        samples_wrong_pw.append(elapsed_wrong_pw)
     reset_login_rate_limiter()
 
     med_unknown = sorted(samples_unknown)[len(samples_unknown) // 2]

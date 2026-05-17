@@ -13,12 +13,35 @@ from localmail.api.errors import ValidationFailed
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
 
 
+_SUPPORTED_FILTER_KEYS = frozenset({
+    "from", "to", "subject", "after", "before", "has_attachment",
+})
+
+# Filter keys that appear in the v1 spec / SearchFiltersModel but are not yet
+# wired through to the underlying Searcher. Surfaced as ValidationFailed so
+# clients get a clear 400 instead of a silently-incorrect (cross-account)
+# result set. Tracked in https://github.com/hherb/localmail/issues — wire
+# these through before declaring filter parity with the spec.
+_KNOWN_UNSUPPORTED_FILTER_KEYS = frozenset({
+    "account_ids", "folder_ids", "date_from", "date_to", "lang",
+})
+
+
 def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
     """Compose `free_text` + filter DSL tokens into a single query string.
 
-    Date filters are validated to YYYY-MM-DD. Unknown filter keys are ignored
-    (no error — forward-compatible with future filter additions).
+    Date filters are validated to YYYY-MM-DD. Keys in
+    `_KNOWN_UNSUPPORTED_FILTER_KEYS` raise `ValidationFailed` so the caller
+    sees a clear 400. Other unknown keys are silently ignored (forward
+    compatibility with future filter additions).
     """
+    for key in _KNOWN_UNSUPPORTED_FILTER_KEYS:
+        if filters.get(key) not in (None, [], "", False):
+            supported = ", ".join(sorted(_SUPPORTED_FILTER_KEYS))
+            raise ValidationFailed(
+                f"filter {key!r} is accepted by the API schema but not yet "
+                f"wired through to the search backend. Supported filters: {supported}"
+            )
     parts: list[str] = []
     if free_text:
         parts.append(free_text)

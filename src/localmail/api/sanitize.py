@@ -3,6 +3,20 @@
 External resource loading is blocked by default; only `cid:` references
 that resolve to an attachment-blob SHA-256 are rewritten to internal URLs.
 The serve layer further constrains the rendered output via Content-Security-Policy.
+
+Design notes:
+
+- ``_STRIP_WITH_CONTENT_RE`` is a regex pre-pass that drops dangerous tags
+  *together with their inner content* before bleach sees them. This is
+  necessary because ``bleach.clean(strip=True)`` removes tags but keeps
+  their text — for ``<script>alert(1)</script>`` that would leak "alert(1)"
+  as visible text. Regex-based HTML parsing is historically fragile (mutation
+  XSS bypasses); the pairing with bleach below mitigates this — even if a
+  malformed ``<script>...`` survives the regex, bleach will still drop the
+  tag itself, so the worst case is a fragment of script source rendered as
+  plain text rather than executed.
+- ``bleach`` upstream is in maintenance-only mode; a future migration to
+  ``nh3`` (Rust-backed, actively maintained) is tracked separately.
 """
 from __future__ import annotations
 

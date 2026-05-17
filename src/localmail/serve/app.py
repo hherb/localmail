@@ -1,11 +1,14 @@
 """FastAPI application factory."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 
 from localmail.api.errors import APIError
+from localmail.config import ServeConfig
 from localmail.serve.middleware import APIErrorHandlerMiddleware, RequestIdMiddleware
 from localmail.serve.routes import accounts as accounts_routes
 from localmail.serve.routes import auth as auth_routes
@@ -16,14 +19,36 @@ from localmail.serve.routes import search as search_routes
 from localmail.serve.routes import version as version_routes
 
 
-def create_app(*, db_dsn: str, searcher=None) -> FastAPI:
+def create_app(
+    *,
+    db_dsn: str,
+    searcher=None,
+    serve_config: ServeConfig | None = None,
+) -> FastAPI:
     """Build a FastAPI app bound to a Postgres pool and (optionally) a Searcher.
 
     `searcher` is None in baseline tests; production runs pass a configured
-    Searcher created via `localmail.search.create_searcher`.
+    Searcher created via `localmail.search.create_searcher`. `serve_config`
+    controls pool sizing; the default is fine for a single-user local
+    deployment.
     """
-    app = FastAPI()
-    app.state.pool = ConnectionPool(db_dsn, min_size=1, max_size=4, open=True)
+    cfg = serve_config or ServeConfig()
+    pool = ConnectionPool(
+        db_dsn,
+        min_size=cfg.pool_min_size,
+        max_size=cfg.pool_max_size,
+        open=True,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            pool.close()
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.pool = pool
     app.state.searcher = searcher
 
     # Exception handler for APIError raised inside route handlers / dependencies.

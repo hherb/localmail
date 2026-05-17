@@ -73,3 +73,6 @@ def test_e2e_login_capabilities(db_dsn: str, tmp_path: Path) -> None:
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+        # Surface a thread that didn't drain — otherwise we leak it to the
+        # next test which can race against the port still being in TIME_WAIT.
+        assert not thread.is_alive(), "uvicorn server thread did not exit within 5s"

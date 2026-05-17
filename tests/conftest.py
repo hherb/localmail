@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 
 import keyring
 import psycopg
@@ -81,9 +82,6 @@ def db_conn(db_dsn):
         yield conn
     finally:
         conn.close()
-
-
-from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

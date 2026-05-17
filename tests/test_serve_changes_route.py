@@ -67,3 +67,19 @@ def test_changes_with_bogus_cursor_400(db_dsn: str, api_token: str) -> None:
     assert r.headers["content-type"].startswith("application/problem+json")
     body = r.json()
     assert body["type"] == "/problems/validation-failed"
+
+
+def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db_conn) -> None:
+    """Polling clients should see an empty `new_messages` and the same
+    `next_cursor` they sent in, when no rows have been inserted between calls.
+    A regression here means clients re-render the same batch forever."""
+    now = datetime.now(timezone.utc)
+    _seed_msg(db_conn, now - timedelta(hours=1), "aa")
+    db_conn.commit()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r1 = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
+    cursor = r1.json()["next_cursor"]
+    r2 = c.get(f"/v1/changes?since={cursor}", headers={"Authorization": f"Bearer {api_token}"})
+    body = r2.json()
+    assert body["new_messages"] == []
+    assert body["next_cursor"] == cursor

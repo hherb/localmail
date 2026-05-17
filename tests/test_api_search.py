@@ -48,12 +48,29 @@ def test_filter_value_with_embedded_quote_is_stripped() -> None:
     assert 'subject:"has quotes in it"' in q
 
 
-def test_build_query_string_accounts_become_account_dsl_tokens() -> None:
-    q = build_query_string(
-        free_text="x",
-        filters={"account_ids": ["1", "3"]},
-    )
-    assert "x" in q
+@pytest.mark.parametrize("unsupported_key, value", [
+    ("account_ids", ["1", "3"]),
+    ("folder_ids", ["10"]),
+    ("date_from", "2024-01-01"),
+    ("date_to", "2024-12-31"),
+    ("lang", "en"),
+])
+def test_unsupported_filter_keys_raise_validation(unsupported_key, value) -> None:
+    """Filters in the API schema but not wired to the searcher must 400.
+
+    Without this, a client requesting `account_ids: ["1"]` gets cross-account
+    results back, silently — the worst possible outcome for a search API.
+    """
+    with pytest.raises(ValidationFailed):
+        build_query_string(free_text="x", filters={unsupported_key: value})
+
+
+def test_empty_unsupported_filter_values_do_not_raise() -> None:
+    """Pydantic's exclude_none can still leave empty lists / empty strings;
+    those are equivalent to "filter not set" and must not 400."""
+    build_query_string(free_text="x", filters={"account_ids": []})
+    build_query_string(free_text="x", filters={"date_from": ""})
+    build_query_string(free_text="x", filters={"lang": None})
 
 
 def test_run_search_calls_searcher_and_maps_results() -> None:

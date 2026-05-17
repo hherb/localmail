@@ -716,7 +716,15 @@ def serve_cmd(
     if no_tls and bind != "127.0.0.1":
         raise click.ClickException("--no-tls is only valid when --bind 127.0.0.1")
 
-    dsn = _dsn_from_ctx(ctx)
+    from localmail.config import ServeConfig
+    override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
+    if override:
+        dsn = override
+        serve_cfg = ServeConfig()
+    else:
+        cfg = load_config(ctx.obj["config_path"])
+        dsn = cfg.database.dsn
+        serve_cfg = cfg.serve
 
     try:
         from localmail.search import create_searcher
@@ -725,7 +733,7 @@ def serve_cmd(
         click.echo(f"warning: search disabled ({exc})", err=True)
         searcher = None
 
-    app = create_app(db_dsn=dsn, searcher=searcher)
+    app = create_app(db_dsn=dsn, searcher=searcher, serve_config=serve_cfg)
 
     if no_tls:
         click.echo(f"serving HTTP on {bind}:{port}", err=True)

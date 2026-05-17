@@ -47,14 +47,40 @@ TOKEN_TTL_DAYS = 30
 LOGIN_MAX_FAILURES = 5
 LOGIN_LOCKOUT_SECONDS = 60
 
+# Global cap on /v1/auth/login attempts (all usernames, success or failure).
+# Bounds the argon2 CPU work an unauthenticated attacker can induce on the
+# server. Per-username limiter (above) does not help here because an attacker
+# can rotate usernames; this limiter does. Tuned for a single-user local
+# deployment — bump if you actually have many concurrent legit logins.
+LOGIN_GLOBAL_MAX_PER_WINDOW = 30
+LOGIN_GLOBAL_WINDOW_SECONDS = 60
+
 _LOGIN_FAILURES_LOCK = threading.Lock()
 _LOGIN_FAILURES: dict[str, list[float]] = {}
 
+_LOGIN_GLOBAL_LOCK = threading.Lock()
+_LOGIN_GLOBAL_ATTEMPTS: list[float] = []
+
 
 def reset_login_rate_limiter() -> None:
-    """Clear all per-username failure history. Test-only helper."""
+    """Clear all per-username and global attempt history. Test-only helper."""
     with _LOGIN_FAILURES_LOCK:
         _LOGIN_FAILURES.clear()
+    with _LOGIN_GLOBAL_LOCK:
+        _LOGIN_GLOBAL_ATTEMPTS.clear()
+
+
+def _check_login_global_rate_limit() -> None:
+    cutoff = _time.monotonic() - LOGIN_GLOBAL_WINDOW_SECONDS
+    with _LOGIN_GLOBAL_LOCK:
+        _LOGIN_GLOBAL_ATTEMPTS[:] = [t for t in _LOGIN_GLOBAL_ATTEMPTS if t > cutoff]
+        if len(_LOGIN_GLOBAL_ATTEMPTS) >= LOGIN_GLOBAL_MAX_PER_WINDOW:
+            raise RateLimited(
+                f"server-wide login rate limit exceeded "
+                f"({LOGIN_GLOBAL_MAX_PER_WINDOW} attempts per "
+                f"{LOGIN_GLOBAL_WINDOW_SECONDS}s); retry shortly"
+            )
+        _LOGIN_GLOBAL_ATTEMPTS.append(_time.monotonic())
 
 
 def _check_login_rate_limit(username: str) -> None:
@@ -172,9 +198,14 @@ def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, 
     """Verify credentials and mint a token.
 
     Raises:
-      RateLimited if the per-username failure threshold was hit.
+      RateLimited if either the global or per-username failure threshold was hit.
       AuthenticationFailed for bad credentials or disabled users.
+
+    The global limit is checked before the per-username limit because the
+    former protects against argon2 CPU amplification from any unauthenticated
+    caller, regardless of which username they target.
     """
+    _check_login_global_rate_limit()
     _check_login_rate_limit(username)
     with conn.cursor() as cur:
         cur.execute(

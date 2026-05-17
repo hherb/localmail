@@ -103,6 +103,47 @@ security find-generic-password -s localmail-gui -a bearer_token -w
 These should show your stored values. After logout, only `server_url`, `cert_sha256_pin`
 should remain — `username` and `bearer_token` cleared.
 
+## Manual smoke (Sub-plan 3 acceptance)
+
+Same server prereqs as Sub-plan 2. Run `localmail serve` and have at least
+one account synced with some messages (otherwise the message list will be
+empty — not a bug).
+
+```bash
+cd gui
+npm run tauri dev
+```
+
+Acceptance steps:
+
+1. Log in as before (Sub-plan 2 flow).
+2. App lands on the new **Main view** — three columns:
+   - Left rail: "📥 All Mail" pinned at top, then your configured accounts.
+   - Middle column: a list of the most recent ~200 messages across all
+     accounts, sorted newest first. Each row shows sender, subject, account,
+     and a relative date.
+   - Right pane: "Select a message to read it." placeholder.
+3. Click an account in the left rail. The account expands to show its
+   folders (loaded from `/v1/accounts/{id}/folders`). The middle column
+   filters to messages from that account (**client-side filter on the
+   already-loaded 200 — server-side narrowing arrives in Sub-plan 4**).
+4. Click a folder. Selection narrows further but the same client-side
+   account filter is what's actually applied (folder filtering is also
+   server-side and deferred).
+5. Click "📥 All Mail" to reset to the full loaded set.
+6. Click any message row. The right pane loads its plain-text body and
+   key headers (From / To / Date / Account · Folders). HTML-only messages
+   show "No plain-text body. (HTML rendering arrives in Sub-plan 4.)" —
+   that is expected behaviour for this sub-plan.
+7. Click another message; the right pane updates without flicker.
+8. Click the same message twice — no redundant network request fires.
+9. "Refresh token" and "Log out" buttons in the top header still work.
+10. After log out, log back in. The main view loads accounts + messages
+    again with no stale data.
+
+If any step fails, capture the DevTools console output AND the `npm run
+tauri dev` terminal output, then report.
+
 ## Talking to the server
 
 The client expects a `localmail serve` HTTPS endpoint. The connection URL, username, password, and TLS cert pin are stored in the OS keyring — landed in Sub-plan 2 (not in this scaffolding).

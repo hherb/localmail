@@ -198,6 +198,73 @@ def test_attachment_text_and_chunks_tables_exist(db_conn):
     assert "WHERE (embedding_v1 IS NULL)" in row[0]
 
 
+def test_failed_extractions_table_exists(db_conn):
+    """Verify migration 0012 created failed_extractions with correct schema.
+
+    Checks column names in order, nullability of key columns, and that the
+    primary key is sha256 alone (one row per blob, not per (blob, extractor)).
+    """
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name, is_nullable "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'failed_extractions' ORDER BY ordinal_position"
+        )
+        cols = cur.fetchall()
+    names = [c[0] for c in cols]
+    assert names == [
+        "sha256", "extractor", "error_class", "error_message", "traceback",
+        "retry_count", "failed_at", "last_retry_at",
+    ]
+    nullable = {c[0]: c[1] for c in cols}
+    assert nullable["extractor"] == "NO"
+    assert nullable["traceback"] == "YES"
+    assert nullable["last_retry_at"] == "YES"
+    assert nullable["error_class"] == "NO"
+    assert nullable["error_message"] == "NO"
+    assert nullable["retry_count"] == "NO"
+
+    # PK is sha256 alone
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.attname FROM pg_index i "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+            "AND a.attnum = ANY(i.indkey) "
+            "WHERE i.indrelid = 'failed_extractions'::regclass "
+            "AND i.indisprimary"
+        )
+        pk_cols = [r[0] for r in cur.fetchall()]
+    assert pk_cols == ["sha256"]
+
+
+def test_failed_extractions_cascade_on_blob_delete(db_conn):
+    """Deleting an attachment_blobs row cascades to failed_extractions."""
+    sha = b"\x55" * 32
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "/tmp/fe-cascade", "application/pdf", 1),
+        )
+        cur.execute(
+            "INSERT INTO failed_extractions "
+            "(sha256, extractor, error_class, error_message) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "lightweight", "BadFile", "broken"),
+        )
+    db_conn.commit()
+
+    with db_conn.cursor() as cur:
+        cur.execute("DELETE FROM attachment_blobs WHERE sha256 = %s", (sha,))
+    db_conn.commit()
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM failed_extractions WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0
+
+
 def test_attachment_text_and_chunks_cascade_on_blob_delete(db_conn):
     """Deleting an attachment_blobs row cascades to both attachment_text
     and attachment_chunks rows referencing the same sha256."""

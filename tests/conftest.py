@@ -73,7 +73,7 @@ def db_conn(db_dsn):
                 "TRUNCATE accounts, mailboxes, messages, message_labels, "
                 "attachment_blobs, failed_messages, message_chunks, "
                 "failed_embeddings, embedding_models, failed_chunkings, "
-                "attachment_text, attachment_chunks "
+                "attachment_text, attachment_chunks, failed_extractions "
                 "RESTART IDENTITY CASCADE"
             )
         conn.commit()

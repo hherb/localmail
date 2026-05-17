@@ -124,8 +124,49 @@ class LightweightExtractor:
     ) -> ExtractedText:
         """Extract text from `blob_path`.
 
-        Stub — per-format dispatch added in Tasks 7-10.
+        Dispatches per format. Returns ExtractedText with text='' when
+        the file is structurally valid but contains no extractable text
+        (e.g. a scanned PDF with no native text stream). Raises
+        ExtractorError on irrecoverable parse failures (corrupt bytes,
+        encryption, etc.).
         """
+        ext = blob_path.suffix.lower()
+        mt = (mime_type or "").lower()
+
+        if mt == "application/pdf" or ext == ".pdf":
+            return self._extract_pdf(blob_path)
+
         raise NotImplementedError(
-            "per-format dispatch is added in Tasks 7-10"
+            f"per-format dispatch for {mt!r}/{ext!r} added in subsequent tasks"
+        )
+
+    def _extract_pdf(self, blob_path: Path) -> ExtractedText:
+        """Extract text from a PDF blob using pypdf.
+
+        Returns ExtractedText(text='', ...) on PDFs whose only content
+        is rasterized images (scanned documents). Raises ExtractorError
+        on encrypted/password-protected PDFs and on irrecoverable parse
+        failures.
+        """
+        import pypdf
+        try:
+            reader = pypdf.PdfReader(str(blob_path))
+        except Exception as exc:
+            raise ExtractorError(f"pypdf failed to open: {exc}") from exc
+
+        if reader.is_encrypted:
+            raise ExtractorError(
+                "pypdf: encrypted PDF (no password supplied)"
+            )
+
+        try:
+            pages = [page.extract_text() or "" for page in reader.pages]
+        except Exception as exc:
+            raise ExtractorError(f"pypdf failed to extract: {exc}") from exc
+
+        text = "\n".join(pages).strip()
+        return ExtractedText(
+            text=text,
+            page_count=len(reader.pages),
+            extractor=f"{self.name}@{self.version}",
         )

@@ -44,3 +44,73 @@ def test_extractor_protocol_runtime_checkable() -> None:
     a configured class implements the interface."""
     lw = LightweightExtractor()
     assert isinstance(lw, AttachmentExtractor)
+
+
+import io
+
+
+def _build_native_pdf(text: str) -> bytes:
+    """Build a single-page text PDF in memory using reportlab."""
+    from reportlab.pdfgen import canvas
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    c.drawString(72, 720, text)
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def test_lightweight_extracts_native_pdf(tmp_path) -> None:
+    pdf_bytes = _build_native_pdf("hello attachment world")
+    p = tmp_path / "a.pdf"
+    p.write_bytes(pdf_bytes)
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "application/pdf")
+
+    assert "hello attachment world" in result.text
+    assert result.extractor == "lightweight@1.0"
+    assert result.page_count == 1
+
+
+def test_lightweight_returns_empty_on_scanned_pdf(tmp_path) -> None:
+    """A PDF whose only content is a rasterized image of text returns ''
+    from pypdf — the docling fallback exists for this case."""
+    from PIL import Image, ImageDraw
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
+
+    img = Image.new("RGB", (400, 80), "white")
+    ImageDraw.Draw(img).text((10, 30), "scanned text content", fill="black")
+    img_buf = io.BytesIO()
+    img.save(img_buf, format="PNG")
+    img_buf.seek(0)
+
+    pdf_buf = io.BytesIO()
+    c = canvas.Canvas(pdf_buf)
+    c.drawImage(ImageReader(img_buf), 72, 600, width=400, height=80)
+    c.showPage()
+    c.save()
+
+    p = tmp_path / "scan.pdf"
+    p.write_bytes(pdf_buf.getvalue())
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "application/pdf")
+
+    assert result.text == ""
+
+
+def test_lightweight_raises_on_encrypted_pdf(tmp_path) -> None:
+    import pikepdf
+    pdf_bytes = _build_native_pdf("secret")
+    src = tmp_path / "src.pdf"
+    src.write_bytes(pdf_bytes)
+
+    enc = tmp_path / "enc.pdf"
+    with pikepdf.open(src) as p:
+        p.save(enc, encryption=pikepdf.Encryption(owner="o", user="u", R=4))
+
+    lw = LightweightExtractor()
+    with pytest.raises(ExtractorError):
+        lw.extract(enc, "application/pdf")

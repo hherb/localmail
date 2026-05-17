@@ -172,3 +172,68 @@ def test_lightweight_extracts_pptx(tmp_path) -> None:
     )
     assert "Slide title here" in result.text
     assert "speaker note content" in result.text
+
+
+def test_lightweight_extracts_txt_utf8(tmp_path) -> None:
+    p = tmp_path / "a.txt"
+    p.write_text("plain text content über alles", encoding="utf-8")
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "text/plain")
+    assert "plain text content über alles" == result.text
+
+
+def test_lightweight_extracts_txt_latin1(tmp_path) -> None:
+    p = tmp_path / "a.txt"
+    p.write_bytes("naïve résumé".encode("latin-1"))
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "text/plain")
+    assert "naïve résumé" == result.text
+
+
+def test_lightweight_extracts_md(tmp_path) -> None:
+    p = tmp_path / "a.md"
+    p.write_text("# Header\n\nbody text", encoding="utf-8")
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "text/markdown")
+    assert "# Header" in result.text
+    assert "body text" in result.text
+
+
+def test_lightweight_extracts_html(tmp_path) -> None:
+    p = tmp_path / "a.html"
+    p.write_text(
+        "<html><body><h1>title</h1><p>paragraph</p></body></html>",
+        encoding="utf-8",
+    )
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "text/html")
+    # html2text emits markdown-ish; both strings should be present.
+    assert "title" in result.text
+    assert "paragraph" in result.text
+
+
+def test_lightweight_extracts_csv(tmp_path) -> None:
+    p = tmp_path / "a.csv"
+    p.write_text("name,city\nalice,Berlin\nbob,Madrid\n", encoding="utf-8")
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "text/csv")
+    assert "alice" in result.text
+    assert "Berlin" in result.text
+
+
+def test_lightweight_extracts_rtf(tmp_path) -> None:
+    p = tmp_path / "a.rtf"
+    p.write_text(
+        r"{\rtf1\ansi\deff0 {\fonttbl {\f0 Helvetica;}}"
+        r"\f0\fs24 RTF body content here.\par}",
+        encoding="ascii",
+    )
+
+    lw = LightweightExtractor()
+    result = lw.extract(p, "application/rtf")
+    assert "RTF body content here" in result.text

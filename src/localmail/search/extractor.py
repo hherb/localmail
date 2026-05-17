@@ -141,6 +141,16 @@ class LightweightExtractor:
             return self._extract_xlsx(blob_path)
         if "presentationml" in mt or ext == ".pptx":
             return self._extract_pptx(blob_path)
+        if mt == "text/plain" or ext == ".txt":
+            return self._extract_txt(blob_path)
+        if mt == "text/markdown" or ext == ".md":
+            return self._extract_md(blob_path)
+        if mt == "text/html" or ext in (".html", ".htm"):
+            return self._extract_html(blob_path)
+        if mt == "text/csv" or ext == ".csv":
+            return self._extract_csv(blob_path)
+        if mt == "application/rtf" or ext == ".rtf":
+            return self._extract_rtf(blob_path)
 
         raise NotImplementedError(
             f"per-format dispatch for {mt!r}/{ext!r} added in subsequent tasks"
@@ -257,5 +267,123 @@ class LightweightExtractor:
         text = "\n".join(parts).strip()
         return ExtractedText(
             text=text, page_count=None,
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_txt(self, blob_path: Path) -> ExtractedText:
+        """Extract text from a plain-text blob.
+
+        Encoding detection order:
+          1. UTF-8 (strict) — covers the vast majority of modern files.
+          2. chardet heuristic — handles multi-byte encodings (Shift-JIS,
+             GB18030, etc.) that are unambiguously detectable by chardet.
+             A CHARDET_CONFIDENCE_MIN threshold guards against low-confidence
+             guesses where chardet cannot distinguish between similar
+             single-byte encodings (e.g. latin-1 vs cp1250 for short files).
+          3. latin-1 hard fallback — IANA-registered default encoding for
+             text; maps all 256 byte values without error, so this path
+             never raises UnicodeDecodeError.
+
+        errors='replace' on the chardet path absorbs any remaining
+        mis-detections without raising. Logging deferred to extract_worker
+        (Task 13).
+        """
+        import chardet
+
+        _CHARDET_CONFIDENCE_MIN = 0.5
+
+        raw = blob_path.read_bytes()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            det = chardet.detect(raw) or {}
+            conf = det.get("confidence") or 0.0
+            enc = det.get("encoding") if conf >= _CHARDET_CONFIDENCE_MIN else None
+            encoding = enc or "latin-1"
+            try:
+                text = raw.decode(encoding, errors="replace")
+            except Exception as exc:
+                raise ExtractorError(f"txt decode failed: {exc}") from exc
+        return ExtractedText(
+            text=text.strip(),
+            page_count=None,
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_md(self, blob_path: Path) -> ExtractedText:
+        """Extract text from a Markdown blob.
+
+        Markdown is left as-is — chunking and embeddings handle its
+        structure well without stripping. Delegates to _extract_txt for
+        encoding detection (DRY: Markdown is plain text with structure
+        markers we don't interpret). Logging deferred to extract_worker.
+        """
+        return self._extract_txt(blob_path)
+
+    def _extract_html(self, blob_path: Path) -> ExtractedText:
+        """Extract text from an HTML blob using html2text.
+
+        Returns Markdown-ish output: markup is stripped, paragraphs and
+        headings are preserved as plain text. ignore_images drops
+        '![alt](url)' noise; body_width=0 disables line-wrapping so full
+        sentences stay on one line for better snippet quality. Logging
+        deferred to extract_worker (Task 13).
+        """
+        import html2text
+        try:
+            html = blob_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            raise ExtractorError(f"html read failed: {exc}") from exc
+        h = html2text.HTML2Text()
+        h.ignore_images = True
+        h.body_width = 0
+        text = h.handle(html).strip()
+        return ExtractedText(
+            text=text, page_count=None,
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_csv(self, blob_path: Path) -> ExtractedText:
+        """Extract text from a CSV blob using stdlib csv.
+
+        Each row's cells are space-joined; rows are newline-joined. The
+        newline='' argument lets csv.reader handle cross-platform line
+        endings inside quoted cells correctly. Logging deferred to
+        extract_worker (Task 13).
+        """
+        import csv
+        try:
+            with blob_path.open(
+                "r", encoding="utf-8", errors="replace", newline=""
+            ) as f:
+                rows = [" ".join(r) for r in csv.reader(f)]
+        except Exception as exc:
+            raise ExtractorError(f"csv read failed: {exc}") from exc
+        return ExtractedText(
+            text="\n".join(rows).strip(),
+            page_count=None,
+            extractor=f"{self.name}@{self.version}",
+        )
+
+    def _extract_rtf(self, blob_path: Path) -> ExtractedText:
+        """Extract text from an RTF blob using striprtf.
+
+        Reads as UTF-8 with replacement (RTF files are nominally ASCII
+        with backslash-escaped non-ASCII; replacement chars are harmless
+        for the rare malformed case). Logging deferred to extract_worker
+        (Task 13).
+        """
+        from striprtf.striprtf import rtf_to_text
+        try:
+            raw = blob_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            raise ExtractorError(f"rtf read failed: {exc}") from exc
+        try:
+            text = rtf_to_text(raw)
+        except Exception as exc:
+            raise ExtractorError(f"striprtf failed: {exc}") from exc
+        return ExtractedText(
+            text=text.strip(),
+            page_count=None,
             extractor=f"{self.name}@{self.version}",
         )

@@ -7,8 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::commands::auth::AuthError;
+use crate::commands::session::read_authenticated;
 use crate::http::client::{build_pinned_client, http_get_json};
-use crate::storage::keyring::{KeyringStore, Slot};
+use crate::storage::keyring::KeyringStore;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct MessageAddress {
@@ -34,24 +35,13 @@ pub struct MessageSummary {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ChangesResponse {
     pub new_messages: Vec<MessageSummary>,
-    pub next_cursor: String,
-}
-
-fn read_connection(store: &KeyringStore) -> Result<(String, String, String), AuthError> {
-    let url = store.get(Slot::ServerUrl)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .ok_or(AuthError::NotConnected)?;
-    let pin = store.get(Slot::CertPin)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .ok_or(AuthError::NotConnected)?;
-    let token = store.get(Slot::BearerToken)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .ok_or(AuthError::NotLoggedIn)?;
-    Ok((url, pin, token))
+    // Server returns null/absent when there's nothing further to page; modelling
+    // this as a required String would cause every initial load to fail.
+    pub next_cursor: Option<String>,
 }
 
 pub async fn list_recent_messages(store: &KeyringStore) -> Result<ChangesResponse, AuthError> {
-    let (url, pin, token) = read_connection(store)?;
+    let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
     let endpoint = format!("{url}v1/changes");
     let resp: ChangesResponse = http_get_json(&client, &endpoint, Some(&token)).await?;
@@ -67,7 +57,7 @@ pub async fn list_recent_messages_cmd() -> Result<ChangesResponse, AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::keyring::MemKeyring;
+    use crate::storage::keyring::{MemKeyring, Slot};
 
     fn fake_store() -> KeyringStore {
         KeyringStore::with_backend(MemKeyring::new())
@@ -87,5 +77,26 @@ mod tests {
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = list_recent_messages(&store).await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
+    }
+
+    #[test]
+    fn changes_response_deserialises_null_next_cursor() {
+        let body = r#"{"new_messages": [], "next_cursor": null}"#;
+        let resp: ChangesResponse = serde_json::from_str(body).unwrap();
+        assert!(resp.next_cursor.is_none());
+    }
+
+    #[test]
+    fn changes_response_deserialises_absent_next_cursor() {
+        let body = r#"{"new_messages": []}"#;
+        let resp: ChangesResponse = serde_json::from_str(body).unwrap();
+        assert!(resp.next_cursor.is_none());
+    }
+
+    #[test]
+    fn changes_response_deserialises_present_next_cursor() {
+        let body = r#"{"new_messages": [], "next_cursor": "cur-123"}"#;
+        let resp: ChangesResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(resp.next_cursor.as_deref(), Some("cur-123"));
     }
 }

@@ -68,6 +68,34 @@ describe("AccountTree", () => {
     expect(await findByText("INBOX")).toBeTruthy();
   });
 
+  it("rapid second click while folders loading does not collapse the tree", async () => {
+    mocks.listAccounts.mockResolvedValue([
+      {
+        id: "1",
+        name: "personal",
+        address: null,
+        last_sync_at: null,
+        message_count: 0,
+        capabilities: { can_sync: true, is_archive_only: false, is_shared: false },
+      },
+    ]);
+    let resolveFolders!: (v: unknown) => void;
+    mocks.listFolders.mockReturnValue(
+      new Promise((r) => {
+        resolveFolders = r;
+      }),
+    );
+    await mail.loadAccounts();
+    const { getByText, findByText } = render(AccountTree);
+    await fireEvent.click(getByText("personal"));
+    await fireEvent.click(getByText("personal"));
+    resolveFolders([
+      { id: "10", name: "INBOX", full_path: "INBOX", flags: null, last_uid: null, message_count: 0 },
+    ]);
+    expect(await findByText("INBOX")).toBeTruthy();
+    expect(mocks.listFolders).toHaveBeenCalledTimes(1);
+  });
+
   it("clicking a folder sets selection.kind = folder", async () => {
     mocks.listAccounts.mockResolvedValue([
       {

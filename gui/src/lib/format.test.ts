@@ -97,4 +97,13 @@ describe("selectionMatches", () => {
     expect(selectionMatches(sel, mkMsg("1"))).toBe(true);
     expect(selectionMatches(sel, mkMsg("2"))).toBe(false);
   });
+
+  it('"folder" ignores folderId — varying it does not change the match', () => {
+    // Documents the deferred behavior: message summaries carry no folder, so
+    // changing the selected folderId can never change a per-message decision.
+    const a: Selection = { kind: "folder", accountId: "1", folderId: "5" };
+    const b: Selection = { kind: "folder", accountId: "1", folderId: "999" };
+    const m = mkMsg("1");
+    expect(selectionMatches(a, m)).toBe(selectionMatches(b, m));
+  });
 });

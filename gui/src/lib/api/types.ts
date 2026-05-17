@@ -51,7 +51,7 @@ export interface MessageSummary {
 
 export interface ChangesResponse {
   new_messages: MessageSummary[];
-  next_cursor: string;
+  next_cursor: string | null;
 }
 
 export interface MessageFolder {

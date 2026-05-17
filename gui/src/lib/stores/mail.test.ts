@@ -116,7 +116,7 @@ describe("mail store", () => {
   });
 
   it("loadingMessages is true during fetch, false after", async () => {
-    let resolveFn!: (v: { new_messages: MessageSummary[]; next_cursor: string }) => void;
+    let resolveFn!: (v: { new_messages: MessageSummary[]; next_cursor: string | null }) => void;
     mocks.listRecentMessages.mockReturnValue(
       new Promise((r) => {
         resolveFn = r;
@@ -124,9 +124,19 @@ describe("mail store", () => {
     );
     const pending = mail.loadRecentMessages();
     expect(mail.snapshot.loadingMessages).toBe(true);
-    resolveFn({ new_messages: [], next_cursor: "0" });
+    resolveFn({ new_messages: [], next_cursor: null });
     await pending;
     expect(mail.snapshot.loadingMessages).toBe(false);
+  });
+
+  it("accepts null next_cursor without error", async () => {
+    mocks.listRecentMessages.mockResolvedValue({
+      new_messages: [msg("1", "1")],
+      next_cursor: null,
+    });
+    await mail.loadRecentMessages();
+    expect(mail.snapshot.messages).toHaveLength(1);
+    expect(mail.snapshot.errorMessage).toBeNull();
   });
 
   it("captures errorMessage on load failure", async () => {

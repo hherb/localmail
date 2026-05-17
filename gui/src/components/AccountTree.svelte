@@ -8,6 +8,10 @@
   import { mail } from "../lib/stores/mail.svelte";
 
   let expanded: Set<string> = $state(new Set());
+  // Plain (non-reactive) Set: tracks accounts whose first-ever folder load is
+  // in flight. A rapid second click while loading would otherwise read the
+  // already-flipped `expanded` and collapse the tree before folders arrive.
+  const expansionsInFlight = new Set<string>();
 
   function selectAll(): void {
     mail.setSelection({ kind: "all" });
@@ -15,6 +19,7 @@
 
   async function selectAccount(accountId: string): Promise<void> {
     mail.setSelection({ kind: "account", accountId });
+    if (expansionsInFlight.has(accountId)) return;
     if (expanded.has(accountId)) {
       const next = new Set(expanded);
       next.delete(accountId);
@@ -24,7 +29,12 @@
     const next = new Set(expanded);
     next.add(accountId);
     expanded = next;
-    await mail.loadFoldersFor(accountId);
+    expansionsInFlight.add(accountId);
+    try {
+      await mail.loadFoldersFor(accountId);
+    } finally {
+      expansionsInFlight.delete(accountId);
+    }
   }
 
   function selectFolder(accountId: string, folderId: string): void {

@@ -77,6 +77,13 @@ describe("MessageList", () => {
     expect(queryByText("second")).toBeNull();
   });
 
+  it("renders error message when store.errorMessage is set after a failed load", async () => {
+    mocks.listRecentMessages.mockRejectedValue({ kind: "Http", detail: "boom" });
+    await mail.loadRecentMessages();
+    const { getByText } = render(MessageList);
+    expect(getByText(/boom/i)).toBeTruthy();
+  });
+
   it("clicking a row calls openMessage with its id", async () => {
     mocks.listRecentMessages.mockResolvedValue({
       new_messages: [

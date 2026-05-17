@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::auth::AuthError;
 use crate::commands::changes::MessageAddress;
+use crate::commands::session::read_authenticated;
 use crate::http::client::{build_pinned_client, http_get_json};
-use crate::storage::keyring::{KeyringStore, Slot};
+use crate::storage::keyring::KeyringStore;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct MessageFolder {
@@ -46,21 +47,8 @@ pub struct MessageDetail {
     pub folders: Vec<MessageFolder>,
 }
 
-fn read_connection(store: &KeyringStore) -> Result<(String, String, String), AuthError> {
-    let url = store.get(Slot::ServerUrl)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .ok_or(AuthError::NotConnected)?;
-    let pin = store.get(Slot::CertPin)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .ok_or(AuthError::NotConnected)?;
-    let token = store.get(Slot::BearerToken)
-        .map_err(|e| AuthError::Keyring(e.to_string()))?
-        .ok_or(AuthError::NotLoggedIn)?;
-    Ok((url, pin, token))
-}
-
 pub async fn get_message(store: &KeyringStore, message_id: &str) -> Result<MessageDetail, AuthError> {
-    let (url, pin, token) = read_connection(store)?;
+    let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
     let endpoint = format!("{url}v1/messages/{message_id}");
     let detail: MessageDetail = http_get_json(&client, &endpoint, Some(&token)).await?;
@@ -76,7 +64,7 @@ pub async fn get_message_cmd(message_id: String) -> Result<MessageDetail, AuthEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::keyring::MemKeyring;
+    use crate::storage::keyring::{MemKeyring, Slot};
 
     fn fake_store() -> KeyringStore {
         KeyringStore::with_backend(MemKeyring::new())

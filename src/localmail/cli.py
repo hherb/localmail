@@ -597,5 +597,60 @@ def rotate_tls(cert_path: Path, key_path: Path, hostname: str, force: bool) -> N
     click.echo(f"sha256 fingerprint: {fp}")
 
 
+@main.command("serve")
+@click.option("--bind", default="127.0.0.1", show_default=True,
+              help="Interface to bind. Use 0.0.0.0 to expose to the network.")
+@click.option("--port", default=8443, type=int, show_default=True)
+@click.option("--tls-cert", "tls_cert", default=None, type=click.Path(path_type=Path))
+@click.option("--tls-key", "tls_key", default=None, type=click.Path(path_type=Path))
+@click.option("--no-tls", is_flag=True, default=False,
+              help="Disable TLS. Only valid when --bind is 127.0.0.1.")
+@click.pass_context
+def serve_cmd(
+    ctx: click.Context,
+    bind: str,
+    port: int,
+    tls_cert: Path | None,
+    tls_key: Path | None,
+    no_tls: bool,
+) -> None:
+    """Run the HTTPS API server."""
+    import uvicorn
+    from localmail.serve.app import create_app
+    from localmail.serve.tls import ensure_self_signed_cert
+
+    if no_tls and bind != "127.0.0.1":
+        raise click.ClickException("--no-tls is only valid when --bind 127.0.0.1")
+
+    dsn = _dsn_from_ctx(ctx)
+
+    try:
+        from localmail.search import create_searcher
+        searcher = create_searcher()
+    except Exception as exc:
+        click.echo(f"warning: search disabled ({exc})", err=True)
+        searcher = None
+
+    app = create_app(db_dsn=dsn, searcher=searcher)
+
+    if no_tls:
+        click.echo(f"serving HTTP on {bind}:{port}", err=True)
+        uvicorn.run(app, host=bind, port=port, log_level="info")
+        return
+
+    cert_path = tls_cert or Path.home() / ".config" / "localmail" / "tls" / "cert.pem"
+    key_path = tls_key or Path.home() / ".config" / "localmail" / "tls" / "key.pem"
+    ensure_self_signed_cert(
+        cert_path=cert_path, key_path=key_path,
+        hostname=bind if bind != "0.0.0.0" else "localhost",
+    )
+    click.echo(f"serving HTTPS on {bind}:{port}", err=True)
+    click.echo(f"cert: {cert_path}", err=True)
+    uvicorn.run(
+        app, host=bind, port=port, log_level="info",
+        ssl_certfile=str(cert_path), ssl_keyfile=str(key_path),
+    )
+
+
 if __name__ == "__main__":
     main()

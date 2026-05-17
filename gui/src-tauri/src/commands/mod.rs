@@ -3,3 +3,4 @@
 
 pub mod connect;
 pub mod auth;
+pub mod capabilities;

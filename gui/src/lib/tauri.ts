@@ -128,3 +128,12 @@ export interface DownloadResult {
 export async function downloadAttachment(sha256: string, dest: string): Promise<DownloadResult> {
   return invoke<DownloadResult>("download_attachment_cmd", { sha256, dest });
 }
+
+export interface AttachmentBlob {
+  bytes: number[];
+  content_type: string | null;
+}
+
+export async function fetchAttachmentBytes(sha256: string): Promise<AttachmentBlob> {
+  return invoke<AttachmentBlob>("fetch_attachment_bytes_cmd", { sha256 });
+}

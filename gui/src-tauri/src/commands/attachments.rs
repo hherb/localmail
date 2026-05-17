@@ -49,6 +49,38 @@ pub async fn download_attachment_cmd(
     download_attachment(&store, &sha256, PathBuf::from(dest)).await
 }
 
+#[derive(Debug, Serialize)]
+pub struct AttachmentBlob {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+}
+
+pub async fn fetch_attachment_bytes(
+    store: &KeyringStore,
+    sha256: &str,
+) -> Result<AttachmentBlob, AuthError> {
+    let (url, pin, token) = read_authenticated(store)?;
+    let client = build_pinned_client(&pin)?;
+    let endpoint = format!("{url}v1/attachments/{sha256}");
+    let resp = client.get(&endpoint).bearer_auth(&token).send().await
+        .map_err(|e| AuthError::Io(format!("attachment request: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(AuthError::Io(format!("HTTP {} on {endpoint}", resp.status())));
+    }
+    let content_type = resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let bytes = resp.bytes().await
+        .map_err(|e| AuthError::Io(format!("read body: {e}")))?;
+    Ok(AttachmentBlob { bytes: bytes.to_vec(), content_type })
+}
+
+#[tauri::command]
+pub async fn fetch_attachment_bytes_cmd(sha256: String) -> Result<AttachmentBlob, AuthError> {
+    let store = KeyringStore::new();
+    fetch_attachment_bytes(&store, &sha256).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +105,22 @@ mod tests {
         s.put(Slot::CertPin, "deadbeef").unwrap();
         let err = download_attachment(&s, "x", PathBuf::from("/tmp/x"))
             .await.unwrap_err();
+        assert!(matches!(err, AuthError::NotLoggedIn));
+    }
+
+    #[tokio::test]
+    async fn fetch_bytes_without_connection_returns_not_connected() {
+        let s = fake_store();
+        let err = fetch_attachment_bytes(&s, "deadbeef").await.unwrap_err();
+        assert!(matches!(err, AuthError::NotConnected));
+    }
+
+    #[tokio::test]
+    async fn fetch_bytes_without_token_returns_not_logged_in() {
+        let s = fake_store();
+        s.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        s.put(Slot::CertPin, "deadbeef").unwrap();
+        let err = fetch_attachment_bytes(&s, "x").await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
     }
 }

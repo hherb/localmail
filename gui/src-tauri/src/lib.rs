@@ -76,6 +76,7 @@ pub fn run() {
             crate::commands::messages::get_message_cmd,
             crate::commands::search::run_search_cmd,
             crate::commands::attachments::download_attachment_cmd,
+            crate::commands::attachments::fetch_attachment_bytes_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

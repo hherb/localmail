@@ -46,7 +46,10 @@ class ParsedQuery:
     filters: SearchFilters = field(default_factory=SearchFilters)
 
 
-_OPERATORS = {"from", "to", "subject", "after", "before", "has", "label", "account", "folder"}
+_OPERATORS = {
+    "from", "to", "subject", "after", "before", "has", "label",
+    "account", "folder", "account_id", "folder_id",
+}
 
 
 def _tokenize(s: str) -> list[str]:
@@ -85,6 +88,8 @@ def parse_query(query: str) -> ParsedQuery:
     free_parts: list[str] = []
     f_account_names: list[str] = []
     f_folders: list[str] = []
+    f_account_ids: list[int] = []
+    f_folder_ids: list[int] = []
     f_from = f_to = f_subject = f_label = None
     f_after = f_before = None
     f_has_attachment: bool | None = None
@@ -106,6 +111,18 @@ def parse_query(query: str) -> ParsedQuery:
                     f_account_names.append(value)
                 elif op_l == "folder":
                     f_folders.append(value)
+                elif op_l == "account_id":
+                    try:
+                        f_account_ids.append(int(value))
+                    except ValueError:
+                        free_parts.append(tok)
+                    continue
+                elif op_l == "folder_id":
+                    try:
+                        f_folder_ids.append(int(value))
+                    except ValueError:
+                        free_parts.append(tok)
+                    continue
                 elif op_l == "after":
                     f_after = _parse_date(value, "after")
                 elif op_l == "before":
@@ -119,6 +136,8 @@ def parse_query(query: str) -> ParsedQuery:
     filters = SearchFilters(
         account_names=f_account_names,
         folders=f_folders or None,
+        account_ids=f_account_ids or None,
+        folder_ids=f_folder_ids or None,
         from_substr=f_from,
         to_substr=f_to,
         subject_substr=f_subject,

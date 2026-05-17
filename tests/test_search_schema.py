@@ -162,6 +162,7 @@ def test_attachment_text_and_chunks_tables_exist(db_conn):
     assert names == ["sha256", "extractor", "extracted_text", "page_count", "extracted_at"]
 
     nullable = {c[0]: c[1] for c in cols}
+    assert nullable["extractor"] == "NO"
     assert nullable["extracted_text"] == "NO"
     assert nullable["page_count"] == "YES"
 
@@ -178,9 +179,11 @@ def test_attachment_text_and_chunks_tables_exist(db_conn):
     # Unique (sha256, chunk_idx)
     with db_conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM pg_indexes "
-            "WHERE tablename = 'attachment_chunks' "
-            "AND indexdef ILIKE '%UNIQUE%(sha256, chunk_idx)%'"
+            "SELECT 1 FROM pg_constraint c "
+            "JOIN pg_class t ON t.oid = c.conrelid "
+            "WHERE t.relname = 'attachment_chunks' "
+            "  AND c.contype = 'u' "
+            "  AND pg_get_constraintdef(c.oid) LIKE '%(sha256, chunk_idx)%'"
         )
         assert cur.fetchone() is not None
 
@@ -193,3 +196,41 @@ def test_attachment_text_and_chunks_tables_exist(db_conn):
         row = cur.fetchone()
     assert row is not None
     assert "WHERE (embedding_v1 IS NULL)" in row[0]
+
+
+def test_attachment_text_and_chunks_cascade_on_blob_delete(db_conn):
+    """Deleting an attachment_blobs row cascades to both attachment_text
+    and attachment_chunks rows referencing the same sha256."""
+    sha = b"\x42" * 32
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "/tmp/cascade-test", "text/plain", 4),
+        )
+        cur.execute(
+            "INSERT INTO attachment_text (sha256, extractor, extracted_text) "
+            "VALUES (%s, %s, %s)",
+            (sha, "lightweight@1.0", "test"),
+        )
+        cur.execute(
+            "INSERT INTO attachment_chunks "
+            "(sha256, chunk_idx, text, token_count) "
+            "VALUES (%s, 0, %s, 1)",
+            (sha, "test"),
+        )
+    db_conn.commit()
+
+    with db_conn.cursor() as cur:
+        cur.execute("DELETE FROM attachment_blobs WHERE sha256 = %s", (sha,))
+    db_conn.commit()
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM attachment_text WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0
+        cur.execute("SELECT count(*) FROM attachment_chunks WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0

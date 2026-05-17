@@ -71,6 +71,8 @@ from typing import Literal
 
 import tiktoken
 
+from localmail.config import SearchConfig
+
 _ENC = tiktoken.get_encoding("cl100k_base")
 _HEADER_BODY_INTRO_TOKENS = 200
 
@@ -147,7 +149,7 @@ def _header_text(msg: MessageRow, body_for_intro: str) -> str:
 def chunk_attachment_text(
     sha256: bytes,
     text: str,
-    cfg,
+    cfg: SearchConfig,
 ) -> list[ChunkSpec]:
     """Token-aware chunking for extracted attachment text. Pure function.
 
@@ -179,18 +181,14 @@ def chunk_attachment_text(
     if not text:
         return []
 
-    truncated = False
     if len(text) > cfg.extractor_max_extracted_chars:
-        text = text[: cfg.extractor_max_extracted_chars]
-        truncated = True
+        text = text[: cfg.extractor_max_extracted_chars] + "\n[truncated]"
 
     pieces = split_by_tokens(
         text,
         size=cfg.chunk_size_tokens,
         overlap=cfg.chunk_overlap_tokens,
     )
-    if truncated and pieces:
-        pieces[-1] = pieces[-1] + "\n[truncated]"
 
     chunks: list[ChunkSpec] = []
     for idx, piece in enumerate(pieces):

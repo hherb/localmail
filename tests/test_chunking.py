@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+from localmail.config import SearchConfig
 from localmail.search.chunking import (
+    ChunkSpec,
+    MessageRow,
+    chunk_attachment_text,
+    chunk_message,
     normalize_whitespace,
+    split_by_tokens,
     strip_quoted_replies,
     strip_signature,
 )
@@ -62,17 +70,6 @@ def test_strip_signature_keeps_body_with_no_sig():
 def test_normalize_whitespace_collapses_runs():
     assert normalize_whitespace("a   b\n\n\n c") == "a b\n\nc"
     assert normalize_whitespace("   leading \t") == "leading"
-
-
-from datetime import datetime, timezone
-
-from localmail.config import SearchConfig
-from localmail.search.chunking import (
-    ChunkSpec,
-    MessageRow,
-    chunk_message,
-    split_by_tokens,
-)
 
 
 def _cfg(**overrides) -> SearchConfig:
@@ -152,8 +149,6 @@ def test_chunk_message_handles_none_body():
 
 
 def test_chunk_attachment_text_short_input_one_chunk() -> None:
-    from localmail.search.chunking import chunk_attachment_text
-
     cfg = SearchConfig()
     sha = b"\x01" * 32
     chunks = chunk_attachment_text(sha, "short text body", cfg)
@@ -166,8 +161,6 @@ def test_chunk_attachment_text_short_input_one_chunk() -> None:
 
 
 def test_chunk_attachment_text_long_input_multiple_chunks() -> None:
-    from localmail.search.chunking import chunk_attachment_text
-
     cfg = SearchConfig()
     long_text = "lorem ipsum dolor sit amet " * 1000
     sha = b"\x02" * 32
@@ -182,8 +175,6 @@ def test_chunk_attachment_text_long_input_multiple_chunks() -> None:
 
 
 def test_chunk_attachment_text_truncates_at_max_extracted_chars() -> None:
-    from localmail.search.chunking import chunk_attachment_text
-
     cfg = SearchConfig(extractor_max_extracted_chars=200)
     sha = b"\x03" * 32
     long_text = "x " * 5000  # 10000 chars
@@ -195,8 +186,6 @@ def test_chunk_attachment_text_truncates_at_max_extracted_chars() -> None:
 
 
 def test_chunk_attachment_text_normalizes_whitespace() -> None:
-    from localmail.search.chunking import chunk_attachment_text
-
     cfg = SearchConfig()
     sha = b"\x04" * 32
     messy = "line one\n\n\n\n\nline   two\t\t\tline three"
@@ -210,8 +199,6 @@ def test_chunk_attachment_text_normalizes_whitespace() -> None:
 def test_chunk_attachment_text_empty_returns_no_chunks() -> None:
     """Empty input returns []; the embed_worker uses this to skip
     sentinel attachment_text rows."""
-    from localmail.search.chunking import chunk_attachment_text
-
     cfg = SearchConfig()
     sha = b"\x05" * 32
     assert chunk_attachment_text(sha, "", cfg) == []

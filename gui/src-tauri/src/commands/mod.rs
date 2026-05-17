@@ -4,4 +4,5 @@
 pub mod accounts;
 pub mod auth;
 pub mod capabilities;
+pub mod changes;
 pub mod connect;

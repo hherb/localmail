@@ -266,6 +266,48 @@ def test_failed_extractions_cascade_on_blob_delete(db_conn):
         assert row[0] == 0
 
 
+def test_attachment_arm4_indexes_exist(db_conn):
+    """Verify migration 0013 created HNSW on attachment_chunks.embedding_v1
+    and GIN on messages.attachments for Arm 4 vector + JSONB retrieval.
+
+    The HNSW WITH-clause parameters must match Phase 1's message_chunks index
+    (m=16, ef_construction=64) for consistent build cost and recall.
+    Postgres 18 normalises these as quoted integers in indexdef
+    (e.g. m='16'), so the assertions match that canonical form.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'attachment_chunks_embedding_v1_hnsw'"
+        )
+        row = cur.fetchone()
+    assert row is not None, "attachment_chunks_embedding_v1_hnsw index missing"
+    assert "USING hnsw" in row[0]
+    assert "halfvec_cosine_ops" in row[0]
+    # WITH-clause parameters: Postgres normalises to m='16', ef_construction='64'.
+    # Accept quoted or unquoted forms so the test survives across PG versions.
+    indexdef = row[0]
+    assert "m='16'" in indexdef or "m = 16" in indexdef or "m=16" in indexdef
+    assert (
+        "ef_construction='64'" in indexdef
+        or "ef_construction = 64" in indexdef
+        or "ef_construction=64" in indexdef
+    )
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'messages_attachments_gin'"
+        )
+        row = cur.fetchone()
+    assert row is not None, "messages_attachments_gin index missing"
+    assert "USING gin" in row[0]
+    # GIN target column must be `attachments`, not some other JSONB column.
+    # Postgres includes the schema prefix in indexdef (e.g. "public.messages"),
+    # so match the tail that is stable across schema qualification.
+    assert "using gin (attachments)" in row[0].lower()
+
+
 def test_attachment_text_and_chunks_cascade_on_blob_delete(db_conn):
     """Deleting an attachment_blobs row cascades to both attachment_text
     and attachment_chunks rows referencing the same sha256."""

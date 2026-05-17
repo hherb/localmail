@@ -149,3 +149,70 @@ def test_chunk_message_handles_none_body():
     chunks = chunk_message(msg, _cfg())
     assert len(chunks) == 1
     assert "Subject only" in chunks[0].text
+
+
+def test_chunk_attachment_text_short_input_one_chunk() -> None:
+    from localmail.search.chunking import chunk_attachment_text
+
+    cfg = SearchConfig()
+    sha = b"\x01" * 32
+    chunks = chunk_attachment_text(sha, "short text body", cfg)
+
+    assert len(chunks) == 1
+    assert chunks[0].kind == "attachment"
+    assert chunks[0].chunk_idx == 0
+    assert chunks[0].text == "short text body"
+    assert chunks[0].token_count > 0
+
+
+def test_chunk_attachment_text_long_input_multiple_chunks() -> None:
+    from localmail.search.chunking import chunk_attachment_text
+
+    cfg = SearchConfig()
+    long_text = "lorem ipsum dolor sit amet " * 1000
+    sha = b"\x02" * 32
+    chunks = chunk_attachment_text(sha, long_text, cfg)
+
+    assert len(chunks) > 1
+    indices = [c.chunk_idx for c in chunks]
+    assert indices == list(range(len(chunks)))
+    for c in chunks:
+        assert c.kind == "attachment"
+        assert c.text
+
+
+def test_chunk_attachment_text_truncates_at_max_extracted_chars() -> None:
+    from localmail.search.chunking import chunk_attachment_text
+
+    cfg = SearchConfig(extractor_max_extracted_chars=200)
+    sha = b"\x03" * 32
+    long_text = "x " * 5000  # 10000 chars
+    chunks = chunk_attachment_text(sha, long_text, cfg)
+
+    full = "\n".join(c.text for c in chunks)
+    assert len(full) <= cfg.extractor_max_extracted_chars + 50
+    assert any("[truncated]" in c.text for c in chunks)
+
+
+def test_chunk_attachment_text_normalizes_whitespace() -> None:
+    from localmail.search.chunking import chunk_attachment_text
+
+    cfg = SearchConfig()
+    sha = b"\x04" * 32
+    messy = "line one\n\n\n\n\nline   two\t\t\tline three"
+    chunks = chunk_attachment_text(sha, messy, cfg)
+
+    text = chunks[0].text
+    assert "\n\n\n" not in text
+    assert "   " not in text
+
+
+def test_chunk_attachment_text_empty_returns_no_chunks() -> None:
+    """Empty input returns []; the embed_worker uses this to skip
+    sentinel attachment_text rows."""
+    from localmail.search.chunking import chunk_attachment_text
+
+    cfg = SearchConfig()
+    sha = b"\x05" * 32
+    assert chunk_attachment_text(sha, "", cfg) == []
+    assert chunk_attachment_text(sha, "   \n\n  \t  ", cfg) == []

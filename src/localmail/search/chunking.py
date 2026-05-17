@@ -144,6 +144,67 @@ def _header_text(msg: MessageRow, body_for_intro: str) -> str:
     return " | ".join(parts)
 
 
+def chunk_attachment_text(
+    sha256: bytes,
+    text: str,
+    cfg,
+) -> list[ChunkSpec]:
+    """Token-aware chunking for extracted attachment text. Pure function.
+
+    Args:
+        sha256: The blob's sha256 (unused for chunking but kept in the
+            signature so callers can pass it explicitly — useful for
+            future extensions that key chunks back to the source blob).
+        text: The extracted plain-text from one attachment_text row.
+        cfg: SearchConfig — supplies chunk_size_tokens,
+            chunk_overlap_tokens, and extractor_max_extracted_chars.
+
+    Returns:
+        A list of ChunkSpec records with kind='attachment' and ordered
+        chunk_idx starting at 0. Returns [] for empty input (the
+        embed_worker uses this to silently skip sentinel
+        attachment_text rows with extracted_text='').
+
+    Behavior:
+        - Normalises whitespace before chunking (collapses tabs, runs
+          of spaces, and runs of 3+ newlines).
+        - If the input exceeds cfg.extractor_max_extracted_chars, the
+          tail is truncated and the last chunk gets a '[truncated]'
+          marker appended (Rule 6 — truncation is user-approved via
+          SearchConfig).
+        - Splits via the existing token-budget chunker using
+          cfg.chunk_size_tokens and cfg.chunk_overlap_tokens.
+    """
+    text = normalize_whitespace(text or "")
+    if not text:
+        return []
+
+    truncated = False
+    if len(text) > cfg.extractor_max_extracted_chars:
+        text = text[: cfg.extractor_max_extracted_chars]
+        truncated = True
+
+    pieces = split_by_tokens(
+        text,
+        size=cfg.chunk_size_tokens,
+        overlap=cfg.chunk_overlap_tokens,
+    )
+    if truncated and pieces:
+        pieces[-1] = pieces[-1] + "\n[truncated]"
+
+    chunks: list[ChunkSpec] = []
+    for idx, piece in enumerate(pieces):
+        chunks.append(
+            ChunkSpec(
+                kind="attachment",
+                chunk_idx=idx,
+                text=piece,
+                token_count=len(_ENC.encode(piece)),
+            )
+        )
+    return chunks
+
+
 def chunk_message(msg: MessageRow, cfg) -> list[ChunkSpec]:
     """Produce header + body chunks for a message.
 

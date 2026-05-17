@@ -1,7 +1,7 @@
 # localmail
 
 <p align="center">
-  <img src="assets/banner medium.png" alt="localmail" width="180">
+  <img src="assets/banner medium.png" alt="localmail" width="480">
 </p>
 
 Mirrors one or more IMAP accounts (password or Gmail OAuth2) into a local

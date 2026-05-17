@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from localmail.config import SearchConfig
-from localmail.search.extract_worker import run_extract_worker_once
+from localmail.search.extract_worker import run_extract_worker, run_extract_worker_once
+from tests.conftest import TEST_DSN
 
 
 def _seed_blob(
@@ -211,3 +215,60 @@ def test_extract_worker_excludes_blobs_at_max_retries(
         row = cur.fetchone()
         assert row is not None
         assert row[0] == cfg.extract_worker_max_retries  # unchanged
+
+
+def test_run_extract_worker_drains_queue_then_idles(db_conn, tmp_path) -> None:
+    """run_extract_worker drains pending work, then blocks on the poll
+    interval until the stop event is set."""
+    _seed_blob(db_conn, b"blob alpha content", "text/plain", tmp_path, "a.txt")
+    _seed_blob(db_conn, b"blob beta content", "text/plain", tmp_path, "b.txt")
+
+    cfg = SearchConfig(extract_worker_poll_interval_s=1)
+    stop = threading.Event()
+
+    def _make_conn() -> psycopg.Connection:
+        return psycopg.connect(TEST_DSN)
+
+    t = threading.Thread(
+        target=run_extract_worker,
+        kwargs={"conn_factory": _make_conn, "cfg": cfg, "stop_event": stop},
+        daemon=True,
+    )
+    t.start()
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM attachment_text")
+            row = cur.fetchone()
+            assert row is not None
+            if row[0] >= 2:
+                break
+        time.sleep(0.1)
+
+    stop.set()
+    t.join(timeout=3)
+    assert not t.is_alive()
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM attachment_text")
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 2
+
+
+def test_run_extract_worker_stops_immediately_when_event_set(db_conn) -> None:
+    """Setting stop_event before starting the loop causes immediate exit."""
+    cfg = SearchConfig(extract_worker_poll_interval_s=30)
+    stop = threading.Event()
+    stop.set()  # already set before the loop starts
+
+    def _make_conn() -> psycopg.Connection:
+        return psycopg.connect(TEST_DSN)
+
+    start = time.monotonic()
+    run_extract_worker(conn_factory=_make_conn, cfg=cfg, stop_event=stop)
+    elapsed = time.monotonic() - start
+
+    # Should exit in <1s, well under the 30s poll interval.
+    assert elapsed < 1.0

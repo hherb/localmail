@@ -43,8 +43,10 @@ worker to return 0 when False, consistent with ``run_embed_worker_once``.
 from __future__ import annotations
 
 import logging
+import threading
 import traceback as tb_mod
 from pathlib import Path
+from typing import Callable
 
 import psycopg
 
@@ -392,37 +394,59 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
 
 
 def run_extract_worker(
-    stop,
-    pool,
+    *,
+    conn_factory: Callable[[], psycopg.Connection],
     cfg: SearchConfig,
+    stop_event: threading.Event,
 ) -> None:
-    """Background daemon loop: sweep, sleep, repeat.  Exits when ``stop`` is set.
+    """Background loop: drain the extraction queue, sleep, repeat.
 
-    Mirrors ``run_embed_worker``:
-    - Acquires a fresh connection from ``pool`` each sweep to keep idle rotation
-      healthy.
-    - Backs off exponentially (up to ``cfg.extract_worker_poll_interval_s * 7``)
-      on consecutive empty sweeps so an empty queue doesn't busy-poll.
-    - Any sweep-level exception is logged at ERROR; the loop continues.
+    Opens a fresh connection via ``conn_factory`` for each outer iteration so
+    that server-side idle timeouts and transaction-state leaks cannot
+    accumulate across sweeps. Reconnects with exponential backoff (1 s → 60 s
+    cap) when ``conn_factory`` raises.  Exits cleanly as soon as
+    ``stop_event`` is set — including during the inter-sweep sleep so the
+    thread joins promptly.
 
     Args:
-        stop: A ``threading.Event`` that signals the loop to exit cleanly.
-        pool: A ``psycopg_pool.ConnectionPool`` from which connections are
-            borrowed per sweep.
-        cfg: SearchConfig providing all tunables, including the master enable
-            flag ``run_extract_worker``.
+        conn_factory: Zero-argument callable that returns a fresh
+            ``psycopg.Connection``.  The worker owns the connection's
+            lifecycle (close is called in ``finally``).
+        cfg: ``SearchConfig`` supplying all tunables: poll interval, batch
+            size, retry cap, and the master enable flag.
+        stop_event: Set this to request graceful shutdown.  The loop checks
+            the event before each sweep and uses ``stop_event.wait`` for
+            inter-sweep sleeps so cancellation is near-instantaneous.
     """
-    consecutive_empty = 0
-    while not stop.is_set():
+    backoff = 1.0
+    while not stop_event.is_set():
         try:
-            with pool.connection() as conn:
-                wrote = run_extract_worker_once(conn, cfg)
-        except Exception as exc:  # noqa: BLE001
-            _LOG.error("extract_worker sweep error: %s", exc, exc_info=True)
-            wrote = 0
-        if wrote == 0:
-            consecutive_empty = min(consecutive_empty + 1, 6)
-        else:
-            consecutive_empty = 0
-        sleep_s = cfg.extract_worker_poll_interval_s * (1 + consecutive_empty)
-        stop.wait(timeout=sleep_s)
+            conn = conn_factory()
+        except Exception:
+            _LOG.warning(
+                "extract_worker: connect failed; backing off %.0fs", backoff
+            )
+            if stop_event.wait(timeout=backoff):
+                return
+            backoff = min(backoff * 2, 60.0)
+            continue
+
+        backoff = 1.0
+        try:
+            while not stop_event.is_set():
+                touched = run_extract_worker_once(conn, cfg)
+                if touched == 0:
+                    break
+            if stop_event.is_set():
+                break
+            stop_event.wait(timeout=cfg.extract_worker_poll_interval_s)
+        except Exception:
+            _LOG.exception("extract_worker: error during sweep")
+            if stop_event.wait(timeout=backoff):
+                return
+            backoff = min(backoff * 2, 60.0)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass

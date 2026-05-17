@@ -35,7 +35,9 @@ npm run tauri build
 
 Produces a platform-specific bundle in `src-tauri/target/release/bundle/`.
 
-**NOTE:** Bundling uses the icon files at `src-tauri/icons/`. The scaffolding ships with **minimal placeholder PNGs** generated programmatically (Sub-plan 1) so `cargo build` succeeds; real branded icons are part of Sub-plan 5 (Packaging). Until then, `tauri build` works but produces a bundle with placeholder iconography.
+**NOTE:** Bundling uses the icon files at `src-tauri/icons/`. The scaffolding ships with **minimal placeholder PNGs + ICNS** generated programmatically (Sub-plan 1) so `cargo build` and `tauri dev` succeed; real branded icons are part of Sub-plan 5 (Packaging).
+
+**Icon-rebuild gotcha:** `tauri::generate_context!()` embeds icon bytes into the binary at compile time. If you change a file in `src-tauri/icons/`, cargo doesn't see that change (icons aren't in the source dependency graph) — touch `src/lib.rs` or run `cargo clean -p localmail-gui` to force a relink, otherwise the old icon bytes stay baked in and macOS may panic at app launch.
 
 ## Manual smoke (Sub-plan 1 acceptance)
 

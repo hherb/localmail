@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 
 import keyring
 import psycopg
@@ -73,10 +74,39 @@ def db_conn(db_dsn):
                 "TRUNCATE accounts, mailboxes, messages, message_labels, "
                 "attachment_blobs, failed_messages, message_chunks, "
                 "failed_embeddings, embedding_models, failed_chunkings, "
-                "attachment_text, attachment_chunks, failed_extractions "
+                "attachment_text, attachment_chunks, failed_extractions, "
+                "api_users, api_tokens "
                 "RESTART IDENTITY CASCADE"
             )
         conn.commit()
         yield conn
     finally:
         conn.close()
+
+
+@dataclass(frozen=True)
+class SeededUser:
+    id: int
+    username: str
+    password: str
+
+
+@pytest.fixture
+def api_user(db_conn):
+    """Create a single API user, return SeededUser."""
+    from localmail.api.auth import create_user, reset_login_rate_limiter
+    reset_login_rate_limiter()
+    username = "alice"
+    password = "hunter2"
+    uid = create_user(db_conn, username, password)
+    db_conn.commit()
+    return SeededUser(id=uid, username=username, password=password)
+
+
+@pytest.fixture
+def api_token(db_conn, api_user):
+    """Mint a valid bearer token for `api_user`."""
+    from localmail.api.auth import login
+    token, _expires = login(db_conn, api_user.username, api_user.password)
+    db_conn.commit()
+    return token

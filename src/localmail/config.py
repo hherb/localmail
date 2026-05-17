@@ -28,6 +28,12 @@ class DaemonConfig(BaseModel):
     poll_seconds: int = 300
 
 
+class ServeConfig(BaseModel):
+    """Tunables for the GUI HTTP server (localmail.serve)."""
+    pool_min_size: int = 1
+    pool_max_size: int = 4
+
+
 class GmailOAuthConfig(BaseModel):
     client_secrets_file: Path
 
@@ -179,6 +185,7 @@ class Config(BaseModel):
     database: DatabaseConfig
     attachments: AttachmentsConfig = AttachmentsConfig()
     daemon: DaemonConfig = DaemonConfig()
+    serve: ServeConfig = Field(default_factory=ServeConfig)
     gmail_oauth: GmailOAuthConfig | None = None
     accounts: list[AccountConfig] = Field(default_factory=list)
     search: SearchConfig = Field(default_factory=SearchConfig)

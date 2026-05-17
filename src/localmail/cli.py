@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -594,6 +595,163 @@ def retry_failed_embeddings(chunk_table):
     finally:
         pool.close()
     click.echo(f"cleared {n} failed_embeddings rows")
+
+
+def _dsn_from_ctx(ctx: click.Context) -> str:
+    """DSN resolver: env override wins over config (useful for tests)."""
+    override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
+    if override:
+        return override
+    cfg = load_config(ctx.obj["config_path"])
+    return cfg.database.dsn
+
+
+@main.command("add-api-user")
+@click.argument("username")
+@click.option("--password", "password_opt", default=None,
+              help="If omitted, prompt with hidden input.")
+@click.pass_context
+def add_api_user(ctx: click.Context, username: str, password_opt: str | None) -> None:
+    """Create a new API user. Password is hashed with argon2id.
+
+    Note: until the per-account ACL lands, every API user has read access to
+    every account and message in the archive. Adding a second user is
+    therefore a sharing decision, not a permissions one — a warning prints
+    when that happens.
+    """
+    from localmail.api.auth import create_user
+    password = password_opt or click.prompt("Password", hide_input=True, confirmation_prompt=True)
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM api_users")
+            row = cur.fetchone()
+            assert row is not None
+            existing = int(row[0])
+        try:
+            uid = create_user(conn, username, password)
+            conn.commit()
+        except psycopg.errors.UniqueViolation:
+            raise click.ClickException(f"user {username!r} already exists")
+    click.echo(f"created user {username!r} (id={uid})")
+    if existing >= 1:
+        click.echo(
+            f"warning: {existing + 1} API users now exist. The current build has "
+            f"no per-account ACL, so {username!r} can read every account's mail. "
+            f"Only add multiple users if that is intended.",
+            err=True,
+        )
+
+
+@main.command("remove-api-user")
+@click.argument("username")
+@click.pass_context
+def remove_api_user(ctx: click.Context, username: str) -> None:
+    """Delete an API user and all its tokens."""
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM api_users WHERE username = %s", (username,))
+        if cur.rowcount == 0:
+            raise click.ClickException(f"no such user: {username!r}")
+        conn.commit()
+    click.echo(f"removed user {username!r}")
+
+
+@main.command("list-api-users")
+@click.pass_context
+def list_api_users(ctx: click.Context) -> None:
+    """List configured API users (and whether each is disabled)."""
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn, conn.cursor() as cur:
+        cur.execute("SELECT username, disabled_at FROM api_users ORDER BY username")
+        rows = cur.fetchall()
+    if not rows:
+        click.echo("(no users)")
+        return
+    for username, disabled_at in rows:
+        marker = " [disabled]" if disabled_at else ""
+        click.echo(f"{username}{marker}")
+
+
+@main.command("rotate-tls")
+@click.option("--cert", "cert_path", required=True, type=click.Path(path_type=Path))
+@click.option("--key", "key_path", required=True, type=click.Path(path_type=Path))
+@click.option("--hostname", default="localhost", show_default=True)
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite existing cert/key without prompting.")
+def rotate_tls(cert_path: Path, key_path: Path, hostname: str, force: bool) -> None:
+    """Generate (or regenerate with --force) a self-signed TLS cert + key."""
+    from localmail.serve.tls import cert_fingerprint_sha256_hex, ensure_self_signed_cert
+    if force:
+        if cert_path.exists():
+            cert_path.unlink()
+        if key_path.exists():
+            key_path.unlink()
+    ensure_self_signed_cert(cert_path=cert_path, key_path=key_path, hostname=hostname)
+    fp = cert_fingerprint_sha256_hex(cert_path=cert_path)
+    click.echo(f"cert: {cert_path}")
+    click.echo(f"key:  {key_path}")
+    click.echo(f"sha256 fingerprint: {fp}")
+
+
+@main.command("serve")
+@click.option("--bind", default="127.0.0.1", show_default=True,
+              help="Interface to bind. Use 0.0.0.0 to expose to the network.")
+@click.option("--port", default=8443, type=int, show_default=True)
+@click.option("--tls-cert", "tls_cert", default=None, type=click.Path(path_type=Path))
+@click.option("--tls-key", "tls_key", default=None, type=click.Path(path_type=Path))
+@click.option("--no-tls", is_flag=True, default=False,
+              help="Disable TLS. Only valid when --bind is 127.0.0.1.")
+@click.pass_context
+def serve_cmd(
+    ctx: click.Context,
+    bind: str,
+    port: int,
+    tls_cert: Path | None,
+    tls_key: Path | None,
+    no_tls: bool,
+) -> None:
+    """Run the HTTPS API server."""
+    import uvicorn
+    from localmail.serve.app import create_app
+    from localmail.serve.tls import ensure_self_signed_cert
+
+    if no_tls and bind != "127.0.0.1":
+        raise click.ClickException("--no-tls is only valid when --bind 127.0.0.1")
+
+    from localmail.config import ServeConfig
+    override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
+    if override:
+        dsn = override
+        serve_cfg = ServeConfig()
+    else:
+        cfg = load_config(ctx.obj["config_path"])
+        dsn = cfg.database.dsn
+        serve_cfg = cfg.serve
+
+    try:
+        from localmail.search import create_searcher
+        searcher = create_searcher()
+    except Exception as exc:
+        click.echo(f"warning: search disabled ({exc})", err=True)
+        searcher = None
+
+    app = create_app(db_dsn=dsn, searcher=searcher, serve_config=serve_cfg)
+
+    if no_tls:
+        click.echo(f"serving HTTP on {bind}:{port}", err=True)
+        uvicorn.run(app, host=bind, port=port, log_level="info")
+        return
+
+    cert_path = tls_cert or Path.home() / ".config" / "localmail" / "tls" / "cert.pem"
+    key_path = tls_key or Path.home() / ".config" / "localmail" / "tls" / "key.pem"
+    ensure_self_signed_cert(
+        cert_path=cert_path, key_path=key_path,
+        hostname=bind if bind != "0.0.0.0" else "localhost",
+    )
+    click.echo(f"serving HTTPS on {bind}:{port}", err=True)
+    click.echo(f"cert: {cert_path}", err=True)
+    uvicorn.run(
+        app, host=bind, port=port, log_level="info",
+        ssl_certfile=str(cert_path), ssl_keyfile=str(key_path),
+    )
 
 
 @main.command("list-failed-extractions")

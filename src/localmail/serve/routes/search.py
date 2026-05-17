@@ -1,0 +1,55 @@
+"""POST /v1/search endpoint."""
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, Field
+
+from localmail.api.errors import FeatureUnavailable
+from localmail.api.search import run_search
+from localmail.serve.middleware import get_authenticated_user
+
+router = APIRouter()
+
+
+class SearchFiltersModel(BaseModel):
+    account_ids: list[str] | None = None
+    folder_ids: list[str] | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    has_attachment: bool | None = None
+    lang: str | None = None
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
+    subject: str | None = None
+    after: str | None = None
+    before: str | None = None
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+
+class SearchRequest(BaseModel):
+    query: str
+    filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
+    limit: int = 50
+    cursor: str | None = None
+
+
+@router.post("")
+def search_endpoint(
+    req: SearchRequest,
+    request: Request,
+    _user=Depends(get_authenticated_user),
+) -> dict[str, Any]:
+    searcher = request.app.state.searcher
+    if searcher is None:
+        raise FeatureUnavailable("search not configured on this server")
+    filters_dict = req.filters.model_dump(by_alias=True, exclude_none=True)
+    return run_search(
+        searcher=searcher,
+        free_text=req.query,
+        filters=filters_dict,
+        limit=req.limit,
+        cursor=req.cursor,
+    )

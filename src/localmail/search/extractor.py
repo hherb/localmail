@@ -205,6 +205,7 @@ class LightweightExtractor:
         Reads all sheets; each row is joined into a single text line.
         Logging deferred to extract_worker (Task 13).
         """
+        import contextlib
         import openpyxl
         try:
             wb = openpyxl.load_workbook(
@@ -214,11 +215,12 @@ class LightweightExtractor:
             raise ExtractorError(f"openpyxl failed to open: {exc}") from exc
 
         parts: list[str] = []
-        for ws in wb.worksheets:
-            for row in ws.iter_rows(values_only=True):
-                row_text = " ".join(str(c) for c in row if c is not None)
-                if row_text:
-                    parts.append(row_text)
+        with contextlib.closing(wb):
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    row_text = " ".join(str(c) for c in row if c is not None)
+                    if row_text:
+                        parts.append(row_text)
         text = "\n".join(parts).strip()
         return ExtractedText(
             text=text, page_count=None,
@@ -228,7 +230,8 @@ class LightweightExtractor:
     def _extract_pptx(self, blob_path: Path) -> ExtractedText:
         """Extract text from a PPTX blob using python-pptx.
 
-        Captures shape-frame text plus speaker notes. Logging deferred
+        Captures shape-frame text (including field elements like slide
+        numbers and date fields) plus speaker notes. Logging deferred
         to extract_worker (Task 13).
         """
         from pptx import Presentation
@@ -241,14 +244,15 @@ class LightweightExtractor:
         for slide in prs.slides:
             for shape in slide.shapes:
                 if shape.has_text_frame:
-                    for para in shape.text_frame.paragraphs:
-                        for run in para.runs:
-                            if run.text:
-                                parts.append(run.text)
+                    t = shape.text_frame.text.strip()
+                    if t:
+                        parts.append(t)
             if slide.has_notes_slide:
-                notes = slide.notes_slide.notes_text_frame.text
-                if notes:
-                    parts.append(notes)
+                ntf = slide.notes_slide.notes_text_frame
+                if ntf is not None:
+                    notes = ntf.text
+                    if notes:
+                        parts.append(notes)
 
         text = "\n".join(parts).strip()
         return ExtractedText(

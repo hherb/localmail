@@ -152,6 +152,7 @@ def test_lightweight_extracts_xlsx(tmp_path) -> None:
     assert "row one cell A" in result.text
     assert "row one cell B" in result.text
     assert "second sheet content" in result.text
+    assert result.extractor == "lightweight@1.0"
 
 
 def test_lightweight_extracts_pptx(tmp_path) -> None:

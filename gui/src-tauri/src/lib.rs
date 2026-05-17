@@ -53,6 +53,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|_app| {
             // rustls requires exactly one crypto provider per process.
             rustls::crypto::ring::default_provider()

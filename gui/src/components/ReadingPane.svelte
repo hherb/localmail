@@ -1,5 +1,6 @@
 <script lang="ts">
   import HtmlBody from "./HtmlBody.svelte";
+  import AttachmentsStrip from "./AttachmentsStrip.svelte";
   import { addressLabel, formatRelativeDate } from "../lib/format";
   import { mail } from "../lib/stores/mail.svelte";
 
@@ -76,6 +77,8 @@
         <p class="placeholder">No {mail.snapshot.bodyMode} body available.</p>
       {/if}
     </section>
+
+    <AttachmentsStrip />
   {:else}
     <div class="hint">Select a message to read it.</div>
   {/if}

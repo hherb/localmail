@@ -7,4 +7,5 @@ pub mod capabilities;
 pub mod changes;
 pub mod connect;
 pub mod messages;
+pub mod search;
 pub mod session;

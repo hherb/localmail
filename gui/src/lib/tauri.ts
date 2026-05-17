@@ -10,6 +10,7 @@ import type {
   FolderSummary,
   MessageDetail,
 } from "./api/types";
+import type { SearchRequest, SearchResponse } from "./api/search";
 
 export type {
   AccountCapabilities,
@@ -25,6 +26,17 @@ export type {
   MessageSummary,
   Selection,
 } from "./api/types";
+export type {
+  SearchAccount,
+  SearchAddress,
+  SearchFiltersUI,
+  SearchFiltersWire,
+  SearchFolder,
+  SearchRequest,
+  SearchResponse,
+  SearchResultRow,
+} from "./api/search";
+export { emptyFilters, filtersUiToWire } from "./api/search";
 
 export interface Greeting {
   message: string;
@@ -102,4 +114,8 @@ export async function listRecentMessages(): Promise<ChangesResponse> {
 
 export async function getMessage(messageId: string): Promise<MessageDetail> {
   return invoke<MessageDetail>("get_message_cmd", { messageId });
+}
+
+export async function runSearch(req: SearchRequest): Promise<SearchResponse> {
+  return invoke<SearchResponse>("run_search_cmd", { req });
 }

@@ -190,3 +190,122 @@ def test_chunking_failure_records_failed_chunking_and_skips_message(db_conn, mon
     # Sweep 3: 1 >= 1 → message excluded, chunk_message not invoked again.
     run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
     assert calls["n"] == calls_before
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: attachment_text chunking + embedding
+# ---------------------------------------------------------------------------
+
+
+def _seed_blob(conn, payload: bytes, text: str, extractor: str = "lightweight@1.0") -> bytes:
+    """Insert attachment_blobs + attachment_text rows; return sha256 bytes."""
+    import hashlib
+
+    sha = hashlib.sha256(payload).digest()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes)"
+            " VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            (sha, f"/nonexistent/{sha.hex()[:8]}", "text/plain", len(payload)),
+        )
+        cur.execute(
+            "INSERT INTO attachment_text (sha256, extractor, extracted_text)"
+            " VALUES (%s, %s, %s)",
+            (sha, extractor, text),
+        )
+    conn.commit()
+    return sha
+
+
+class _FakeBackend:
+    """Minimal EmbeddingBackend stub that returns zero vectors."""
+
+    name = "fake"
+    model = "fake"
+    dimension = 768
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Return a zero vector for each input text."""
+        return [[0.0] * 768 for _ in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        """Return a zero query vector."""
+        return [0.0] * 768
+
+    def health_check(self) -> None:
+        """No-op health check."""
+
+
+def test_embed_worker_chunks_attachment_text(db_conn) -> None:
+    """attachment_text rows with extracted_text != '' produce
+    attachment_chunks rows on the next embed_worker pass."""
+    sha = _seed_blob(db_conn, b"unique blob bytes", "this is the extracted body of an attachment")
+    cfg = SearchConfig()
+    run_embed_worker_once(db_conn, cfg, _FakeBackend())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM attachment_chunks WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] >= 1
+
+
+def test_embed_worker_skips_sentinel_attachment_text(db_conn) -> None:
+    """attachment_text rows with extracted_text='' produce zero chunks."""
+    sha = _seed_blob(db_conn, b"empty marker", "", extractor="lightweight-empty")
+    cfg = SearchConfig()
+    run_embed_worker_once(db_conn, cfg, _FakeBackend())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM attachment_chunks WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0
+
+
+def test_embed_worker_embeds_attachment_chunks(db_conn) -> None:
+    """After chunking, the next pass embeds attachment_chunks where
+    embedding_v1 IS NULL."""
+
+    class _IndexedBackend:
+        """Returns distinct non-zero vectors so we can assert embedding was set."""
+
+        name = "indexed"
+        model = "indexed"
+        dimension = 768
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            """Return a unique vector per text position."""
+            return [[0.1 * (i + 1)] * 768 for i in range(len(texts))]
+
+        def embed_query(self, text: str) -> list[float]:
+            """Return a zero query vector."""
+            return [0.0] * 768
+
+        def health_check(self) -> None:
+            """No-op health check."""
+
+    sha = _seed_blob(db_conn, b"another blob", "embedded text here")
+    cfg = SearchConfig()
+
+    # The contract is that after enough passes the embeddings get filled.
+    # One pass typically both chunks and embeds (embed happens on same sweep);
+    # three passes guarantees it regardless of interleaving order.
+    for _ in range(3):
+        run_embed_worker_once(db_conn, cfg, _IndexedBackend())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM attachment_chunks"
+            " WHERE sha256 = %s AND embedding_v1 IS NOT NULL",
+            (sha,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] >= 1

@@ -1,6 +1,7 @@
-"""Background worker: fill embeddings for message_chunks where missing.
+"""Background worker: fill embeddings for message_chunks and attachment_chunks.
 
-Phase 1 handles message_chunks only; attachment_chunks come in Phase 2.
+Phase 1 handled message_chunks only; Phase 2 extends the worker to also chunk
+attachment_text rows into attachment_chunks and embed them via the same sweep.
 The worker is account-agnostic — one instance per process, since embedding
 throughput is backend-bound rather than IMAP-bound.
 
@@ -8,8 +9,13 @@ Failure model (mirrors sync.py poison-pill handling):
   - Per-message SAVEPOINT around chunk_message() + chunk INSERTs. A poison
     message lands in failed_chunkings (keyed by message_id) and is skipped
     on subsequent sweeps once retry_count >= embed_worker_max_chunk_retries.
+  - Per-blob SAVEPOINT around chunk_attachment_text() + chunk INSERTs. A
+    poison blob is logged and skipped (no dedicated failure table for blobs;
+    the next sweep will retry it until the blob's chunks finally appear).
   - Per-chunk SAVEPOINT around the embedding UPDATE. A poison chunk lands
-    in failed_embeddings and is skipped likewise.
+    in failed_embeddings and is skipped likewise. The chunk_table column in
+    failed_embeddings identifies whether the source was message_chunks or
+    attachment_chunks.
   - Both failure-recording paths use their own nested SAVEPOINT so a logging
     failure can't kill the outer transaction.
   - Batch-level errors (e.g. backend model load failure, network blip) do
@@ -27,8 +33,10 @@ import traceback
 import psycopg
 
 from localmail.config import SearchConfig
-from localmail.search.chunking import MessageRow, chunk_message
+from localmail.search.chunking import MessageRow, chunk_attachment_text, chunk_message
 from localmail.search.embeddings import EmbeddingBackend
+
+_CHUNK_TABLES = frozenset({"message_chunks", "attachment_chunks"})
 
 log = logging.getLogger("localmail.search.embed_worker")
 
@@ -142,32 +150,129 @@ def _chunk_messages_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch: i
     return len(rows)
 
 
-def _claim_unembedded(cur, cfg: SearchConfig) -> list[tuple[int, str]]:
+def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch: int) -> int:
+    """Chunk attachment_text rows that don't yet have attachment_chunks rows.
+
+    Skips sentinel rows where extracted_text='' (produced when an attachment is
+    skipped due to size limits or unsupported format). Per-blob SAVEPOINT mirrors
+    _chunk_messages_lazily — a single broken blob is logged and skipped rather
+    than aborting the whole batch. Returns the number of blobs processed.
+
+    Unlike message chunking, blob-level failures are not recorded in a dedicated
+    failure table; the next sweep will retry the blob until its chunks appear.
+    Persistent failures surface via repeated WARNING log lines.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.sha256, t.extracted_text
+            FROM attachment_text t
+            LEFT JOIN attachment_chunks c USING (sha256)
+            WHERE t.extracted_text <> ''
+              AND c.sha256 IS NULL
+            ORDER BY t.sha256
+            LIMIT %s
+            """,
+            (batch,),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        conn.commit()
+        return 0
+
+    for sha256_bytes, text in rows:
+        with conn.cursor() as cur:
+            cur.execute("SAVEPOINT chunk_blob")
+        try:
+            specs = chunk_attachment_text(sha256_bytes, text, cfg)
+            with conn.cursor() as cur:
+                for spec in specs:
+                    cur.execute(
+                        "INSERT INTO attachment_chunks"
+                        " (sha256, chunk_idx, text, token_count)"
+                        " VALUES (%s, %s, %s, %s)"
+                        " ON CONFLICT (sha256, chunk_idx) DO NOTHING",
+                        (sha256_bytes, spec.chunk_idx, spec.text, spec.token_count),
+                    )
+                cur.execute("RELEASE SAVEPOINT chunk_blob")
+        except Exception as exc:  # noqa: BLE001 — poison-pill isolation
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT chunk_blob")
+            log.warning(
+                "chunking failed for attachment blob %s: %s",
+                sha256_bytes.hex() if isinstance(sha256_bytes, (bytes, bytearray)) else sha256_bytes,
+                exc,
+            )
+    conn.commit()
+    return len(rows)
+
+
+def _claim_unembedded(
+    cur,
+    cfg: SearchConfig,
+    chunk_table: str,
+) -> list[tuple[int, str]]:
+    """Select up to cfg.embed_worker_batch_size unembedded rows from chunk_table.
+
+    Uses FOR UPDATE SKIP LOCKED so concurrent workers don't claim the same rows.
+    Rows whose retry_count in failed_embeddings has reached the configured maximum
+    are excluded — they are permanently poisoned and skipped.
+
+    Args:
+        cur: An open psycopg cursor (must be inside an active transaction).
+        cfg: Search configuration; supplies batch size and max-retry threshold.
+        chunk_table: Must be one of 'message_chunks' or 'attachment_chunks'.
+            Validated against a whitelist before use in SQL.
+    """
+    assert chunk_table in _CHUNK_TABLES, f"unknown chunk_table: {chunk_table!r}"
+    # chunk_table is validated against a closed whitelist above; safe to
+    # interpolate as an identifier rather than a %s placeholder, because
+    # psycopg does not support table-name placeholders in SELECT.
     cur.execute(
-        """
-        SELECT mc.id, mc.text FROM message_chunks mc
-        WHERE mc.embedding_v1 IS NULL
+        f"""
+        SELECT c.id, c.text FROM {chunk_table} c
+        WHERE c.embedding_v1 IS NULL
           AND NOT EXISTS (
               SELECT 1 FROM failed_embeddings fe
-              WHERE fe.chunk_table = 'message_chunks' AND fe.chunk_id = mc.id
+              WHERE fe.chunk_table = %s AND fe.chunk_id = c.id
                 AND fe.retry_count >= %s
           )
-        ORDER BY mc.id
+        ORDER BY c.id
         LIMIT %s
         FOR UPDATE SKIP LOCKED
         """,
-        (cfg.embed_worker_max_chunk_retries, cfg.embed_worker_batch_size),
+        (chunk_table, cfg.embed_worker_max_chunk_retries, cfg.embed_worker_batch_size),
     )
     return cur.fetchall()
 
 
-def _embed_and_store(conn, cfg, backend, claimed):
-    """Embed claimed chunks; UPDATE per chunk inside a SAVEPOINT for poison isolation.
+def _embed_and_store(
+    conn,
+    cfg: SearchConfig,
+    backend: EmbeddingBackend,
+    claimed: list[tuple[int, str]],
+    chunk_table: str,
+) -> int:
+    """Embed claimed chunks; UPDATE each inside a SAVEPOINT for poison isolation.
 
-    The backend.embed_documents() call is NOT inside a per-chunk SAVEPOINT —
-    if it raises, the whole batch is rolled back by the caller (batch-level
-    fallback), which is the correct behavior for transient backend errors.
+    The backend.embed_documents() call covers the whole batch — if it raises,
+    the caller rolls back (batch-level fallback), which is the correct behavior
+    for transient backend errors. Individual UPDATE failures are caught per-chunk
+    and recorded in failed_embeddings so the chunk is skipped on subsequent sweeps.
+
+    Args:
+        conn: Active psycopg connection.
+        cfg: Search configuration (unused here but kept for symmetry with callers).
+        backend: The embedding backend to call.
+        claimed: List of (chunk_id, text) pairs returned by _claim_unembedded.
+        chunk_table: Must be one of 'message_chunks' or 'attachment_chunks'.
+            Validated against a whitelist before use in SQL.
+
+    Returns:
+        Number of chunks successfully written.
     """
+    assert chunk_table in _CHUNK_TABLES, f"unknown chunk_table: {chunk_table!r}"
     texts = [t for _, t in claimed]
     vectors = backend.embed_documents(texts)
     written = 0
@@ -175,8 +280,9 @@ def _embed_and_store(conn, cfg, backend, claimed):
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT chunk")
             try:
+                # chunk_table validated against whitelist above; f-string is safe.
                 cur.execute(
-                    "UPDATE message_chunks SET embedding_v1 = %s::halfvec,"
+                    f"UPDATE {chunk_table} SET embedding_v1 = %s::halfvec,"  # noqa: S608
                     " embedded_at = now() WHERE id = %s",
                     (vec, cid),
                 )
@@ -184,10 +290,46 @@ def _embed_and_store(conn, cfg, backend, claimed):
                 written += 1
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT chunk")
-                log.warning("embedding write failed for chunk %s: %s", cid, exc)
-                record_failed_embedding(conn, "message_chunks", cid, exc)
+                log.warning("embedding write failed for chunk %s in %s: %s", cid, chunk_table, exc)
+                record_failed_embedding(conn, chunk_table, cid, exc)
     conn.commit()
     return written
+
+
+def _embed_table(
+    conn: psycopg.Connection,
+    cfg: SearchConfig,
+    backend: EmbeddingBackend,
+    chunk_table: str,
+) -> int:
+    """Claim unembedded rows from chunk_table and embed them in one batch.
+
+    Returns the number of chunks newly embedded. A batch-level backend error
+    rolls back and returns 0 so that the FOR UPDATE locks are released and
+    chunks get re-claimed on the next sweep.
+
+    Args:
+        conn: Active psycopg connection.
+        cfg: Search configuration; supplies batch size and retry thresholds.
+        backend: The embedding backend to call.
+        chunk_table: Must be 'message_chunks' or 'attachment_chunks'.
+    """
+    with conn.cursor() as cur:
+        claimed = _claim_unembedded(cur, cfg, chunk_table)
+    if not claimed:
+        conn.commit()
+        return 0
+    try:
+        return _embed_and_store(conn, cfg, backend, claimed, chunk_table)
+    except Exception as exc:  # noqa: BLE001 — batch-level fallback
+        log.warning(
+            "embed_worker batch failed for %s (will retry next sweep): %s",
+            chunk_table,
+            exc,
+            exc_info=True,
+        )
+        conn.rollback()
+        return 0
 
 
 def run_embed_worker_once(
@@ -195,29 +337,30 @@ def run_embed_worker_once(
     cfg: SearchConfig,
     backend: EmbeddingBackend,
 ) -> int:
-    """One sweep: chunk pending messages, then embed pending chunks.
+    """One sweep: chunk pending messages + attachments, then embed pending chunks.
 
-    Returns number of chunks newly embedded in this sweep. Used both by
-    the background daemon thread and the `localmail embed-backfill` CLI.
+    Processing order:
+      1. _chunk_messages_lazily — fills message_chunks for unchunked messages.
+      2. _chunk_attachments_lazily — fills attachment_chunks for unchunked
+         attachment_text rows (Phase 2). Sentinel rows (extracted_text='')
+         produce zero chunks and are silently skipped.
+      3. Embed pending message_chunks rows.
+      4. Embed pending attachment_chunks rows.
 
-    Batch-level backend errors are logged and the transaction is rolled
-    back so the FOR UPDATE locks release — chunks get re-claimed next
-    sweep. Operators see the WARNING and intervene; the worker doesn't
-    silently poison every queued chunk.
+    Returns total number of chunks newly embedded across both tables. Used both
+    by the background daemon thread and the `localmail embed-backfill` CLI.
+
+    Batch-level backend errors are logged and the transaction is rolled back so
+    the FOR UPDATE locks release — chunks get re-claimed next sweep. Operators
+    see the WARNING and intervene; the worker doesn't silently poison every
+    queued chunk.
     """
-    _chunk_messages_lazily(conn, cfg, batch=max(cfg.embed_worker_batch_size, 50))
-    with conn.cursor() as cur:
-        claimed = _claim_unembedded(cur, cfg)
-    if not claimed:
-        conn.commit()
-        return 0
-    try:
-        return _embed_and_store(conn, cfg, backend, claimed)
-    except Exception as exc:  # noqa: BLE001 — batch-level fallback
-        log.warning("embed_worker batch failed (will retry next sweep): %s",
-                    exc, exc_info=True)
-        conn.rollback()
-        return 0
+    chunk_batch = max(cfg.embed_worker_batch_size, 50)
+    _chunk_messages_lazily(conn, cfg, batch=chunk_batch)
+    _chunk_attachments_lazily(conn, cfg, batch=chunk_batch)
+    embedded_msg = _embed_table(conn, cfg, backend, "message_chunks")
+    embedded_att = _embed_table(conn, cfg, backend, "attachment_chunks")
+    return embedded_msg + embedded_att
 
 
 def run_embed_worker(

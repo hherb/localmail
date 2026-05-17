@@ -1,8 +1,4 @@
-"""Tests for the extractor protocol and LightweightExtractor skeleton.
-
-Per-format extraction is added in Tasks 7-10; this file currently only
-asserts the type contracts and the .supports() allowlist behavior.
-"""
+"""Tests for the extractor protocol and LightweightExtractor."""
 
 from __future__ import annotations
 
@@ -239,7 +235,7 @@ def test_lightweight_extracts_rtf(tmp_path) -> None:
     assert "RTF body content here" in result.text
 
 
-def test_lightweight_extracts_odt(tmp_path) -> None:
+def test_lightweight_extracts_odt(tmp_path: Path) -> None:
     from odf.opendocument import OpenDocumentText
     from odf.text import P
     p = tmp_path / "a.odt"
@@ -254,7 +250,7 @@ def test_lightweight_extracts_odt(tmp_path) -> None:
     assert "odt paragraph two" in result.text
 
 
-def test_lightweight_extracts_ics(tmp_path) -> None:
+def test_lightweight_extracts_ics(tmp_path: Path) -> None:
     import datetime as dt
     from icalendar import Calendar, Event
     cal = Calendar()
@@ -275,3 +271,5 @@ def test_lightweight_extracts_ics(tmp_path) -> None:
     assert "Annual review" in result.text
     assert "quarterly bonus criteria" in result.text
     assert "Conf room Berlin" in result.text
+    assert result.page_count == 1
+    assert result.extractor == "lightweight@1.0"

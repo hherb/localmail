@@ -1,16 +1,16 @@
 """Attachment extractors.
 
-Protocol + LightweightExtractor (pure-Python, no OCR) + DoclingExtractor
-(lazy-imported, OCR-capable). The extract_worker picks LightweightExtractor
-by default; if it returns empty/raises on a PDF, the worker falls back to
-DoclingExtractor when docling is importable.
+Protocol + LightweightExtractor (pure-Python, no OCR, covers 11 allowlisted
+formats) + DoclingExtractor (lazy-imported, OCR-capable, added later).
+The extract_worker picks LightweightExtractor by default; if it returns
+empty/raises on a PDF, the worker falls back to DoclingExtractor when
+docling is importable.
 
-This module currently defines only:
+Exports:
 - ExtractedText: frozen dataclass returned by every successful extraction.
 - ExtractorError: raised on irrecoverable failure.
 - AttachmentExtractor: Protocol that all extractors implement.
-- LightweightExtractor: skeleton class. Per-format dispatch added in
-  subsequent tasks (Tasks 7-10).
+- LightweightExtractor: pure-Python dispatch across PDF/Office/text/ODT/ICS.
 """
 
 from __future__ import annotations
@@ -86,9 +86,7 @@ class AttachmentExtractor(Protocol):
 # --- Lightweight extractor ---------------------------------------------------
 #
 # Pure-Python, no OCR. The MIME/extension allowlists below are derived from
-# SearchConfig defaults so there is a single source of truth. Per-format
-# extraction is added in Tasks 7-10; for now .extract() raises
-# NotImplementedError to make the gap obvious.
+# SearchConfig defaults so there is a single source of truth.
 
 # Derived from SearchConfig defaults — single source of truth.
 _LW_MIME_PREFIXES: frozenset[str] = frozenset(
@@ -104,9 +102,10 @@ _LW_EXTENSIONS: frozenset[str] = frozenset(
 class LightweightExtractor:
     """Pure-Python extractor for documents that don't require OCR.
 
-    Supports the 11 MIME/extension pairs in the Phase 2 allowlist.
-    Per-format dispatch is added in subsequent tasks (7-10); .extract()
-    currently raises NotImplementedError.
+    Dispatches across all 11 allowlisted formats via extract():
+    PDF (pypdf), DOCX (python-docx), XLSX (openpyxl), PPTX (python-pptx),
+    TXT/MD (chardet fallback), HTML (html2text), CSV (stdlib csv),
+    RTF (striprtf), ODT (odfpy), ICS (icalendar).
     """
 
     name = "lightweight"
@@ -165,9 +164,7 @@ class LightweightExtractor:
         if mt == "text/calendar" or ext == ".ics":
             return self._extract_ics(blob_path)
 
-        raise NotImplementedError(
-            f"no extractor for {mt!r}/{ext!r}"
-        )
+        raise ExtractorError(f"no extractor for {mt!r}/{ext!r}")
 
     def _extract_pdf(self, blob_path: Path) -> ExtractedText:
         """Extract text from a PDF blob using pypdf.

@@ -2,3 +2,4 @@
 //! registers them all via `tauri::generate_handler!`.
 
 pub mod connect;
+pub mod auth;

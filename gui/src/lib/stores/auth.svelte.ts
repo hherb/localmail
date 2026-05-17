@@ -123,9 +123,15 @@ class AuthStore {
 
 function formatError(err: unknown): string {
   if (err && typeof err === "object") {
-    const o = err as { kind?: string; detail?: string };
-    if (o.kind && o.detail) return `${o.kind}: ${o.detail}`;
-    if (o.kind) return o.kind;
+    const o = err as { kind?: string; detail?: unknown };
+    if (o.kind && o.detail !== undefined) {
+      const detailStr =
+        typeof o.detail === "object" && o.detail !== null
+          ? formatError(o.detail)
+          : String(o.detail);
+      return `${o.kind}: ${detailStr}`;
+    }
+    if (o.kind) return String(o.kind);
   }
   return String(err);
 }

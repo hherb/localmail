@@ -17,7 +17,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, cast, runtime_checkable
+
+from localmail.config import SearchConfig
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,7 @@ class AttachmentExtractor(Protocol):
     name: str
     version: str
 
-    def supports(self, mime_type: str | None, filename: str) -> bool:
+    def supports(self, mime_type: str | None, filename: str | None) -> bool:
         """Return True iff this extractor can process the given blob.
 
         Implementations should accept either a known MIME type OR a
@@ -83,30 +85,20 @@ class AttachmentExtractor(Protocol):
 
 # --- Lightweight extractor ---------------------------------------------------
 #
-# Pure-Python, no OCR. The MIME/extension allowlists below mirror the
-# SearchConfig.extractor_*_allowlist defaults so .supports() works without
-# the worker passing config in. Per-format extraction is added in Tasks
-# 7-10; for now .extract() raises NotImplementedError to make the gap
-# obvious.
+# Pure-Python, no OCR. The MIME/extension allowlists below are derived from
+# SearchConfig defaults so there is a single source of truth. Per-format
+# extraction is added in Tasks 7-10; for now .extract() raises
+# NotImplementedError to make the gap obvious.
 
-_LW_MIME_PREFIXES = frozenset({
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "application/vnd.oasis.opendocument.text",
-    "application/rtf",
-    "text/plain",
-    "text/markdown",
-    "text/html",
-    "text/csv",
-    "text/calendar",
-})
-
-_LW_EXTENSIONS = frozenset({
-    ".pdf", ".docx", ".xlsx", ".pptx", ".odt", ".rtf",
-    ".txt", ".md", ".html", ".htm", ".csv", ".ics",
-})
+# Derived from SearchConfig defaults — single source of truth.
+_LW_MIME_PREFIXES: frozenset[str] = frozenset(
+    cast(Callable[[], list[str]],
+         SearchConfig.model_fields["extractor_mime_allowlist"].default_factory)()
+)
+_LW_EXTENSIONS: frozenset[str] = frozenset(
+    cast(Callable[[], list[str]],
+         SearchConfig.model_fields["extractor_extension_allowlist"].default_factory)()
+)
 
 
 class LightweightExtractor:
@@ -120,7 +112,7 @@ class LightweightExtractor:
     name = "lightweight"
     version = "1.0"
 
-    def supports(self, mime_type: str | None, filename: str) -> bool:
+    def supports(self, mime_type: str | None, filename: str | None) -> bool:
         """True iff the MIME type or filename extension is allowlisted."""
         if mime_type and mime_type.lower() in _LW_MIME_PREFIXES:
             return True
@@ -130,8 +122,10 @@ class LightweightExtractor:
     def extract(
         self, blob_path: Path, mime_type: str | None
     ) -> ExtractedText:
-        """Extract text from `blob_path`. Stub — per-format dispatch
-        is added in Tasks 7-10."""
+        """Extract text from `blob_path`.
+
+        Stub — per-format dispatch added in Tasks 7-10.
+        """
         raise NotImplementedError(
             "per-format dispatch is added in Tasks 7-10"
         )

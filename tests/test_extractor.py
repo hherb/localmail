@@ -6,6 +6,7 @@ asserts the type contracts and the .supports() allowlist behavior.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ from localmail.search.extractor import (
 
 def test_extracted_text_is_frozen_dataclass() -> None:
     et = ExtractedText(text="hello", page_count=1, extractor="x@1")
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         et.text = "world"  # type: ignore[misc]
 
 
@@ -30,6 +31,7 @@ def test_lightweight_supports_pdf_mime_and_ext() -> None:
     assert lw.supports(None, "foo.pdf")
     assert lw.supports("application/pdf", "")
     assert not lw.supports("video/mp4", "foo.mp4")
+    assert not lw.supports(None, None)
 
 
 def test_lightweight_does_not_support_image() -> None:

@@ -26,6 +26,12 @@ pub fn run() {
     // Without this hook, any panic during window/webview setup surfaces
     // only as "panic in a function that cannot unwind" with the real
     // message lost. Print the payload + location, then abort cleanly.
+    //
+    // The explicit `process::abort()` matters for dev builds (panic = unwind):
+    // without it, the runtime would try to unwind through the Obj-C frames and
+    // hit the FFI boundary again. In release (panic = "abort" in Cargo.toml)
+    // the runtime aborts on its own once the hook returns, so this is a no-op
+    // there — kept for parity so both build profiles behave identically.
     std::panic::set_hook(Box::new(|info| {
         let payload = info
             .payload()

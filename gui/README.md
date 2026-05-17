@@ -54,3 +54,15 @@ If any of those fail, that's a Sub-plan 1 regression worth fixing before moving 
 ## Talking to the server
 
 The client expects a `localmail serve` HTTPS endpoint. The connection URL, username, password, and TLS cert pin are stored in the OS keyring — landed in Sub-plan 2 (not in this scaffolding).
+
+## Deferred security gates (must be addressed before later sub-plans ship)
+
+Sub-plan 1 ships a scaffolding-only webview that renders no remote or user-supplied content. Two security knobs are intentionally permissive today and **must** be tightened before the corresponding sub-plans land:
+
+- **CSP** — [`tauri.conf.json`](src-tauri/tauri.conf.json) sets `"csp": null`. Must be set to a strict policy before **Sub-plan 4 (HTML email rendering)**. Tracked in [issue #15](https://github.com/hherb/localmail/issues/15).
+- **`shell:allow-open` scope** — [`capabilities/default.json`](src-tauri/capabilities/default.json) grants the bare permission with no URL allowlist. Must be scoped (https/http only, no `file:`/`javascript:`) before any UI wires up external-link handling. Tracked in [issue #16](https://github.com/hherb/localmail/issues/16).
+
+Lower-priority follow-ups that should land alongside their natural sub-plan:
+
+- Tighten `tsconfig.json` (`noUnusedLocals`, `noUnusedParameters` → `true`) once Sub-plan 2 adds real surface — [issue #17](https://github.com/hherb/localmail/issues/17).
+- Add a CI workflow for `gui/` — [issue #18](https://github.com/hherb/localmail/issues/18).

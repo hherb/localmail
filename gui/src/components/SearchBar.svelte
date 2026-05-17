@@ -32,8 +32,12 @@
 </form>
 
 {#if popoverOpen}
-  <!-- Placeholder; FilterPopover is wired in Task B7. -->
-  <div class="popover" role="dialog">Filter popover (Task B7).</div>
+  <div class="popover" role="dialog">
+    {#await import("./FilterPopover.svelte") then mod}
+      {@const C = mod.default}
+      <C />
+    {/await}
+  </div>
 {/if}
 
 <style>

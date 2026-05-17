@@ -11,6 +11,7 @@ from localmail.serve.routes import accounts as accounts_routes
 from localmail.serve.routes import auth as auth_routes
 from localmail.serve.routes import attachments as attachments_routes
 from localmail.serve.routes import messages as messages_routes
+from localmail.serve.routes import changes as changes_routes
 from localmail.serve.routes import search as search_routes
 from localmail.serve.routes import version as version_routes
 
@@ -56,4 +57,5 @@ def create_app(*, db_dsn: str, searcher=None) -> FastAPI:
     app.include_router(messages_routes.router, prefix="/v1/messages")
     app.include_router(attachments_routes.router, prefix="/v1/attachments")
     app.include_router(search_routes.router, prefix="/v1/search")
+    app.include_router(changes_routes.router, prefix="/v1/changes")
     return app

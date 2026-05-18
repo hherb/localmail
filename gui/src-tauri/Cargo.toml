@@ -30,6 +30,17 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 sha2 = "0.10"
 url = "2"
 
+# secret-service v4 requires the consumer to explicitly pick a runtime feature.
+# keyring's `linux-native-async-persistent` feature pulls it in as a transitive
+# dep but doesn't propagate the runtime choice, so the Linux build fails with
+# `Please enable a feature to pick a runtime ...`. We already use tokio for the
+# Tauri async runtime, so `rt-tokio-crypto-rust` is the matching pick. This is
+# a Linux-only crate; the macOS/Windows builds use Keychain / Credential Manager
+# via keyring's `apple-native` / `windows-native` features and never link
+# secret-service at all.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.13"

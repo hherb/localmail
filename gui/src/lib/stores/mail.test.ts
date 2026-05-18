@@ -1,15 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   listFolders: vi.fn(),
   listRecentMessages: vi.fn(),
   getMessage: vi.fn(),
+  invoke: vi.fn(),
 }));
 
 vi.mock("../tauri", () => mocks);
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
 import { mail } from "./mail.svelte";
+import { POLL_INTERVAL_MS } from "../change_poller";
 import type { AccountSummary, FolderSummary, MessageDetail, MessageSummary } from "../tauri";
 
 const acct = (id: string, name: string): AccountSummary => ({
@@ -151,5 +154,147 @@ describe("mail store", () => {
     mail.reset();
     expect(mail.snapshot.accounts).toEqual([]);
     expect(mail.snapshot.selection).toEqual({ kind: "all" });
+  });
+
+  it("loadRecentMessages captures next_cursor for later polling", async () => {
+    mocks.listRecentMessages.mockResolvedValue({
+      new_messages: [msg("1", "1")],
+      next_cursor: "cur-42",
+    });
+    await mail.loadRecentMessages();
+    expect(mail.changeCursor).toBe("cur-42");
+  });
+
+  it("loadRecentMessages preserves prior cursor when next_cursor is null", async () => {
+    mocks.listRecentMessages.mockResolvedValueOnce({
+      new_messages: [msg("1", "1")],
+      next_cursor: "cur-7",
+    });
+    await mail.loadRecentMessages();
+    mocks.listRecentMessages.mockResolvedValueOnce({
+      new_messages: [],
+      next_cursor: null,
+    });
+    await mail.loadRecentMessages();
+    expect(mail.changeCursor).toBe("cur-7");
+  });
+});
+
+describe("mail.mergeNewMessages", () => {
+  it("prepends fresh messages and returns the count added", () => {
+    const a = msg("1", "1");
+    const b = msg("2", "1");
+    const c = msg("3", "1");
+    mail.mergeNewMessages([a]);
+    const added = mail.mergeNewMessages([a, b, c]);
+    expect(added).toBe(2);
+    // dedupNewMessages preserves the incoming server order; merged result
+    // is [<new in given order>, ...existing].
+    expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["2", "3", "1"]);
+  });
+
+  it("returns 0 and leaves state untouched when all incoming are duplicates", () => {
+    mail.mergeNewMessages([msg("1", "1"), msg("2", "1")]);
+    const before = mail.snapshot.messages;
+    const added = mail.mergeNewMessages([msg("1", "1"), msg("2", "1")]);
+    expect(added).toBe(0);
+    expect(mail.snapshot.messages).toBe(before);
+  });
+});
+
+describe("mail.pollOnce", () => {
+  it("invokes list_recent_messages_cmd with the current cursor", async () => {
+    mocks.listRecentMessages.mockResolvedValue({
+      new_messages: [msg("1", "1")],
+      next_cursor: "cur-1",
+    });
+    await mail.loadRecentMessages();
+    mocks.invoke.mockResolvedValue({ new_messages: [], next_cursor: "cur-1" });
+    await mail.pollOnce();
+    expect(mocks.invoke).toHaveBeenCalledWith("list_recent_messages_cmd", { since: "cur-1" });
+  });
+
+  it("merges fresh messages and advances the cursor", async () => {
+    mocks.listRecentMessages.mockResolvedValue({
+      new_messages: [msg("1", "1")],
+      next_cursor: "cur-1",
+    });
+    await mail.loadRecentMessages();
+    mocks.invoke.mockResolvedValue({
+      new_messages: [msg("1", "1"), msg("2", "1"), msg("3", "1")],
+      next_cursor: "cur-3",
+    });
+    await mail.pollOnce();
+    expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["2", "3", "1"]);
+    expect(mail.changeCursor).toBe("cur-3");
+  });
+
+  it("keeps the previous cursor when next_cursor is empty string", async () => {
+    mocks.listRecentMessages.mockResolvedValue({
+      new_messages: [],
+      next_cursor: "cur-stable",
+    });
+    await mail.loadRecentMessages();
+    mocks.invoke.mockResolvedValue({ new_messages: [], next_cursor: "" });
+    await mail.pollOnce();
+    expect(mail.changeCursor).toBe("cur-stable");
+  });
+
+  it("captures errorMessage when the invoke rejects", async () => {
+    mocks.invoke.mockRejectedValue({ kind: "Http", detail: "boom" });
+    await mail.pollOnce();
+    expect(mail.snapshot.errorMessage).toContain("Http");
+  });
+
+  it("does not throw when called before loadRecentMessages (cursor=null)", async () => {
+    mocks.invoke.mockResolvedValue({ new_messages: [msg("9", "1")], next_cursor: "cur-9" });
+    await mail.pollOnce();
+    expect(mocks.invoke).toHaveBeenCalledWith("list_recent_messages_cmd", { since: null });
+    expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["9"]);
+    expect(mail.changeCursor).toBe("cur-9");
+  });
+});
+
+describe("mail.startPolling / stopPolling", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    mail.stopPolling();
+    vi.useRealTimers();
+  });
+
+  it("startPolling triggers pollOnce on every interval tick", async () => {
+    mocks.invoke.mockResolvedValue({ new_messages: [], next_cursor: null });
+    mail.startPolling();
+    expect(mail.isPolling).toBe(true);
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3);
+    expect(mocks.invoke).toHaveBeenCalledTimes(3);
+  });
+
+  it("startPolling is idempotent — second call does not spawn a second interval", async () => {
+    mocks.invoke.mockResolvedValue({ new_messages: [], next_cursor: null });
+    mail.startPolling();
+    mail.startPolling();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("stopPolling halts further ticks", async () => {
+    mocks.invoke.mockResolvedValue({ new_messages: [], next_cursor: null });
+    mail.startPolling();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    mail.stopPolling();
+    expect(mail.isPolling).toBe(false);
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 5);
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("reset stops the polling loop", () => {
+    mail.startPolling();
+    expect(mail.isPolling).toBe(true);
+    mail.reset();
+    expect(mail.isPolling).toBe(false);
   });
 });

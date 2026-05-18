@@ -69,6 +69,7 @@ pub fn run() {
             crate::commands::auth::logout_cmd,
             crate::commands::auth::refresh_cmd,
             crate::commands::auth::whoami_cmd,
+            crate::commands::auth_change_password::change_password_cmd,
             crate::commands::capabilities::get_capabilities_cmd,
             crate::commands::accounts::list_accounts_cmd,
             crate::commands::accounts::list_folders_cmd,

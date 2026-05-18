@@ -22,6 +22,8 @@
  *   setExternalImagesAllowed(v)                          allow/block external images; resets per-message
  *   reset()                                              clear all state (used on logout)
  */
+import { getChanges } from "../api/changes";
+import { POLL_INTERVAL_MS, dedupNewMessages, parseCursor } from "../change_poller";
 import {
   getMessage,
   listAccounts,
@@ -64,12 +66,24 @@ function initialState(): MailState {
 
 class MailStore {
   #state: MailState = $state(initialState());
+  #changeCursor: string | null = null;
+  #pollHandle: ReturnType<typeof setInterval> | null = null;
 
   get snapshot(): MailState {
     return this.#state;
   }
 
+  get changeCursor(): string | null {
+    return this.#changeCursor;
+  }
+
+  get isPolling(): boolean {
+    return this.#pollHandle !== null;
+  }
+
   reset(): void {
+    this.stopPolling();
+    this.#changeCursor = null;
     this.#state = initialState();
   }
 
@@ -101,10 +115,43 @@ class MailStore {
     try {
       const resp = await listRecentMessages();
       this.#state.messages = resp.new_messages;
+      this.#changeCursor = parseCursor(resp.next_cursor) ?? this.#changeCursor;
     } catch (err: unknown) {
       this.#state.errorMessage = formatError(err);
     } finally {
       this.#state.loadingMessages = false;
+    }
+  }
+
+  mergeNewMessages(incoming: readonly MessageSummary[]): number {
+    const fresh = dedupNewMessages(this.#state.messages, incoming);
+    if (fresh.length > 0) {
+      this.#state.messages = [...fresh, ...this.#state.messages];
+    }
+    return fresh.length;
+  }
+
+  async pollOnce(): Promise<void> {
+    try {
+      const resp = await getChanges(this.#changeCursor);
+      this.#changeCursor = parseCursor(resp.next_cursor) ?? this.#changeCursor;
+      this.mergeNewMessages(resp.new_messages);
+    } catch (err: unknown) {
+      this.#state.errorMessage = formatError(err);
+    }
+  }
+
+  startPolling(): void {
+    if (this.#pollHandle !== null) return;
+    this.#pollHandle = setInterval(() => {
+      void this.pollOnce();
+    }, POLL_INTERVAL_MS);
+  }
+
+  stopPolling(): void {
+    if (this.#pollHandle !== null) {
+      clearInterval(this.#pollHandle);
+      this.#pollHandle = null;
     }
   }
 

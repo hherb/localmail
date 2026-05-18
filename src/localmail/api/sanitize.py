@@ -8,13 +8,11 @@ Content-Security-Policy.
 Design notes:
 
 - Sanitisation is delegated to ``nh3`` (Python bindings over Rust's
-  ``ammonia``). ``nh3`` is actively maintained and uses ``html5ever`` for
-  parsing, which is robust against the mutation-XSS bypasses that plague
-  regex- and DOM-based sanitisers.
-- ``clean_content_tags`` is the first-class equivalent of the old
-  ``bleach`` + regex pre-pass: ``<script>``/``<style>``/etc. are dropped
-  *together with their inner content*, so an attacker cannot leak script
-  source as visible text via ``strip=True``-style behaviour.
+  ``ammonia``). It uses ``html5ever`` for parsing, which is robust against
+  the mutation-XSS bypasses that plague regex- and DOM-based sanitisers.
+- ``clean_content_tags`` drops ``<script>``/``<style>``/etc. *together
+  with their inner content*, so an attacker cannot leak script source as
+  visible text via strip-style behaviour.
 - Inline ``style`` attributes are preserved (HTML email relies on them)
   but every CSS declaration is checked against
   ``_ALLOWED_STYLE_PROPERTIES``. URL-loading shorthands (``background``,
@@ -47,33 +45,40 @@ _ALLOWED_ATTRS: dict[str, set[str]] = {
     "th": {"colspan", "rowspan", "align"},
 }
 
-# ``http``/``https`` are required so nh3 passes the root-relative
-# ``/v1/attachments/…`` URLs produced by ``_rewrite_image_srcs`` (nh3 uses a
-# real URL parser and only resolves relative paths when a "real" scheme is in
-# the allowed list). The src-rewrite pass below strips ALL external
-# ``http``/``https`` srcs first — regardless of quoting style — so this
-# entry does NOT permit remote tracker-pixels through. The ``data`` entry
-# enables inline base64 image URIs validated by ``_DATA_IMAGE_RE``.
+# ``http``/``https`` are required so legitimate ``<a href="https://…">``
+# links survive — nh3 drops the ``href`` entirely if the scheme is not in
+# this set. The rewritten ``/v1/attachments/<sha>`` attachment URLs are
+# scheme-relative and pass through regardless of this allowlist.
+#
+# SECURITY-CRITICAL: because ``http``/``https`` are allowed, nh3 itself
+# does NOT strip ``<img src="http://tracker/…">``. ``_rewrite_image_srcs``
+# below is the *sole* defense against image trackers — it strips every
+# ``src=…`` whose value is not a known-good ``cid:`` or validated
+# ``data:image/…;base64,…`` URI before nh3 sees the document. Anyone
+# tightening that regex must keep it broad enough to catch every
+# attribute-shaped ``src=…`` an attacker might emit.
+#
+# ``data`` enables inline base64 image URIs validated end-to-end by
+# ``_DATA_IMAGE_RE`` (full match, base64 alphabet only — no embedded
+# quote/lt/gt that could confuse the parser).
 _ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({"mailto", "http", "https", "data"})
 
 # Tags whose inner *content* is removed along with the tag itself.
-# Replaces the old regex pre-pass — ``html5ever`` handles malformed and
-# self-closing variants correctly, so the result is robust where the regex
-# was best-effort.
+# ``html5ever`` handles malformed and self-closing variants correctly,
+# so unclosed ``<script>`` at EOF is still neutralised.
 _CLEAN_CONTENT_TAGS: frozenset[str] = frozenset({
     "script", "style", "noscript", "iframe", "object", "embed", "applet",
     "form",
 })
 
-# Safe CSS properties for inline ``style`` attributes. Mirrors the intent
-# of bleach's default ``ALLOWED_CSS_PROPERTIES`` (typography + box model +
-# table layout) while deliberately excluding:
+# Safe CSS properties for inline ``style`` attributes — typography, box
+# model, and table layout. Deliberately excluded:
 #   - URL-loading shorthands: ``background``, ``background-image``,
 #     ``border-image``, ``list-style``, ``list-style-image``, ``cursor``
 #     (cursor URL form), ``content``.
 #   - Overlay / click-jacking primitives: ``position``, ``top``, ``right``,
 #     ``bottom``, ``left``, ``z-index``, ``clip``, ``clip-path``.
-#   - Anything that takes ``url()`` and could fetch a remote resource.
+#   - Anything else that takes ``url()`` and could fetch a remote resource.
 # ``nh3``'s own CSS normaliser additionally drops invalid declarations
 # and ``@rules``, so this list is the *only* knob protecting render-time
 # layout from inline-style attacks.
@@ -109,7 +114,15 @@ _ALLOWED_STYLE_PROPERTIES: frozenset[str] = frozenset({
 })
 
 _CID_RE = re.compile(r"^cid:(.+)$", re.IGNORECASE)
-_DATA_IMAGE_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,", re.IGNORECASE)
+# Full-match (not prefix-match) so the rewriter never echoes an attacker-
+# supplied ``"``/``<``/``>`` back into the document. The base64 alphabet
+# is ``[A-Za-z0-9+/=]``; anything outside that — including the very chars
+# that could break out of an attribute — fails the match and the src is
+# stripped instead of forwarded.
+_DATA_IMAGE_RE = re.compile(
+    r"^data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]*$",
+    re.IGNORECASE,
+)
 
 
 def sanitize_html(html: str, *, cid_to_sha: dict[str, str]) -> str:

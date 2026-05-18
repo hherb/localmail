@@ -48,3 +48,35 @@ def test_data_uri_image_allowed() -> None:
     html = '<img src="data:image/png;base64,AAAA">'
     out = sanitize_html(html, cid_to_sha={})
     assert "data:image/png" in out
+
+
+def test_style_color_kept() -> None:
+    """Safe CSS — colors, fonts, borders — must survive the CSS sanitizer."""
+    html = '<p style="color: red; font-weight: bold">x</p>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "color: red" in out
+    assert "font-weight: bold" in out
+
+
+def test_style_background_image_url_dropped() -> None:
+    """background-image is not in bleach's default property allowlist."""
+    html = '<p style="background-image: url(https://tracker.example/p.png)">x</p>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "tracker.example" not in out
+    assert "background-image" not in out
+
+
+def test_style_position_fixed_dropped() -> None:
+    """`position` is omitted from bleach's default allowlist — blocks overlay/clickjacking via inline style."""
+    html = '<div style="position: fixed; top: 0; left: 0; color: red">overlay</div>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "position" not in out
+    assert "color: red" in out
+
+
+def test_style_javascript_url_dropped() -> None:
+    """A `javascript:` URL inside CSS (e.g. background) must not survive."""
+    html = '<p style="background: url(javascript:alert(1))">x</p>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "javascript:" not in out
+    assert "alert" not in out

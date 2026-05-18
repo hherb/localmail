@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 
 import bleach
+from bleach.css_sanitizer import CSSSanitizer
 
 _ALLOWED_TAGS = [
     "a", "abbr", "b", "blockquote", "br", "cite", "code", "div",
@@ -48,6 +49,14 @@ _ALLOWED_PROTOCOLS = ["mailto", "http", "https", "data"]
 
 _CID_RE = re.compile(r"^cid:(.+)$", re.IGNORECASE)
 _DATA_IMAGE_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,", re.IGNORECASE)
+
+# bleach defaults to a 46-property safe allowlist (no background-image, no
+# position, no expression/behavior). We accept that allowlist verbatim so
+# inline `style` attributes — which are very common in HTML email — still
+# render fonts/colors/borders/etc. while CSS-based exfil and overlay
+# attacks are dropped. Without a CSSSanitizer here, bleach allows style
+# attributes through *unfiltered* and emits NoCssSanitizerWarning.
+_CSS_SANITIZER = CSSSanitizer()
 
 # Tags whose inner content must also be removed (not just the tags themselves).
 _STRIP_WITH_CONTENT_RE = re.compile(
@@ -77,6 +86,7 @@ def sanitize_html(html: str, *, cid_to_sha: dict[str, str]) -> str:
         tags=_ALLOWED_TAGS,
         attributes=_ALLOWED_ATTRS,
         protocols=_ALLOWED_PROTOCOLS,
+        css_sanitizer=_CSS_SANITIZER,
         strip=True,
         strip_comments=True,
     )

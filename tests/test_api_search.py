@@ -48,15 +48,22 @@ def test_filter_value_with_embedded_quote_is_stripped() -> None:
     assert 'subject:"has quotes in it"' in q
 
 
-@pytest.mark.parametrize("unsupported_key, value", [
-    ("date_from", "2024-01-01"),
-    ("date_to", "2024-12-31"),
-    ("lang", "en"),
+def test_known_unsupported_filter_keys_is_empty() -> None:
+    """Every v1 spec filter key is wired through to the Searcher."""
+    from localmail.api.search import _KNOWN_UNSUPPORTED_FILTER_KEYS, _SUPPORTED_FILTER_KEYS
+    assert _KNOWN_UNSUPPORTED_FILTER_KEYS == frozenset()
+    assert {"date_from", "date_to", "lang"} <= _SUPPORTED_FILTER_KEYS
+
+
+@pytest.mark.parametrize("key, value, expected_token", [
+    ("date_from", "2024-01-01", "after:2024-01-01"),
+    ("date_to", "2024-12-31", "before:2024-12-31"),
+    ("lang", "en", "lang:en"),
 ])
-def test_unsupported_filter_keys_raise_validation(unsupported_key, value) -> None:
-    """Filters in the API schema but not wired to the searcher must 400."""
-    with pytest.raises(ValidationFailed):
-        build_query_string(free_text="x", filters={unsupported_key: value})
+def test_formerly_unsupported_keys_now_emit_tokens(key, value, expected_token) -> None:
+    """date_from/date_to/lang were previously rejected; Sub-plan 5 wires them through."""
+    q = build_query_string(free_text="x", filters={key: value})
+    assert expected_token in q
 
 
 def test_empty_unsupported_filter_values_do_not_raise() -> None:

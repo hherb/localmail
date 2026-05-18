@@ -16,14 +16,13 @@ from localmail.search.searcher import SearchPage, SearchResult, Searcher
 _SUPPORTED_FILTER_KEYS = frozenset({
     "from", "to", "subject", "after", "before", "has_attachment",
     "account_ids", "folder_ids",
-})
-
-# Filter keys that appear in the v1 spec / SearchFiltersModel but are not yet
-# wired through to the underlying Searcher. Surfaced as ValidationFailed so
-# clients get a clear 400 instead of a silently-incorrect result set.
-_KNOWN_UNSUPPORTED_FILTER_KEYS = frozenset({
     "date_from", "date_to", "lang",
 })
+
+# Empty: every v1 spec filter key now wires through to the Searcher.
+# Kept as a frozenset so the existing "unsupported key" check keeps working
+# without special-casing an empty case at call sites.
+_KNOWN_UNSUPPORTED_FILTER_KEYS: frozenset[str] = frozenset()
 
 
 def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
@@ -76,6 +75,21 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
     if (v := filters.get("before")):
         _validate_date(v, "before")
         out.append(f"before:{v}")
+    if (v := filters.get("date_from")):
+        _validate_date(v, "date_from")
+        out.append(f"after:{v}")
+    if (v := filters.get("date_to")):
+        _validate_date(v, "date_to")
+        out.append(f"before:{v}")
+    if "lang" in filters:
+        lang_v = filters["lang"]
+        if lang_v is not None and lang_v != []:
+            values = lang_v if isinstance(lang_v, list) else [lang_v]
+            for one in values:
+                s = str(one).strip().lower()
+                if not s:
+                    raise ValidationFailed("lang: empty value not allowed")
+                out.append(f"lang:{s}")
     if filters.get("has_attachment") is True:
         out.append("has:attachment")
     return out

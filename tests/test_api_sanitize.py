@@ -132,10 +132,11 @@ def test_anchor_gains_rel_noopener_noreferrer() -> None:
 def test_script_src_cid_does_not_leak_attachment_url() -> None:
     """``<script src="cid:...">`` must not surface a rewritten attachment URL.
 
-    ``_rewrite_image_srcs`` runs before the sanitiser, so it could in
-    principle rewrite the script's ``src`` to ``/v1/attachments/<sha>``.
-    nh3's ``clean_content_tags`` then removes the whole tag (and any
-    content), so neither the rewritten URL nor the inner text escape.
+    The ``attribute_filter`` only rewrites ``img/src`` (it returns the
+    value unchanged for ``script/src``), but ``clean_content_tags``
+    removes the whole ``<script>`` tag plus its content before any URL
+    surfaces in the output. Both layers are pinned here so a future
+    relaxation of either is forced to update this test.
     """
     cid_to_sha = {"evil@example": "deadbeef" * 8}
     html = '<p>before</p><script src="cid:evil@example">alert(1)</script><p>after</p>'
@@ -303,3 +304,34 @@ def test_anchor_text_containing_img_substring_preserved() -> None:
     assert "https://example.com/" in out
     assert ">x</a>" in out
     assert "foo" in out
+
+
+def test_href_with_uppercase_cid_scheme_stripped() -> None:
+    """URL schemes are case-insensitive per RFC 3986; ``CID:`` must be dropped too.
+
+    The ``attribute_filter`` lowercases the value before matching the
+    ``cid:`` prefix, so case-variant attacks (``CID:``, ``Cid:``,
+    ``cId:``) cannot bypass the href defence. Pins the ``.lower()``
+    call against accidental removal.
+    """
+    cid_to_sha = {"exfil@example": "a" * 64}
+    html = '<a href="CID:exfil@example">click</a>'
+    out = sanitize_html(html, cid_to_sha=cid_to_sha)
+    assert "CID:" not in out
+    assert "cid:" not in out.lower()
+    assert "/v1/attachments/" not in out
+    assert ">click</a>" in out
+
+
+def test_cid_substring_in_title_attribute_preserved() -> None:
+    """The ``attribute_filter`` must not over-reach into non-URL attributes.
+
+    A ``title`` attribute happens to allow free text including
+    ``cid:`` substrings. The filter's ``href``-only ``cid:`` block must
+    not also strip ``title`` values; the only attributes that can act on
+    a URL are ``img/src`` (rewritten) and ``a/href`` (cid: dropped).
+    """
+    html = '<span title="see cid:foo for the inline image">x</span>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert 'title="see cid:foo for the inline image"' in out
+    assert ">x</span>" in out

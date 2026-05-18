@@ -46,6 +46,14 @@ _ALLOWED_TAGS: frozenset[str] = frozenset({
     "sup", "table", "tbody", "td", "th", "thead", "tr", "u", "ul",
 })
 
+# SECURITY-CRITICAL: any new URL-interpreted attribute added here (e.g.
+# ``srcset`` on ``<source>``, ``poster`` on ``<video>``, ``formaction`` on
+# ``<button>``, ``data`` on ``<object>``) MUST get a parallel branch in
+# ``_make_attribute_filter`` — otherwise ``cid:`` values would survive on
+# a browser-dereferenced attribute, and ``http(s)://`` trackers would
+# survive on any new image-like attribute. Today the filter handles
+# exactly ``img/src`` (rewrite/strip) and ``a/href`` (drop ``cid:``);
+# that matches this allowlist.
 _ALLOWED_ATTRS: dict[str, set[str]] = {
     "*": {"class", "style", "title"},
     "a": {"href"},

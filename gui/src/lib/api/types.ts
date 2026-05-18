@@ -70,6 +70,12 @@ export interface MessageAttachment {
   sha256: string | null;
 }
 
+export interface MatchedChunk {
+  kind: string;
+  text: string;
+  score?: number;
+}
+
 export interface MessageDetail {
   id: string;
   subject: string | null;
@@ -87,6 +93,10 @@ export interface MessageDetail {
   // src/lib/api/full_headers.ts). Flat map of raw header name → value;
   // headers that occurred multiple times come back as a string[].
   headers?: Record<string, string | string[]> | null;
+  // Populated when the message was opened via a search result that returned
+  // chunk-level matches. Used by the debug-mode DebugChunks pane in
+  // ReadingPane. Server wiring is best-effort and may leave this undefined.
+  matched_chunks?: MatchedChunk[];
 }
 
 /**

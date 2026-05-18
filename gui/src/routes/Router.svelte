@@ -4,11 +4,14 @@
   import ConnectScreen from "../screens/ConnectScreen.svelte";
   import LoginScreen from "../screens/LoginScreen.svelte";
   import MainView from "../screens/MainView.svelte";
+  import VersionGate from "../components/VersionGate.svelte";
 
   onMount(async () => {
     await auth.refreshState();
   });
 </script>
+
+<VersionGate />
 
 {#if auth.snapshot.phase === "connecting" || auth.snapshot.phase === "needs_trust"}
   <ConnectScreen />

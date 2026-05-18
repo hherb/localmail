@@ -1,8 +1,12 @@
 <script lang="ts">
   import HtmlBody from "./HtmlBody.svelte";
   import AttachmentsStrip from "./AttachmentsStrip.svelte";
+  import RawBodyView from "./RawBodyView.svelte";
+  import HeaderUnfold from "./HeaderUnfold.svelte";
+  import DebugChunks from "./DebugChunks.svelte";
   import { addressLabel, formatRelativeDate } from "../lib/format";
   import { mail } from "../lib/stores/mail.svelte";
+  import { settings } from "../lib/stores/settings.svelte";
 
   function setMode(m: "html" | "plain" | "raw") { mail.setBodyMode(m); }
 </script>
@@ -31,6 +35,7 @@
           {/if}
         </dd>
       </dl>
+      <div class="unfold"><HeaderUnfold messageId={String(m.id)} /></div>
     </header>
 
     <nav class="modes">
@@ -70,7 +75,7 @@
       {:else if mail.snapshot.bodyMode === "plain" && m.body_text}
         <pre class="plain">{m.body_text}</pre>
       {:else if mail.snapshot.bodyMode === "raw"}
-        <p class="placeholder">Raw RFC822 view arrives with the headers-unfold widget in Sub-plan 5.</p>
+        <RawBodyView messageId={String(m.id)} />
       {:else if mail.snapshot.bodyMode === "html" && !m.body_html && m.body_text}
         <pre class="plain">{m.body_text}</pre>
       {:else}
@@ -79,6 +84,12 @@
     </section>
 
     <AttachmentsStrip />
+
+    {#if settings.snapshot.debug}
+      <section class="debug" data-testid="debug-chunks-wrap">
+        <DebugChunks matchedChunks={m.matched_chunks} />
+      </section>
+    {/if}
   {:else}
     <div class="hint">Select a message to read it.</div>
   {/if}
@@ -168,5 +179,14 @@
     padding: 16px;
     color: #888;
     font-style: italic;
+  }
+  .unfold {
+    margin-top: 8px;
+  }
+  .debug {
+    border-top: 1px dashed #ddd;
+    padding: 8px 12px;
+    flex-shrink: 0;
+    background: #fcfcfd;
   }
 </style>

@@ -40,6 +40,21 @@ uv run localmail sync [--account N] [--limit-per-folder K]   # one-shot incremen
 uv run localmail run             # foreground daemon (IDLE on INBOX + periodic poll)
 uv run localmail list-failed [--account N] [--limit K]   # show messages sync skipped
 uv run localmail retry-failed [--account N]    # re-attempt every failed message
+uv run localmail extract-backfill              # one-shot extraction backfill for all blobs
+uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
+uv run localmail retry-failed-extractions      # re-attempt every failed extraction
+# search-status also reports Phase 2 attachment_text/attachment_chunks counts
+```
+
+GUI server (Phase: gui-server):
+
+```bash
+uv run localmail add-api-user USERNAME       # create an API user
+uv run localmail list-api-users
+uv run localmail remove-api-user USERNAME
+uv run localmail rotate-tls --cert PATH --key PATH
+uv run localmail serve [--bind 127.0.0.1] [--port 8443] \
+                       [--tls-cert PATH] [--tls-key PATH] [--no-tls]
 ```
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
@@ -64,17 +79,19 @@ src/localmail/
   idle.py           # run_inbox_idle_loop, _one_inbox_session, _idle_step
   poller.py         # run_poll_loop, _one_poll_pass
   daemon.py         # Daemon class: signal handling, per-account thread spawn
-  search/           # hybrid search subsystem (Phase 1)
+  search/           # hybrid search subsystem (Phases 1 + 2)
     __init__.py     # public API: create_searcher, Searcher, SearchPage, SearchResult
-    arms.py         # retrieval arms: arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks
-    chunking.py     # chunk_message() -> ChunkSpec list
+    arms.py         # retrieval arms: arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
+    chunking.py     # chunk_message() -> ChunkSpec list; chunk_attachment_text() -> ChunkSpec list
     embed_worker.py # run_embed_worker_once, run_embed_worker (background thread)
     embeddings.py   # FastEmbedBackend + EmbeddingBackend ABC
+    extractor.py    # LightweightExtractor (11 formats) + ExtractorBackend ABC; DoclingExtractor via [extraction] extra
+    extract_worker.py # run_extract_worker_once, run_extract_worker (background thread)
     page_cache.py   # in-process LRU cache for paginated result pools
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0010_failed_chunkings.sql
+migrations/         # 0001_init.sql … 0015_messages_body_lang.sql
 tests/
   acceptance/       # standalone eval harness (run_recall_eval.py)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
@@ -92,7 +109,8 @@ User-facing config lives at `~/.config/localmail/config.toml` (override with
 ## Schema essentials
 
 Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
-`attachment_blobs`, `failed_messages`, `schema_migrations`. Dedup model:
+`attachment_blobs`, `attachment_text`, `attachment_chunks`,
+`failed_messages`, `failed_extractions`, `schema_migrations`. Dedup model:
 
 - **Messages — per-account, by `Message-Id`**: same Message-Id in INBOX + 3
   Gmail labels produces one `messages` row + four `message_labels` rows. The
@@ -165,17 +183,22 @@ them), and attachment-only messages get synthesized
 so they remain searchable and visible (original bytes/filenames are intact
 in `messages.attachments` + the blobs tree).
 
-## Search subsystem (Phase 1 shipped)
+## Search subsystem (Phases 1 + 2 shipped)
 
-Hybrid lexical (tsvector) + vector (pgvector) search over messages. See
+Hybrid lexical (tsvector) + vector (pgvector) search over messages and
+attachment text. See
 [docs/superpowers/specs/2026-05-16-hybrid-search-design.md](docs/superpowers/specs/2026-05-16-hybrid-search-design.md)
-for the full design and
+for the full design,
 [docs/superpowers/plans/2026-05-16-hybrid-search-phase1.md](docs/superpowers/plans/2026-05-16-hybrid-search-phase1.md)
-for the Phase 1 implementation plan.
+for the Phase 1 plan, and
+[docs/superpowers/specs/2026-05-16-hybrid-search-phase2-design.md](docs/superpowers/specs/2026-05-16-hybrid-search-phase2-design.md) /
+[docs/superpowers/plans/2026-05-16-hybrid-search-phase2.md](docs/superpowers/plans/2026-05-16-hybrid-search-phase2.md)
+for the Phase 2 plan.
 
 - Code lives under `src/localmail/search/` — `chunking.py`, `embeddings.py`,
   `reranker.py`, `query.py`, `searcher.py`, `arms.py`, `page_cache.py`,
-  `embed_worker.py`. Public API: `localmail.search.create_searcher`.
+  `embed_worker.py`, `extractor.py`, `extract_worker.py`. Public API:
+  `localmail.search.create_searcher`.
 - All numeric tunables in `LocalmailConfig.search` (`SearchConfig`).
   **No magic numbers elsewhere in search code.**
 - Lexical retrieval via PostgreSQL built-in `tsvector` + `ts_rank_cd` with
@@ -200,8 +223,23 @@ for the Phase 1 implementation plan.
       off; chunks get re-claimed next sweep. Permanently-broken backends
       surface via repeated WARNINGs rather than silently poisoning the
       entire queue.
-- Phase 2 (attachment search), Phase 3 (MCP), Phase 4 (--smart),
-  Phase 5 (polish) — separate design + plans.
+- Phase 2 (attachment search) — **shipped**, see
+  [docs/superpowers/specs/2026-05-16-hybrid-search-phase2-design.md] and
+  [docs/superpowers/plans/2026-05-16-hybrid-search-phase2.md].
+  Phase 3 (MCP), Phase 4 (--smart), Phase 5 (polish) — separate design + plans.
+
+**Phase 2 notes**:
+- `LightweightExtractor` handles 11 formats (PDF, DOCX, XLSX, PPTX, ODT, RTF,
+  TXT, Markdown, HTML, CSV, ICS). `DoclingExtractor` is optional, enabled via the
+  `[extraction]` uv extra.
+- `extract_worker` uses `conn_factory` (not pool) so each sweep gets a fresh
+  connection — prevents server-side idle timeouts on long extractions.
+- `extract_worker` spawn is gated by `cfg.search.run_extract_worker`.
+- There is no `failed_attachment_chunkings` table (intentional Phase 2 scope
+  decision); persistent attachment-chunk failures surface as repeated WARNING logs.
+- `_extract_xlsx` blob-path workaround: openpyxl detects format by file extension,
+  so the worker passes `io.BytesIO(path.read_bytes())` instead of the
+  extension-free blob path. No other Office extractor has this issue.
 
 **`bm25_field_boosts` weight normalization**: `arms.py` normalises the raw
 boost values by `max(raw)` to satisfy `ts_rank_cd`'s `[0, 1]` weight
@@ -230,6 +268,22 @@ de/en/es/ja. Norwegian is reported but not gated. Requires the fastembed model
 to be installed (known deferred concern: `google/embeddinggemma-300m` must be
 in the fastembed registry).
 
+## GUI server (Phase 1 of GUI)
+
+Network-reachable HTTPS API exposing the same functionality as the search
+subsystem, plus account/folder/message/attachment read paths and bearer-token
+auth. See [docs/superpowers/specs/2026-05-17-localmail-gui-design.md](docs/superpowers/specs/2026-05-17-localmail-gui-design.md)
+for the full design.
+
+- Code lives under `src/localmail/api/` (transport-free service library) and
+  `src/localmail/serve/` (FastAPI HTTP wrapper).
+- The MCP server (planned) will import `localmail.api` directly — no HTTP hop.
+- Migration `0014_api_users.sql` adds `api_users` + `api_tokens`. Tokens are
+  stored as SHA-256 hashes; raw bearer is only returned at login/refresh.
+- TLS is on by default; `--no-tls` is only accepted with `--bind 127.0.0.1`.
+- The HTTP server and the sync daemon never call each other — they share
+  Postgres and can run independently.
+
 ## Conventions
 
 - **No comments unless the WHY is non-obvious.** Don't restate the SQL or the
@@ -243,7 +297,7 @@ in the fastembed registry).
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0010_failed_chunkings.sql`; next would be `0011_*.sql`.
+  Latest is `0015_messages_body_lang.sql`; next would be `0016_*.sql`.
 
 ## Testing notes
 

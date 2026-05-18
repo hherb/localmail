@@ -25,7 +25,9 @@ class QueryParseError(ValueError):
 class SearchFilters:
     account_names: list[str] = field(default_factory=list)
     accounts: list[int] | None = None  # resolved by Searcher from account_names
+    account_ids: list[int] | None = None  # set directly from the API layer; bypasses name resolution
     folders: list[str] | None = None
+    folder_ids: list[int] | None = None  # mailbox PKs from the API layer
     from_substr: str | None = None
     to_substr: str | None = None
     subject_substr: str | None = None
@@ -44,7 +46,10 @@ class ParsedQuery:
     filters: SearchFilters = field(default_factory=SearchFilters)
 
 
-_OPERATORS = {"from", "to", "subject", "after", "before", "has", "label", "account", "folder"}
+_OPERATORS = {
+    "from", "to", "subject", "after", "before", "has", "label",
+    "account", "folder", "account_id", "folder_id", "lang",
+}
 
 
 def _tokenize(s: str) -> list[str]:
@@ -83,14 +88,23 @@ def parse_query(query: str) -> ParsedQuery:
     free_parts: list[str] = []
     f_account_names: list[str] = []
     f_folders: list[str] = []
+    f_account_ids: list[int] = []
+    f_folder_ids: list[int] = []
     f_from = f_to = f_subject = f_label = None
     f_after = f_before = None
     f_has_attachment: bool | None = None
+    f_languages: list[str] = []
 
     for tok in _tokenize(query):
         if ":" in tok:
             op, _, value = tok.partition(":")
             op_l = op.lower()
+            if op_l == "lang":
+                normalized = value.strip().lower()
+                if not normalized:
+                    raise QueryParseError("lang: empty value not allowed")
+                f_languages.append(normalized)
+                continue
             if op_l in _OPERATORS and value:
                 if op_l == "from":
                     f_from = value
@@ -104,6 +118,18 @@ def parse_query(query: str) -> ParsedQuery:
                     f_account_names.append(value)
                 elif op_l == "folder":
                     f_folders.append(value)
+                elif op_l == "account_id":
+                    try:
+                        f_account_ids.append(int(value))
+                    except ValueError:
+                        free_parts.append(tok)
+                    continue
+                elif op_l == "folder_id":
+                    try:
+                        f_folder_ids.append(int(value))
+                    except ValueError:
+                        free_parts.append(tok)
+                    continue
                 elif op_l == "after":
                     f_after = _parse_date(value, "after")
                 elif op_l == "before":
@@ -117,6 +143,8 @@ def parse_query(query: str) -> ParsedQuery:
     filters = SearchFilters(
         account_names=f_account_names,
         folders=f_folders or None,
+        account_ids=f_account_ids or None,
+        folder_ids=f_folder_ids or None,
         from_substr=f_from,
         to_substr=f_to,
         subject_substr=f_subject,
@@ -124,5 +152,6 @@ def parse_query(query: str) -> ParsedQuery:
         before=f_before,
         has_attachment=f_has_attachment,
         label=f_label,
+        languages=f_languages or None,
     )
     return ParsedQuery(free_text=" ".join(free_parts), filters=filters)

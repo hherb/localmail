@@ -35,12 +35,16 @@ class Daemon:
         self.threads: list[threading.Thread] = []
         self._embedding_backend_factory = embedding_backend_factory
         self._embed_pool: ConnectionPool | None = None
+        self._started = False
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("received signal %s; stopping daemon", signum)
         self._stop_event.set()
 
     def start_workers(self) -> None:
+        if self._started:
+            return
+        self._started = True
         gmail_secrets = (
             self.cfg.gmail_oauth.client_secrets_file if self.cfg.gmail_oauth else None
         )
@@ -92,6 +96,25 @@ class Daemon:
             t_embed.start()
             self.threads.append(t_embed)
             log.info("started embed_worker thread")
+
+        if self.cfg.search.run_extract_worker:
+            import psycopg  # noqa: PLC0415
+            from localmail.search.extract_worker import run_extract_worker  # noqa: PLC0415
+
+            dsn = self._dsn
+            t_extract = threading.Thread(
+                target=run_extract_worker,
+                kwargs={
+                    "conn_factory": lambda: psycopg.connect(dsn),
+                    "cfg": self.cfg.search,
+                    "stop_event": self._stop_event,
+                },
+                name="extract_worker",
+                daemon=True,
+            )
+            t_extract.start()
+            self.threads.append(t_extract)
+            log.info("started extract_worker thread")
 
     def start(self) -> None:
         """Start all worker threads without blocking."""

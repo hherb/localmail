@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -20,6 +21,24 @@ from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
 from .search import create_searcher
 from .sync import retry_failed_messages, sync_account
+
+
+def _is_loopback_bind(bind: str) -> bool:
+    """Return True iff `bind` is unambiguously a loopback interface.
+
+    Accepts literal `localhost`, any literal IPv4/IPv6 address whose
+    `.is_loopback` is True (e.g. `127.0.0.1`, `127.0.0.5`, `::1`), and
+    rejects everything else — including `0.0.0.0`, public IPs, and DNS
+    names that might resolve to non-loopback addresses.
+    """
+    import ipaddress
+
+    if bind == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(bind).is_loopback
+    except ValueError:
+        return False
 
 
 def _account_or_die(cfg: Config, name: str) -> AccountConfig:
@@ -401,6 +420,36 @@ def _make_backend(cfg):
     return FastEmbedBackend(cfg.search)
 
 
+@main.command("extract-backfill")
+@click.option("--no-progress", is_flag=True)
+def extract_backfill(no_progress: bool) -> None:
+    """Drain the attachment-extraction queue in the foreground; exit when empty.
+
+    Account-agnostic — extracts text from all eligible blobs whose MIME type or
+    file extension matches the configured allowlists.
+    """
+    from localmail.db import open_pool
+    from localmail.search.extract_worker import run_extract_worker_once
+    cfg = load_config()
+    pool = open_pool(_dsn())
+    try:
+        total = 0
+        while True:
+            with pool.connection() as conn:
+                touched = run_extract_worker_once(conn, cfg.search)
+            if touched == 0:
+                break
+            total += touched
+            if not no_progress:
+                click.echo(
+                    f"extracted {touched} blobs (total {total})",
+                    err=True,
+                )
+    finally:
+        pool.close()
+    click.echo(f"done: {total} blobs processed")
+
+
 @main.command("embed-backfill")
 @click.option("--no-progress", is_flag=True)
 def embed_backfill(no_progress):
@@ -431,8 +480,13 @@ def embed_backfill(no_progress):
 @main.command("search-status")
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def search_status(fmt):
-    """Show progress: how many chunks remain to be embedded, failures, etc."""
+    """Show progress: how many chunks remain to be embedded, failures, etc.
+
+    Reports message embedding status (Phase 1) and attachment extraction /
+    embedding status (Phase 2), plus failure counts for both subsystems.
+    """
     from localmail.db import open_pool
+    cfg = load_config()
     pool = open_pool(_dsn())
     try:
         with pool.connection() as conn, conn.cursor() as cur:
@@ -452,6 +506,41 @@ def search_status(fmt):
             row = cur.fetchone()
             assert row is not None
             failed = row[0]
+            cur.execute(
+                "SELECT count(*) FROM attachment_blobs b "
+                "WHERE b.mime_type = ANY(%s) "
+                "   OR lower(substring(b.path FROM '\\.[^.]+$')) = ANY(%s)",
+                (
+                    cfg.search.extractor_mime_allowlist,
+                    cfg.search.extractor_extension_allowlist,
+                ),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            blobs_eligible = row[0]
+            cur.execute(
+                "SELECT count(*) FROM attachment_text "
+                "WHERE extracted_text <> ''"
+            )
+            row = cur.fetchone()
+            assert row is not None
+            blobs_extracted = row[0]
+            blobs_pending = max(0, blobs_eligible - blobs_extracted)
+            cur.execute("SELECT count(*) FROM attachment_chunks")
+            row = cur.fetchone()
+            assert row is not None
+            attachment_chunks_total = row[0]
+            cur.execute(
+                "SELECT count(*) FROM attachment_chunks "
+                "WHERE embedding_v1 IS NOT NULL"
+            )
+            row = cur.fetchone()
+            assert row is not None
+            attachment_chunks_embedded = row[0]
+            cur.execute("SELECT count(*) FROM failed_extractions")
+            row = cur.fetchone()
+            assert row is not None
+            failed_extractions_count = row[0]
     finally:
         pool.close()
     payload = {
@@ -460,6 +549,12 @@ def search_status(fmt):
         "chunks_embedded": chunks_embedded,
         "chunks_pending": chunks_total - chunks_embedded,
         "failed_embeddings": failed,
+        "blobs_eligible": blobs_eligible,
+        "blobs_extracted": blobs_extracted,
+        "blobs_pending": blobs_pending,
+        "attachment_chunks_total": attachment_chunks_total,
+        "attachment_chunks_embedded": attachment_chunks_embedded,
+        "failed_extractions": failed_extractions_count,
     }
     if fmt == "json":
         click.echo(_json.dumps(payload))
@@ -518,6 +613,290 @@ def retry_failed_embeddings(chunk_table):
     finally:
         pool.close()
     click.echo(f"cleared {n} failed_embeddings rows")
+
+
+def _dsn_from_ctx(ctx: click.Context) -> str:
+    """DSN resolver: env override wins over config (useful for tests)."""
+    override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
+    if override:
+        return override
+    cfg = load_config(ctx.obj["config_path"])
+    return cfg.database.dsn
+
+
+@main.command("add-api-user")
+@click.argument("username")
+@click.option("--password", "password_opt", default=None,
+              help="If omitted, prompt on TTY or read from stdin via --password-stdin.")
+@click.option("--password-stdin", "password_stdin", is_flag=True, default=False,
+              help="Read the password from stdin (no echo, no prompt). For "
+                   "scripts and CI; refuses to run on a TTY to avoid silent "
+                   "hangs.")
+@click.pass_context
+def add_api_user(
+    ctx: click.Context,
+    username: str,
+    password_opt: str | None,
+    password_stdin: bool,
+) -> None:
+    """Create a new API user. Password is hashed with argon2id.
+
+    Note: until the per-account ACL lands, every API user has read access to
+    every account and message in the archive. Adding a second user is
+    therefore a sharing decision, not a permissions one — a warning prints
+    when that happens.
+    """
+    from localmail.api.auth import create_user
+    if password_stdin and password_opt is not None:
+        raise click.ClickException("--password and --password-stdin are mutually exclusive")
+    if password_stdin:
+        if sys.stdin.isatty():
+            raise click.ClickException(
+                "--password-stdin requires piped input; refusing to read from a TTY"
+            )
+        password = sys.stdin.readline().rstrip("\n")
+        if not password:
+            raise click.ClickException("--password-stdin: empty password")
+    elif password_opt is not None:
+        password = password_opt
+    elif not sys.stdin.isatty():
+        raise click.ClickException(
+            "stdin is not a TTY; pass --password or --password-stdin"
+        )
+    else:
+        password = click.prompt("Password", hide_input=True, confirmation_prompt=True)
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM api_users")
+            row = cur.fetchone()
+            assert row is not None
+            existing = int(row[0])
+        try:
+            uid = create_user(conn, username, password)
+            conn.commit()
+        except psycopg.errors.UniqueViolation:
+            raise click.ClickException(f"user {username!r} already exists")
+    click.echo(f"created user {username!r} (id={uid})")
+    if existing >= 1:
+        click.echo(
+            f"warning: {existing + 1} API users now exist. The current build has "
+            f"no per-account ACL, so {username!r} can read every account's mail. "
+            f"Only add multiple users if that is intended.",
+            err=True,
+        )
+
+
+@main.command("remove-api-user")
+@click.argument("username")
+@click.pass_context
+def remove_api_user(ctx: click.Context, username: str) -> None:
+    """Delete an API user and all its tokens."""
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM api_users WHERE username = %s", (username,))
+        if cur.rowcount == 0:
+            raise click.ClickException(f"no such user: {username!r}")
+        conn.commit()
+    click.echo(f"removed user {username!r}")
+
+
+@main.command("list-api-users")
+@click.pass_context
+def list_api_users(ctx: click.Context) -> None:
+    """List configured API users (and whether each is disabled)."""
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn, conn.cursor() as cur:
+        cur.execute("SELECT username, disabled_at FROM api_users ORDER BY username")
+        rows = cur.fetchall()
+    if not rows:
+        click.echo("(no users)")
+        return
+    for username, disabled_at in rows:
+        marker = " [disabled]" if disabled_at else ""
+        click.echo(f"{username}{marker}")
+
+
+@main.command("rotate-tls")
+@click.option("--cert", "cert_path", required=True, type=click.Path(path_type=Path))
+@click.option("--key", "key_path", required=True, type=click.Path(path_type=Path))
+@click.option("--hostname", default="localhost", show_default=True)
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite existing cert/key without prompting.")
+def rotate_tls(cert_path: Path, key_path: Path, hostname: str, force: bool) -> None:
+    """Generate (or regenerate with --force) a self-signed TLS cert + key."""
+    from localmail.serve.tls import (
+        cert_fingerprint_sha256_hex,
+        ensure_self_signed_cert,
+        rotate_self_signed_cert,
+    )
+    if force and (cert_path.exists() or key_path.exists()):
+        rotate_self_signed_cert(
+            cert_path=cert_path, key_path=key_path, hostname=hostname,
+        )
+    else:
+        ensure_self_signed_cert(
+            cert_path=cert_path, key_path=key_path, hostname=hostname,
+        )
+    fp = cert_fingerprint_sha256_hex(cert_path=cert_path)
+    click.echo(f"cert: {cert_path}")
+    click.echo(f"key:  {key_path}")
+    click.echo(f"sha256 fingerprint: {fp}")
+
+
+@main.command("serve")
+@click.option("--bind", default="127.0.0.1", show_default=True,
+              help="Interface to bind. Use 0.0.0.0 to expose to the network.")
+@click.option("--port", default=8443, type=int, show_default=True)
+@click.option("--tls-cert", "tls_cert", default=None, type=click.Path(path_type=Path))
+@click.option("--tls-key", "tls_key", default=None, type=click.Path(path_type=Path))
+@click.option("--no-tls", is_flag=True, default=False,
+              help="Disable TLS. Only valid when --bind is 127.0.0.1.")
+@click.pass_context
+def serve_cmd(
+    ctx: click.Context,
+    bind: str,
+    port: int,
+    tls_cert: Path | None,
+    tls_key: Path | None,
+    no_tls: bool,
+) -> None:
+    """Run the HTTPS API server."""
+    import uvicorn
+    from localmail.db import pending_migrations
+    from localmail.serve.app import create_app
+    from localmail.serve.tls import ensure_self_signed_cert
+
+    if no_tls and not _is_loopback_bind(bind):
+        raise click.ClickException(
+            "--no-tls is only valid when --bind resolves to a loopback address"
+        )
+
+    from localmail.config import ServeConfig
+    override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
+    if override:
+        dsn = override
+        serve_cfg = ServeConfig()
+    else:
+        cfg = load_config(ctx.obj["config_path"])
+        dsn = cfg.database.dsn
+        serve_cfg = cfg.serve
+
+    try:
+        pending = pending_migrations(dsn)
+    except Exception as exc:
+        raise click.ClickException(
+            f"could not check schema: {exc}. Is Postgres reachable?"
+        ) from exc
+    if pending:
+        raise click.ClickException(
+            "database is missing migrations: "
+            + ", ".join(pending)
+            + ". Run `localmail init-db` first."
+        )
+
+    try:
+        from localmail.search import create_searcher
+        searcher = create_searcher()
+    except Exception as exc:
+        click.echo(f"warning: search disabled ({exc})", err=True)
+        searcher = None
+
+    app = create_app(db_dsn=dsn, searcher=searcher, serve_config=serve_cfg)
+
+    if no_tls:
+        click.echo(f"serving HTTP on {bind}:{port}", err=True)
+        uvicorn.run(app, host=bind, port=port, log_level="info")
+        return
+
+    cert_path = tls_cert or Path.home() / ".config" / "localmail" / "tls" / "cert.pem"
+    key_path = tls_key or Path.home() / ".config" / "localmail" / "tls" / "key.pem"
+    if tls_cert is None and not _is_loopback_bind(bind):
+        click.echo(
+            f"warning: --bind {bind} accepts non-loopback traffic but no --tls-cert "
+            "was given; using a self-signed cert. Clients must pin its fingerprint "
+            "(see `rotate-tls --force` and the printed sha256).",
+            err=True,
+        )
+    ensure_self_signed_cert(
+        cert_path=cert_path, key_path=key_path,
+        hostname=bind if bind != "0.0.0.0" else "localhost",
+    )
+    click.echo(f"serving HTTPS on {bind}:{port}", err=True)
+    click.echo(f"cert: {cert_path}", err=True)
+    uvicorn.run(
+        app, host=bind, port=port, log_level="info",
+        ssl_certfile=str(cert_path), ssl_keyfile=str(key_path),
+    )
+
+
+@main.command("list-failed-extractions")
+@click.option("--limit", type=int, default=50)
+@click.option(
+    "--format", "fmt",
+    type=click.Choice(["text", "json"]), default="text",
+)
+def list_failed_extractions(limit: int, fmt: str) -> None:
+    """Show recent failed_extractions rows.
+
+    Each row represents a blob for which text extraction failed.  Use
+    ``retry-failed-extractions`` to clear rows so the worker re-attempts them.
+    """
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT encode(sha256,'hex'), extractor, error_class, "
+                "error_message, retry_count, failed_at, last_retry_at "
+                "FROM failed_extractions "
+                "ORDER BY failed_at DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.close()
+    cols = ["sha256_hex", "extractor", "error_class", "error_message",
+            "retry_count", "failed_at", "last_retry_at"]
+    payload = [dict(zip(cols, r, strict=True)) for r in rows]
+    if fmt == "json":
+        click.echo(_json.dumps(payload, default=str))
+    else:
+        for p in payload:
+            click.echo(
+                f"{p['sha256_hex'][:12]}  {p['extractor']}  "
+                f"{p['error_class']}  retries={p['retry_count']}  "
+                f"{p['failed_at']}"
+            )
+            click.echo(f"    {p['error_message']}")
+
+
+@main.command("retry-failed-extractions")
+@click.option(
+    "--sha256", "sha256_hex", default=None,
+    help="Restrict to one blob (full hex sha256); clears all rows when omitted.",
+)
+def retry_failed_extractions(sha256_hex: str | None) -> None:
+    """Clear failed_extractions rows so the extract worker re-attempts them.
+
+    Without ``--sha256`` every failed_extractions row is removed so the
+    extract worker will attempt all previously-failed blobs on its next
+    sweep.  With ``--sha256 HEX`` only the single matching row is removed.
+    """
+    from localmail.db import open_pool
+    pool = open_pool(_dsn())
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            if sha256_hex:
+                cur.execute(
+                    "DELETE FROM failed_extractions "
+                    "WHERE sha256 = decode(%s,'hex')",
+                    (sha256_hex,),
+                )
+            else:
+                cur.execute("DELETE FROM failed_extractions")
+            n = cur.rowcount
+        conn.commit()
+    finally:
+        pool.close()
+    click.echo(f"cleared {n} failed_extractions rows")
 
 
 if __name__ == "__main__":

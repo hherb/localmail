@@ -143,3 +143,198 @@ def test_fts_v2_finds_subject_match(db_conn) -> None:
         )
         row = cur.fetchone()
     assert row is not None, "fts_v2 generated column did not match 'Berlin' in subject"
+
+
+def test_attachment_text_and_chunks_tables_exist(db_conn) -> None:
+    """Verify migration 0011 created attachment_text and attachment_chunks with correct schema.
+
+    Checks column names, nullability, unique constraint on (sha256, chunk_idx),
+    and the partial pending index on attachment_chunks.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name, is_nullable, data_type "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'attachment_text' ORDER BY ordinal_position"
+        )
+        cols = cur.fetchall()
+    names = [c[0] for c in cols]
+    assert names == ["sha256", "extractor", "extracted_text", "page_count", "extracted_at"]
+
+    nullable = {c[0]: c[1] for c in cols}
+    assert nullable["extractor"] == "NO"
+    assert nullable["extracted_text"] == "NO"
+    assert nullable["page_count"] == "YES"
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'attachment_chunks' ORDER BY ordinal_position"
+        )
+        names = [r[0] for r in cur.fetchall()]
+    assert names == [
+        "id", "sha256", "chunk_idx", "text", "token_count", "embedding_v1", "embedded_at"
+    ]
+
+    # Unique (sha256, chunk_idx)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_constraint c "
+            "JOIN pg_class t ON t.oid = c.conrelid "
+            "WHERE t.relname = 'attachment_chunks' "
+            "  AND c.contype = 'u' "
+            "  AND pg_get_constraintdef(c.oid) LIKE '%(sha256, chunk_idx)%'"
+        )
+        assert cur.fetchone() is not None
+
+    # Partial pending index
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'attachment_chunks_pending_idx'"
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert "WHERE (embedding_v1 IS NULL)" in row[0]
+
+
+def test_failed_extractions_table_exists(db_conn) -> None:
+    """Verify migration 0012 created failed_extractions with correct schema.
+
+    Checks column names in order, nullability of key columns, and that the
+    primary key is sha256 alone (one row per blob, not per (blob, extractor)).
+    """
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name, is_nullable "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'failed_extractions' ORDER BY ordinal_position"
+        )
+        cols = cur.fetchall()
+    names = [c[0] for c in cols]
+    assert names == [
+        "sha256", "extractor", "error_class", "error_message", "traceback",
+        "retry_count", "failed_at", "last_retry_at",
+    ]
+    nullable = {c[0]: c[1] for c in cols}
+    assert nullable["extractor"] == "NO"
+    assert nullable["traceback"] == "YES"
+    assert nullable["last_retry_at"] == "YES"
+    assert nullable["error_class"] == "NO"
+    assert nullable["error_message"] == "NO"
+    assert nullable["retry_count"] == "NO"
+
+    # PK is sha256 alone
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.attname FROM pg_index i "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+            "AND a.attnum = ANY(i.indkey) "
+            "WHERE i.indrelid = 'failed_extractions'::regclass "
+            "AND i.indisprimary "
+            "ORDER BY a.attnum"
+        )
+        pk_cols = [r[0] for r in cur.fetchall()]
+    assert pk_cols == ["sha256"]
+
+
+def test_failed_extractions_cascade_on_blob_delete(db_conn) -> None:
+    """Deleting an attachment_blobs row cascades to failed_extractions."""
+    sha = b"\x55" * 32
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "/tmp/fe-cascade", "application/pdf", 1),
+        )
+        cur.execute(
+            "INSERT INTO failed_extractions "
+            "(sha256, extractor, error_class, error_message) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "lightweight", "BadFile", "broken"),
+        )
+    db_conn.commit()
+
+    with db_conn.cursor() as cur:
+        cur.execute("DELETE FROM attachment_blobs WHERE sha256 = %s", (sha,))
+    db_conn.commit()
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM failed_extractions WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0
+
+
+def test_attachment_arm4_indexes_exist(db_conn) -> None:
+    """Verify migration 0013 created HNSW on attachment_chunks.embedding_v1
+    and GIN on messages.attachments for Arm 4 vector + JSONB retrieval.
+
+    The HNSW WITH-clause parameters must match Phase 1's message_chunks index
+    (m=16, ef_construction=64) for consistent build cost and recall.
+    Postgres 18 normalises these as quoted integers in indexdef
+    (e.g. m='16'), so the assertions match that canonical form.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'attachment_chunks_embedding_v1_hnsw'"
+        )
+        row = cur.fetchone()
+    assert row is not None, "attachment_chunks_embedding_v1_hnsw index missing"
+    assert "USING hnsw" in row[0]
+    assert "halfvec_cosine_ops" in row[0]
+    # Postgres normalises WITH-clause params to quoted integers in indexdef.
+    assert "m='16'" in row[0]
+    assert "ef_construction='64'" in row[0]
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'messages_attachments_gin'"
+        )
+        row = cur.fetchone()
+    assert row is not None, "messages_attachments_gin index missing"
+    assert "USING gin" in row[0]
+    # GIN target column must be `attachments`, not some other JSONB column.
+    # Postgres includes the schema prefix in indexdef (e.g. "public.messages"),
+    # so match the tail that is stable across schema qualification.
+    assert "using gin (attachments)" in row[0].lower()
+
+
+def test_attachment_text_and_chunks_cascade_on_blob_delete(db_conn) -> None:
+    """Deleting an attachment_blobs row cascades to both attachment_text
+    and attachment_chunks rows referencing the same sha256."""
+    sha = b"\x42" * 32
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "/tmp/cascade-test", "text/plain", 4),
+        )
+        cur.execute(
+            "INSERT INTO attachment_text (sha256, extractor, extracted_text) "
+            "VALUES (%s, %s, %s)",
+            (sha, "lightweight@1.0", "test"),
+        )
+        cur.execute(
+            "INSERT INTO attachment_chunks "
+            "(sha256, chunk_idx, text, token_count) "
+            "VALUES (%s, 0, %s, 1)",
+            (sha, "test"),
+        )
+    db_conn.commit()
+
+    with db_conn.cursor() as cur:
+        cur.execute("DELETE FROM attachment_blobs WHERE sha256 = %s", (sha,))
+    db_conn.commit()
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM attachment_text WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0
+        cur.execute("SELECT count(*) FROM attachment_chunks WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0

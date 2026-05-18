@@ -1,10 +1,11 @@
-"""SQL retrieval arms for Phase 1: BM25 (messages, chunks) + vector (chunks).
+"""SQL retrieval arms for hybrid search: BM25 (messages, chunks) + vector (chunks, attachment_chunks).
 
 Each arm is a pure function `(conn, parsed_query, cfg, ...) -> list[ArmHit]`.
-Arm 4 (vector over attachment_chunks) lands in Phase 2.
 
 Arms 1 and 2 use PostgreSQL tsvector FTS with ts_rank_cd for scoring.
-Arm 3 uses pgvector cosine distance over halfvec embeddings.
+Arm 3 uses pgvector cosine distance over halfvec embeddings on message_chunks.
+Arm 4 uses pgvector cosine distance over halfvec embeddings on attachment_chunks,
+    joined to messages via JSONB containment on messages.attachments.
 """
 
 from __future__ import annotations
@@ -29,6 +30,9 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
     if filters.accounts:
         parts.append("m.account_id = ANY(%s)")
         params.append(filters.accounts)
+    if filters.account_ids:
+        parts.append("m.account_id = ANY(%s)")
+        params.append(filters.account_ids)
     if filters.from_substr:
         parts.append("(m.from_addr ILIKE %s OR m.from_name ILIKE %s)")
         like = f"%{filters.from_substr}%"
@@ -55,12 +59,27 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
             " WHERE ml.message_id = m.id AND mb.name = ANY(%s))"
         )
         params.append(filters.folders)
+    if filters.folder_ids:
+        # No join to mailboxes needed — we have the PKs directly.
+        parts.append(
+            "EXISTS (SELECT 1 FROM message_labels ml"
+            " WHERE ml.message_id = m.id AND ml.mailbox_id = ANY(%s))"
+        )
+        params.append(filters.folder_ids)
     if filters.label:
         parts.append(
             "EXISTS (SELECT 1 FROM message_labels ml JOIN mailboxes mb ON mb.id = ml.mailbox_id"
             " WHERE ml.message_id = m.id AND mb.name ILIKE %s)"
         )
         params.append(filters.label)
+    if filters.languages:
+        # `messages.body_lang` is populated per-message by language detection
+        # (migration 0015). NULL rows are excluded — lang filtering is opt-in.
+        # The leading `IS NOT NULL` matches the partial index predicate so
+        # the planner uses `messages_body_lang_idx` even on tables where the
+        # column is sparsely populated.
+        parts.append("m.body_lang IS NOT NULL AND m.body_lang = ANY(%s)")
+        params.append(list(filters.languages))
     if not parts:
         return "", []
     return " AND " + " AND ".join(parts), params
@@ -173,11 +192,14 @@ def arm_vector_chunks(
                ROW_NUMBER() OVER (ORDER BY score DESC) FROM ranked
     """
     params: list[Any] = [query_vector, *where_params, query_vector, limit]
+    # ef_search must be >= the LIMIT we want returned, otherwise HNSW
+    # truncates the candidate set before our SELECT sees it.
+    ef = max(int(cfg.hnsw_ef_search), int(limit))
     with conn.cursor() as cur:
         # SET LOCAL requires an open transaction. psycopg_pool connections
         # are non-autocommit by default; if you ever wrap this call in an
         # autocommit context, the SET silently has no effect.
-        cur.execute(f"SET LOCAL hnsw.ef_search = {int(cfg.hnsw_ef_search)}")
+        cur.execute(f"SET LOCAL hnsw.ef_search = {ef}")
         cur.execute(sql, params)
         rows = cur.fetchall()
     return [
@@ -185,3 +207,109 @@ def arm_vector_chunks(
                arm_score=float(score), rank=int(rank))
         for mid, cid, score, rank in rows
     ]
+
+
+def arm_vector_attachment_chunks(
+    conn: psycopg.Connection,
+    parsed: ParsedQuery,
+    cfg: SearchConfig,
+    qvec: list[float],
+    limit: int,
+) -> list[ArmHit]:
+    """Arm 4 — vector cosine over attachment_chunks, JOINed to messages via
+    JSONB containment on messages.attachments.
+
+    Process:
+        1. Rank attachment chunks by cosine distance from qvec using the HNSW
+           index on attachment_chunks.embedding_v1. A wider candidate set of
+           limit * 3 chunks is fetched first to give fan-out headroom — a
+           single high-scoring chunk may expand to many messages, so the
+           raw chunk count needed before fan-out capping is larger than limit.
+        2. JOIN each matched chunk to every message that references the
+           carrying blob. The join condition uses the JSONB @> containment
+           operator on messages.attachments, which is accelerated by the GIN
+           index (migration 0013). encode(sha256, 'hex') converts the BYTEA
+           primary key to the hex string stored in the JSONB.
+        3. Cap fan-out per chunk at cfg.arm4_fanout_cap using ROW_NUMBER()
+           PARTITION BY chunk id, ordered by messages.date_sent DESC NULLS
+           LAST so the most recent carriers win when fan-out exceeds the cap.
+           This prevents a single popular blob (e.g. a newsletter PDF attached
+           to hundreds of recipients) from monopolising the candidate budget.
+        4. Apply Phase 1 filter SQL (account:, folder:, after:, before:,
+           from:, to:, subject:, label:, has:attachment) via _filter_sql().
+           Filters operate on the messages alias 'm', matching every other arm.
+        5. Convert cosine distance [0, 2] to arm_score via 1.0 - dist,
+           yielding a similarity-like value in [-1, 1]. RRF fusion uses only
+           the rank order, not absolute scores, so the conversion is for
+           interpretability rather than correctness.
+
+    Returns up to `limit` ArmHits, each with chunk_table='attachment_chunks'
+    and rank in [1, limit].
+    """
+    filter_sql, filter_params = _filter_sql(parsed.filters)
+    # Fetch 3x the requested limit of chunks before fan-out so that after
+    # expanding each chunk to its carrying messages and applying the per-chunk
+    # cap, there are still enough candidates to fill the output budget.
+    chunk_limit = max(limit, 1) * cfg.arm4_chunk_prefetch_multiplier
+
+    sql = f"""
+    WITH ranked_chunks AS (
+        SELECT c.id      AS chunk_id,
+               c.sha256  AS chunk_sha256,
+               c.embedding_v1 <=> %s::halfvec(768) AS dist
+        FROM attachment_chunks c
+        WHERE c.embedding_v1 IS NOT NULL
+        ORDER BY c.embedding_v1 <=> %s::halfvec(768)
+        LIMIT %s
+    ),
+    fanned AS (
+        SELECT m.id                                              AS message_id,
+               rc.chunk_id,
+               rc.dist,
+               ROW_NUMBER() OVER (
+                   PARTITION BY rc.chunk_id
+                   ORDER BY m.date_sent DESC NULLS LAST
+               )                                                AS rn
+        FROM ranked_chunks rc
+        JOIN messages m
+          ON m.attachments @> jsonb_build_array(
+                 jsonb_build_object('sha256', encode(rc.chunk_sha256, 'hex'))
+             )
+        WHERE TRUE
+          {filter_sql}
+    )
+    SELECT message_id, chunk_id, dist
+    FROM fanned
+    WHERE rn <= %s
+    ORDER BY dist
+    LIMIT %s
+    """
+
+    params: list[Any] = [
+        qvec, qvec, chunk_limit,
+        *filter_params,
+        cfg.arm4_fanout_cap, limit,
+    ]
+
+    # ef_search must be >= chunk_limit; otherwise HNSW returns fewer
+    # candidates than the prefetch ORDER BY ... LIMIT expects, capping the
+    # fan-out budget below what the caller actually requested.
+    ef = max(int(cfg.hnsw_ef_search), int(chunk_limit))
+    with conn.cursor() as cur:
+        cur.execute(f"SET LOCAL hnsw.ef_search = {ef}")
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+
+    out: list[ArmHit] = []
+    for rank, (message_id, chunk_id, dist) in enumerate(rows, start=1):
+        arm_score = float(1.0 - dist)
+        out.append(
+            ArmHit(
+                message_id=message_id,
+                chunk_id=chunk_id,
+                chunk_table="attachment_chunks",
+                rank=rank,
+                arm_score=arm_score,
+            )
+        )
+    return out

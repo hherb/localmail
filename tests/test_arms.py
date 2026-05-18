@@ -8,8 +8,8 @@ each arm returns the expected hit shape and ordering.
 from __future__ import annotations
 
 from localmail.config import SearchConfig
-from localmail.search.arms import arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks
-from localmail.search.query import parse_query
+from localmail.search.arms import arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
+from localmail.search.query import parse_query, ParsedQuery, SearchFilters
 from localmail.search.embed_worker import run_embed_worker_once
 
 
@@ -152,3 +152,123 @@ def test_arms_respect_label_filter(db_conn):
     msg_ids = [h.message_id for h in hits]
     assert ids[0] in msg_ids
     assert ids[1] not in msg_ids
+
+
+def test_arm_vector_attachment_chunks_returns_message_ids(db_conn) -> None:
+    """Insert an attachment_blob + message that references it via JSONB
+    attachments, plus an attachment_chunks row with a known embedding.
+    Arm 4 should return the message_id."""
+    import hashlib
+    import json
+
+    sha = hashlib.sha256(b"blob xyz").digest()
+    sha_hex = sha.hex()
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method) "
+            "VALUES ('a','e@x','h','password') RETURNING id"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        acct_id = row[0]
+
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "/somewhere/foo.pdf", "application/pdf", 1000),
+        )
+
+        attachments = json.dumps(
+            [{"filename": "report.pdf", "sha256": sha_hex}]
+        )
+        cur.execute(
+            "INSERT INTO messages "
+            "(account_id, message_id, raw_sha256, subject, body_text, "
+            " headers, raw_bytes, size_bytes, attachments) "
+            "VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, %s, %s, %s::jsonb) "
+            "RETURNING id",
+            (acct_id, "<m1@x>", b"\x10" * 32, "FYI", "see attached",
+             b"raw", 3, attachments),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        msg_id = row[0]
+
+        unit = [0.0] * 768
+        unit[0] = 1.0
+        cur.execute(
+            "INSERT INTO attachment_chunks "
+            "(sha256, chunk_idx, text, token_count, embedding_v1, embedded_at) "
+            "VALUES (%s, 0, %s, 10, %s::halfvec, now())",
+            (sha, "attachment chunk text", unit),
+        )
+    db_conn.commit()
+
+    cfg = SearchConfig()
+    parsed = ParsedQuery(free_text="anything", filters=SearchFilters())
+    hits = arm_vector_attachment_chunks(
+        db_conn, parsed, cfg, qvec=unit, limit=10
+    )
+
+    assert len(hits) >= 1
+    assert hits[0].message_id == msg_id
+    assert hits[0].chunk_table == "attachment_chunks"
+
+
+def test_arm_vector_attachment_chunks_fanout_cap_honored(db_conn) -> None:
+    """A blob attached to N messages fans out to at most arm4_fanout_cap rows."""
+    import hashlib, json
+
+    sha = hashlib.sha256(b"popular blob").digest()
+    sha_hex = sha.hex()
+    attachments = json.dumps([{"filename": "x.pdf", "sha256": sha_hex}])
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method) "
+            "VALUES ('b','e@y','h','password') RETURNING id"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        acct_id = row[0]
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "/p", "application/pdf", 100),
+        )
+        for i in range(25):
+            cur.execute(
+                "INSERT INTO messages (account_id, message_id, raw_sha256, "
+                "subject, body_text, headers, raw_bytes, size_bytes, attachments) "
+                "VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, %s, %s, %s::jsonb)",
+                (acct_id, f"<m{i}@y>", bytes([i + 50]) * 32, f"S{i}", "",
+                 b"r", 1, attachments),
+            )
+        unit = [0.0] * 768
+        unit[0] = 1.0
+        cur.execute(
+            "INSERT INTO attachment_chunks (sha256, chunk_idx, text, "
+            "token_count, embedding_v1, embedded_at) "
+            "VALUES (%s, 0, %s, 10, %s::halfvec, now())",
+            (sha, "chunk", unit),
+        )
+    db_conn.commit()
+
+    cfg = SearchConfig(arm4_fanout_cap=10)
+    parsed = ParsedQuery(free_text="x", filters=SearchFilters())
+    hits = arm_vector_attachment_chunks(
+        db_conn, parsed, cfg, qvec=unit, limit=100
+    )
+    assert len(hits) <= 10
+
+
+def test_arm_vector_attachment_chunks_no_chunks_returns_empty(db_conn) -> None:
+    """No attachment_chunks rows in DB → empty result, no error."""
+    cfg = SearchConfig()
+    parsed = ParsedQuery(free_text="x", filters=SearchFilters())
+    unit = [0.0] * 768
+    hits = arm_vector_attachment_chunks(
+        db_conn, parsed, cfg, qvec=unit, limit=10
+    )
+    assert hits == []

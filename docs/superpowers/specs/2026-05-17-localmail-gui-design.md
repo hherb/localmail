@@ -116,7 +116,7 @@ Three processes, two hosts (or one host in the single-machine case):
 | Server transport | FastAPI + uvicorn | Async framework; sync handlers run in threadpool (fine for current sync `psycopg`/`localmail.search` code). |
 | Auth | Argon2id (`argon2-cffi`) + opaque bearer tokens, server stores SHA-256 | No JWT; server-side revocation matters more than statelessness at this scale. |
 | TLS | Self-signed by default; client TOFU pinning | `--tls-cert`/`--tls-key` for user-provided certs; `--no-tls` only valid with `--bind 127.0.0.1`. |
-| HTML sanitizer | `bleach` (Python) | Allowlist tags/attrs; external images blocked by default; `cid:` rewritten to `/v1/attachments/{sha256}`. |
+| HTML sanitizer | `nh3` (Rust `ammonia` via PyO3) | Allowlist tags/attrs; external images blocked by default; `cid:` rewritten to `/v1/attachments/{sha256}`. CSS property allowlist enforced via `filter_style_properties`; dangerous tags removed with their content via `clean_content_tags`. |
 | Client shell | Tauri 2 | Rust binary + webview; small footprint, native menus, cross-platform bundling. |
 | Client UI | Svelte 5 + TypeScript | Small bundle, layout-friendly; revisitable during implementation if the user has a strong alternate preference. |
 | Client HTTP | `reqwest` (Rust) with `rustls` | Rust-side; Svelte calls it via Tauri `invoke()` so JS never sees the bearer token. |
@@ -319,7 +319,7 @@ src/localmail/
     messages.py       # get_message, get_raw_rfc822, header projection
     accounts.py       # list accounts/folders, derive capabilities
     attachments.py    # metadata, byte streaming
-    sanitize.py       # bleach-based HTML sanitizer
+    sanitize.py       # nh3-based HTML sanitizer
     errors.py         # typed exceptions → HTTP problem mapping
   serve/              # NEW — FastAPI HTTP wrapper
     __init__.py

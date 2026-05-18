@@ -105,6 +105,7 @@ def _claim_batch(conn: psycopg.Connection, cfg: SearchConfig) -> list[tuple]:
               AND (f.sha256 IS NULL OR f.retry_count < %s)
             ORDER BY b.first_seen_at
             LIMIT %s
+            FOR UPDATE OF b SKIP LOCKED
             """,
             (cfg.extract_worker_max_retries, cfg.extract_worker_batch_size),
         )
@@ -143,7 +144,7 @@ def _record_failure(
             INSERT INTO failed_extractions
                 (sha256, extractor, error_class, error_message, traceback,
                  retry_count, last_retry_at)
-            VALUES (%s, %s, %s, %s, %s, 0, now())
+            VALUES (%s, %s, %s, %s, %s, 1, now())
             ON CONFLICT (sha256) DO UPDATE
                 SET extractor      = EXCLUDED.extractor,
                     error_class    = EXCLUDED.error_class,

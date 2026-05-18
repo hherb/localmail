@@ -46,3 +46,69 @@ def test_daemon_skips_extract_worker_when_disabled(db_dsn) -> None:
     assert not any(n.startswith("extract_worker") for n in names)
     d.stop()
     d.join(timeout=5)
+
+
+def test_daemon_starts_idle_poll_extract_together_and_joins_on_stop(
+    db_dsn,
+) -> None:
+    """All three thread types must spawn alongside each other AND join on stop.
+
+    The previous tests in this file used ``accounts: []`` so the IDLE/poll
+    spawn loop was skipped entirely — that left the actual shutdown sequence
+    (IDLE + poll + embed + extract joined together via the shared
+    ``stop_event``) untested. Without this test, a regression that wedges the
+    join order — e.g. an IDLE thread that ignores ``stop_event`` while
+    backing off — would only surface in production. We point the account at
+    an unreachable IMAP host so the worker threads exercise their backoff
+    path; the backoff uses ``stop_event.wait`` so cancellation is prompt.
+    """
+    cfg = LocalmailConfig.model_validate({
+        "database": {"dsn": db_dsn},
+        "accounts": [
+            {
+                "name": "test-acct",
+                "email": "test@example.invalid",
+                "imap_host": "127.0.0.1",
+                "imap_port": 1,
+                "auth_method": "password",
+            }
+        ],
+    })
+    cfg.search.run_extract_worker = True
+    cfg.search.run_embed_worker = True
+    d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
+    d.start()
+    time.sleep(0.5)
+    names = {t.name for t in threading.enumerate()}
+    assert any(n == "idle-test-acct" for n in names), names
+    assert any(n == "poll-test-acct" for n in names), names
+    assert any(n == "embed_worker" for n in names), names
+    assert any(n == "extract_worker" for n in names), names
+    d.stop()
+    d.join(timeout=10)
+    names_after = {t.name for t in threading.enumerate()}
+    assert not any(n.startswith("idle-") for n in names_after), names_after
+    assert not any(n.startswith("poll-") for n in names_after), names_after
+    assert "embed_worker" not in names_after
+    assert "extract_worker" not in names_after
+
+
+def test_daemon_start_then_run_forever_does_not_double_spawn(db_dsn) -> None:
+    """Calling ``start()`` then ``run_forever()`` must not duplicate workers.
+
+    A regression where ``run_forever`` re-invokes ``start_workers`` would
+    silently double every per-account thread — and double the per-account
+    DB connection footprint. The idempotency flag on ``start_workers`` is
+    the only thing preventing that, so it deserves a direct test.
+    """
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
+    cfg.search.run_extract_worker = True
+    d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
+    d.start()
+    d.start_workers()  # explicit second call — must be a no-op
+    spawned = list(d.threads)
+    assert len(spawned) == len({id(t) for t in spawned})
+    extract_threads = [t for t in spawned if t.name == "extract_worker"]
+    assert len(extract_threads) == 1
+    d.stop()
+    d.join(timeout=5)

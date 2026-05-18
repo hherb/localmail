@@ -77,6 +77,30 @@ def _split_statements(sql: str) -> list[str]:
     return stmts
 
 
+def pending_migrations(dsn: str) -> list[str]:
+    """Return revisions present on disk but missing from `schema_migrations`.
+
+    Returns an empty list if `schema_migrations` doesn't exist yet (treated as
+    "everything pending") OR if every migration on disk is already applied.
+    Used by `localmail serve` to fail fast when the DB is out of sync.
+    """
+    on_disk = [p.stem for p in list_migrations()]
+    try:
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = 'schema_migrations'"
+                )
+                if cur.fetchone() is None:
+                    return on_disk
+                cur.execute("SELECT revision FROM schema_migrations")
+                done = {row[0] for row in cur.fetchall()}
+    except psycopg.OperationalError:
+        raise
+    return [rev for rev in on_disk if rev not in done]
+
+
 def apply_migrations(
     dsn: str,
     *,

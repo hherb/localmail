@@ -50,6 +50,7 @@ def create_app(
     app = FastAPI(lifespan=lifespan)
     app.state.pool = pool
     app.state.searcher = searcher
+    app.state.serve_config = cfg
 
     # Exception handler for APIError raised inside route handlers / dependencies.
     # FastAPI's DI layer catches these before BaseHTTPMiddleware sees them, so we
@@ -71,9 +72,16 @@ def create_app(
     @app.middleware("http")
     async def add_csp_header(request, call_next):
         response = await call_next(request)
+        # frame-ancestors and form-action have no fallback to default-src in
+        # the CSP spec, so they must be listed explicitly to deny clickjacking
+        # and form-submission abuse on rendered HTML email bodies. base-uri
+        # blocks <base href> hijacks that would shift relative URLs (e.g. the
+        # /v1/attachments rewrites) to an attacker-controlled origin.
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'"
+            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
         )
+        response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 
     app.include_router(version_routes.router, prefix="/v1")

@@ -172,6 +172,7 @@ def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch
               AND c.sha256 IS NULL
             ORDER BY t.sha256
             LIMIT %s
+            FOR UPDATE OF t SKIP LOCKED
             """,
             (batch,),
         )

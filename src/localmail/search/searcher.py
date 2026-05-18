@@ -195,6 +195,32 @@ class Searcher:
         self._reranker = reranker
         self._rewriter = rewriter
         self._cache = PageCache(maxsize=cfg.page_cache_size, ttl_s=cfg.page_cache_ttl_s)
+        self._lang_warning_emitted = False
+
+    def _maybe_warn_unpopulated_body_lang(
+        self, conn: psycopg.Connection, parsed: ParsedQuery,
+    ) -> None:
+        """One-shot warning when `lang:` filters target an empty body_lang column.
+
+        Migration 0015 adds `messages.body_lang` but population is intentionally
+        deferred (see PR #30). A user running `lang:de` against an unpopulated
+        archive gets zero results with no hint as to why; this nudge tells
+        them exactly that. The probe uses the partial index so cost is O(1).
+        """
+        if self._lang_warning_emitted:
+            return
+        if not parsed.filters.languages:
+            return
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM messages WHERE body_lang IS NOT NULL LIMIT 1")
+            if cur.fetchone() is None:
+                log.warning(
+                    "search: `lang:` filter present but messages.body_lang is "
+                    "not populated for any row; query will return 0 hits. "
+                    "Run the language-detection backfill (deferred, see PR #30) "
+                    "to enable lang filtering."
+                )
+        self._lang_warning_emitted = True
 
     def _resolve_account_names(self, conn: psycopg.Connection, parsed: ParsedQuery) -> ParsedQuery:
         if not parsed.filters.account_names:
@@ -512,6 +538,7 @@ class Searcher:
 
         with self._pool.connection() as conn:
             parsed = self._resolve_account_names(conn, parsed)
+            self._maybe_warn_unpopulated_body_lang(conn, parsed)
             t = time.monotonic()
             fused = self._retrieve_pool(conn, parsed, cpa, rps)
             timing["retrieve"] = (time.monotonic() - t) * 1000

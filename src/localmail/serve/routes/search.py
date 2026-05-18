@@ -29,10 +29,13 @@ class SearchFiltersModel(BaseModel):
     model_config = {"populate_by_name": True, "extra": "ignore"}
 
 
+SEARCH_LIMIT_MAX = 200
+
+
 class SearchRequest(BaseModel):
     query: str
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
-    limit: int = 50
+    limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
     cursor: str | None = None
 
 

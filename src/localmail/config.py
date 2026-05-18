@@ -32,6 +32,13 @@ class ServeConfig(BaseModel):
     """Tunables for the GUI HTTP server (localmail.serve)."""
     pool_min_size: int = 1
     pool_max_size: int = 4
+    # /v1/changes excludes messages newer than `now() - changes_safe_horizon_s`
+    # so a concurrent sync transaction that allocates `messages.id = N+1` and
+    # commits before another tx with id=N can't make the client advance past
+    # N+1 and miss N when its commit lands. The default 5 s is much longer
+    # than any reasonable per-message sync transaction; bump if you observe
+    # sync transactions that genuinely take longer.
+    changes_safe_horizon_s: int = 5
 
 
 class GmailOAuthConfig(BaseModel):

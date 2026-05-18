@@ -3,7 +3,13 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from fastapi.testclient import TestClient
 
+from localmail.config import ServeConfig
 from localmail.serve.app import create_app
+
+# Tests insert + read messages within the same millisecond; the production
+# safe-horizon would mask every just-seeded row. Drop it to 0 so the test
+# assertions cover the cursor logic itself, not the horizon.
+_TEST_SERVE_CFG = ServeConfig(changes_safe_horizon_s=0)
 
 
 def _ensure_account(conn: psycopg.Connection) -> int:
@@ -35,7 +41,7 @@ def test_changes_no_cursor_returns_recent(db_dsn: str, api_token: str, db_conn) 
     _seed_msg(db_conn, now - timedelta(hours=2), "aa")
     _seed_msg(db_conn, now - timedelta(hours=1), "bb")
     db_conn.commit()
-    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG))
     r = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200
     body = r.json()
@@ -47,7 +53,7 @@ def test_changes_with_cursor_filters(db_dsn: str, api_token: str, db_conn) -> No
     now = datetime.now(timezone.utc)
     mid_old = _seed_msg(db_conn, now - timedelta(hours=2), "aa")
     db_conn.commit()
-    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG))
     r1 = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
     cursor = r1.json()["next_cursor"]
     _seed_msg(db_conn, now, "bb")
@@ -61,7 +67,7 @@ def test_changes_with_cursor_filters(db_dsn: str, api_token: str, db_conn) -> No
 def test_changes_with_bogus_cursor_400(db_dsn: str, api_token: str) -> None:
     """A non-integer ?since= should surface as problem+json 400, not silently
     return the entire archive."""
-    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG))
     r = c.get("/v1/changes?since=not-a-number", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 400
     assert r.headers["content-type"].startswith("application/problem+json")
@@ -76,7 +82,7 @@ def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db
     now = datetime.now(timezone.utc)
     _seed_msg(db_conn, now - timedelta(hours=1), "aa")
     db_conn.commit()
-    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG))
     r1 = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
     cursor = r1.json()["next_cursor"]
     r2 = c.get(f"/v1/changes?since={cursor}", headers={"Authorization": f"Bearer {api_token}"})

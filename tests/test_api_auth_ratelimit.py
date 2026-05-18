@@ -48,6 +48,23 @@ def test_successful_login_resets_failure_count(db_conn: psycopg.Connection) -> N
         login(db_conn, "alice", "wrong")  # one failure tolerated again
 
 
+def test_login_failures_dict_is_bounded(monkeypatch) -> None:
+    """Memory cannot grow unboundedly under a username-rotating attacker.
+
+    The per-username failure dict has a hard size cap; once exceeded, the
+    least-recently-touched usernames are evicted (LRU). This is what stops
+    `dict[str, ...]` blowing up to RAM-pressure size on adversarial traffic
+    that rotates usernames faster than entries expire on their own.
+    """
+    from localmail.api import auth
+
+    monkeypatch.setattr(auth, "LOGIN_FAILURES_MAX_USERS", 4)
+    auth.reset_login_rate_limiter()
+    for i in range(50):
+        auth._record_login_failure(f"user-{i}")
+    assert len(auth._LOGIN_FAILURES) <= 4
+
+
 def test_global_login_rate_limit_caps_all_usernames(db_conn: psycopg.Connection, monkeypatch) -> None:
     """Global limiter bounds argon2 CPU work no matter which username is tried.
 

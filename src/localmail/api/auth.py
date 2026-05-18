@@ -9,6 +9,7 @@ import hashlib
 import secrets
 import threading
 import time as _time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -60,8 +61,15 @@ LOGIN_LOCKOUT_SECONDS = 60
 LOGIN_GLOBAL_MAX_PER_WINDOW = 30
 LOGIN_GLOBAL_WINDOW_SECONDS = 60
 
+# Hard cap on distinct usernames tracked in the per-username failure dict.
+# An attacker rotating usernames past the global limiter could otherwise grow
+# the dict unboundedly; once we exceed this cap we evict the oldest entry
+# (LRU) so memory is bounded regardless of input pattern.
+LOGIN_FAILURES_MAX_USERS = 1024
+
 _LOGIN_FAILURES_LOCK = threading.Lock()
-_LOGIN_FAILURES: dict[str, list[float]] = {}
+# OrderedDict so we can evict the least-recently-touched username on overflow.
+_LOGIN_FAILURES: "OrderedDict[str, list[float]]" = OrderedDict()
 
 _LOGIN_GLOBAL_LOCK = threading.Lock()
 _LOGIN_GLOBAL_ATTEMPTS: list[float] = []
@@ -88,11 +96,28 @@ def _check_login_global_rate_limit() -> None:
         _LOGIN_GLOBAL_ATTEMPTS.append(_time.monotonic())
 
 
+def _sweep_login_failures_locked(now: float) -> None:
+    """Drop usernames whose newest attempt is older than the lockout window.
+
+    Caller must hold ``_LOGIN_FAILURES_LOCK``. Runs in O(n) over the dict —
+    cheap because we cap size at LOGIN_FAILURES_MAX_USERS.
+    """
+    cutoff = now - LOGIN_LOCKOUT_SECONDS
+    stale = [u for u, attempts in _LOGIN_FAILURES.items() if not attempts or attempts[-1] <= cutoff]
+    for u in stale:
+        _LOGIN_FAILURES.pop(u, None)
+
+
 def _check_login_rate_limit(username: str) -> None:
-    cutoff = _time.monotonic() - LOGIN_LOCKOUT_SECONDS
+    now = _time.monotonic()
+    cutoff = now - LOGIN_LOCKOUT_SECONDS
     with _LOGIN_FAILURES_LOCK:
         recent = [t for t in _LOGIN_FAILURES.get(username, []) if t > cutoff]
-        _LOGIN_FAILURES[username] = recent
+        if recent:
+            _LOGIN_FAILURES[username] = recent
+            _LOGIN_FAILURES.move_to_end(username)
+        else:
+            _LOGIN_FAILURES.pop(username, None)
         if len(recent) >= LOGIN_MAX_FAILURES:
             raise RateLimited(
                 f"too many failed login attempts; try again in "
@@ -101,8 +126,15 @@ def _check_login_rate_limit(username: str) -> None:
 
 
 def _record_login_failure(username: str) -> None:
+    now = _time.monotonic()
     with _LOGIN_FAILURES_LOCK:
-        _LOGIN_FAILURES.setdefault(username, []).append(_time.monotonic())
+        attempts = _LOGIN_FAILURES.setdefault(username, [])
+        attempts.append(now)
+        _LOGIN_FAILURES.move_to_end(username)
+        if len(_LOGIN_FAILURES) > LOGIN_FAILURES_MAX_USERS:
+            _sweep_login_failures_locked(now)
+            while len(_LOGIN_FAILURES) > LOGIN_FAILURES_MAX_USERS:
+                _LOGIN_FAILURES.popitem(last=False)
 
 
 def _clear_login_failures(username: str) -> None:

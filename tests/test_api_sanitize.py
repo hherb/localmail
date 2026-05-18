@@ -80,3 +80,26 @@ def test_style_javascript_url_dropped() -> None:
     out = sanitize_html(html, cid_to_sha={})
     assert "javascript:" not in out
     assert "alert" not in out
+
+
+def test_external_image_unquoted_src_stripped() -> None:
+    """Unquoted srcs (`src=foo`) must also be neutralised."""
+    html = "<img src=https://tracker.example/pixel.gif>"
+    out = sanitize_html(html, cid_to_sha={})
+    assert "tracker.example" not in out
+
+
+def test_external_image_single_quoted_src_stripped() -> None:
+    """Single-quoted srcs must also be neutralised."""
+    html = "<img src='https://tracker.example/pixel.gif'>"
+    out = sanitize_html(html, cid_to_sha={})
+    assert "tracker.example" not in out
+
+
+def test_cid_unquoted_src_rewritten() -> None:
+    """cid: references work regardless of quoting style."""
+    cid_to_sha = {"image1@example": "cafef00d" * 8}
+    html = "<img src=cid:image1@example>"
+    out = sanitize_html(html, cid_to_sha=cid_to_sha)
+    assert "/v1/attachments/" + ("cafef00d" * 8) in out
+    assert "cid:" not in out

@@ -75,7 +75,10 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
     if filters.languages:
         # `messages.body_lang` is populated per-message by language detection
         # (migration 0015). NULL rows are excluded — lang filtering is opt-in.
-        parts.append("m.body_lang = ANY(%s)")
+        # The leading `IS NOT NULL` matches the partial index predicate so
+        # the planner uses `messages_body_lang_idx` even on tables where the
+        # column is sparsely populated.
+        parts.append("m.body_lang IS NOT NULL AND m.body_lang = ANY(%s)")
         params.append(list(filters.languages))
     if not parts:
         return "", []
@@ -189,11 +192,14 @@ def arm_vector_chunks(
                ROW_NUMBER() OVER (ORDER BY score DESC) FROM ranked
     """
     params: list[Any] = [query_vector, *where_params, query_vector, limit]
+    # ef_search must be >= the LIMIT we want returned, otherwise HNSW
+    # truncates the candidate set before our SELECT sees it.
+    ef = max(int(cfg.hnsw_ef_search), int(limit))
     with conn.cursor() as cur:
         # SET LOCAL requires an open transaction. psycopg_pool connections
         # are non-autocommit by default; if you ever wrap this call in an
         # autocommit context, the SET silently has no effect.
-        cur.execute(f"SET LOCAL hnsw.ef_search = {int(cfg.hnsw_ef_search)}")
+        cur.execute(f"SET LOCAL hnsw.ef_search = {ef}")
         cur.execute(sql, params)
         rows = cur.fetchall()
     return [
@@ -285,8 +291,12 @@ def arm_vector_attachment_chunks(
         cfg.arm4_fanout_cap, limit,
     ]
 
+    # ef_search must be >= chunk_limit; otherwise HNSW returns fewer
+    # candidates than the prefetch ORDER BY ... LIMIT expects, capping the
+    # fan-out budget below what the caller actually requested.
+    ef = max(int(cfg.hnsw_ef_search), int(chunk_limit))
     with conn.cursor() as cur:
-        cur.execute(f"SET LOCAL hnsw.ef_search = {int(cfg.hnsw_ef_search)}")
+        cur.execute(f"SET LOCAL hnsw.ef_search = {ef}")
         cur.execute(sql, params)
         rows = cur.fetchall()
 

@@ -23,6 +23,24 @@ from .search import create_searcher
 from .sync import retry_failed_messages, sync_account
 
 
+def _is_loopback_bind(bind: str) -> bool:
+    """Return True iff `bind` is unambiguously a loopback interface.
+
+    Accepts literal `localhost`, any literal IPv4/IPv6 address whose
+    `.is_loopback` is True (e.g. `127.0.0.1`, `127.0.0.5`, `::1`), and
+    rejects everything else — including `0.0.0.0`, public IPs, and DNS
+    names that might resolve to non-loopback addresses.
+    """
+    import ipaddress
+
+    if bind == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(bind).is_loopback
+    except ValueError:
+        return False
+
+
 def _account_or_die(cfg: Config, name: str) -> AccountConfig:
     for a in cfg.accounts:
         if a.name == name:
@@ -609,9 +627,18 @@ def _dsn_from_ctx(ctx: click.Context) -> str:
 @main.command("add-api-user")
 @click.argument("username")
 @click.option("--password", "password_opt", default=None,
-              help="If omitted, prompt with hidden input.")
+              help="If omitted, prompt on TTY or read from stdin via --password-stdin.")
+@click.option("--password-stdin", "password_stdin", is_flag=True, default=False,
+              help="Read the password from stdin (no echo, no prompt). For "
+                   "scripts and CI; refuses to run on a TTY to avoid silent "
+                   "hangs.")
 @click.pass_context
-def add_api_user(ctx: click.Context, username: str, password_opt: str | None) -> None:
+def add_api_user(
+    ctx: click.Context,
+    username: str,
+    password_opt: str | None,
+    password_stdin: bool,
+) -> None:
     """Create a new API user. Password is hashed with argon2id.
 
     Note: until the per-account ACL lands, every API user has read access to
@@ -620,7 +647,24 @@ def add_api_user(ctx: click.Context, username: str, password_opt: str | None) ->
     when that happens.
     """
     from localmail.api.auth import create_user
-    password = password_opt or click.prompt("Password", hide_input=True, confirmation_prompt=True)
+    if password_stdin and password_opt is not None:
+        raise click.ClickException("--password and --password-stdin are mutually exclusive")
+    if password_stdin:
+        if sys.stdin.isatty():
+            raise click.ClickException(
+                "--password-stdin requires piped input; refusing to read from a TTY"
+            )
+        password = sys.stdin.readline().rstrip("\n")
+        if not password:
+            raise click.ClickException("--password-stdin: empty password")
+    elif password_opt is not None:
+        password = password_opt
+    elif not sys.stdin.isatty():
+        raise click.ClickException(
+            "stdin is not a TTY; pass --password or --password-stdin"
+        )
+    else:
+        password = click.prompt("Password", hide_input=True, confirmation_prompt=True)
     with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM api_users")
@@ -678,13 +722,19 @@ def list_api_users(ctx: click.Context) -> None:
               help="Overwrite existing cert/key without prompting.")
 def rotate_tls(cert_path: Path, key_path: Path, hostname: str, force: bool) -> None:
     """Generate (or regenerate with --force) a self-signed TLS cert + key."""
-    from localmail.serve.tls import cert_fingerprint_sha256_hex, ensure_self_signed_cert
-    if force:
-        if cert_path.exists():
-            cert_path.unlink()
-        if key_path.exists():
-            key_path.unlink()
-    ensure_self_signed_cert(cert_path=cert_path, key_path=key_path, hostname=hostname)
+    from localmail.serve.tls import (
+        cert_fingerprint_sha256_hex,
+        ensure_self_signed_cert,
+        rotate_self_signed_cert,
+    )
+    if force and (cert_path.exists() or key_path.exists()):
+        rotate_self_signed_cert(
+            cert_path=cert_path, key_path=key_path, hostname=hostname,
+        )
+    else:
+        ensure_self_signed_cert(
+            cert_path=cert_path, key_path=key_path, hostname=hostname,
+        )
     fp = cert_fingerprint_sha256_hex(cert_path=cert_path)
     click.echo(f"cert: {cert_path}")
     click.echo(f"key:  {key_path}")
@@ -710,11 +760,14 @@ def serve_cmd(
 ) -> None:
     """Run the HTTPS API server."""
     import uvicorn
+    from localmail.db import pending_migrations
     from localmail.serve.app import create_app
     from localmail.serve.tls import ensure_self_signed_cert
 
-    if no_tls and bind != "127.0.0.1":
-        raise click.ClickException("--no-tls is only valid when --bind 127.0.0.1")
+    if no_tls and not _is_loopback_bind(bind):
+        raise click.ClickException(
+            "--no-tls is only valid when --bind resolves to a loopback address"
+        )
 
     from localmail.config import ServeConfig
     override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
@@ -725,6 +778,19 @@ def serve_cmd(
         cfg = load_config(ctx.obj["config_path"])
         dsn = cfg.database.dsn
         serve_cfg = cfg.serve
+
+    try:
+        pending = pending_migrations(dsn)
+    except Exception as exc:
+        raise click.ClickException(
+            f"could not check schema: {exc}. Is Postgres reachable?"
+        ) from exc
+    if pending:
+        raise click.ClickException(
+            "database is missing migrations: "
+            + ", ".join(pending)
+            + ". Run `localmail init-db` first."
+        )
 
     try:
         from localmail.search import create_searcher
@@ -742,6 +808,13 @@ def serve_cmd(
 
     cert_path = tls_cert or Path.home() / ".config" / "localmail" / "tls" / "cert.pem"
     key_path = tls_key or Path.home() / ".config" / "localmail" / "tls" / "key.pem"
+    if tls_cert is None and not _is_loopback_bind(bind):
+        click.echo(
+            f"warning: --bind {bind} accepts non-loopback traffic but no --tls-cert "
+            "was given; using a self-signed cert. Clients must pin its fingerprint "
+            "(see `rotate-tls --force` and the printed sha256).",
+            err=True,
+        )
     ensure_self_signed_cert(
         cert_path=cert_path, key_path=key_path,
         hostname=bind if bind != "0.0.0.0" else "localhost",

@@ -91,7 +91,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0013_attachment_search_indexes.sql
+migrations/         # 0001_init.sql … 0015_messages_body_lang.sql
 tests/
   acceptance/       # standalone eval harness (run_recall_eval.py)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
@@ -297,7 +297,7 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0013_attachment_search_indexes.sql`; next would be `0014_*.sql`.
+  Latest is `0015_messages_body_lang.sql`; next would be `0016_*.sql`.
 
 ## Testing notes
 

@@ -35,12 +35,16 @@ class Daemon:
         self.threads: list[threading.Thread] = []
         self._embedding_backend_factory = embedding_backend_factory
         self._embed_pool: ConnectionPool | None = None
+        self._started = False
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("received signal %s; stopping daemon", signum)
         self._stop_event.set()
 
     def start_workers(self) -> None:
+        if self._started:
+            return
+        self._started = True
         gmail_secrets = (
             self.cfg.gmail_oauth.client_secrets_file if self.cfg.gmail_oauth else None
         )

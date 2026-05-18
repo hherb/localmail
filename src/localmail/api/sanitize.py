@@ -38,13 +38,13 @@ _ALLOWED_ATTRS = {
     "td": ["colspan", "rowspan", "align"],
     "th": ["colspan", "rowspan", "align"],
 }
-# "http"/"https" are required to let bleach pass root-relative URLs like
-# /v1/attachments/…  (bleach uses urllib.parse internally and only resolves
-# relative paths when a "real" scheme is present in the allowed list).
-# External http/https image srcs are already stripped to "" by
-# _rewrite_image_srcs before bleach ever sees them, so this does NOT allow
-# remote tracking pixels through.
-# "data" enables inline base64 image URIs rewritten in _rewrite_image_srcs.
+# "http"/"https" are required so bleach passes the root-relative
+# /v1/attachments/… URLs produced by _rewrite_image_srcs (bleach uses
+# urllib.parse internally and only resolves relative paths when a "real"
+# scheme is in the allowed list). The src-rewrite pass below strips ALL
+# external http/https srcs first — regardless of quoting style — so this
+# entry does NOT permit remote tracker-pixels through. The data entry
+# enables inline base64 image URIs validated by _DATA_IMAGE_RE.
 _ALLOWED_PROTOCOLS = ["mailto", "http", "https", "data"]
 
 _CID_RE = re.compile(r"^cid:(.+)$", re.IGNORECASE)
@@ -92,10 +92,22 @@ def sanitize_html(html: str, *, cid_to_sha: dict[str, str]) -> str:
     )
 
 
+_SRC_ATTR_RE = re.compile(
+    r"""src\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s>]+))""",
+    re.IGNORECASE,
+)
+
+
 def _rewrite_image_srcs(html: str, cid_to_sha: dict[str, str]) -> str:
-    """Replace cid:* srcs with /v1/attachments/<sha256>; strip everything else."""
+    """Replace cid:* srcs with /v1/attachments/<sha256>; strip everything else.
+
+    Matches double-quoted, single-quoted, and unquoted `src` attribute forms
+    so that external trackers cannot slip through by choosing a quoting style
+    the regex didn't anticipate. The rewritten output is always emitted as a
+    double-quoted attribute regardless of the input quoting.
+    """
     def replace_src(match: re.Match[str]) -> str:
-        src = match.group(1)
+        src = match.group("dq") or match.group("sq") or match.group("bare") or ""
         cid_match = _CID_RE.match(src.strip("<>"))
         if cid_match:
             cid = cid_match.group(1).strip("<>")
@@ -104,12 +116,7 @@ def _rewrite_image_srcs(html: str, cid_to_sha: dict[str, str]) -> str:
                 return 'src=""'
             return f'src="/v1/attachments/{sha}"'
         if _DATA_IMAGE_RE.match(src):
-            return match.group(0)
+            return f'src="{src}"'
         return 'src=""'
 
-    return re.sub(
-        r'src\s*=\s*"([^"]*)"',
-        replace_src,
-        html,
-        flags=re.IGNORECASE,
-    )
+    return _SRC_ATTR_RE.sub(replace_src, html)

@@ -119,4 +119,52 @@ describe("SettingsServer", () => {
     expect(user?.textContent).toContain("(logged out)");
     expect(pin?.textContent).toContain("(unknown)");
   });
+
+  it("clears both password fields after a successful change", async () => {
+    const { container } = render(SettingsServer);
+    const oldInput = container.querySelector('[data-testid="old-password"]') as HTMLInputElement;
+    const newInput = container.querySelector('[data-testid="new-password"]') as HTMLInputElement;
+    await fireEvent.input(oldInput, { target: { value: "a" } });
+    await fireEvent.input(newInput, { target: { value: "b" } });
+    await fireEvent.click(container.querySelector('[data-testid="change-password-submit"]') as HTMLButtonElement);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(oldInput.value).toBe("");
+    expect(newInput.value).toBe("");
+  });
+
+  it("on 401 (wrong current password) clears only old-password and shows a friendly message", async () => {
+    // The Rust side returns a structured AuthError; we round-trip the
+    // HttpError::HttpStatus { status: 401 } shape the GUI now branches on.
+    changePasswordMock.mockRejectedValueOnce({
+      kind: "Http",
+      detail: { kind: "HttpStatus", detail: { status: 401, body: "wrong" } },
+    });
+    const { container } = render(SettingsServer);
+    const oldInput = container.querySelector('[data-testid="old-password"]') as HTMLInputElement;
+    const newInput = container.querySelector('[data-testid="new-password"]') as HTMLInputElement;
+    await fireEvent.input(oldInput, { target: { value: "wrong-old" } });
+    await fireEvent.input(newInput, { target: { value: "new" } });
+    await fireEvent.click(container.querySelector('[data-testid="change-password-submit"]') as HTMLButtonElement);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(oldInput.value).toBe("");
+    expect(newInput.value).toBe("new");
+    const msg = container.querySelector('[data-testid="change-password-message"]');
+    expect(msg?.textContent).toContain("Current password is incorrect");
+  });
+
+  it("on transient (non-401) error keeps both fields so the user does not have to retype", async () => {
+    changePasswordMock.mockRejectedValueOnce({ kind: "Io", detail: "timeout" });
+    const { container } = render(SettingsServer);
+    const oldInput = container.querySelector('[data-testid="old-password"]') as HTMLInputElement;
+    const newInput = container.querySelector('[data-testid="new-password"]') as HTMLInputElement;
+    await fireEvent.input(oldInput, { target: { value: "old" } });
+    await fireEvent.input(newInput, { target: { value: "new" } });
+    await fireEvent.click(container.querySelector('[data-testid="change-password-submit"]') as HTMLButtonElement);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(oldInput.value).toBe("old");
+    expect(newInput.value).toBe("new");
+  });
 });

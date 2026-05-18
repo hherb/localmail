@@ -39,6 +39,26 @@ describe("extractDslFilters", () => {
     expect(filters.from).toBe("anna h");
     expect(filters.subject).toBe("the trip");
   });
+
+  it("does not absorb later DSL tokens when a quote is left unterminated", () => {
+    // Prior tokenizer behavior: unterminated quote greedily consumed the rest
+    // of the input as one token, silently dropping `subject:work` and `q`.
+    // Hardened behavior: re-tokenize the unterminated run by whitespace so
+    // later tokens remain extractable.
+    const { freeText, filters } = extractDslFilters('from:"anna subject:work q');
+    expect(filters.from).toBe("anna");
+    expect(filters.subject).toBe("work");
+    expect(freeText).toBe("q");
+  });
+
+  it("treats apostrophes inside DSL values as literal text (not single-quote opens)", () => {
+    // The prior tokenizer treated `'` as a quote char, so `from:o'brien` swallowed
+    // every later token until end-of-input. Apostrophes are now literal.
+    const { freeText, filters } = extractDslFilters("from:o'brien subject:report");
+    expect(filters.from).toBe("o'brien");
+    expect(filters.subject).toBe("report");
+    expect(freeText).toBe("");
+  });
 });
 
 describe("formatDslTokens", () => {

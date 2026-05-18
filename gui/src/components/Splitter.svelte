@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
+
   interface Props {
     onResize: (deltaX: number) => void;
     disabled?: boolean;
@@ -8,6 +10,15 @@
   let dragging: boolean = $state(false);
   let lastX: number = $state(0);
   let pointerId: number | null = $state(null);
+
+  function teardown(): void {
+    dragging = false;
+    pointerId = null;
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    }
+  }
 
   function onPointerDown(e: PointerEvent): void {
     if (disabled) return;
@@ -27,11 +38,12 @@
 
   function onPointerUp(e: PointerEvent): void {
     if (e.pointerId !== pointerId) return;
-    dragging = false;
-    pointerId = null;
-    window.removeEventListener("pointermove", onPointerMove);
-    window.removeEventListener("pointerup", onPointerUp);
+    teardown();
   }
+
+  // If the component unmounts mid-drag (logout, layout swap, parent re-key)
+  // the window listeners would otherwise keep firing into a stale closure.
+  onDestroy(teardown);
 </script>
 
 <div

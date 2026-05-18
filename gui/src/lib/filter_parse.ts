@@ -20,23 +20,43 @@ const POPOVER_OPERATORS = new Set([
 ]);
 
 function tokenize(s: string): string[] {
-  // Whitespace-split, but respect quoted runs (single or double quotes).
+  // Whitespace-split, respecting double-quoted runs. Apostrophes are treated
+  // as literal text (so `from:o'brien` round-trips); single-quoted multi-word
+  // values are not supported because the cost of breaking `o'brien` is worse
+  // than the value of `'foo bar'` (use `"foo bar"` instead).
+  //
+  // If a quote is never closed, the unterminated run is re-processed as
+  // whitespace-split tokens. The prior greedy-absorb behavior would swallow
+  // every later DSL token into the unterminated run, silently dropping them.
   const out: string[] = [];
   let buf = "";
-  let quote: string | null = null;
+  let inQuote = false;
+  let bufBeforeQuote = "";
   for (const ch of s) {
-    if (quote !== null) {
-      if (ch === quote) {
-        quote = null;
+    if (inQuote) {
+      if (ch === '"') {
+        inQuote = false;
       } else {
         buf += ch;
       }
-    } else if (ch === '"' || ch === "'") {
-      quote = ch;
+    } else if (ch === '"') {
+      inQuote = true;
+      bufBeforeQuote = buf;
     } else if (/\s/.test(ch)) {
       if (buf) { out.push(buf); buf = ""; }
     } else {
       buf += ch;
+    }
+  }
+  if (inQuote) {
+    const tail = buf.slice(bufBeforeQuote.length);
+    buf = bufBeforeQuote;
+    for (const ch of tail) {
+      if (/\s/.test(ch)) {
+        if (buf) { out.push(buf); buf = ""; }
+      } else {
+        buf += ch;
+      }
     }
   }
   if (buf) out.push(buf);

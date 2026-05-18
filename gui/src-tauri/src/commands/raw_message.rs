@@ -4,8 +4,6 @@
 //! messages with large inline attachments, so we cap it the same way
 //! `attachments.rs` does to avoid an unbounded buffer / IPC payload.
 
-use serde::Deserialize;
-
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
 use crate::http::client::build_pinned_client;
@@ -15,15 +13,12 @@ use crate::storage::keyring::KeyringStore;
 // any base64-encoded attachments inline, so the bound has to match.
 const MAX_RAW_BYTES: u64 = 100 * 1024 * 1024;
 
-#[derive(Debug, Deserialize)]
-pub struct GetMessageRawArgs {
-    pub message_id: String,
-}
-
 pub async fn get_message_raw(store: &KeyringStore, message_id: &str) -> Result<Vec<u8>, AuthError> {
     let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
-    let endpoint = format!("{url}v1/messages/{message_id}/raw");
+    let encoded_id =
+        ::url::form_urlencoded::byte_serialize(message_id.as_bytes()).collect::<String>();
+    let endpoint = format!("{url}v1/messages/{encoded_id}/raw");
     let resp = client
         .get(&endpoint)
         .bearer_auth(&token)
@@ -56,9 +51,9 @@ pub async fn get_message_raw(store: &KeyringStore, message_id: &str) -> Result<V
 }
 
 #[tauri::command]
-pub async fn get_message_raw_cmd(args: GetMessageRawArgs) -> Result<Vec<u8>, AuthError> {
+pub async fn get_message_raw_cmd(message_id: String) -> Result<Vec<u8>, AuthError> {
     let store = KeyringStore::new();
-    get_message_raw(&store, &args.message_id).await
+    get_message_raw(&store, &message_id).await
 }
 
 #[cfg(test)]

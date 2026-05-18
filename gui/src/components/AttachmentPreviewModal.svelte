@@ -15,6 +15,12 @@
   let pdfDoc: { numPages: number; getPage: (n: number) => Promise<unknown> } | null = $state(null);
   let pageNum: number = $state(1);
   let pageCount: number = $state(0);
+  // pdfjs forbids overlapping render() calls on the same canvas. Rapid Prev/Next
+  // clicks would otherwise throw "Cannot use the same canvas during multiple
+  // render operations" or corrupt the bitmap. Tracked + cancelled on each new
+  // call; the cancelled task rejects with RenderingCancelledException which we
+  // swallow.
+  let currentRenderTask: { cancel: () => void; promise: Promise<void> } | null = null;
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") onClose();
@@ -32,16 +38,30 @@
 
   async function renderPage(): Promise<void> {
     if (!pdfDoc || !canvasEl) return;
+    if (currentRenderTask) {
+      currentRenderTask.cancel();
+      try { await currentRenderTask.promise; } catch { /* cancelled */ }
+      currentRenderTask = null;
+    }
     const page = (await pdfDoc.getPage(pageNum)) as {
       getViewport: (opts: { scale: number }) => { width: number; height: number };
-      render: (opts: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> };
+      render: (opts: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void>; cancel: () => void };
     };
     const viewport = page.getViewport({ scale: 1.5 });
     canvasEl.width = viewport.width;
     canvasEl.height = viewport.height;
     const ctx = canvasEl.getContext("2d");
     if (!ctx) return;
-    await page.render({ canvasContext: ctx, viewport }).promise;
+    const task = page.render({ canvasContext: ctx, viewport });
+    currentRenderTask = task;
+    try {
+      await task.promise;
+    } catch (e: unknown) {
+      // Cancellation is expected when the user clicks Next/Prev quickly.
+      if (currentRenderTask === task) throw e;
+    } finally {
+      if (currentRenderTask === task) currentRenderTask = null;
+    }
   }
 
   function prevPage(): void {
@@ -87,6 +107,10 @@
 
   onDestroy(() => {
     document.removeEventListener("keydown", onKey);
+    if (currentRenderTask) {
+      currentRenderTask.cancel();
+      currentRenderTask = null;
+    }
     if (blobUrl) URL.revokeObjectURL(blobUrl);
   });
 </script>

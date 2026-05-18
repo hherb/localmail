@@ -4,13 +4,19 @@
 //! a `KeyringStore` + endpoint + credentials so it can be tested with a
 //! mockito server, plus a `#[tauri::command]` wrapper that constructs the
 //! real OS-keyring-backed store.
+//
+// Defence-in-depth note on the password strings: `old_password` /
+// `new_password` are owned `String`s on the heap for the duration of the
+// request and are not actively zeroized on drop. This matches the rest of
+// the codebase (login does the same). If we ever pull in `secrecy` /
+// `zeroize`, this path is the natural first adopter.
 
 use reqwest::Client;
 use serde::Serialize;
 
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
-use crate::http::client::build_pinned_client;
+use crate::http::client::{build_pinned_client, http_post_json_no_resp};
 use crate::storage::keyring::KeyringStore;
 
 #[derive(Serialize)]
@@ -34,25 +40,11 @@ async fn post_change_password(
         old_password,
         new_password,
     };
-    // Server returns 204 on success; http_post_empty handles both 2xx and 204
-    // explicitly, and a JSON body is allowed even though the verb is POST-empty
-    // semantically. Use a manual send to attach the body.
-    let resp = client
-        .post(&endpoint)
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AuthError::Io(format!("network: {e}")))?;
-    let status = resp.status();
-    if !status.is_success() && status.as_u16() != 204 {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(AuthError::Io(format!(
-            "server returned {} ({})",
-            status, text
-        )));
-    }
-    Ok(())
+    // Use the shared helper so 401 (wrong old password — UX-critical) and
+    // 500 surface as distinct HttpError::HttpStatus { status, body } variants
+    // that the Svelte side can branch on, rather than flattening into one
+    // opaque AuthError::Io string.
+    Ok(http_post_json_no_resp(client, &endpoint, &body, Some(token)).await?)
 }
 
 pub async fn change_password(
@@ -123,7 +115,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_change_password_maps_4xx_to_io_error() {
+    async fn post_change_password_maps_401_to_structured_http_status() {
+        // 401 (wrong old password) is the UX-critical case the GUI must
+        // distinguish from 500. Verify the structured HttpError::HttpStatus
+        // variant is preserved through AuthError so the Svelte side can
+        // branch on status without string-matching.
         let mut server = mockito::Server::new_async().await;
         let _m = server
             .mock("POST", "/v1/auth/change-password")
@@ -137,10 +133,11 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            AuthError::Io(msg) => {
-                assert!(msg.contains("401"), "expected 401 in message, got {msg}");
+            AuthError::Http(crate::http::errors::HttpError::HttpStatus { status, body }) => {
+                assert_eq!(status, 401);
+                assert_eq!(body, "invalid old password");
             }
-            other => panic!("expected Io error, got {other:?}"),
+            other => panic!("expected AuthError::Http(HttpStatus {{ 401, .. }}), got {other:?}"),
         }
     }
 }

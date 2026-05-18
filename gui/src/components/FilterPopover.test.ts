@@ -10,15 +10,31 @@ vi.mock("../lib/tauri", () => ({ runSearch: vi.fn(async () => ({
 afterEach(() => { search.reset(); vi.clearAllMocks(); });
 
 describe("FilterPopover", () => {
-  it("renders inputs for from/to/subject/after/before/has-attachment + Apply", () => {
+  it("renders inputs for from/to/subject/date-range/language/has-attachment + Apply", () => {
     render(FilterPopover);
     expect(screen.getByLabelText(/^from$/i)).toBeTruthy();
     expect(screen.getByLabelText(/^to$/i)).toBeTruthy();
     expect(screen.getByLabelText(/subject/i)).toBeTruthy();
-    expect(screen.getByLabelText(/^after$/i)).toBeTruthy();
-    expect(screen.getByLabelText(/^before$/i)).toBeTruthy();
+    // The popover exposes one date pair via the From date / To date inputs;
+    // the older `After` / `Before` UI fields were removed to avoid offering
+    // two inputs that wrote different SearchFiltersUI keys for the same date.
+    expect(screen.getByLabelText(/^from date$/i)).toBeTruthy();
+    expect(screen.getByLabelText(/^to date$/i)).toBeTruthy();
     expect(screen.getByLabelText(/has attachment/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: /apply/i })).toBeTruthy();
+  });
+
+  it("Apply mirrors dateFrom/dateTo into after/before for wire compatibility", async () => {
+    render(FilterPopover);
+    const fromDate = screen.getByLabelText(/^from date$/i) as HTMLInputElement;
+    const toDate = screen.getByLabelText(/^to date$/i) as HTMLInputElement;
+    await fireEvent.input(fromDate, { target: { value: "2024-03-01" } });
+    await fireEvent.input(toDate, { target: { value: "2024-04-01" } });
+    await fireEvent.click(screen.getByRole("button", { name: /apply/i }));
+    expect(search.snapshot.filters.dateFrom).toBe("2024-03-01");
+    expect(search.snapshot.filters.dateTo).toBe("2024-04-01");
+    expect(search.snapshot.filters.after).toBe("2024-03-01");
+    expect(search.snapshot.filters.before).toBe("2024-04-01");
   });
 
   it("typing into from updates the local state then writes on Apply", async () => {

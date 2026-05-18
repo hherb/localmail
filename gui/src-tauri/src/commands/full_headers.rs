@@ -21,7 +21,13 @@ async fn fetch_full_headers(
     message_id: &str,
     token: Option<&str>,
 ) -> Result<MessageDetail, AuthError> {
-    let endpoint = format!("{base_url}v1/messages/{message_id}?headers=full");
+    // Percent-encode the path segment so message IDs containing `?`, `#`, `/`
+    // (RFC 5322 permits all of these inside the dot-atom-text local part) do
+    // not corrupt the URL. NON_ALPHANUMERIC is the safe default for opaque
+    // path segments.
+    let encoded_id =
+        url::form_urlencoded::byte_serialize(message_id.as_bytes()).collect::<String>();
+    let endpoint = format!("{base_url}v1/messages/{encoded_id}?headers=full");
     let detail: MessageDetail = http_get_json(client, &endpoint, token).await?;
     Ok(detail)
 }

@@ -67,6 +67,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import MainView from "./MainView.svelte";
 import { auth } from "../lib/stores/auth.svelte";
 import { mail } from "../lib/stores/mail.svelte";
+import { version } from "../lib/stores/version.svelte";
 
 function forceLoggedIn(): void {
   Object.assign(auth.snapshot, {
@@ -85,6 +86,7 @@ function forceLoggedIn(): void {
 beforeEach(() => {
   mail.reset();
   auth.reset();
+  version.reset();
   vi.clearAllMocks();
   window.localStorage.clear();
 });
@@ -142,5 +144,48 @@ describe("MainView", () => {
     expect(container.querySelector('[role="dialog"]')).toBeTruthy();
     await fireEvent.click(getByLabelText(/^close$/i));
     expect(container.querySelector('[role="dialog"]')).toBeFalsy();
+  });
+
+  it("does not load accounts/messages or start polling when the server's api_major is incompatible", async () => {
+    // The hard gate: a VersionGate overlay alone is not enough — if data
+    // loads and the 30s poller still run, we hammer an incompatible server
+    // and risk misinterpreting payloads. Verify both are suppressed.
+    apiMocks.getVersion.mockResolvedValueOnce({
+      api_major: 999,
+      api_minor: 0,
+      server_version: null,
+      build_hash: null,
+    });
+    forceLoggedIn();
+    render(MainView);
+    // Let MainView's async onMount settle: it awaits version.check() then
+    // checks compatible before any further IO. A single microtask flush
+    // isn't enough because of the chained await; spin twice.
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(version.snapshot.compatible).toBe(false);
+    expect(tauriMocks.listAccounts).not.toHaveBeenCalled();
+    expect(tauriMocks.listRecentMessages).not.toHaveBeenCalled();
+    expect(mail.isPolling).toBe(false);
+  });
+
+  it("loads accounts/messages and starts polling on api_major match", async () => {
+    apiMocks.getVersion.mockResolvedValueOnce({
+      api_major: 1,
+      api_minor: 0,
+      server_version: null,
+      build_hash: null,
+    });
+    forceLoggedIn();
+    render(MainView);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(version.snapshot.compatible).toBe(true);
+    expect(tauriMocks.listAccounts).toHaveBeenCalled();
+    expect(tauriMocks.listRecentMessages).toHaveBeenCalled();
+    expect(mail.isPolling).toBe(true);
   });
 });

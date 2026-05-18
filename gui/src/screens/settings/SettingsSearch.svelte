@@ -37,13 +37,13 @@
 
   <h3>Default language</h3>
   <label>
-    ISO 639-1 code (or empty for none):
+    BCP-47 tag (or empty for none):
     <input
       type="text"
-      maxlength="5"
+      maxlength="8"
       bind:value={langText}
       onblur={applyLanguage}
-      placeholder="e.g. en"
+      placeholder="e.g. en or en-GB"
     />
   </label>
 

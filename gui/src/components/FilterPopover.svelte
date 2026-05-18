@@ -12,6 +12,10 @@
   // and any DSL tokens typed into the search bar — so opening the popover
   // after typing `from:anna` shows "anna" in the From field. DSL tokens
   // that don't map to popover fields stay in the query string as free text.
+  //
+  // The form exposes one date pair (`dateFrom`/`dateTo`); the legacy
+  // `after`/`before` UI fields are seeded from them on apply() so the wire
+  // format keeps both populated for server backward-compat.
   function initialLocal(): SearchFiltersUI {
     const dsl = extractDslFilters(search.snapshot.query).filters;
     const stored = search.snapshot.filters;
@@ -21,11 +25,11 @@
       from: stored.from || dsl.from,
       to: stored.to || dsl.to,
       subject: stored.subject || dsl.subject,
-      after: stored.after || dsl.after,
-      before: stored.before || dsl.before,
+      after: "",
+      before: "",
       hasAttachment: stored.hasAttachment ?? dsl.hasAttachment,
-      dateFrom: stored.dateFrom || dsl.dateFrom,
-      dateTo: stored.dateTo || dsl.dateTo,
+      dateFrom: stored.dateFrom || dsl.dateFrom || stored.after || dsl.after,
+      dateTo: stored.dateTo || dsl.dateTo || stored.before || dsl.before,
       language: stored.language || dsl.language,
     };
   }
@@ -34,6 +38,12 @@
   async function apply() {
     search.setFilters({
       ...local,
+      // dateFrom/dateTo are the canonical popover values; mirror them into
+      // after/before so filtersUiToWire emits both wire fields. (The server
+      // accepts either; rebroadcasting keeps server-side parsers that only
+      // look at `after`/`before` working.)
+      after: local.dateFrom ?? "",
+      before: local.dateTo ?? "",
       // Preserve account/folder narrowing the tree has already set.
       accountIds: search.snapshot.filters.accountIds,
       folderIds: search.snapshot.filters.folderIds,
@@ -74,10 +84,6 @@
   <input id="fp-to" bind:value={local.to} placeholder="horst@" />
   <label for="fp-subject">Subject</label>
   <input id="fp-subject" bind:value={local.subject} placeholder="school" />
-  <label for="fp-after">After</label>
-  <input id="fp-after" type="date" bind:value={local.after} />
-  <label for="fp-before">Before</label>
-  <input id="fp-before" type="date" bind:value={local.before} />
   <label for="fp-date-from">From date</label>
   <div class="field">
     <input id="fp-date-from" type="date" bind:value={local.dateFrom} />

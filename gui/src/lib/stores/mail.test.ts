@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../tauri", () => mocks);
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
-import { mail } from "./mail.svelte";
+import { mail, MAX_POLL_FAILURES, MAX_RECENT_MESSAGES } from "./mail.svelte";
 import { POLL_INTERVAL_MS } from "../change_poller";
 import type { AccountSummary, FolderSummary, MessageDetail, MessageSummary } from "../tauri";
 
@@ -200,6 +200,19 @@ describe("mail.mergeNewMessages", () => {
     expect(added).toBe(0);
     expect(mail.snapshot.messages).toBe(before);
   });
+
+  it("caps retained messages at MAX_RECENT_MESSAGES so a long-running poll loop cannot leak memory", () => {
+    // Seed past the cap so the trim path is exercised, then verify the
+    // most-recent prefix is kept and the tail is dropped. Without the cap
+    // a 30s poller would accumulate state unboundedly.
+    const ids = Array.from({ length: MAX_RECENT_MESSAGES + 50 }, (_, i) => String(i));
+    mail.mergeNewMessages(ids.map((id) => msg(id, "1")));
+    expect(mail.snapshot.messages.length).toBe(MAX_RECENT_MESSAGES);
+    expect(mail.snapshot.messages[0].message_id).toBe("0");
+    expect(mail.snapshot.messages[MAX_RECENT_MESSAGES - 1].message_id).toBe(
+      String(MAX_RECENT_MESSAGES - 1),
+    );
+  });
 });
 
 describe("mail.pollOnce", () => {
@@ -252,6 +265,32 @@ describe("mail.pollOnce", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("list_recent_messages_cmd", { since: null });
     expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["9"]);
     expect(mail.changeCursor).toBe("cur-9");
+  });
+
+  it("increments pollFailureCount on rejection and resets it on success", async () => {
+    mocks.invoke.mockRejectedValueOnce({ kind: "Http", detail: "boom" });
+    await mail.pollOnce();
+    expect(mail.pollFailureCount).toBe(1);
+    mocks.invoke.mockRejectedValueOnce({ kind: "Http", detail: "boom" });
+    await mail.pollOnce();
+    expect(mail.pollFailureCount).toBe(2);
+    mocks.invoke.mockResolvedValueOnce({ new_messages: [], next_cursor: null });
+    await mail.pollOnce();
+    expect(mail.pollFailureCount).toBe(0);
+  });
+
+  it("stops the polling loop after MAX_POLL_FAILURES consecutive failures", async () => {
+    mocks.invoke.mockRejectedValue({ kind: "Auth", detail: "NotLoggedIn" });
+    mail.startPolling();
+    expect(mail.isPolling).toBe(true);
+    // pollOnce is called manually here (not via timer) so we don't have to
+    // juggle fake timers; the behavior under test is the failure-count gate.
+    for (let i = 0; i < MAX_POLL_FAILURES; i++) {
+      await mail.pollOnce();
+    }
+    expect(mail.isPolling).toBe(false);
+    expect(mail.snapshot.errorMessage).toContain(`${MAX_POLL_FAILURES} consecutive failures`);
+    mail.stopPolling();
   });
 });
 

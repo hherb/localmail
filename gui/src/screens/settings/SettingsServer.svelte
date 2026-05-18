@@ -5,6 +5,7 @@
    * non-destructive "re-trust" action that just re-displays the current pin.
    * The actual TOFU prompt only happens on a fresh /connect flow.
    */
+  import { onDestroy } from "svelte";
   import { changePassword } from "../../lib/api/change_password";
   import { auth } from "../../lib/stores/auth.svelte";
 
@@ -18,20 +19,45 @@
     auth.snapshot.phase === "logged_in" ? auth.snapshot.username : "(logged out)",
   );
 
+  function clearPasswordFields(): void {
+    oldPassword = "";
+    newPassword = "";
+  }
+
+  function isWrongOldPassword(err: unknown): boolean {
+    if (!err || typeof err !== "object") return false;
+    const o = err as { kind?: string; detail?: unknown };
+    if (o.kind !== "Http" || !o.detail || typeof o.detail !== "object") return false;
+    const d = o.detail as { kind?: string; detail?: { status?: number } };
+    return d.kind === "HttpStatus" && d.detail?.status === 401;
+  }
+
+  function formatChangePasswordError(err: unknown): string {
+    if (isWrongOldPassword(err)) return "Current password is incorrect.";
+    return err instanceof Error ? err.message : String(err);
+  }
+
   async function onChange(): Promise<void> {
     busy = true;
     message = null;
     try {
       await changePassword(oldPassword, newPassword);
       message = "Password changed.";
-      oldPassword = "";
-      newPassword = "";
+      clearPasswordFields();
     } catch (err: unknown) {
-      message = err instanceof Error ? err.message : String(err);
+      message = formatChangePasswordError(err);
+      // On a 401 the typed current-password was wrong; clear it so the user
+      // can retry without a second-keystroke leak risk. On network/5xx errors
+      // keep both fields so the user doesn't have to retype on every blip.
+      if (isWrongOldPassword(err)) oldPassword = "";
     } finally {
       busy = false;
     }
   }
+
+  // Belt-and-braces: if the user closes the Settings overlay (component
+  // unmounts) any cleartext in the form must not survive in memory.
+  onDestroy(clearPasswordFields);
 
   async function onLogout(): Promise<void> {
     busy = true;

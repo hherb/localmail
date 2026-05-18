@@ -30,6 +30,7 @@
   } from "../lib/splitter";
   import { auth } from "../lib/stores/auth.svelte";
   import { mail } from "../lib/stores/mail.svelte";
+  import { version } from "../lib/stores/version.svelte";
 
   const PANE_WIDTHS_KEY = "localmail.gui.paneWidths";
 
@@ -51,7 +52,12 @@
 
   function persistWidths(w: PaneWidths): void {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(PANE_WIDTHS_KEY, serializeWidths(w));
+    try {
+      window.localStorage.setItem(PANE_WIDTHS_KEY, serializeWidths(w));
+    } catch {
+      // QuotaExceededError or Safari private-mode SecurityError. Drag tick
+      // should not crash the UI just because persistence failed.
+    }
   }
 
   function onLeftResize(dx: number): void {
@@ -79,6 +85,12 @@
     if (typeof window !== "undefined") {
       window.addEventListener("resize", onWindowResize);
     }
+    // Block data flow on an api_major mismatch: hitting an incompatible
+    // server every 30s churns the network and risks misinterpreting payloads.
+    // VersionGate's overlay shows the same modal regardless of where check()
+    // is initiated; making MainView own the await keeps the gate honest.
+    await version.check();
+    if (version.snapshot.compatible === false) return;
     await Promise.all([mail.loadAccounts(), mail.loadRecentMessages()]);
     mail.startPolling();
   });

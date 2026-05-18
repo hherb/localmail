@@ -21,24 +21,30 @@ class VersionStore {
     errorMessage: null,
     checking: false,
   });
+  #inFlight: Promise<void> | null = null;
 
   get snapshot(): VersionState {
     return this.#state;
   }
 
   async check(): Promise<void> {
+    if (this.#inFlight !== null) return this.#inFlight;
     this.#state.checking = true;
     this.#state.errorMessage = null;
-    try {
-      const info = await getVersion();
-      this.#state.info = info;
-      this.#state.compatible = isMajorCompatible(info);
-    } catch (err: unknown) {
-      this.#state.errorMessage = String(err);
-      this.#state.compatible = null;
-    } finally {
-      this.#state.checking = false;
-    }
+    this.#inFlight = (async () => {
+      try {
+        const info = await getVersion();
+        this.#state.info = info;
+        this.#state.compatible = isMajorCompatible(info);
+      } catch (err: unknown) {
+        this.#state.errorMessage = String(err);
+        this.#state.compatible = null;
+      } finally {
+        this.#state.checking = false;
+        this.#inFlight = null;
+      }
+    })();
+    return this.#inFlight;
   }
 
   reset(): void {
@@ -46,6 +52,7 @@ class VersionStore {
     this.#state.compatible = null;
     this.#state.errorMessage = null;
     this.#state.checking = false;
+    this.#inFlight = null;
   }
 }
 

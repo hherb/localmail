@@ -122,21 +122,57 @@ def run_search(
     filters: dict[str, Any],
     limit: int,
     cursor: str | None,
+    allowed_account_ids: list[int],
+    user_id: int,
 ) -> dict[str, Any]:
-    """Run a search and return the API-shaped response.
+    """Run a search and return the API-shaped response, scoped to ``allowed_account_ids``.
+
+    The intersection of caller-supplied ``filters['account_ids']`` and the
+    ACL is computed before calling the underlying Searcher; an empty
+    intersection short-circuits to an empty result set without running any
+    arm queries.
 
     `cursor` is the previous response's `next_cursor` (which is the SearchPage
     token). In v1 the cursor is informational only — the GUI does not paginate
     deep; expanded paging lands with a future grow_pool/continue_page wrapper.
     """
-    query = build_query_string(free_text=free_text, filters=filters)
-    page: SearchPage = searcher.search(query, page_size=limit)
+    scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
+    if scoped_filters is None:
+        return {"results": [], "next_cursor": None, "total_estimate": 0, "took_ms": 0.0}
+    query = build_query_string(free_text=free_text, filters=scoped_filters)
+    page: SearchPage = searcher.search(query, page_size=limit, user_id=user_id)
     return {
         "results": [_to_api_result(r) for r in page.results],
         "next_cursor": page.search_token,
         "total_estimate": None,
         "took_ms": page.timing_ms.get("total", 0.0),
     }
+
+
+def _scope_filters_by_acl(
+    filters: dict[str, Any], allowed_account_ids: list[int],
+) -> dict[str, Any] | None:
+    """Return a new filters dict with ``account_ids`` intersected against the ACL.
+
+    Returns ``None`` when the intersection is empty — the caller should
+    short-circuit and skip running the underlying search.
+    """
+    if not allowed_account_ids:
+        return None
+    caller_ids = filters.get("account_ids")
+    if caller_ids:
+        try:
+            caller_set = {int(v) for v in caller_ids}
+        except (TypeError, ValueError) as exc:
+            raise ValidationFailed(
+                f"account_ids: each value must be an integer or integer-string, "
+                f"got {caller_ids!r}"
+            ) from exc
+        intersection = sorted(caller_set & set(allowed_account_ids))
+        if not intersection:
+            return None
+        return {**filters, "account_ids": [str(a) for a in intersection]}
+    return {**filters, "account_ids": [str(a) for a in sorted(allowed_account_ids)]}
 
 
 def _to_api_result(r: SearchResult) -> dict[str, Any]:

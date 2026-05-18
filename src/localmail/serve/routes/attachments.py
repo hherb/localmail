@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
+from localmail.api.acl import allowed_account_ids
 from localmail.api.attachments import get_attachment_text, open_attachment_bytes
 from localmail.serve.middleware import get_authenticated_user
 
@@ -16,11 +17,14 @@ router = APIRouter()
 def stream_blob(
     sha256: str,
     request: Request,
-    _user=Depends(get_authenticated_user),
+    user=Depends(get_authenticated_user),
 ) -> StreamingResponse:
     pool = request.app.state.pool
     with pool.connection() as conn:
-        fp, mime, size = open_attachment_bytes(conn, sha256)
+        allowed = allowed_account_ids(conn, user.id)
+        fp, mime, size = open_attachment_bytes(
+            conn, sha256, allowed_account_ids=allowed,
+        )
 
     def gen():
         try:
@@ -40,9 +44,10 @@ def stream_blob(
 def attachment_text(
     sha256: str,
     request: Request,
-    _user=Depends(get_authenticated_user),
+    user=Depends(get_authenticated_user),
 ) -> dict[str, str]:
     pool = request.app.state.pool
     with pool.connection() as conn:
-        text = get_attachment_text(conn, sha256)
+        allowed = allowed_account_ids(conn, user.id)
+        text = get_attachment_text(conn, sha256, allowed_account_ids=allowed)
     return {"text": text}

@@ -141,6 +141,8 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
         filters={},
         limit=20,
         cursor=None,
+        allowed_account_ids=[1],
+        user_id=99,
     )
 
     fake_searcher.search.assert_called_once()

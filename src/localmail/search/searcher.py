@@ -401,8 +401,15 @@ class Searcher:
             ))
         return out
 
-    def continue_page(self, search_token: str, page: int) -> SearchPage:
+    def continue_page(
+        self, search_token: str, page: int, *, user_id: int | None = None,
+    ) -> SearchPage:
         """Serve subsequent pages from the cached pool. Raises if past pool's end.
+
+        ``user_id`` namespaces cached pools so a cursor minted by user A cannot
+        be replayed by user B. If the cached pool's ``user_id`` does not
+        match, the cache lookup is treated as a miss — the caller can fall
+        back to a fresh search rather than reusing another user's pool.
 
         Zero DB round-trips when the page slice contains no attachment hits.
         Opens a short-lived connection only when filename resolution is needed
@@ -411,6 +418,8 @@ class Searcher:
         """
         import math
         entry = self._cache.get(search_token)  # may raise CacheMissError
+        if user_id is not None and entry.get("user_id") != user_id:
+            raise CacheMissError(search_token)
         page_size = entry["page_size"]
         hydrated = entry["hydrated"]
         pool_size = len(hydrated)
@@ -443,20 +452,30 @@ class Searcher:
             timing_ms={"cache_hit": 0.0},
         )
 
-    def grow_pool(self, search_token: str, candidates_per_arm: int) -> SearchPage:
-        """Re-run the pipeline with a larger candidate pool. Returns page 1."""
+    def grow_pool(
+        self, search_token: str, candidates_per_arm: int, *, user_id: int | None = None,
+    ) -> SearchPage:
+        """Re-run the pipeline with a larger candidate pool. Returns page 1.
+
+        ``user_id`` enforces the same cache-scoping invariant as
+        :meth:`continue_page`: a cursor minted by user A is treated as
+        unknown when presented under user B's identity.
+        """
         entry = self._cache.get(search_token)
+        if user_id is not None and entry.get("user_id") != user_id:
+            raise CacheMissError(search_token)
         parsed = entry["parsed"]
         self._cache.invalidate(search_token)
         # rerank pool grows proportionally so the larger arm output isn't wasted
         rps = max(candidates_per_arm, entry["rerank_pool_size"])
         page = self._search_with_parsed(parsed, page_size=entry["page_size"],
                                         candidates_per_arm=candidates_per_arm,
-                                        rerank_pool_size=rps, use_cache=True)
+                                        rerank_pool_size=rps, use_cache=True,
+                                        user_id=user_id)
         return page
 
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
-                            rerank_pool_size, use_cache):
+                            rerank_pool_size, use_cache, user_id: int | None = None):
         """Variant of search() that takes an already-parsed query.
 
         Connection scope: retrieval + hydrate inside one 'with' block. The
@@ -498,6 +517,7 @@ class Searcher:
                 "parsed": parsed, "hydrated": hydrated, "scores": scores,
                 "candidates_per_arm": candidates_per_arm,
                 "rerank_pool_size": rerank_pool_size, "page_size": page_size,
+                "user_id": user_id,
             })
         return SearchPage(
             results=results, page=1, page_size=page_size, pool_size=len(hydrated),
@@ -516,6 +536,7 @@ class Searcher:
         use_cache: bool = True,
         smart: bool = False,
         disable_rerank: bool = False,
+        user_id: int | None = None,
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
 
@@ -577,6 +598,7 @@ class Searcher:
                 "parsed": parsed, "hydrated": hydrated, "scores": scores,
                 "candidates_per_arm": cpa, "rerank_pool_size": rps,
                 "page_size": effective_page_size,
+                "user_id": user_id,
             })
         pool_size = len(hydrated)
         return SearchPage(

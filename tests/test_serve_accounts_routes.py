@@ -32,8 +32,11 @@ def test_list_accounts_auth_required(db_dsn: str) -> None:
     assert r.status_code == 401
 
 
-def test_list_accounts_returns_array(db_dsn: str, api_token: str, db_conn) -> None:
+def test_list_accounts_returns_array(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
     _seed_account_and_folder(db_conn)
+    grant_alice_all_accounts()
     r = _client(db_dsn).get("/v1/accounts", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200
     body = r.json()
@@ -42,8 +45,11 @@ def test_list_accounts_returns_array(db_dsn: str, api_token: str, db_conn) -> No
     assert body[0]["name"] == "a1"
 
 
-def test_list_folders_for_account(db_dsn: str, api_token: str, db_conn) -> None:
+def test_list_folders_for_account(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
     aid, _ = _seed_account_and_folder(db_conn)
+    grant_alice_all_accounts()
     r = _client(db_dsn).get(
         f"/v1/accounts/{aid}/folders",
         headers={"Authorization": f"Bearer {api_token}"},

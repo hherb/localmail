@@ -51,9 +51,11 @@ uv run localmail retry-failed-extractions      # re-attempt every failed extract
 GUI server (Phase: gui-server):
 
 ```bash
-uv run localmail add-api-user USERNAME       # create an API user
-uv run localmail list-api-users
+uv run localmail add-api-user USERNAME       # create an API user (no grants by default)
+uv run localmail list-api-users [--with-grants]
 uv run localmail remove-api-user USERNAME
+uv run localmail grant-account USERNAME ACCOUNT_NAME   # per-user ACL (migration 0016)
+uv run localmail revoke-account USERNAME ACCOUNT_NAME
 uv run localmail rotate-tls --cert PATH --key PATH
 uv run localmail serve [--bind 127.0.0.1] [--port 8443] \
                        [--tls-cert PATH] [--tls-key PATH] [--no-tls]
@@ -94,7 +96,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0015_messages_body_lang.sql
+migrations/         # 0001_init.sql … 0016_user_accounts.sql
 tests/
   acceptance/       # standalone eval harness (run_recall_eval.py)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
@@ -113,7 +115,8 @@ User-facing config lives at `~/.config/localmail/config.toml` (override with
 
 Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
 `attachment_blobs`, `attachment_text`, `attachment_chunks`,
-`failed_messages`, `failed_extractions`, `schema_migrations`. Dedup model:
+`failed_messages`, `failed_extractions`, `api_users`, `api_tokens`,
+`user_accounts`, `schema_migrations`. Dedup model:
 
 - **Messages — per-account, by `Message-Id`**: same Message-Id in INBOX + 3
   Gmail labels produces one `messages` row + four `message_labels` rows. The
@@ -283,6 +286,15 @@ for the full design.
 - The MCP server (planned) will import `localmail.api` directly — no HTTP hop.
 - Migration `0014_api_users.sql` adds `api_users` + `api_tokens`. Tokens are
   stored as SHA-256 hashes; raw bearer is only returned at login/refresh.
+- Migration `0016_user_accounts.sql` adds the per-user `(user_id, account_id)`
+  ACL join table. Every service-layer accessor under `src/localmail/api/`
+  takes a required keyword-only `allowed_account_ids: list[int]` so the SQL
+  boundary applies `WHERE account_id = ANY(%s)` on every read. Routes
+  resolve the list once per request via `localmail.api.acl.allowed_account_ids`.
+  See [docs/superpowers/specs/2026-05-18-per-user-account-acl-design.md](docs/superpowers/specs/2026-05-18-per-user-account-acl-design.md).
+- The page cache namespaces cursors by `user_id` so a search cursor minted
+  by user A and replayed by user B is treated as a cache miss — preventing
+  cross-user pool leakage.
 - TLS is on by default; `--no-tls` is only accepted with `--bind 127.0.0.1`.
 - The HTTP server and the sync daemon never call each other — they share
   Postgres and can run independently.
@@ -300,7 +312,7 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0015_messages_body_lang.sql`; next would be `0016_*.sql`.
+  Latest is `0016_user_accounts.sql`; next would be `0017_*.sql`.
 
 ## Testing notes
 

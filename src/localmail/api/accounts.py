@@ -3,6 +3,9 @@
 `is_archive_only` is currently derived as "account exists but no mailbox has
 been synced in the last 30 days". Promoted to a column in a future migration
 if the derivation becomes expensive.
+
+`is_shared` is set to True when the caller has access to more than one
+account — the GUI uses it to switch on account grouping/chips.
 """
 from __future__ import annotations
 
@@ -14,12 +17,18 @@ import psycopg
 _ARCHIVE_STALENESS_DAYS = 30
 
 
-def list_accounts(conn: psycopg.Connection) -> list[dict[str, Any]]:
-    """Return one dict per row in `accounts`, with derived capabilities + counts.
+def list_accounts(
+    conn: psycopg.Connection, *, allowed_account_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Return one dict per account the caller may read.
 
-    The SQL column is `email_address`; the JSON field exposed to clients is
-    `address` per the API spec.
+    `allowed_account_ids = []` returns an empty list — a user with no grants
+    sees no accounts. `capabilities.is_shared` reflects whether the caller
+    has access to >1 account (presentation hint, not authorisation).
     """
+    if not allowed_account_ids:
+        return []
+    is_shared = len(allowed_account_ids) > 1
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -27,8 +36,10 @@ def list_accounts(conn: psycopg.Connection) -> list[dict[str, Any]]:
                    (SELECT max(mb.last_sync_at) FROM mailboxes mb WHERE mb.account_id = a.id) AS last_sync_at,
                    (SELECT count(*) FROM messages m WHERE m.account_id = a.id) AS message_count
               FROM accounts a
+             WHERE a.id = ANY(%s)
              ORDER BY a.name
-            """
+            """,
+            (allowed_account_ids,),
         )
         rows = cur.fetchall()
     out: list[dict[str, Any]] = []
@@ -43,14 +54,23 @@ def list_accounts(conn: psycopg.Connection) -> list[dict[str, Any]]:
             "capabilities": {
                 "can_sync": not is_archive_only,
                 "is_archive_only": is_archive_only,
-                "is_shared": False,
+                "is_shared": is_shared,
             },
         })
     return out
 
 
-def list_folders(conn: psycopg.Connection, account_id: int) -> list[dict[str, Any]]:
-    """Return folders for an account with per-folder message counts."""
+def list_folders(
+    conn: psycopg.Connection, account_id: int, *, allowed_account_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Return folders for `account_id`, or an empty list if the caller cannot read it.
+
+    Returning empty rather than raising mirrors `/v1/accounts` semantics: a
+    user without access sees "no folders" for an account they cannot see,
+    not a 403 that reveals the account exists.
+    """
+    if account_id not in allowed_account_ids:
+        return []
     with conn.cursor() as cur:
         cur.execute(
             """

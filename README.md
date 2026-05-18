@@ -86,10 +86,21 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | Command | Purpose |
 | --- | --- |
 | `localmail serve [--bind 127.0.0.1] [--port 8443] [--tls-cert PATH] [--tls-key PATH] [--no-tls]` | Run the HTTPS API server. TLS is mandatory unless `--bind 127.0.0.1 --no-tls`. |
-| `localmail add-api-user USERNAME [--password TEXT \| --password-stdin]` | Create an API user (argon2id-hashed password). |
-| `localmail list-api-users` | List configured API users. |
+| `localmail add-api-user USERNAME [--password TEXT \| --password-stdin]` | Create an API user (argon2id-hashed password). New users have **no account grants** — they see no mail until `grant-account` is run. |
+| `localmail list-api-users [--with-grants]` | List configured API users. `--with-grants` shows each user's account grants. |
 | `localmail remove-api-user USERNAME` | Delete an API user and all its tokens. |
+| `localmail grant-account USERNAME ACCOUNT_NAME` | Grant `USERNAME` read access to `ACCOUNT_NAME` (per-user account ACL). Idempotent. |
+| `localmail revoke-account USERNAME ACCOUNT_NAME` | Revoke `USERNAME`'s access to `ACCOUNT_NAME`. |
 | `localmail rotate-tls --cert PATH --key PATH [--hostname H] [--force]` | Generate (or regenerate) a self-signed TLS cert + key. |
+
+> **Upgrading to migration 0016.** Per-user account ACL is now enforced
+> at the API boundary: by default a freshly-created user can read **no**
+> accounts and every `/v1/*` call returns empty lists / 404s. Run
+> `localmail grant-account USERNAME ACCOUNT_NAME` once per (user, account)
+> pair to restore the pre-0016 default-allow posture. Pre-existing users
+> need explicit grants for any account they should keep reading. See
+> [docs/superpowers/specs/2026-05-18-per-user-account-acl-design.md](docs/superpowers/specs/2026-05-18-per-user-account-acl-design.md)
+> for the full design.
 
 ## Gmail OAuth2 setup
 

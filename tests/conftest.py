@@ -75,7 +75,7 @@ def db_conn(db_dsn):
                 "attachment_blobs, failed_messages, message_chunks, "
                 "failed_embeddings, embedding_models, failed_chunkings, "
                 "attachment_text, attachment_chunks, failed_extractions, "
-                "api_users, api_tokens "
+                "api_users, api_tokens, user_accounts "
                 "RESTART IDENTITY CASCADE"
             )
         conn.commit()
@@ -110,3 +110,25 @@ def api_token(db_conn, api_user):
     token, _expires = login(db_conn, api_user.username, api_user.password)
     db_conn.commit()
     return token
+
+
+@pytest.fixture
+def grant_alice_all_accounts(db_conn, api_user):
+    """Returns a callable that grants `api_user` access to every account
+    currently seeded in the DB.
+
+    Most pre-ACL route tests seed an account, then call the route under the
+    `api_token` fixture and expect to read it back. Call this fixture's
+    returned callable after seeding so the route's ACL filter sees the user
+    as authorised.
+    """
+    def _grant() -> None:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_accounts (user_id, account_id) "
+                "SELECT %s, id FROM accounts "
+                "ON CONFLICT DO NOTHING",
+                (api_user.id,),
+            )
+        db_conn.commit()
+    return _grant

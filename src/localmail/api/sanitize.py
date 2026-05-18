@@ -13,6 +13,14 @@ Design notes:
 - ``clean_content_tags`` drops ``<script>``/``<style>``/etc. *together
   with their inner content*, so an attacker cannot leak script source as
   visible text via strip-style behaviour.
+- Image-source rewriting is done inside nh3's ``attribute_filter``
+  callback (parser-aware, runs after the attribute allowlist and before
+  the URL-scheme check). The earlier regex pre-pass — which matched
+  ``src=…`` anywhere in the raw HTML, including inside ``<a href>``
+  query strings — has been removed; that pre-pass silently corrupted
+  links like ``?src=foo&x=1`` (issue #43). The filter only sees
+  attribute values in their proper tag context, so an ``href`` query
+  string is never confused with an ``<img src>`` attribute.
 - Inline ``style`` attributes are preserved (HTML email relies on them)
   but every CSS declaration is checked against
   ``_ALLOWED_STYLE_PROPERTIES``. URL-loading shorthands (``background``,
@@ -27,6 +35,7 @@ Design notes:
 from __future__ import annotations
 
 import re
+from typing import Callable
 
 import nh3
 
@@ -51,17 +60,25 @@ _ALLOWED_ATTRS: dict[str, set[str]] = {
 # scheme-relative and pass through regardless of this allowlist.
 #
 # SECURITY-CRITICAL: because ``http``/``https`` are allowed, nh3 itself
-# does NOT strip ``<img src="http://tracker/…">``. ``_rewrite_image_srcs``
-# below is the *sole* defense against image trackers — it strips every
-# ``src=…`` whose value is not a known-good ``cid:`` or validated
-# ``data:image/…;base64,…`` URI before nh3 sees the document. Anyone
-# tightening that regex must keep it broad enough to catch every
-# attribute-shaped ``src=…`` an attacker might emit.
+# does NOT strip ``<img src="http://tracker/…">``. The ``attribute_filter``
+# below is the *sole* defense against image trackers — it returns
+# ``None`` for every ``img/src`` whose value is not a known-good ``cid:``
+# or validated ``data:image/…;base64,…`` URI.
+#
+# ``cid`` is allowed here so that ``<img src="cid:…">`` values reach
+# the ``attribute_filter`` (when the scheme is rejected up front nh3
+# strips the attribute before the filter ever runs). The filter rewrites
+# img/src cid: URLs to scheme-relative ``/v1/attachments/<sha>`` paths
+# and returns ``None`` for cid: on every other URL attribute (currently
+# only ``<a href>``), so an attacker cannot turn a clicked link into an
+# internal attachment fetch.
 #
 # ``data`` enables inline base64 image URIs validated end-to-end by
 # ``_DATA_IMAGE_RE`` (full match, base64 alphabet only — no embedded
 # quote/lt/gt that could confuse the parser).
-_ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({"mailto", "http", "https", "data"})
+_ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({
+    "mailto", "http", "https", "data", "cid",
+})
 
 # Tags whose inner *content* is removed along with the tag itself.
 # ``html5ever`` handles malformed and self-closing variants correctly,
@@ -134,17 +151,20 @@ def sanitize_html(html: str, *, cid_to_sha: dict[str, str]) -> str:
         brackets) to attachment-blob SHA-256 hex strings. Used to rewrite
         ``<img src="cid:...">`` to the attachment URL.
 
-    External src values (anything starting with ``http(s)://`` or ``//``)
-    are stripped before nh3 sees them. Dangerous tags
-    (``script``/``style``/``iframe``/…) are removed *together with their
-    content* by nh3's ``clean_content_tags``. Inline ``style`` attributes
-    are kept but filtered to ``_ALLOWED_STYLE_PROPERTIES``.
+    Image-source rewriting and external-tracker stripping are performed
+    inside nh3's ``attribute_filter`` callback so they see attribute
+    values in proper tag context — an ``href`` URL with a ``?src=…``
+    query string is never confused with an ``<img src=…>`` attribute.
+    Dangerous tags (``script``/``style``/``iframe``/…) are removed
+    *together with their content* by nh3's ``clean_content_tags``.
+    Inline ``style`` attributes are kept but filtered to
+    ``_ALLOWED_STYLE_PROPERTIES``.
     """
-    pre = _rewrite_image_srcs(html, cid_to_sha)
     return nh3.clean(
-        pre,
+        html,
         tags=set(_ALLOWED_TAGS),
         attributes=_ALLOWED_ATTRS,
+        attribute_filter=_make_attribute_filter(cid_to_sha),
         url_schemes=set(_ALLOWED_URL_SCHEMES),
         clean_content_tags=set(_CLEAN_CONTENT_TAGS),
         filter_style_properties=set(_ALLOWED_STYLE_PROPERTIES),
@@ -152,32 +172,60 @@ def sanitize_html(html: str, *, cid_to_sha: dict[str, str]) -> str:
     )
 
 
-_SRC_ATTR_RE = re.compile(
-    r"""src\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s>]+))""",
-    re.IGNORECASE,
-)
+def _make_attribute_filter(
+    cid_to_sha: dict[str, str],
+) -> Callable[[str, str, str], str | None]:
+    """Build the per-call ``attribute_filter`` for ``nh3.clean``.
 
+    The returned callable is invoked by nh3 for every attribute that
+    survives the tag/attr allowlist check, *before* the URL-scheme check.
+    Returning ``None`` drops the attribute; returning a string replaces
+    its value. Two responsibilities:
 
-def _rewrite_image_srcs(html: str, cid_to_sha: dict[str, str]) -> str:
-    """Replace cid:* srcs with /v1/attachments/<sha256>; strip everything else.
-
-    Matches double-quoted, single-quoted, and unquoted ``src`` attribute
-    forms so that external trackers cannot slip through by choosing a
-    quoting style the regex didn't anticipate. The rewritten output is
-    always emitted as a double-quoted attribute regardless of the input
-    quoting.
+    1. **Rewrite ``<img src="cid:…">``** to ``/v1/attachments/<sha>`` if
+       the cid resolves to a known blob, otherwise drop the src.
+       Pass-through validated ``data:image/…;base64,…`` URIs. Drop
+       everything else on ``img/src`` (this is the sole defence against
+       image trackers — ``http``/``https`` are in ``_ALLOWED_URL_SCHEMES``
+       so nh3 itself would let them through).
+    2. **Block ``cid:`` on non-img URL attributes** (currently just
+       ``<a href>``). ``cid`` is in ``_ALLOWED_URL_SCHEMES`` so that
+       cid values reach this filter for the img/src rewrite above;
+       defence-in-depth, the same scheme must never survive on any
+       attribute a browser dereferences via user action.
     """
-    def replace_src(match: re.Match[str]) -> str:
-        src = match.group("dq") or match.group("sq") or match.group("bare") or ""
-        cid_match = _CID_RE.match(src.strip("<>"))
-        if cid_match:
-            cid = cid_match.group(1).strip("<>")
-            sha = cid_to_sha.get(cid)
-            if sha is None:
-                return 'src=""'
-            return f'src="/v1/attachments/{sha}"'
-        if _DATA_IMAGE_RE.match(src):
-            return f'src="{src}"'
-        return 'src=""'
+    def _filter(tag: str, attr: str, value: str) -> str | None:
+        if tag == "img" and attr == "src":
+            return _rewrite_img_src(value, cid_to_sha)
+        if attr == "href" and value.lower().startswith("cid:"):
+            return None
+        return value
 
-    return _SRC_ATTR_RE.sub(replace_src, html)
+    return _filter
+
+
+def _rewrite_img_src(value: str, cid_to_sha: dict[str, str]) -> str | None:
+    """Decide what to do with the ``src`` of an ``<img>`` element.
+
+    Returns the rewritten value (or ``None`` to drop the attribute):
+
+    - ``cid:<id>`` resolves to ``/v1/attachments/<sha>`` if the id is
+      known, otherwise ``None`` (broken cid, drop). Angle brackets
+      sometimes appearing around the id (``cid:<image1@host>``) are
+      stripped before lookup.
+    - ``data:image/<mime>;base64,<data>`` passes through iff it matches
+      ``_DATA_IMAGE_RE`` end-to-end (no embedded quote/lt/gt).
+    - Anything else (``http(s)://…``, ``//tracker/…``, relative paths,
+      ``javascript:…``, …) returns ``None`` — image trackers are blocked
+      regardless of how the attacker tries to dress them up.
+    """
+    cid_match = _CID_RE.match(value.strip("<>"))
+    if cid_match:
+        cid = cid_match.group(1).strip("<>")
+        sha = cid_to_sha.get(cid)
+        if sha is None:
+            return None
+        return f"/v1/attachments/{sha}"
+    if _DATA_IMAGE_RE.match(value):
+        return value
+    return None

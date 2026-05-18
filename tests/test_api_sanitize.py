@@ -247,23 +247,59 @@ def test_svg_tag_stripped() -> None:
     assert "<p>after</p>" in out
 
 
-def test_href_query_string_with_src_param_corrupted() -> None:
-    """Known limitation: ``href`` URLs whose query string contains ``src=``
-    are corrupted by the regex pre-pass.
+def test_href_query_string_with_src_param_preserved() -> None:
+    """``href`` URLs whose query string contains ``src=`` must survive intact.
 
-    ``_rewrite_image_srcs`` runs against raw HTML (not parsed nodes), so
-    a ``?src=foo&x=1`` inside an ``<a href>`` matches the same regex used
-    for ``<img src>`` and gets rewritten to ``src=``. The result is a
-    broken-but-safe link (less powerful, never more). Proper fix needs a
-    parser-based rewriter — tracked in issue #43.
+    The previous regex pre-pass matched ``src=…`` anywhere in the raw
+    HTML, including inside ``<a href>`` query strings — which silently
+    corrupted legitimate ``?src=…``/``?utm_source=…&src=…`` tracking
+    links. The new design delegates rewriting to nh3's
+    ``attribute_filter``, which is parser-aware: it only sees attribute
+    values in the proper tag context, so an ``href`` query-string
+    ``src=foo`` is never confused with an ``<img src=foo>`` attribute.
+    Closes issue #43.
 
-    This test pins the current behaviour so that any future fix shows up
-    explicitly in the diff rather than as a silent improvement that could
-    mask regressions elsewhere.
+    nh3 HTML-encodes ``&`` to ``&amp;`` in attribute values; assert the
+    URL parts separately so the test is whitespace- and
+    entity-encoding-agnostic.
     """
     html = '<a href="https://example.com/page?src=foo&x=1">link</a>'
     out = sanitize_html(html, cid_to_sha={})
-    assert "https://example.com/page" in out
-    assert "foo" not in out
-    assert "x=1" not in out
+    assert "https://example.com/page?src=foo" in out
+    assert "x=1" in out
     assert ">link</a>" in out
+
+
+def test_href_with_cid_scheme_stripped() -> None:
+    """``<a href="cid:...">`` must have the href stripped.
+
+    ``cid`` is in ``_ALLOWED_URL_SCHEMES`` so that the cid →
+    attachment-URL rewrite in ``attribute_filter`` reaches img/src values
+    (without ``cid`` in the scheme allowlist, nh3 drops the attribute
+    before the filter ever runs). The same filter defensively returns
+    ``None`` for ``cid:`` on ``<a href>`` so an attacker cannot turn a
+    clicked link into an internal attachment fetch — even one that would
+    resolve to a known blob.
+    """
+    cid_to_sha = {"exfil@example": "a" * 64}
+    html = '<a href="cid:exfil@example">click</a>'
+    out = sanitize_html(html, cid_to_sha=cid_to_sha)
+    assert "cid:" not in out
+    assert "/v1/attachments/" not in out
+    assert ">click</a>" in out
+
+
+def test_anchor_text_containing_img_substring_preserved() -> None:
+    """Tag-shaped substrings inside attribute values must not be mistaken for tags.
+
+    The previous regex pre-pass operated on raw HTML text, so a ``title``
+    attribute containing the literal substring ``<img src=foo>`` would
+    have its ``src=`` rewritten as if it were a real img tag. The
+    parser-based filter only sees attribute values in their proper tag
+    context, so substrings cannot be confused with tags.
+    """
+    html = '<a href="https://example.com/" title="see &lt;img src=foo&gt; below">x</a>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "https://example.com/" in out
+    assert ">x</a>" in out
+    assert "foo" in out

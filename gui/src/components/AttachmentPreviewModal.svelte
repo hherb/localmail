@@ -12,6 +12,9 @@
   let contentType: string | null = $state(null);
   let error: string | null = $state(null);
   let canvasEl: HTMLCanvasElement | null = $state(null);
+  let pdfDoc: { numPages: number; getPage: (n: number) => Promise<unknown> } | null = $state(null);
+  let pageNum: number = $state(1);
+  let pageCount: number = $state(0);
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") onClose();
@@ -25,6 +28,34 @@
 
   function isPdf(): boolean {
     return ext() === ".pdf" || contentType === "application/pdf";
+  }
+
+  async function renderPage(): Promise<void> {
+    if (!pdfDoc || !canvasEl) return;
+    const page = (await pdfDoc.getPage(pageNum)) as {
+      getViewport: (opts: { scale: number }) => { width: number; height: number };
+      render: (opts: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> };
+    };
+    const viewport = page.getViewport({ scale: 1.5 });
+    canvasEl.width = viewport.width;
+    canvasEl.height = viewport.height;
+    const ctx = canvasEl.getContext("2d");
+    if (!ctx) return;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+  }
+
+  function prevPage(): void {
+    if (pageNum > 1) {
+      pageNum -= 1;
+      void renderPage();
+    }
+  }
+
+  function nextPage(): void {
+    if (pageNum < pageCount) {
+      pageNum += 1;
+      void renderPage();
+    }
   }
 
   onMount(async () => {
@@ -41,17 +72,13 @@
         const PdfjsWorker = (await import("pdfjs-dist/build/pdf.worker.mjs?url")).default;
         (pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } })
           .GlobalWorkerOptions.workerSrc = PdfjsWorker;
-        const doc = await pdfjs.getDocument({ data: u8 }).promise;
-        const page = await doc.getPage(1);
-        const viewport = page.getViewport({ scale: 1.5 });
-        if (canvasEl) {
-          canvasEl.width = viewport.width;
-          canvasEl.height = viewport.height;
-          const ctx = canvasEl.getContext("2d");
-          if (ctx) {
-            await page.render({ canvasContext: ctx, viewport }).promise;
-          }
-        }
+        pdfDoc = (await pdfjs.getDocument({ data: u8 }).promise) as unknown as {
+          numPages: number;
+          getPage: (n: number) => Promise<unknown>;
+        };
+        pageCount = pdfDoc.numPages;
+        pageNum = 1;
+        await renderPage();
       }
     } catch (e: unknown) {
       error = String(e);
@@ -76,6 +103,13 @@
       {:else if !blobUrl}
         <p class="placeholder">Loading…</p>
       {:else if isPdf()}
+        {#if pageCount > 0}
+          <div class="pdf-controls">
+            <button type="button" onclick={prevPage} disabled={pageNum <= 1} aria-label="Previous page">← Prev</button>
+            <span class="page-counter">Page {pageNum} of {pageCount}</span>
+            <button type="button" onclick={nextPage} disabled={pageNum >= pageCount} aria-label="Next page">Next →</button>
+          </div>
+        {/if}
         <canvas bind:this={canvasEl}></canvas>
       {:else}
         <img src={blobUrl} alt={filename ?? ""} />
@@ -99,4 +133,9 @@
   .body canvas { display: block; }
   .placeholder { color: #888; font-style: italic; }
   .error { color: #c00; }
+  .pdf-controls { display: flex; align-items: center; gap: 8px;
+                  padding: 4px 0 8px; font-size: 13px; }
+  .pdf-controls button { padding: 4px 10px; cursor: pointer; }
+  .pdf-controls button:disabled { cursor: not-allowed; opacity: 0.5; }
+  .page-counter { color: #555; }
 </style>

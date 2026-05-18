@@ -48,7 +48,7 @@ class ParsedQuery:
 
 _OPERATORS = {
     "from", "to", "subject", "after", "before", "has", "label",
-    "account", "folder", "account_id", "folder_id",
+    "account", "folder", "account_id", "folder_id", "lang",
 }
 
 
@@ -93,11 +93,18 @@ def parse_query(query: str) -> ParsedQuery:
     f_from = f_to = f_subject = f_label = None
     f_after = f_before = None
     f_has_attachment: bool | None = None
+    f_languages: list[str] = []
 
     for tok in _tokenize(query):
         if ":" in tok:
             op, _, value = tok.partition(":")
             op_l = op.lower()
+            if op_l == "lang":
+                normalized = value.strip().lower()
+                if not normalized:
+                    raise QueryParseError("lang: empty value not allowed")
+                f_languages.append(normalized)
+                continue
             if op_l in _OPERATORS and value:
                 if op_l == "from":
                     f_from = value
@@ -145,5 +152,6 @@ def parse_query(query: str) -> ParsedQuery:
         before=f_before,
         has_attachment=f_has_attachment,
         label=f_label,
+        languages=f_languages or None,
     )
     return ParsedQuery(free_text=" ".join(free_parts), filters=filters)

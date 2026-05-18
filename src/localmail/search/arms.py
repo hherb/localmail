@@ -72,6 +72,11 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
             " WHERE ml.message_id = m.id AND mb.name ILIKE %s)"
         )
         params.append(filters.label)
+    if filters.languages:
+        # `messages.body_lang` is populated per-message by language detection
+        # (migration 0015). NULL rows are excluded — lang filtering is opt-in.
+        parts.append("m.body_lang = ANY(%s)")
+        params.append(list(filters.languages))
     if not parts:
         return "", []
     return " AND " + " AND ".join(parts), params

@@ -6,6 +6,6 @@ Public service functions live in submodules:
 - messages: get message detail, full headers, raw RFC822
 - attachments: stream blob bytes, extracted text
 - search: hybrid search wrapping localmail.search.Searcher
-- sanitize: bleach-based HTML sanitizer with cid: rewriting
+- sanitize: nh3-based HTML sanitizer with cid: rewriting
 - errors: typed exceptions
 """

@@ -202,10 +202,11 @@ class Searcher:
     ) -> None:
         """One-shot warning when `lang:` filters target an empty body_lang column.
 
-        Migration 0015 adds `messages.body_lang` but population is intentionally
-        deferred (see PR #30). A user running `lang:de` against an unpopulated
-        archive gets zero results with no hint as to why; this nudge tells
-        them exactly that. The probe uses the partial index so cost is O(1).
+        Migration 0015 adds `messages.body_lang`; the embed worker populates
+        it lazily and `localmail lang-backfill` drains the existing archive.
+        A user running `lang:de` against an unpopulated column gets zero
+        results with no hint as to why; this nudge tells them exactly that.
+        The probe uses the partial index so cost is O(1).
         """
         if self._lang_warning_emitted:
             return
@@ -217,8 +218,7 @@ class Searcher:
                 log.warning(
                     "search: `lang:` filter present but messages.body_lang is "
                     "not populated for any row; query will return 0 hits. "
-                    "Run the language-detection backfill (deferred, see PR #30) "
-                    "to enable lang filtering."
+                    "Run `localmail lang-backfill` to populate the column."
                 )
         self._lang_warning_emitted = True
 

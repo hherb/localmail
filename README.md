@@ -71,10 +71,11 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 
 | Command | Purpose |
 | --- | --- |
-| `localmail embed-backfill` | Drain the message-chunk embedding queue in the foreground; exit when empty. |
+| `localmail embed-backfill` | Drain the message-chunk embedding queue in the foreground; exit when empty. Also drains the language-detection queue after embeddings finish. |
 | `localmail extract-backfill [--no-progress]` | Drain the attachment-extraction queue (Phase 2): extract text from PDFs, DOCX, etc. |
+| `localmail lang-backfill [--no-progress]` | Populate `messages.body_lang` for every message with NULL body_lang. Required once after first install so the `lang:` search token returns rows. |
 | `localmail search "QUERY" [--format text\|json]` | Hybrid lexical + vector search over the local archive (see [Search](#search) below). |
-| `localmail search-status [--format text\|json]` | Report chunk/extraction backlog and failure counts for Phase 1 and Phase 2. |
+| `localmail search-status [--format text\|json]` | Report chunk/extraction backlog, language-detection progress, and failure counts. |
 | `localmail list-failed-embeddings` | Show recent `failed_embeddings` rows. |
 | `localmail retry-failed-embeddings` | Clear `failed_embeddings` so the embed worker re-picks them up. |
 | `localmail list-failed-extractions` | Show recent `failed_extractions` rows. |
@@ -253,14 +254,21 @@ from the CLI, from Python, or via the GUI / HTTPS API.
 uv run localmail init-db
 
 # Backfill message-body embeddings. First run downloads ~250 MB of model
-# weights to ~/.cache/fastembed/ (one-time).
+# weights to ~/.cache/fastembed/ (one-time). This also drains the
+# `messages.body_lang` queue via `lingua-language-detector` once embedding
+# finishes, so `lang:` filters work without a second command.
 uv run localmail embed-backfill
+
+# (Optional) Run only the body_lang pass — useful when chunks/embeddings
+# are already up to date but body_lang is not (e.g. after upgrading from a
+# pre-body_lang archive, or after raising `body_lang_min_confidence`).
+uv run localmail lang-backfill
 
 # (Optional, Phase 2) Backfill attachment text for an existing archive.
 # Requires the docling optional dep: `uv sync --extra extraction`.
 uv run localmail extract-backfill
 
-# Progress at any time:
+# Progress at any time (includes body_lang_populated / body_lang_pending):
 uv run localmail search-status
 ```
 
@@ -275,9 +283,13 @@ uv run localmail search "minutes lang:en before:2025-06-01"   # language + date 
 
 DSL operators: `from:`, `to:`, `subject:`, `label:`, `account:`, `folder:`,
 `account_id:N`, `folder_id:N`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`,
-`lang:XX` (ISO 639 code; matches the `messages.body_lang` column populated
-per-message), and `has:attachment`. Each operator may appear multiple times
-where it makes sense (e.g. multiple `lang:` accumulate).
+`lang:XX` (ISO 639-1 code; matches the `messages.body_lang` column populated
+per-message by `lingua-language-detector`), and `has:attachment`. Each operator
+may appear multiple times where it makes sense (e.g. multiple `lang:`
+accumulate; `lang:en lang:de` matches either). Bodies shorter than
+`search.body_lang_min_text_chars` (default 20) and detections below
+`search.body_lang_min_confidence` (default 0.65) stay NULL and are excluded
+from `lang:` queries.
 
 ### Search from Python
 
@@ -324,6 +336,11 @@ modern laptop. The most likely knobs to touch:
 - `candidates_per_arm` (default 50) — increase for hard queries
 - `rerank_pool_size` (default 50) — match `candidates_per_arm`
 - `chunk_size_tokens` (default 512) — smaller for short messages
+- `body_lang_enabled` (default true) — set false to skip language detection
+- `body_lang_min_confidence` (default 0.65) — lower to label more messages
+  (and accept more wrong labels); raise to be stricter
+- `body_lang_low_accuracy` (default true) — ~100 MB resident; set false for
+  full lingua mode (~1 GB)
 
 ### Acceptance evaluation
 

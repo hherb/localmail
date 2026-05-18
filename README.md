@@ -71,7 +71,7 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 
 | Command | Purpose |
 | --- | --- |
-| `localmail embed-backfill` | Drain the message-chunk embedding queue in the foreground; exit when empty. Also runs the language-detection pass on each sweep. |
+| `localmail embed-backfill` | Drain the message-chunk embedding queue in the foreground; exit when empty. Also drains the language-detection queue after embeddings finish. |
 | `localmail extract-backfill [--no-progress]` | Drain the attachment-extraction queue (Phase 2): extract text from PDFs, DOCX, etc. |
 | `localmail lang-backfill [--no-progress]` | Populate `messages.body_lang` for every message with NULL body_lang. Required once after first install so the `lang:` search token returns rows. |
 | `localmail search "QUERY" [--format text\|json]` | Hybrid lexical + vector search over the local archive (see [Search](#search) below). |
@@ -254,13 +254,14 @@ from the CLI, from Python, or via the GUI / HTTPS API.
 uv run localmail init-db
 
 # Backfill message-body embeddings. First run downloads ~250 MB of model
-# weights to ~/.cache/fastembed/ (one-time). The same sweep also populates
-# `messages.body_lang` via `lingua-language-detector` so `lang:` filters work.
+# weights to ~/.cache/fastembed/ (one-time). This also drains the
+# `messages.body_lang` queue via `lingua-language-detector` once embedding
+# finishes, so `lang:` filters work without a second command.
 uv run localmail embed-backfill
 
-# Populate body_lang for the existing archive (one-shot; idempotent).
-# Not needed on fresh installs — embed-backfill already does this — but
-# required after upgrading from a pre-body_lang archive.
+# (Optional) Run only the body_lang pass — useful when chunks/embeddings
+# are already up to date but body_lang is not (e.g. after upgrading from a
+# pre-body_lang archive, or after raising `body_lang_min_confidence`).
 uv run localmail lang-backfill
 
 # (Optional, Phase 2) Backfill attachment text for an existing archive.

@@ -183,9 +183,12 @@ def test_run_lang_detect_pass_leaves_null_when_detector_returns_none(db_conn) ->
 
     processed = run_lang_detect_pass(db_conn, cfg, detector)
 
-    # The message was still claimed and counted as processed; body_lang
-    # remains NULL because the detector chose not to guess.
-    assert processed == 1
+    # The detector declined to label the row; body_lang stays NULL and the
+    # row is not counted. The return value tracks rows whose body_lang
+    # transitioned from NULL to non-NULL — this guarantees the
+    # `lang-backfill` CLI loop terminates on archives full of bodies the
+    # detector cannot label, rather than re-claiming the same rows forever.
+    assert processed == 0
     assert _body_lang(db_conn, mid) is None
 
 
@@ -234,8 +237,9 @@ def test_run_lang_detect_pass_isolates_poison_message(db_conn) -> None:
 
     processed = run_lang_detect_pass(db_conn, cfg, _PoisonDetector())
 
-    # Both rows were claimed; the poison one stays NULL, the good one is set.
-    assert processed == 2
+    # Only the labelled row is counted; the poison row stays NULL and is
+    # excluded from the return count.
+    assert processed == 1
     assert _body_lang(db_conn, poison) is None
     assert _body_lang(db_conn, good) == "en"
 
@@ -270,3 +274,23 @@ def test_run_lang_detect_pass_explicit_batch_overrides_cfg(db_conn) -> None:
     processed = run_lang_detect_pass(db_conn, cfg, detector, batch=2)
 
     assert processed == 2
+
+
+def test_run_lang_detect_pass_loop_terminates_on_persistent_null(db_conn) -> None:
+    """Regression: a while-loop draining the function must terminate even when
+    the detector cannot label any of the pending rows. Prior behaviour returned
+    the claimed-row count, which made the lang-backfill / embed-backfill CLI
+    loops re-claim the same NULL rows forever on archives full of short bodies.
+    """
+    acct = _seed_account(db_conn)
+    for i in range(3):
+        _seed_message(db_conn, acct, i, "x")  # below the 20-char floor
+    db_conn.commit()
+    cfg = SearchConfig()
+    detector = FixedDetector({})  # never labels anything
+
+    first = run_lang_detect_pass(db_conn, cfg, detector)
+    second = run_lang_detect_pass(db_conn, cfg, detector)
+
+    assert first == 0
+    assert second == 0

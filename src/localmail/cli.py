@@ -455,14 +455,15 @@ def extract_backfill(no_progress: bool) -> None:
 def embed_backfill(no_progress):
     """Drain the embedding queue in the foreground; exit when empty.
 
-    Account-agnostic — fills embeddings for all accounts. Also runs the
-    language-detection pass on each sweep when `search.body_lang_enabled`
-    is True (the default), so a fresh archive ends up with both chunks and
-    `messages.body_lang` populated in a single command.
+    Account-agnostic — fills embeddings for all accounts. Each embedding
+    sweep also processes one `body_lang_detect_batch_size` slice of
+    language-detection work; after the embedding queue drains, any
+    remaining NULL `body_lang` rows are flushed in a tight loop so the
+    command's exit means both queues are empty.
     """
     from localmail.db import open_pool
     from localmail.search.embed_worker import run_embed_worker_once
-    from localmail.search.lang_detect import make_detector
+    from localmail.search.lang_detect import make_detector, run_lang_detect_pass
     cfg = load_config()
     backend = _make_backend(cfg)
     lang_detector = make_detector(cfg.search)
@@ -479,9 +480,24 @@ def embed_backfill(no_progress):
             total += wrote
             if not no_progress:
                 click.echo(f"embedded {wrote} chunks (total {total})", err=True)
+        lang_total = 0
+        if lang_detector is not None:
+            while True:
+                with pool.connection() as conn:
+                    processed = run_lang_detect_pass(conn, cfg.search, lang_detector)
+                if processed == 0:
+                    break
+                lang_total += processed
+                if not no_progress:
+                    click.echo(
+                        f"detected lang for {processed} messages (total {lang_total})",
+                        err=True,
+                    )
     finally:
         pool.close()
-    click.echo(f"done: {total} chunks embedded")
+    click.echo(
+        f"done: {total} chunks embedded, {lang_total} messages lang-detected"
+    )
 
 
 @main.command("lang-backfill")

@@ -23,8 +23,8 @@ def _seed_messages(conn, bodies: list[str | None]) -> list[int]:
             cur.execute(
                 "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
                 " body_text, headers, raw_bytes, size_bytes)"
-                " VALUES (%s, %s, %s, 's', %s, '{}'::jsonb, 'r', 1) RETURNING id",
-                (acct, f"<m{i}>", bytes([i + 1]) * 32, body),
+                " VALUES (%s, %s, %s, 's', %s, '{}'::jsonb, %s, %s) RETURNING id",
+                (acct, f"<m{i}>", bytes([i + 1]) * 32, body, b"raw", 1),
             )
             ids.append(cur.fetchone()[0])
     conn.commit()

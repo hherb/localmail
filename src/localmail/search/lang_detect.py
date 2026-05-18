@@ -100,6 +100,9 @@ class LinguaDetector:
             return None
         self._ensure_built()
         assert self._detector is not None
+        # Lingua sees the stripped form so the length floor and the detector
+        # input agree — otherwise leading/trailing whitespace would inflate
+        # the apparent length above the floor.
         confidences = self._detector.compute_language_confidence_values(stripped)
         if not confidences:
             return None
@@ -136,10 +139,17 @@ def run_lang_detect_pass(
 
     Selects up to `batch` (default `cfg.body_lang_detect_batch_size`)
     messages with NULL `body_lang` and non-NULL `body_text`, runs the
-    detector on each body, and writes the result. Returns the number of
-    messages claimed (whether or not the detector produced a non-None
-    answer) so a `while pass: ...` backfill loop terminates when no rows
-    remain.
+    detector on each body, and writes the result.
+
+    Returns the number of rows whose `body_lang` transitioned from NULL to
+    a non-NULL value in this call — *not* the number of rows visited. Rows
+    the detector declined to label (too short, below confidence floor, or
+    a poison exception) stay NULL and are not counted, so a `while pass:
+    ...` backfill loop terminates once no row produced a new label in the
+    current sweep. Pre-existing NULL rows can still be retried by a
+    future call (e.g. after lowering `body_lang_min_confidence` or
+    swapping the detector); termination here means "no further progress
+    on this run," not "no rows are NULL."
 
     Per-message SAVEPOINT isolates detector exceptions: a single poison
     body lands a WARNING and stays NULL while the rest of the batch
@@ -148,6 +158,7 @@ def run_lang_detect_pass(
     matches the policy already in place for attachment chunking.
     """
     limit = batch if batch is not None else cfg.body_lang_detect_batch_size
+    updated = 0
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -172,6 +183,7 @@ def run_lang_detect_pass(
                         "UPDATE messages SET body_lang = %s WHERE id = %s",
                         (code, mid),
                     )
+                    updated += 1
                 cur.execute("RELEASE SAVEPOINT lang")
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT lang")
@@ -179,4 +191,4 @@ def run_lang_detect_pass(
                     "lang detection failed for message %s: %s", mid, exc,
                 )
     conn.commit()
-    return len(rows)
+    return updated

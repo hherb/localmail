@@ -25,6 +25,11 @@ class WhoamiResponse(BaseModel):
     user_id: str
 
 
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(req: LoginRequest, request: Request) -> TokenResponse:
     pool = request.app.state.pool
@@ -59,3 +64,16 @@ def refresh(request: Request, _user=Depends(get_authenticated_user)) -> TokenRes
 @router.get("/whoami", response_model=WhoamiResponse)
 def whoami(user=Depends(get_authenticated_user)) -> WhoamiResponse:
     return WhoamiResponse(username=user.username, user_id=str(user.id))
+
+
+@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+def change_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    user=Depends(get_authenticated_user),
+) -> Response:
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        auth_svc.change_password(conn, user.id, body.old_password, body.new_password)
+        conn.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

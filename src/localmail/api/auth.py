@@ -16,7 +16,12 @@ import psycopg
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError, VerificationError
 
-from localmail.api.errors import AuthenticationFailed, InvalidToken, RateLimited
+from localmail.api.errors import (
+    AuthenticationFailed,
+    InvalidToken,
+    RateLimited,
+    ValidationFailed,
+)
 
 _HASHER = PasswordHasher()
 
@@ -253,3 +258,44 @@ def refresh_token(conn: psycopg.Connection, token: str) -> tuple[str, datetime]:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM api_tokens WHERE token_sha256 = %s", (hash_token(token),))
     return new_token, expires_at
+
+
+def change_password(
+    conn: psycopg.Connection,
+    user_id: int,
+    old_password: str,
+    new_password: str,
+) -> None:
+    """Replace ``user_id``'s password after verifying ``old_password``.
+
+    Existing tokens are intentionally **not** revoked — a password rotation
+    should not log the user out of their current session (the bearer is
+    already proof-of-possession of the prior credential). The argon2 verify
+    here runs whether or not the user exists so an attacker holding a token
+    for a since-deleted user cannot enumerate that fact via response timing.
+
+    Caller commits.
+
+    Raises:
+      ValidationFailed if ``new_password`` is empty.
+      AuthenticationFailed if the user does not exist, is disabled, or
+        ``old_password`` does not match.
+    """
+    if not new_password:
+        raise ValidationFailed("new password must be non-empty")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT password_hash FROM api_users "
+            "WHERE id = %s AND disabled_at IS NULL",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    stored_hash = row[0] if row is not None else _DUMMY_PASSWORD_HASH
+    if not verify_password(old_password, stored_hash) or row is None:
+        raise AuthenticationFailed("old password is incorrect")
+    new_hash = hash_password(new_password)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_users SET password_hash = %s WHERE id = %s",
+            (new_hash, user_id),
+        )

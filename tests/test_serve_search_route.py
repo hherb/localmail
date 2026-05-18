@@ -63,7 +63,7 @@ def test_search_returns_results(db_dsn: str, api_token: str, db_conn, api_user) 
     body = r.json()
     assert len(body["results"]) == 1
     assert body["results"][0]["message_id"] == "7"
-    assert body["next_cursor"] == "tok-99"
+    assert body["next_cursor"] is None
 
 
 def test_search_validation_failure(db_dsn: str, api_token: str, db_conn, api_user) -> None:

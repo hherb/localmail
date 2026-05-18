@@ -37,7 +37,6 @@ class SearchRequest(BaseModel):
     query: str
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
-    cursor: str | None = None
 
 
 @router.post("")
@@ -58,7 +57,6 @@ def search_endpoint(
         free_text=req.query,
         filters=filters_dict,
         limit=req.limit,
-        cursor=req.cursor,
         allowed_account_ids=allowed,
         user_id=user.id,
     )

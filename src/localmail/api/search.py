@@ -121,7 +121,6 @@ def run_search(
     free_text: str,
     filters: dict[str, Any],
     limit: int,
-    cursor: str | None,
     allowed_account_ids: list[int],
     user_id: int,
 ) -> dict[str, Any]:
@@ -132,9 +131,9 @@ def run_search(
     intersection short-circuits to an empty result set without running any
     arm queries.
 
-    `cursor` is the previous response's `next_cursor` (which is the SearchPage
-    token). In v1 the cursor is informational only — the GUI does not paginate
-    deep; expanded paging lands with a future grow_pool/continue_page wrapper.
+    v1 does not paginate — ``next_cursor`` is always ``None`` (per the design
+    doc's "null when done" semantics). Paging will land via a follow-up that
+    wires ``Searcher.continue_page`` and reintroduces a cursor input field.
     """
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:
@@ -143,7 +142,7 @@ def run_search(
     page: SearchPage = searcher.search(query, page_size=limit, user_id=user_id)
     return {
         "results": [_to_api_result(r) for r in page.results],
-        "next_cursor": page.search_token,
+        "next_cursor": None,
         "total_estimate": None,
         "took_ms": page.timing_ms.get("total", 0.0),
     }

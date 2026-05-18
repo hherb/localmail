@@ -7,7 +7,9 @@ account-scoped route must show A-only data to Alice and B-only data to Bob.
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import psycopg
 from fastapi.testclient import TestClient
@@ -207,3 +209,89 @@ def _user_id(conn, username):
         row = cur.fetchone()
         assert row is not None
         return int(row[0])
+
+
+def _account_scoped_fake_searcher(account_to_hits: dict[int, list[dict[str, object]]]):
+    """Build a fake Searcher that honours the ACL filter in the query string.
+
+    The route layer is expected to inject ``account_id:N`` tokens derived from
+    the caller's grants (see :func:`localmail.api.search._scope_filters_by_acl`).
+    The fake parses those tokens out of the query string and only returns hits
+    whose account_id matches — so a wiring bug that drops the ACL would cause
+    cross-user leakage detectable by the test.
+    """
+    s = MagicMock()
+
+    def _search(query: str, **kwargs):
+        ids = {int(m) for m in re.findall(r"account_id:(\d+)", query)}
+        results = []
+        for aid in sorted(ids):
+            for spec in account_to_hits.get(aid, []):
+                r = MagicMock()
+                r.message_id = spec["message_id"]
+                r.account_id = aid
+                r.rank = 1
+                r.score = 0.9
+                r.rrf_score = 0.5
+                r.subject = spec["subject"]
+                r.from_addr = "a@x"
+                r.from_name = "A"
+                r.date_sent = None
+                r.snippet = "hit"
+                r.snippet_source = "body"
+                r.attachment_filename = None
+                r.matched_chunk_id = None
+                r.matched_chunk_table = "message_chunks"
+                results.append(r)
+        page = MagicMock()
+        page.results = results
+        page.search_token = "tok-fake"
+        page.timing_ms = {"total": 1.0}
+        return page
+
+    s.search.side_effect = _search
+    return s
+
+
+def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
+    """Alice and Bob have disjoint grants — neither can see the other's hits via /v1/search."""
+    ctx = _seed_alice_and_bob(db_conn, tmp_path)
+    hits_per_account = {
+        ctx["a_aid"]: [{"message_id": ctx["a_mid"], "subject": "alice secret"}],
+        ctx["b_aid"]: [{"message_id": ctx["b_mid"], "subject": "bob secret"}],
+    }
+    searcher = _account_scoped_fake_searcher(hits_per_account)
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=searcher))
+
+    r = c.post("/v1/search",
+               json={"query": "secret", "filters": {}, "limit": 20},
+               headers=_h(ctx["alice"]))
+    assert r.status_code == 200
+    seen = {int(hit["account"]["id"]) for hit in r.json()["results"]}
+    assert seen == {ctx["a_aid"]}
+
+    r = c.post("/v1/search",
+               json={"query": "secret", "filters": {}, "limit": 20},
+               headers=_h(ctx["bob"]))
+    assert r.status_code == 200
+    seen = {int(hit["account"]["id"]) for hit in r.json()["results"]}
+    assert seen == {ctx["b_aid"]}
+
+
+def test_search_intersects_account_ids_filter_with_acl(db_dsn, db_conn, tmp_path):
+    """Alice asking for bob's account explicitly gets an empty result, not a 403."""
+    ctx = _seed_alice_and_bob(db_conn, tmp_path)
+    hits_per_account = {
+        ctx["a_aid"]: [{"message_id": ctx["a_mid"], "subject": "alice doc"}],
+        ctx["b_aid"]: [{"message_id": ctx["b_mid"], "subject": "bob doc"}],
+    }
+    searcher = _account_scoped_fake_searcher(hits_per_account)
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=searcher))
+
+    r = c.post(
+        "/v1/search",
+        json={"query": "doc", "filters": {"account_ids": [str(ctx["b_aid"])]}, "limit": 20},
+        headers=_h(ctx["alice"]),
+    )
+    assert r.status_code == 200
+    assert r.json()["results"] == []

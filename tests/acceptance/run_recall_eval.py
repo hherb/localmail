@@ -39,6 +39,7 @@ from localmail.config import SearchConfig
 from localmail.db import apply_migrations, open_pool
 from localmail.search.embed_worker import run_embed_worker_once
 from localmail.search.embeddings import FastEmbedBackend
+from localmail.search.lang_detect import make_detector, run_lang_detect_pass
 from localmail.search.searcher import Searcher
 
 from tests._multilingual_corpus import build_corpus
@@ -102,14 +103,32 @@ def main() -> int:
 
         cfg = SearchConfig()
         backend = FastEmbedBackend(cfg)
+        lang_detector = make_detector(cfg)
         print("Running embed worker …", file=sys.stderr)
         passes = 0
         while True:
-            wrote = run_embed_worker_once(conn, cfg, backend)
+            wrote = run_embed_worker_once(
+                conn, cfg, backend, lang_detector=lang_detector,
+            )
             passes += 1
             if wrote == 0:
                 break
         print(f"  embed worker: {passes} pass(es)", file=sys.stderr)
+
+        if lang_detector is not None:
+            print("Running language detection pass …", file=sys.stderr)
+            detected = 0
+            while True:
+                n = run_lang_detect_pass(conn, cfg, lang_detector)
+                if n == 0:
+                    break
+                detected += n
+            with conn.cursor() as cur:
+                cur.execute("SELECT body_lang, count(*) FROM messages"
+                            " GROUP BY body_lang ORDER BY 2 DESC")
+                breakdown = cur.fetchall()
+            print(f"  lang detect: {detected} message(s), breakdown {breakdown}",
+                  file=sys.stderr)
 
     pool = open_pool(dsn)
     try:

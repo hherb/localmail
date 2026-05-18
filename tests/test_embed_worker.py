@@ -309,3 +309,52 @@ def test_embed_worker_embeds_attachment_chunks(db_conn) -> None:
         row = cur.fetchone()
         assert row is not None
         assert row[0] >= 1
+
+
+def test_run_embed_worker_populates_body_lang_when_detector_provided(db_conn):
+    """End-to-end: detector kwarg flows through and sets messages.body_lang."""
+    from localmail.search.lang_detect import FixedDetector
+
+    body = "anything"
+    mid = _seed_message(db_conn, body=body)
+    cfg = SearchConfig()
+    detector = FixedDetector({body: "de"})
+
+    run_embed_worker_once(db_conn, cfg, _StaticEmbedder(), lang_detector=detector)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT body_lang FROM messages WHERE id = %s", (mid,))
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "de"
+
+
+def test_run_embed_worker_leaves_body_lang_null_when_no_detector(db_conn):
+    """No detector → body_lang is never written (existing callers unaffected)."""
+    mid = _seed_message(db_conn, body="anything")
+    cfg = SearchConfig()
+
+    run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT body_lang FROM messages WHERE id = %s", (mid,))
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] is None
+
+
+def test_run_embed_worker_skips_lang_detect_when_disabled_in_cfg(db_conn):
+    """`body_lang_enabled=False` short-circuits the pass even if a detector is given."""
+    from localmail.search.lang_detect import FixedDetector
+
+    mid = _seed_message(db_conn, body="anything")
+    cfg = SearchConfig(body_lang_enabled=False)
+    detector = FixedDetector({"anything": "de"})
+
+    run_embed_worker_once(db_conn, cfg, _StaticEmbedder(), lang_detector=detector)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT body_lang FROM messages WHERE id = %s", (mid,))
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] is None

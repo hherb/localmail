@@ -78,6 +78,7 @@ class Daemon:
 
         if self.cfg.search.run_embed_worker:
             from localmail.search.embed_worker import run_embed_worker  # noqa: PLC0415
+            from localmail.search.lang_detect import make_detector  # noqa: PLC0415
 
             if self._embedding_backend_factory is None:
                 from localmail.search.embeddings import FastEmbedBackend  # noqa: PLC0415
@@ -85,17 +86,22 @@ class Daemon:
                 backend = FastEmbedBackend(self.cfg.search)
             else:
                 backend = self._embedding_backend_factory(self.cfg.search)
+            lang_detector = make_detector(self.cfg.search)
             embed_pool = open_pool(self._dsn)
             self._embed_pool = embed_pool
             t_embed = threading.Thread(
                 target=run_embed_worker,
                 args=(self._stop_event, embed_pool, self.cfg.search, backend),
+                kwargs={"lang_detector": lang_detector},
                 name="embed_worker",
                 daemon=True,
             )
             t_embed.start()
             self.threads.append(t_embed)
-            log.info("started embed_worker thread")
+            log.info(
+                "started embed_worker thread (lang_detector=%s)",
+                "on" if lang_detector is not None else "off",
+            )
 
         if self.cfg.search.run_extract_worker:
             import psycopg  # noqa: PLC0415

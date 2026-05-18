@@ -16,6 +16,7 @@ dependencies = [
     "icalendar>=6.0",
     "imapclient>=3.0",
     "keyring>=25",
+    "lingua-language-detector>=2.0",
     "odfpy>=1.4",
     "openpyxl>=3.1",
     "psycopg[binary,pool]>=3.2",

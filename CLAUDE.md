@@ -41,9 +41,11 @@ uv run localmail run             # foreground daemon (IDLE on INBOX + periodic p
 uv run localmail list-failed [--account N] [--limit K]   # show messages sync skipped
 uv run localmail retry-failed [--account N]    # re-attempt every failed message
 uv run localmail extract-backfill              # one-shot extraction backfill for all blobs
+uv run localmail lang-backfill                 # one-shot body_lang detection for existing rows
 uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
 uv run localmail retry-failed-extractions      # re-attempt every failed extraction
-# search-status also reports Phase 2 attachment_text/attachment_chunks counts
+# search-status reports Phase 2 attachment_text/attachment_chunks counts and
+# body_lang_populated / body_lang_pending
 ```
 
 GUI server (Phase: gui-server):
@@ -87,6 +89,7 @@ src/localmail/
     embeddings.py   # FastEmbedBackend + EmbeddingBackend ABC
     extractor.py    # LightweightExtractor (11 formats) + ExtractorBackend ABC; DoclingExtractor via [extraction] extra
     extract_worker.py # run_extract_worker_once, run_extract_worker (background thread)
+    lang_detect.py  # LinguaDetector + FixedDetector + run_lang_detect_pass for messages.body_lang
     page_cache.py   # in-process LRU cache for paginated result pools
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC

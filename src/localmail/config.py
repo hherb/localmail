@@ -127,6 +127,26 @@ class SearchConfig(BaseModel):
     # chunking pass — chunking is cheap relative to embedding.
     embed_worker_chunk_batch_size: int = 50
 
+    # --- Phase 1+: per-message body language detection ---
+    # Populates `messages.body_lang` (ISO 639-1 lowercase). Required for the
+    # `lang:` search DSL token / `/v1/search?languages=` filter to return any
+    # rows. Embed worker calls the detector on its sweep when one is provided;
+    # `localmail lang-backfill` runs the same pass standalone for the archive.
+    body_lang_enabled: bool = True
+    # Minimum top-language probability. Lingua's confidence values sum to 1.0
+    # over the active language set; below this threshold, store NULL ("unknown")
+    # rather than guess. 0.65 keeps de/en/es/ja/no fixtures correct while
+    # rejecting noise from very short / multilingual bodies.
+    body_lang_min_confidence: float = 0.65
+    # Bodies shorter than this many characters are skipped — single-line bodies
+    # are too short for reliable detection in any language.
+    body_lang_min_text_chars: int = 20
+    # Use lingua's low-accuracy mode (~100MB resident vs ~1GB). Email bodies
+    # are usually long enough that the accuracy hit is not measurable.
+    body_lang_low_accuracy: bool = True
+    # How many messages to claim per detection pass.
+    body_lang_detect_batch_size: int = 200
+
     # --- Phase 2: extraction worker ---
     # Controls the background thread that extracts text from attachment blobs and
     # writes the results to attachment_text for Arm 4 retrieval.

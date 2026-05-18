@@ -35,6 +35,7 @@ import psycopg
 from localmail.config import SearchConfig
 from localmail.search.chunking import MessageRow, chunk_attachment_text, chunk_message
 from localmail.search.embeddings import EmbeddingBackend
+from localmail.search.lang_detect import LanguageDetector, run_lang_detect_pass
 
 _CHUNK_TABLES = frozenset({"message_chunks", "attachment_chunks"})
 
@@ -335,6 +336,8 @@ def run_embed_worker_once(
     conn: psycopg.Connection,
     cfg: SearchConfig,
     backend: EmbeddingBackend,
+    *,
+    lang_detector: LanguageDetector | None = None,
 ) -> int:
     """One sweep: chunk pending messages + attachments, then embed pending chunks.
 
@@ -343,11 +346,15 @@ def run_embed_worker_once(
       2. _chunk_attachments_lazily — fills attachment_chunks for unchunked
          attachment_text rows (Phase 2). Sentinel rows (extracted_text='')
          produce zero chunks and are silently skipped.
-      3. Embed pending message_chunks rows.
-      4. Embed pending attachment_chunks rows.
+      3. run_lang_detect_pass — populates messages.body_lang for messages
+         that don't yet have it (only when `lang_detector` is provided).
+      4. Embed pending message_chunks rows.
+      5. Embed pending attachment_chunks rows.
 
     Returns total number of chunks newly embedded across both tables. Used both
     by the background daemon thread and the `localmail embed-backfill` CLI.
+    Language detection happens silently as a side effect; its row count is not
+    folded into the return value because it's orthogonal to the embedding queue.
 
     Batch-level backend errors are logged and the transaction is rolled back so
     the FOR UPDATE locks release — chunks get re-claimed next sweep. Operators
@@ -357,6 +364,8 @@ def run_embed_worker_once(
     chunk_batch = max(cfg.embed_worker_batch_size, cfg.embed_worker_chunk_batch_size)
     _chunk_messages_lazily(conn, cfg, batch=chunk_batch)
     _chunk_attachments_lazily(conn, cfg, batch=chunk_batch)
+    if lang_detector is not None and cfg.body_lang_enabled:
+        run_lang_detect_pass(conn, cfg, lang_detector)
     embedded_msg = _embed_table(conn, cfg, backend, "message_chunks")
     embedded_att = _embed_table(conn, cfg, backend, "attachment_chunks")
     return embedded_msg + embedded_att
@@ -367,6 +376,8 @@ def run_embed_worker(
     pool,
     cfg: SearchConfig,
     backend: EmbeddingBackend,
+    *,
+    lang_detector: LanguageDetector | None = None,
 ) -> None:
     """Background loop: sleep, sweep, sleep. Exits when `stop` is set.
 
@@ -378,7 +389,9 @@ def run_embed_worker(
     while not stop.is_set():
         try:
             with pool.connection() as conn:
-                wrote = run_embed_worker_once(conn, cfg, backend)
+                wrote = run_embed_worker_once(
+                    conn, cfg, backend, lang_detector=lang_detector,
+                )
         except Exception as exc:  # noqa: BLE001
             log.error("embed_worker sweep error: %s", exc, exc_info=True)
             wrote = 0

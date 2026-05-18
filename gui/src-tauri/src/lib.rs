@@ -23,6 +23,11 @@ fn greet(name: &str) -> Greeting {
     }
 }
 
+#[tauri::command]
+fn quit_app_cmd(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // macOS-specific: Tauri's event loop runs inside Objective-C callbacks
@@ -63,6 +68,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            quit_app_cmd,
             crate::commands::connect::probe_server_cmd,
             crate::commands::connect::confirm_trust_cmd,
             crate::commands::auth::login_cmd,

@@ -3,6 +3,11 @@
   import { extractDslFilters } from "../lib/filter_parse";
   import { search } from "../lib/stores/search.svelte";
 
+  interface Props {
+    onClose?: () => void;
+  }
+  let { onClose }: Props = $props();
+
   // Seed from a merge of structured filters (already on the search store)
   // and any DSL tokens typed into the search bar — so opening the popover
   // after typing `from:anna` shows "anna" in the From field. DSL tokens
@@ -39,6 +44,7 @@
     const { freeText } = extractDslFilters(search.snapshot.query);
     search.setQuery(freeText);
     await search.submit();
+    onClose?.();
   }
 
   function clear() {
@@ -53,6 +59,15 @@
 </script>
 
 <form class="form" onsubmit={(e) => { e.preventDefault(); void apply(); }}>
+  <div class="header">
+    <span class="title">Filters</span>
+    <button
+      type="button"
+      class="close-x"
+      aria-label="Close filters"
+      onclick={() => onClose?.()}
+    >×</button>
+  </div>
   <label for="fp-from">From</label>
   <input id="fp-from" bind:value={local.from} placeholder="anna@" />
   <label for="fp-to">To</label>
@@ -117,6 +132,12 @@
 
 <style>
   .form { display: flex; flex-direction: column; gap: 8px; padding: 12px; min-width: 260px; }
+  .header { display: flex; justify-content: space-between; align-items: center;
+            margin: -4px -4px 4px -4px; }
+  .title { font-weight: 600; font-size: 13px; color: #333; }
+  .close-x { background: none; border: none; font-size: 18px; line-height: 1;
+             cursor: pointer; color: #666; padding: 2px 6px; border-radius: 3px; }
+  .close-x:hover { background: #f0f0f0; color: #000; }
   label { font-size: 12px; color: #555; }
   input:not([type="checkbox"]) { padding: 3px 6px; border: 1px solid #ccc; border-radius: 3px; }
   .field { display: flex; gap: 4px; align-items: center; }

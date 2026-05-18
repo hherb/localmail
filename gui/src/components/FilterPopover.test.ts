@@ -75,4 +75,23 @@ describe("FilterPopover", () => {
     await fireEvent.click(screen.getByRole("button", { name: /clear language/i }));
     expect((screen.getByLabelText(/^language$/i) as HTMLInputElement).value).toBe("");
   });
+
+  it("Apply invokes the onClose callback", async () => {
+    const onClose = vi.fn();
+    render(FilterPopover, { props: { onClose } });
+    await fireEvent.click(screen.getByRole("button", { name: /apply/i }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("header × button invokes onClose without applying or submitting", async () => {
+    const onClose = vi.fn();
+    render(FilterPopover, { props: { onClose } });
+    const fromInput = screen.getByLabelText(/^from$/i) as HTMLInputElement;
+    await fireEvent.input(fromInput, { target: { value: "anna" } });
+    await fireEvent.click(screen.getByRole("button", { name: /close filters/i }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(search.snapshot.filters.from).toBe("");
+    const { runSearch } = await import("../lib/tauri");
+    expect(runSearch).not.toHaveBeenCalled();
+  });
 });

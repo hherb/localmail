@@ -40,4 +40,22 @@ describe("SearchBar", () => {
     const { runSearch } = await import("../lib/tauri");
     expect(runSearch).toHaveBeenCalledOnce();
   });
+
+  it("toggling the Filters button opens then closes the popover", async () => {
+    const { container } = render(SearchBar);
+    const filtersBtn = screen.getByRole("button", { name: /filters/i });
+    expect(container.querySelector('[role="dialog"]')).toBeFalsy();
+    await fireEvent.click(filtersBtn);
+    expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+    await fireEvent.click(filtersBtn);
+    expect(container.querySelector('[role="dialog"]')).toBeFalsy();
+  });
+
+  it("pressing Escape closes the popover when open", async () => {
+    const { container } = render(SearchBar);
+    await fireEvent.click(screen.getByRole("button", { name: /filters/i }));
+    expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+    await fireEvent.keyDown(window, { key: "Escape" });
+    expect(container.querySelector('[role="dialog"]')).toBeFalsy();
+  });
 });

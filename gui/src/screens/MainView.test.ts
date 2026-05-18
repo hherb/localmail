@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render } from "@testing-library/svelte";
+import { fireEvent, render } from "@testing-library/svelte";
 
 // jsdom in this project's vitest setup does not provide window.localStorage,
 // so install a minimal in-memory shim before any store module that reads it
@@ -132,5 +132,15 @@ describe("MainView", () => {
     // DEFAULT_LEFT_WIDTH_PX = 220, DEFAULT_MIDDLE_WIDTH_PX = 340 (from splitter.ts).
     expect(style).toContain("220px");
     expect(style).toContain("340px");
+  });
+
+  it("Settings button opens the SettingsScreen overlay and × closes it", async () => {
+    forceLoggedIn();
+    const { container, getByTestId, getByLabelText } = render(MainView);
+    expect(container.querySelector('[role="dialog"]')).toBeFalsy();
+    await fireEvent.click(getByTestId("open-settings"));
+    expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+    await fireEvent.click(getByLabelText(/^close$/i));
+    expect(container.querySelector('[role="dialog"]')).toBeFalsy();
   });
 });

@@ -19,6 +19,7 @@
   import ActiveFilterChips from "../components/ActiveFilterChips.svelte";
   import Splitter from "../components/Splitter.svelte";
   import VersionGate from "../components/VersionGate.svelte";
+  import SettingsScreen from "./SettingsScreen.svelte";
   import {
     DEFAULT_LEFT_WIDTH_PX,
     DEFAULT_MIDDLE_WIDTH_PX,
@@ -33,6 +34,7 @@
   const PANE_WIDTHS_KEY = "localmail.gui.paneWidths";
 
   let pending: boolean = $state(false);
+  let settingsOpen: boolean = $state(false);
   let widths: PaneWidths = $state(loadInitialWidths());
   let containerWidth: number = $state(
     typeof window !== "undefined" ? window.innerWidth : 1024,
@@ -127,10 +129,18 @@
           <li class="cap" class:on={snap.capabilities.threading}>threading</li>
           <li class="cap" class:on={snap.capabilities.send}>send</li>
         </ul>
+        <button
+          aria-label="Settings"
+          title="Settings"
+          data-testid="open-settings"
+          onclick={() => (settingsOpen = true)}
+          disabled={pending}
+        >⚙</button>
         <button onclick={onRefresh} disabled={pending}>Refresh token</button>
         <button onclick={onLogout} disabled={pending}>Log out</button>
       </div>
     </header>
+    <SettingsScreen open={settingsOpen} onClose={() => (settingsOpen = false)} />
     <SearchBar />
     <ActiveFilterChips />
     <main

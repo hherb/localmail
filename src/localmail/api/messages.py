@@ -13,13 +13,20 @@ def get_message(
     conn: psycopg.Connection,
     message_id: int,
     *,
+    allowed_account_ids: list[int],
     full_headers: bool = False,
 ) -> dict[str, Any]:
     """Return a structured representation of one message.
 
+    Returns `NotFound` if the message does not exist *or* the caller is not
+    permitted to read its account — these two cases share the same 404 so
+    permission state cannot be enumerated through the API.
+
     HTML body is server-sanitized; cid: image refs are rewritten to
     /v1/attachments/<sha256> when the corresponding attachment is present.
     """
+    if not allowed_account_ids:
+        raise NotFound(f"message {message_id} not found")
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -29,9 +36,9 @@ def get_message(
                    a.name AS account_name, a.email_address AS account_address
               FROM messages m
               JOIN accounts a ON a.id = m.account_id
-             WHERE m.id = %s
+             WHERE m.id = %s AND m.account_id = ANY(%s)
             """,
-            (message_id,),
+            (message_id, allowed_account_ids),
         )
         row = cur.fetchone()
         if row is None:
@@ -78,10 +85,21 @@ def get_message(
     return msg
 
 
-def get_message_raw(conn: psycopg.Connection, message_id: int) -> bytes:
-    """Return the raw RFC822 bytes for a message."""
+def get_message_raw(
+    conn: psycopg.Connection,
+    message_id: int,
+    *,
+    allowed_account_ids: list[int],
+) -> bytes:
+    """Return the raw RFC822 bytes for a message; 404 if outside the caller's ACL."""
+    if not allowed_account_ids:
+        raise NotFound(f"message {message_id} not found")
     with conn.cursor() as cur:
-        cur.execute("SELECT raw_bytes FROM messages WHERE id = %s", (message_id,))
+        cur.execute(
+            "SELECT raw_bytes FROM messages "
+            "WHERE id = %s AND account_id = ANY(%s)",
+            (message_id, allowed_account_ids),
+        )
         row = cur.fetchone()
     if row is None:
         raise NotFound(f"message {message_id} not found")

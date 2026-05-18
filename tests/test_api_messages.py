@@ -71,10 +71,13 @@ def _seed_msg(conn: psycopg.Connection, **overrides) -> int:
         return msg_id
 
 
+_ANY_ACCOUNT = list(range(1, 1000))
+
+
 def test_get_message_returns_compact_headers(db_conn: psycopg.Connection) -> None:
     mid = _seed_msg(db_conn)
     db_conn.commit()
-    msg = get_message(db_conn, mid, full_headers=False)
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, full_headers=False)
     assert msg["id"] == str(mid)
     assert msg["subject"] == "hello"
     assert msg["from"]["address"] == "anna@example.com"
@@ -90,23 +93,23 @@ def test_get_message_returns_compact_headers(db_conn: psycopg.Connection) -> Non
 def test_get_message_full_headers_includes_all(db_conn: psycopg.Connection) -> None:
     mid = _seed_msg(db_conn)
     db_conn.commit()
-    msg = get_message(db_conn, mid, full_headers=True)
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, full_headers=True)
     assert msg["headers"]["From"] == "anna@example.com"
     assert msg["headers"]["Date"].startswith("Mon, 4 Mar")
 
 
 def test_get_message_not_found_raises(db_conn: psycopg.Connection) -> None:
     with pytest.raises(NotFound):
-        get_message(db_conn, 999999)
+        get_message(db_conn, 999999, allowed_account_ids=_ANY_ACCOUNT)
 
 
 def test_get_message_raw_returns_bytes(db_conn: psycopg.Connection) -> None:
     mid = _seed_msg(db_conn)
     db_conn.commit()
-    raw = get_message_raw(db_conn, mid)
+    raw = get_message_raw(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
     assert raw.startswith(b"From: anna")
 
 
 def test_get_message_raw_not_found_raises(db_conn: psycopg.Connection) -> None:
     with pytest.raises(NotFound):
-        get_message_raw(db_conn, 999999)
+        get_message_raw(db_conn, 999999, allowed_account_ids=_ANY_ACCOUNT)

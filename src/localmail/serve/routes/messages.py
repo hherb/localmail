@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
+from localmail.api.acl import allowed_account_ids
 from localmail.api.messages import get_message, get_message_raw
 from localmail.serve.middleware import get_authenticated_user
 
@@ -16,20 +17,26 @@ def detail(
     message_id: int,
     request: Request,
     headers: str = Query("compact"),
-    _user=Depends(get_authenticated_user),
+    user=Depends(get_authenticated_user),
 ) -> dict[str, Any]:
     pool = request.app.state.pool
     with pool.connection() as conn:
-        return get_message(conn, message_id, full_headers=(headers == "full"))
+        allowed = allowed_account_ids(conn, user.id)
+        return get_message(
+            conn, message_id,
+            allowed_account_ids=allowed,
+            full_headers=(headers == "full"),
+        )
 
 
 @router.get("/{message_id}/raw")
 def raw(
     message_id: int,
     request: Request,
-    _user=Depends(get_authenticated_user),
+    user=Depends(get_authenticated_user),
 ) -> Response:
     pool = request.app.state.pool
     with pool.connection() as conn:
-        body = get_message_raw(conn, message_id)
+        allowed = allowed_account_ids(conn, user.id)
+        body = get_message_raw(conn, message_id, allowed_account_ids=allowed)
     return Response(content=body, media_type="message/rfc822")

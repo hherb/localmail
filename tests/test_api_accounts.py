@@ -52,14 +52,17 @@ def _seed_message(conn: psycopg.Connection, account_id: int, mailbox_id: int) ->
         return msg_row[0]
 
 
+_ANY_ACCOUNT = list(range(1, 1000))
+
+
 def test_list_accounts_empty(db_conn: psycopg.Connection) -> None:
-    assert list_accounts(db_conn) == []
+    assert list_accounts(db_conn, allowed_account_ids=_ANY_ACCOUNT) == []
 
 
 def test_list_accounts_returns_basic_fields(db_conn: psycopg.Connection) -> None:
     aid = _seed_account(db_conn, "gmail-primary", "horst@gmail.com")
     db_conn.commit()
-    accounts = list_accounts(db_conn)
+    accounts = list_accounts(db_conn, allowed_account_ids=[aid])
     assert len(accounts) == 1
     a = accounts[0]
     assert a["id"] == str(aid)
@@ -75,7 +78,7 @@ def test_list_accounts_message_count(db_conn: psycopg.Connection) -> None:
     _seed_message(db_conn, aid, mid)
     _seed_message(db_conn, aid, mid)
     db_conn.commit()
-    a = list_accounts(db_conn)[0]
+    a = list_accounts(db_conn, allowed_account_ids=[aid])[0]
     assert a["message_count"] == 2
 
 
@@ -85,7 +88,7 @@ def test_list_folders_returns_per_mailbox_counts(db_conn: psycopg.Connection) ->
     sent = _seed_mailbox(db_conn, aid, "Sent", flags=r"\Sent")
     _seed_message(db_conn, aid, inbox)
     db_conn.commit()
-    folders = list_folders(db_conn, aid)
+    folders = list_folders(db_conn, aid, allowed_account_ids=[aid])
     by_name = {f["name"]: f for f in folders}
     assert by_name["INBOX"]["message_count"] == 1
     assert by_name["Sent"]["message_count"] == 0
@@ -93,4 +96,4 @@ def test_list_folders_returns_per_mailbox_counts(db_conn: psycopg.Connection) ->
 
 
 def test_list_folders_unknown_account_returns_empty(db_conn: psycopg.Connection) -> None:
-    assert list_folders(db_conn, 99999) == []
+    assert list_folders(db_conn, 99999, allowed_account_ids=_ANY_ACCOUNT) == []

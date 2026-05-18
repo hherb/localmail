@@ -713,10 +713,8 @@ def add_api_user(
 ) -> None:
     """Create a new API user. Password is hashed with argon2id.
 
-    Note: until the per-account ACL lands, every API user has read access to
-    every account and message in the archive. Adding a second user is
-    therefore a sharing decision, not a permissions one — a warning prints
-    when that happens.
+    Newly-created users have no account grants — their `/v1/*` calls will
+    return empty lists and 404s until ``localmail grant-account`` is used.
     """
     from localmail.api.auth import create_user
     if password_stdin and password_opt is not None:
@@ -738,24 +736,18 @@ def add_api_user(
     else:
         password = click.prompt("Password", hide_input=True, confirmation_prompt=True)
     with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM api_users")
-            row = cur.fetchone()
-            assert row is not None
-            existing = int(row[0])
         try:
             uid = create_user(conn, username, password)
             conn.commit()
         except psycopg.errors.UniqueViolation:
             raise click.ClickException(f"user {username!r} already exists")
     click.echo(f"created user {username!r} (id={uid})")
-    if existing >= 1:
-        click.echo(
-            f"warning: {existing + 1} API users now exist. The current build has "
-            f"no per-account ACL, so {username!r} can read every account's mail. "
-            f"Only add multiple users if that is intended.",
-            err=True,
-        )
+    click.echo(
+        f"note: no account grants yet. Use "
+        f"`localmail grant-account {username} <account-name>` to give this "
+        f"user read access to mail.",
+        err=True,
+    )
 
 
 @main.command("remove-api-user")
@@ -772,18 +764,92 @@ def remove_api_user(ctx: click.Context, username: str) -> None:
 
 
 @main.command("list-api-users")
+@click.option("--with-grants", is_flag=True, default=False,
+              help="Show each user's account grants below their name.")
 @click.pass_context
-def list_api_users(ctx: click.Context) -> None:
+def list_api_users(ctx: click.Context, with_grants: bool) -> None:
     """List configured API users (and whether each is disabled)."""
+    from localmail.api.acl import grants_for_user
     with psycopg.connect(_dsn_from_ctx(ctx)) as conn, conn.cursor() as cur:
-        cur.execute("SELECT username, disabled_at FROM api_users ORDER BY username")
+        cur.execute("SELECT id, username, disabled_at FROM api_users ORDER BY username")
         rows = cur.fetchall()
-    if not rows:
-        click.echo("(no users)")
-        return
-    for username, disabled_at in rows:
-        marker = " [disabled]" if disabled_at else ""
-        click.echo(f"{username}{marker}")
+        if not rows:
+            click.echo("(no users)")
+            return
+        for uid, username, disabled_at in rows:
+            marker = " [disabled]" if disabled_at else ""
+            click.echo(f"{username}{marker}")
+            if with_grants:
+                grants = grants_for_user(conn, uid)
+                if not grants:
+                    click.echo("  (no grants)")
+                    continue
+                for _aid, name, granted_at in grants:
+                    click.echo(f"  {name} (granted {granted_at.date()})")
+
+
+@main.command("grant-account")
+@click.argument("username")
+@click.argument("account_name")
+@click.pass_context
+def grant_account_cmd(ctx: click.Context, username: str, account_name: str) -> None:
+    """Grant USERNAME read access to ACCOUNT_NAME. Idempotent."""
+    from localmail.api.acl import (
+        grant_account,
+        resolve_account_id_by_name,
+        resolve_user_id_by_username,
+        user_has_account,
+    )
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        uid = resolve_user_id_by_username(conn, username)
+        if uid is None:
+            raise click.ClickException(f"no such user: {username!r}")
+        aid = resolve_account_id_by_name(conn, account_name)
+        if aid is None:
+            raise click.ClickException(f"no such account: {account_name!r}")
+        already = user_has_account(conn, uid, aid)
+        grant_account(conn, uid, aid)
+        conn.commit()
+    if already:
+        click.echo(
+            f"user {username!r} already had access to account {account_name!r} "
+            f"(id={aid}); no change"
+        )
+    else:
+        click.echo(
+            f"granted user {username!r} access to account {account_name!r} (id={aid})"
+        )
+
+
+@main.command("revoke-account")
+@click.argument("username")
+@click.argument("account_name")
+@click.pass_context
+def revoke_account_cmd(ctx: click.Context, username: str, account_name: str) -> None:
+    """Revoke USERNAME's access to ACCOUNT_NAME."""
+    from localmail.api.acl import (
+        resolve_account_id_by_name,
+        resolve_user_id_by_username,
+        revoke_account,
+    )
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        uid = resolve_user_id_by_username(conn, username)
+        if uid is None:
+            raise click.ClickException(f"no such user: {username!r}")
+        aid = resolve_account_id_by_name(conn, account_name)
+        if aid is None:
+            raise click.ClickException(f"no such account: {account_name!r}")
+        affected = revoke_account(conn, uid, aid)
+        conn.commit()
+    if affected == 0:
+        click.echo(
+            f"user {username!r} did not have access to account {account_name!r} "
+            f"(id={aid}); no change"
+        )
+    else:
+        click.echo(
+            f"revoked user {username!r} access to account {account_name!r} (id={aid})"
+        )
 
 
 @main.command("rotate-tls")

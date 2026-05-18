@@ -38,8 +38,11 @@ def _seed_msg(conn: psycopg.Connection) -> int:
     return mid
 
 
-def test_get_message(db_dsn: str, api_token: str, db_conn) -> None:
+def test_get_message(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
     mid = _seed_msg(db_conn)
+    grant_alice_all_accounts()
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
     r = c.get(f"/v1/messages/{mid}", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200
@@ -48,8 +51,11 @@ def test_get_message(db_dsn: str, api_token: str, db_conn) -> None:
     assert "<p>hi" in body["body_html"]
 
 
-def test_get_message_full_headers(db_dsn: str, api_token: str, db_conn) -> None:
+def test_get_message_full_headers(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
     mid = _seed_msg(db_conn)
+    grant_alice_all_accounts()
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
     r = c.get(
         f"/v1/messages/{mid}?headers=full",
@@ -65,8 +71,11 @@ def test_get_message_not_found(db_dsn: str, api_token: str) -> None:
     assert r.status_code == 404
 
 
-def test_get_raw(db_dsn: str, api_token: str, db_conn) -> None:
+def test_get_raw(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
     mid = _seed_msg(db_conn)
+    grant_alice_all_accounts()
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
     r = c.get(f"/v1/messages/{mid}/raw", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200

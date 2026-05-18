@@ -140,7 +140,8 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
         free_text="bus",
         filters={},
         limit=20,
-        cursor=None,
+        allowed_account_ids=[1],
+        user_id=99,
     )
 
     fake_searcher.search.assert_called_once()
@@ -151,4 +152,5 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     assert r["score"] == 0.91
     assert r["matched_arms"]  # non-empty
     assert out["took_ms"] == 12.5
-    assert out["next_cursor"] == "tok-1"
+    # v1 does not paginate — next_cursor is always None until paging is wired.
+    assert out["next_cursor"] is None

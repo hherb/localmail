@@ -74,9 +74,12 @@ pub fn run() {
             crate::commands::accounts::list_folders_cmd,
             crate::commands::changes::list_recent_messages_cmd,
             crate::commands::messages::get_message_cmd,
+            crate::commands::full_headers::get_message_full_headers_cmd,
+            crate::commands::raw_message::get_message_raw_cmd,
             crate::commands::search::run_search_cmd,
             crate::commands::attachments::download_attachment_cmd,
             crate::commands::attachments::fetch_attachment_bytes_cmd,
+            crate::commands::version::get_version_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

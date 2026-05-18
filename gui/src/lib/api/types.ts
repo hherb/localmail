@@ -83,6 +83,10 @@ export interface MessageDetail {
   attachments: MessageAttachment[];
   account: MessageDetailAccount;
   folders: MessageFolder[];
+  // Populated only when the caller requested ?headers=full (see
+  // src/lib/api/full_headers.ts). Flat map of raw header name → value;
+  // headers that occurred multiple times come back as a string[].
+  headers?: Record<string, string | string[]> | null;
 }
 
 /**

@@ -16,7 +16,7 @@
 import { emptyFilters, type SearchFiltersUI } from "./api/search";
 
 const POPOVER_OPERATORS = new Set([
-  "from", "to", "subject", "after", "before", "has",
+  "from", "to", "subject", "after", "before", "has", "lang",
 ]);
 
 function tokenize(s: string): string[] {
@@ -61,8 +61,20 @@ export function extractDslFilters(query: string): ExtractedFilters {
         if (op === "from") { filters.from = val; continue; }
         if (op === "to") { filters.to = val; continue; }
         if (op === "subject") { filters.subject = val; continue; }
-        if (op === "after") { filters.after = val; continue; }
-        if (op === "before") { filters.before = val; continue; }
+        if (op === "after") {
+          filters.after = val;
+          filters.dateFrom = val;
+          continue;
+        }
+        if (op === "before") {
+          filters.before = val;
+          filters.dateTo = val;
+          continue;
+        }
+        if (op === "lang") {
+          filters.language = val.toLowerCase();
+          continue;
+        }
         if (op === "has" && val.toLowerCase() === "attachment") {
           filters.hasAttachment = true;
           continue;
@@ -80,8 +92,13 @@ export function formatDslTokens(f: SearchFiltersUI): string {
   if (f.from) parts.push(`from:"${f.from}"`);
   if (f.to) parts.push(`to:"${f.to}"`);
   if (f.subject) parts.push(`subject:"${f.subject}"`);
-  if (f.after) parts.push(`after:${f.after}`);
-  if (f.before) parts.push(`before:${f.before}`);
+  // Prefer explicit `after`/`before` if set; otherwise fall back to dateFrom/dateTo
+  // (the popover uses dateFrom/dateTo; the legacy DSL field is `after`/`before`).
+  const afterVal = f.after || f.dateFrom || "";
+  const beforeVal = f.before || f.dateTo || "";
+  if (afterVal) parts.push(`after:${afterVal}`);
+  if (beforeVal) parts.push(`before:${beforeVal}`);
+  if (f.language) parts.push(`lang:${f.language}`);
   if (f.hasAttachment === true) parts.push("has:attachment");
   return parts.join(" ");
 }

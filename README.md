@@ -53,6 +53,8 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 
 ## CLI
 
+### Sync & accounts
+
 | Command | Purpose |
 | --- | --- |
 | `localmail init-db` | Apply pending schema migrations. Idempotent. |
@@ -64,6 +66,29 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | `localmail run [--log-level …] [--no-ssl]` | Foreground daemon: per-account IDLE thread on INBOX + periodic poll thread for other folders. SIGTERM/SIGINT shut down cleanly. |
 | `localmail list-failed [--account NAME] [--limit K]` | Show messages that sync skipped due to errors. |
 | `localmail retry-failed [--account NAME]` | Re-attempt every failed message. Successful retries move from `failed_messages` to `messages`. |
+
+### Search backfill & status
+
+| Command | Purpose |
+| --- | --- |
+| `localmail embed-backfill` | Drain the message-chunk embedding queue in the foreground; exit when empty. |
+| `localmail extract-backfill [--no-progress]` | Drain the attachment-extraction queue (Phase 2): extract text from PDFs, DOCX, etc. |
+| `localmail search "QUERY" [--format text\|json]` | Hybrid lexical + vector search over the local archive (see [Search](#search) below). |
+| `localmail search-status [--format text\|json]` | Report chunk/extraction backlog and failure counts for Phase 1 and Phase 2. |
+| `localmail list-failed-embeddings` | Show recent `failed_embeddings` rows. |
+| `localmail retry-failed-embeddings` | Clear `failed_embeddings` so the embed worker re-picks them up. |
+| `localmail list-failed-extractions` | Show recent `failed_extractions` rows. |
+| `localmail retry-failed-extractions` | Clear `failed_extractions` so the extract worker re-picks them up. |
+
+### GUI server (HTTPS API)
+
+| Command | Purpose |
+| --- | --- |
+| `localmail serve [--bind 127.0.0.1] [--port 8443] [--tls-cert PATH] [--tls-key PATH] [--no-tls]` | Run the HTTPS API server. TLS is mandatory unless `--bind 127.0.0.1 --no-tls`. |
+| `localmail add-api-user USERNAME [--password TEXT \| --password-stdin]` | Create an API user (argon2id-hashed password). |
+| `localmail list-api-users` | List configured API users. |
+| `localmail remove-api-user USERNAME` | Delete an API user and all its tokens. |
+| `localmail rotate-tls --cert PATH --key PATH [--hostname H] [--force]` | Generate (or regenerate) a self-signed TLS cert + key. |
 
 ## Gmail OAuth2 setup
 
@@ -155,11 +180,52 @@ Successful retries delete the `failed_messages` row and insert the message
 into `messages` via the same code path live sync uses. Persistent failures
 bump `retry_count` and `last_retry_at`.
 
+## GUI server
+
+`localmail serve` exposes the local archive over a small HTTPS API consumed
+by the desktop client (and any other downstream tool that wants a network
+boundary instead of direct DB access). Routes live under `/v1/`:
+`auth`, `accounts`, `messages`, `attachments`, `changes`, `search`,
+`capabilities`, `version`, `health`.
+
+```bash
+# 1. One-time: create a TLS cert (self-signed is fine for localhost / LAN).
+uv run localmail rotate-tls \
+  --cert ~/.config/localmail/tls.crt \
+  --key  ~/.config/localmail/tls.key
+
+# 2. Create an API user (argon2id-hashed password in the DB).
+uv run localmail add-api-user alice
+
+# 3. Run the server.
+uv run localmail serve \
+  --bind 127.0.0.1 --port 8443 \
+  --tls-cert ~/.config/localmail/tls.crt \
+  --tls-key  ~/.config/localmail/tls.key
+```
+
+`--bind 0.0.0.0` requires TLS (refused otherwise). `--no-tls` is only
+honoured on `127.0.0.1` for local dev.
+
+## GUI client
+
+A Tauri 2 + Svelte 5 desktop client lives in [gui/](gui/). It talks to a
+running `localmail serve` instance over HTTPS and provides search,
+message-reading, attachment download, and connection / account management.
+See [gui/README.md](gui/README.md) for develop / build instructions.
+
+```bash
+cd gui
+npm install
+npm run tauri dev          # development window with hot reload
+npm run tauri build        # produces a platform-specific release bundle
+```
+
 ## Development
 
 ```bash
 uv sync
-uv run pytest                # full suite (~56 tests); skipped if no Postgres
+uv run pytest                # full suite (~400 tests); skipped if no Postgres
 uv run localmail --help
 ```
 
@@ -168,21 +234,34 @@ at `LOCALMAIL_TEST_DSN` (defaults to
 `postgresql://localmail:local%40%40mail@localhost:5532/localmail_test` — a
 separate database from the live archive, so tests can't clobber real data).
 
-## Search (Phase 1)
+## Search
 
 `localmail` ships a hybrid lexical (tsvector) + vector (pgvector) search
 subsystem. Once initial backfill completes, you can search the local archive
-from the CLI or from Python.
+from the CLI, from Python, or via the GUI / HTTPS API.
+
+- **Phase 1** — message-body hybrid search (RRF fuse of three retrieval arms,
+  followed by a cross-encoder rerank).
+- **Phase 2** — attachment-text search: PDFs, DOCX, etc. are decoded by
+  `docling` (install the `extraction` extra), chunked, embedded, and joined
+  into the same fused result list.
 
 ### Setup
 
 ```bash
-# Apply migrations (creates message_chunks, indexes, etc.)
+# Apply migrations (creates message_chunks, attachment_text tables, indexes).
 uv run localmail init-db
 
-# Backfill embeddings for an existing archive. First run downloads
-# ~250 MB of model weights to ~/.cache/fastembed/ (one-time).
+# Backfill message-body embeddings. First run downloads ~250 MB of model
+# weights to ~/.cache/fastembed/ (one-time).
 uv run localmail embed-backfill
+
+# (Optional, Phase 2) Backfill attachment text for an existing archive.
+# Requires the docling optional dep: `uv sync --extra extraction`.
+uv run localmail extract-backfill
+
+# Progress at any time:
+uv run localmail search-status
 ```
 
 ### Search from the CLI

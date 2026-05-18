@@ -2,6 +2,8 @@
   import { search } from "../lib/stores/search.svelte";
 
   let popoverOpen = $state(false);
+  let popoverEl: HTMLDivElement | undefined = $state();
+  let filterBtnEl: HTMLButtonElement | undefined = $state();
 
   async function onSubmit(e?: Event) {
     e?.preventDefault();
@@ -16,7 +18,23 @@
   }
 
   function togglePopover() { popoverOpen = !popoverOpen; }
+  function closePopover() { popoverOpen = false; }
+
+  function onDocumentClick(e: MouseEvent) {
+    if (!popoverOpen) return;
+    const t = e.target as Node | null;
+    if (!t) return;
+    if (popoverEl?.contains(t)) return;
+    if (filterBtnEl?.contains(t)) return;
+    closePopover();
+  }
+
+  function onDocumentKey(e: KeyboardEvent) {
+    if (popoverOpen && e.key === "Escape") closePopover();
+  }
 </script>
+
+<svelte:window onclick={onDocumentClick} onkeydown={onDocumentKey} />
 
 <form class="bar" onsubmit={onSubmit}>
   <input
@@ -28,14 +46,14 @@
     disabled={search.snapshot.loading}
   />
   <button type="submit" disabled={search.snapshot.loading}>Search</button>
-  <button type="button" onclick={togglePopover}>🔧 Filters</button>
+  <button type="button" bind:this={filterBtnEl} onclick={togglePopover}>🔧 Filters</button>
 </form>
 
 {#if popoverOpen}
-  <div class="popover" role="dialog">
+  <div class="popover" role="dialog" bind:this={popoverEl}>
     {#await import("./FilterPopover.svelte") then mod}
       {@const C = mod.default}
-      <C />
+      <C onClose={closePopover} />
     {/await}
   </div>
 {/if}

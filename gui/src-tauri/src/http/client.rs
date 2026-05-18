@@ -125,6 +125,34 @@ pub async fn http_post_empty(
     Ok(())
 }
 
+// POST a JSON body and accept either 2xx with no response body or 204. Mirrors
+// http_post_json's error classification (HttpStatus preserves the status code
+// so callers can branch on 401 vs 500) while not requiring a JSON response.
+pub async fn http_post_json_no_resp<B: Serialize>(
+    client: &Client,
+    url: &str,
+    body: &B,
+    bearer: Option<&str>,
+) -> Result<(), HttpError> {
+    let mut req = client.post(url).json(body);
+    if let Some(tok) = bearer {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
+    let status = resp.status();
+    if !status.is_success() && status.as_u16() != 204 {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(HttpError::HttpStatus {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

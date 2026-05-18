@@ -191,7 +191,14 @@ uv run localmail embed-backfill
 uv run localmail search "Berlin conference"
 uv run localmail search "invoice has:attachment after:2025-01-01 from:anna"
 uv run localmail search "Heizung" --format json | jq
+uv run localmail search "minutes lang:en before:2025-06-01"   # language + date filters
 ```
+
+DSL operators: `from:`, `to:`, `subject:`, `label:`, `account:`, `folder:`,
+`account_id:N`, `folder_id:N`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`,
+`lang:XX` (ISO 639 code; matches the `messages.body_lang` column populated
+per-message), and `has:attachment`. Each operator may appear multiple times
+where it makes sense (e.g. multiple `lang:` accumulate).
 
 ### Search from Python
 

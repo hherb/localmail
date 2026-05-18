@@ -45,13 +45,29 @@ export type AuthState =
 
 class AuthStore {
   #state: AuthState = $state({ phase: "connecting" });
+  // Endpoint metadata is keyring-resident on the Rust side. We cache the
+  // values we learn during probe/confirmTrust so the Settings → Server tab
+  // can display them without a round-trip. These are not used for any
+  // authenticated request — Rust always reads from the keyring directly.
+  #serverUrl: string | null = $state(null);
+  #certPin: string | null = $state(null);
 
   get snapshot(): AuthState {
     return this.#state;
   }
 
+  get serverUrl(): string | null {
+    return this.#serverUrl;
+  }
+
+  get certPin(): string | null {
+    return this.#certPin;
+  }
+
   reset(): void {
     this.#state = { phase: "connecting" };
+    this.#serverUrl = null;
+    this.#certPin = null;
   }
 
   async refreshState(): Promise<void> {
@@ -72,6 +88,8 @@ class AuthStore {
   async probe(url: string): Promise<void> {
     try {
       const res: ProbeResult = await probeServer(url);
+      this.#serverUrl = url;
+      this.#certPin = res.cert_sha256;
       this.#state = {
         phase: "needs_trust",
         url,
@@ -91,6 +109,8 @@ class AuthStore {
       throw new Error("confirmTrust called when not in needs_trust state");
     }
     await rustConfirmTrust(this.#state.url, this.#state.certSha256);
+    this.#serverUrl = this.#state.url;
+    this.#certPin = this.#state.certSha256;
     this.#state = { phase: "logged_out" };
   }
 

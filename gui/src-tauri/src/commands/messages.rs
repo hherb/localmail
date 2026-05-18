@@ -5,6 +5,7 @@
 //! future use (Sub-plan 4) but are not surfaced in the current UI.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::commands::auth::AuthError;
 use crate::commands::changes::MessageAddress;
@@ -45,6 +46,12 @@ pub struct MessageDetail {
     pub attachments: Vec<MessageAttachment>,
     pub account: MessageDetailAccount,
     pub folders: Vec<MessageFolder>,
+    // Populated only when the caller requested ?headers=full. The shape is a
+    // flat object of raw header name → value (string | array of strings), kept
+    // as serde_json::Value so the UI can iterate without us having to model
+    // every RFC header here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Value>,
 }
 
 pub async fn get_message(store: &KeyringStore, message_id: &str) -> Result<MessageDetail, AuthError> {

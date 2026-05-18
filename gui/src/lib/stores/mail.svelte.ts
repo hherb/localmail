@@ -22,6 +22,8 @@
  *   setExternalImagesAllowed(v)                          allow/block external images; resets per-message
  *   reset()                                              clear all state (used on logout)
  */
+import { getChanges } from "../api/changes";
+import { POLL_INTERVAL_MS, dedupNewMessages, parseCursor } from "../change_poller";
 import {
   getMessage,
   listAccounts,
@@ -33,6 +35,17 @@ import {
   type MessageSummary,
   type Selection,
 } from "../tauri";
+
+// Hard ceiling on retained recent messages. /v1/changes prepends fresh items
+// and a long-running session would grow this unboundedly otherwise. Picked
+// to comfortably exceed any reasonable single-page render (settings.pageSize
+// caps out around 200) while keeping memory + MessageList render bounded.
+export const MAX_RECENT_MESSAGES = 1000;
+
+// Consecutive pollOnce failures tolerated before the loop stops itself. After
+// bearer-token expiry every poll fails identically; without this the UI would
+// silently retry forever every POLL_INTERVAL_MS. Counter resets on success.
+export const MAX_POLL_FAILURES = 5;
 
 export interface MailState {
   accounts: AccountSummary[];
@@ -64,12 +77,30 @@ function initialState(): MailState {
 
 class MailStore {
   #state: MailState = $state(initialState());
+  #changeCursor: string | null = null;
+  #pollHandle: ReturnType<typeof setInterval> | null = null;
+  #pollFailureCount: number = 0;
 
   get snapshot(): MailState {
     return this.#state;
   }
 
+  get changeCursor(): string | null {
+    return this.#changeCursor;
+  }
+
+  get isPolling(): boolean {
+    return this.#pollHandle !== null;
+  }
+
+  get pollFailureCount(): number {
+    return this.#pollFailureCount;
+  }
+
   reset(): void {
+    this.stopPolling();
+    this.#changeCursor = null;
+    this.#pollFailureCount = 0;
     this.#state = initialState();
   }
 
@@ -100,11 +131,52 @@ class MailStore {
     this.#state.errorMessage = null;
     try {
       const resp = await listRecentMessages();
-      this.#state.messages = resp.new_messages;
+      this.#state.messages = resp.new_messages.slice(0, MAX_RECENT_MESSAGES);
+      this.#changeCursor = parseCursor(resp.next_cursor) ?? this.#changeCursor;
     } catch (err: unknown) {
       this.#state.errorMessage = formatError(err);
     } finally {
       this.#state.loadingMessages = false;
+    }
+  }
+
+  mergeNewMessages(incoming: readonly MessageSummary[]): number {
+    const fresh = dedupNewMessages(this.#state.messages, incoming);
+    if (fresh.length > 0) {
+      const merged = [...fresh, ...this.#state.messages];
+      this.#state.messages =
+        merged.length > MAX_RECENT_MESSAGES ? merged.slice(0, MAX_RECENT_MESSAGES) : merged;
+    }
+    return fresh.length;
+  }
+
+  async pollOnce(): Promise<void> {
+    try {
+      const resp = await getChanges(this.#changeCursor);
+      this.#changeCursor = parseCursor(resp.next_cursor) ?? this.#changeCursor;
+      this.mergeNewMessages(resp.new_messages);
+      this.#pollFailureCount = 0;
+    } catch (err: unknown) {
+      this.#state.errorMessage = formatError(err);
+      this.#pollFailureCount += 1;
+      if (this.#pollFailureCount >= MAX_POLL_FAILURES && this.#pollHandle !== null) {
+        this.stopPolling();
+        this.#state.errorMessage = `polling stopped after ${MAX_POLL_FAILURES} consecutive failures (last: ${formatError(err)})`;
+      }
+    }
+  }
+
+  startPolling(): void {
+    if (this.#pollHandle !== null) return;
+    this.#pollHandle = setInterval(() => {
+      void this.pollOnce();
+    }, POLL_INTERVAL_MS);
+  }
+
+  stopPolling(): void {
+    if (this.#pollHandle !== null) {
+      clearInterval(this.#pollHandle);
+      this.#pollHandle = null;
     }
   }
 

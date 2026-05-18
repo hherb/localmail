@@ -58,8 +58,9 @@ describe("formatRelativeDate", () => {
       "2026-03-03T08:14:00Z",
       new Date("2026-05-17T12:00:00Z"),
     );
-    // Format like "Mar 3"; assert month abbreviation present.
-    expect(out.toLowerCase()).toMatch(/[a-z]{3}\s+\d+/);
+    // Locale-dependent ordering: en-US → "Mar 3", en-GB/en-AU → "3 Mar".
+    // Assert a 3-letter month token sits next to the day, in either order.
+    expect(out.toLowerCase()).toMatch(/[a-z]{3}\s+\d+|\d+\s+[a-z]{3}/);
   });
 
   it("returns full date for older messages", () => {

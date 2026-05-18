@@ -23,6 +23,11 @@ fn greet(name: &str) -> Greeting {
     }
 }
 
+#[tauri::command]
+fn quit_app_cmd(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // macOS-specific: Tauri's event loop runs inside Objective-C callbacks
@@ -63,20 +68,25 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            quit_app_cmd,
             crate::commands::connect::probe_server_cmd,
             crate::commands::connect::confirm_trust_cmd,
             crate::commands::auth::login_cmd,
             crate::commands::auth::logout_cmd,
             crate::commands::auth::refresh_cmd,
             crate::commands::auth::whoami_cmd,
+            crate::commands::auth_change_password::change_password_cmd,
             crate::commands::capabilities::get_capabilities_cmd,
             crate::commands::accounts::list_accounts_cmd,
             crate::commands::accounts::list_folders_cmd,
             crate::commands::changes::list_recent_messages_cmd,
             crate::commands::messages::get_message_cmd,
+            crate::commands::full_headers::get_message_full_headers_cmd,
+            crate::commands::raw_message::get_message_raw_cmd,
             crate::commands::search::run_search_cmd,
             crate::commands::attachments::download_attachment_cmd,
             crate::commands::attachments::fetch_attachment_bytes_cmd,
+            crate::commands::version::get_version_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

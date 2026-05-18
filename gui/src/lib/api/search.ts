@@ -11,6 +11,9 @@ export interface SearchFiltersWire {
   after: string | null;   // YYYY-MM-DD
   before: string | null;  // YYYY-MM-DD
   has_attachment: boolean | null;
+  date_from?: string;     // YYYY-MM-DD (server-side date floor)
+  date_to?: string;       // YYYY-MM-DD (server-side date ceiling)
+  lang?: string;          // ISO 639-1 lowercase
 }
 
 export interface SearchRequest {
@@ -70,6 +73,9 @@ export interface SearchFiltersUI {
   after: string;
   before: string;
   hasAttachment: boolean | null;  // null = "don't care", true/false explicit
+  dateFrom?: string;              // YYYY-MM-DD -> wire `date_from`
+  dateTo?: string;                // YYYY-MM-DD -> wire `date_to`
+  language?: string;              // ISO 639-1 lowercase -> wire `lang`
 }
 
 export function emptyFilters(): SearchFiltersUI {
@@ -81,7 +87,7 @@ export function emptyFilters(): SearchFiltersUI {
 }
 
 export function filtersUiToWire(ui: SearchFiltersUI): SearchFiltersWire {
-  return {
+  const wire: SearchFiltersWire = {
     account_ids: ui.accountIds,
     folder_ids: ui.folderIds,
     from: ui.from || null,
@@ -91,4 +97,8 @@ export function filtersUiToWire(ui: SearchFiltersUI): SearchFiltersWire {
     before: ui.before || null,
     has_attachment: ui.hasAttachment,
   };
+  if (ui.dateFrom) wire.date_from = ui.dateFrom;
+  if (ui.dateTo) wire.date_to = ui.dateTo;
+  if (ui.language) wire.lang = ui.language;
+  return wire;
 }

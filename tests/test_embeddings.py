@@ -14,6 +14,7 @@ from localmail.search.embeddings import (
     EmbeddingBackend,
     EmbeddingConfigError,
     FastEmbedBackend,
+    _resolve_model_path,
 )
 
 
@@ -65,6 +66,49 @@ def test_protocol_matched_by_backend():
     assert callable(be.embed_documents)
     assert callable(be.embed_query)
     assert callable(be.health_check)
+
+
+def test_resolve_model_path_uses_registry_for_short_name():
+    cfg = SearchConfig()  # embedding_model = "embeddinggemma"
+    assert _resolve_model_path(cfg) == "google/embeddinggemma-300m"
+
+
+def test_resolve_model_path_override_wins():
+    cfg = SearchConfig(
+        embedding_model="embeddinggemma",
+        embedding_model_path="google/embeddinggemma-1b",
+    )
+    assert _resolve_model_path(cfg) == "google/embeddinggemma-1b"
+
+
+def test_resolve_model_path_unknown_short_name_passes_through():
+    """A short name not in the registry is assumed to already be a full path."""
+    cfg = SearchConfig(embedding_model="some/other-model-v1")
+    assert _resolve_model_path(cfg) == "some/other-model-v1"
+
+
+def test_fastembed_backend_records_resolved_model_path():
+    cfg = SearchConfig()
+    be = FastEmbedBackend(cfg=cfg, inner=_StubInner(dim=768))
+    assert be.model == "embeddinggemma"
+    assert be.model_path == "google/embeddinggemma-300m"
+
+
+class _NoQueryEmbedInner:
+    """Older fastembed shape: no `query_embed`."""
+
+    def embed(self, texts, **_):
+        for _ in texts:
+            yield [0.0] * 768
+
+
+def test_fastembed_backend_raises_when_query_embed_missing():
+    """If the installed fastembed lacks query_embed, query/document task
+    prefixes would be wrong — fail loudly at init rather than degrade
+    silently."""
+    with pytest.raises(EmbeddingConfigError) as exc:
+        FastEmbedBackend(cfg=SearchConfig(), inner=_NoQueryEmbedInner())
+    assert "query_embed" in str(exc.value)
 
 
 @pytest.mark.slow

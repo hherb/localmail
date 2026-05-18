@@ -117,3 +117,27 @@ def test_sanitize_filename_strips_path_separators_and_control_chars():
     assert sanitize_filename(".hidden") == "hidden"
     assert sanitize_filename("") == "attachment"
     assert sanitize_filename("   ") == "attachment"
+
+
+def test_write_attachments_includes_content_id_for_inline_image(db_conn, tmp_path: Path):
+    """Inline images must carry `content_id` in the JSONB row so the HTML
+    body sanitiser can rewrite cid: references."""
+    parsed = parse_message(_eml.html_with_inline_image())
+    rows = write_attachments(db_conn, parsed, root=tmp_path)
+    db_conn.commit()
+
+    assert len(rows) == 1
+    assert rows[0]["filename"] == "inline.png"
+    assert rows[0]["content_id"] == "inline-pixel@example"
+    assert "sha256" in rows[0]
+
+
+def test_write_attachments_omits_content_id_for_regular_attachment(
+    db_conn, tmp_path: Path
+):
+    parsed = parse_message(_eml.with_attachment())
+    rows = write_attachments(db_conn, parsed, root=tmp_path)
+    db_conn.commit()
+
+    assert len(rows) == 1
+    assert "content_id" not in rows[0]

@@ -1,0 +1,55 @@
+[package]
+name = "localmail-gui"
+version = "0.1.0"
+description = "Read-only desktop client for the localmail archive"
+authors = ["Horst Herb"]
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "localmail_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = [] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "json", "http2", "charset"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-async-persistent"] }
+anyhow = "1"
+thiserror = "1"
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+sha2 = "0.10"
+url = "2"
+
+# secret-service v4 requires the consumer to explicitly pick a runtime feature.
+# keyring's `linux-native-async-persistent` feature pulls it in as a transitive
+# dep but doesn't propagate the runtime choice, so the Linux build fails with
+# `Please enable a feature to pick a runtime ...`. We already use tokio for the
+# Tauri async runtime, so `rt-tokio-crypto-rust` is the matching pick. This is
+# a Linux-only crate; the macOS/Windows builds use Keychain / Credential Manager
+# via keyring's `apple-native` / `windows-native` features and never link
+# secret-service at all.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+mockito = "1"
+serial_test = "3"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

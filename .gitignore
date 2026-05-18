@@ -17,3 +17,13 @@ __pycache__/
 
 # User config (kept under ~/.config/localmail/, never in the repo)
 config.toml
+
+# Superpowers brainstorming scratch
+.superpowers/
+
+# GUI client
+gui/node_modules/
+gui/dist/
+gui/src-tauri/target/
+gui/src-tauri/gen/
+gui/.svelte-kit/

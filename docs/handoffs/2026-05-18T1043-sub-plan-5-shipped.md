@@ -1,0 +1,246 @@
+# NEXT_SESSION.md — localmail GUI client handoff
+
+> **Delete this file once Sub-plan 5's B24 bundle + B25 smoke ship and the
+> `gui-client-5` PR merges to `main`.**
+
+This session executed 25 of the 27 Sub-plan 5 tasks (A1–A2 + B1–B23). The
+remaining two — **B24 (Tauri bundle build + branded icons)** and **B25
+(end-to-end smoke + PR open)** — need a manual user-validation pass and are
+not safe to dispatch as background subagents.
+
+## Project context (1-minute version)
+
+`localmail` mirrors IMAP accounts (Gmail OAuth, password) into Postgres.
+**Strictly read-only with respect to IMAP**. Hybrid search (Phases 1 + 2
+incl. attachment text) shipped. GUI server (`localmail serve`, migration 0014)
+shipped. GUI client Sub-plans 1–4 shipped and merged to `main`. Sub-plan 5
+(this session) closes the GUI feature surface and starts the bundle work.
+See [CLAUDE.md](CLAUDE.md) and
+[docs/superpowers/specs/2026-05-17-localmail-gui-design.md](docs/superpowers/specs/2026-05-17-localmail-gui-design.md).
+
+**Server vs. client branch:** the GUI server code (`src/localmail/api/`,
+`src/localmail/serve/`, migrations through `0014_api_users.sql`) lives on the
+long-lived `worktree-phase2-hybrid-search` branch. Main has the **client**
+only. Sub-plan 5's Phase A commits landed on `worktree-phase2-hybrid-search`
+directly (no PR — same convention as Sub-plan 4 Phase A). Phase B lives on
+the `gui-client-5` branch which will PR into `main` once B24/B25 ship.
+
+## What's done
+
+| Component | Status |
+|---|---|
+| **Server**: `localmail.api` + FastAPI `localmail serve` + migration 0014 | ✅ PR #6 → `worktree-phase2-hybrid-search` |
+| **Sub-plan 1**: Tauri 2 + Svelte 5 scaffolding | ✅ PR #14 → `main` |
+| **Sub-plan 2**: Connection core | ✅ PR #19 → `main` |
+| **Sub-plan 3**: 3-pane main view shell | ✅ PR #20 → `main` |
+| **Sub-plan 4 — Phase A**: Server `account_ids`/`folder_ids` filters | ✅ on `worktree-phase2-hybrid-search` |
+| **Sub-plan 4 — Phase B**: GUI search + HTML body + attachments | ✅ PR #21 → `main` |
+| **PR #23 fixissues** | ✅ → `main` |
+| **Sub-plan 5 — Phase A** (this session): `lang:` token + filter forwarding | ✅ pushed to `worktree-phase2-hybrid-search` (`23fee78`, `9c23134`) |
+| **Sub-plan 5 — Phase B** (this session): batches 1–4 + bundle config | ✅ pushed to `gui-client-5` (5 commits, `bbdc4c2` HEAD) |
+| **Sub-plan 5 — B24/B25** | 🟡 **bundle smoke + manual smoke + PR — pending user-validation session** |
+
+## What this session shipped
+
+### Phase A — server (`worktree-phase2-hybrid-search`)
+
+| SHA | What |
+|---|---|
+| `23fee78` | `feat(search): lang: DSL token + languages predicate in _filter_sql` — adds migration `0015_messages_body_lang.sql` (nullable text column + partial index); `parse_query` accepts `lang:VAL`; `_filter_sql` emits `m.body_lang = ANY(%s)` |
+| `9c23134` | `feat(api): forward date_from/date_to/lang filters; clear unsupported list` — `_KNOWN_UNSUPPORTED_FILTER_KEYS` is now empty; `_filter_tokens` emits `after:`/`before:`/`lang:` from the three keys |
+
+Phase A tests: full suite (359 passed) green; new tests cover the DSL token,
+the languages predicate, and API-layer round-trips.
+
+### Phase B — client (`gui-client-5`)
+
+| SHA | What |
+|---|---|
+| `50901fe` | (pre-session) Sub-plan 5 plan |
+| `d2e1737` | **Batch 1** — pure helpers (splitter, change_poller, version_check), version store, type extensions on `SearchFiltersUI` + `filter_parse`, 4 Tauri commands (`get_version_cmd`, `get_message_raw_cmd`, `get_message_full_headers_cmd`, plus optional `headers` field on `MessageDetail`) |
+| `edfbf83` | **Batch 2** — 7 new components (Splitter, VersionGate, RawBodyView, HeaderUnfold, DebugBadges, DebugChunks) + multi-page PDF nav in `AttachmentPreviewModal` |
+| `30ed7ac` | **Batch 3** — settings store + SettingsScreen with 4 tabs (Server/Display/Search/About), `change_password_cmd` Tauri command, mail-store polling (`changeCursor`/`pollOnce`/`startPolling`/`stopPolling`/`mergeNewMessages`) |
+| `7f1148e` | **Batch 4** — screen integrations: Splitter ×2 + polling + VersionGate in MainView; VersionGate in Router; RawBodyView + HeaderUnfold + DebugChunks in ReadingPane; `dateFrom`/`dateTo`/`language` form fields in FilterPopover |
+| `f2862d8` | `quit_app_cmd` Tauri command + tauri.conf.json bundle category/descriptions/macOS minimumSystemVersion |
+| `bbdc4c2` | README DSL operator + `lang:` documentation |
+
+### Test counts (acceptance gates)
+
+| Suite | Before | After | Plan target |
+|---|---:|---:|---|
+| **Server pytest** (Phase A) | — | 359 passed | n/a |
+| **GUI vitest** | 105 | **215** | 150+ ✅ |
+| **GUI cargo test** | 49 | **69** | 60+ ✅ |
+| **`npm run check`** | — | 0 errors, 1 pre-existing CSS warning | 0 errors ✅ |
+| `_KNOWN_UNSUPPORTED_FILTER_KEYS` | `{date_from, date_to, lang}` | `frozenset()` | empty ✅ |
+
+## What remains — B24 + B25
+
+The two remaining tasks need a host with a working Tauri bundle toolchain
+and human visual validation.
+
+### Task B24 — Tauri bundle + branded icons
+
+**Already done in `f2862d8`:**
+- `bundle.category = "Productivity"`, short/long descriptions, macOS
+  `minimumSystemVersion: 10.15`.
+- Existing default Tauri icons in `gui/src-tauri/icons/` remain
+  (32×32 / 128×128 / 128×128@2x / .icns / .ico).
+
+**Still needs the user to do:**
+1. Replace the default Tauri icons with a branded asset. The plan calls
+   for a simple SVG envelope+database silhouette via `rsvg-convert` /
+   ImageMagick → `1024×1024 icon.png` → Tauri-generated platform sizes
+   via `npx @tauri-apps/cli icon ./icons/icon.png`. Skip if a designer
+   has provided final art.
+2. Run a macOS bundle smoke:
+   ```bash
+   cd /Users/hherb/src/localmail/.claude/worktrees/gui-client-5/gui
+   npm run tauri build -- --bundles dmg
+   open src-tauri/target/release/bundle/dmg/*.dmg   # mount + run
+   ```
+3. Document the Windows `.msi` / Linux `.AppImage` build commands in
+   `docs/superpowers/notes/2026-05-18-bundle-smoke.md` (CI can later
+   add per-OS jobs).
+
+### Task B25 — manual smoke + PR
+
+Manual click-through against a real `localmail serve` instance:
+
+1. Connect / Login / settings persistence (localStorage key
+   `localmail.gui.settings` + `localmail.gui.paneWidths`).
+2. Resize the splitter, restart the app, check widths persist.
+3. Toggle settings.debug, verify DebugBadges chips render in
+   MessageList rows and DebugChunks section in ReadingPane (matched
+   chunks visible if the server returns `matched_chunks`).
+4. Open a message, switch body mode HTML → Plain → Raw (RawBodyView).
+5. Toggle HeaderUnfold; verify it lazy-fetches via
+   `get_message_full_headers_cmd?headers=full`.
+6. Type `lang:de before:2025-01-01 conference` in SearchBar — verify
+   results.
+7. Open Settings → change-password — expect a 404 from the server
+   (the server route is not yet implemented; see open decision #2).
+8. Open the GitHub PR:
+   ```bash
+   gh pr create --base main --head gui-client-5 \
+     --title "GUI client Sub-plan 5: polish + packaging" \
+     --body-file docs/superpowers/plans/2026-05-18-localmail-gui-client-5-polish-packaging.md
+   ```
+
+## Open decisions & risks
+
+1. **`messages.body_lang` is NULL for every existing row.** Migration
+   0015 adds the column but no embed-worker change populates it.
+   `lang:` filtering will therefore return 0 results until either (a)
+   a follow-up embed worker change detects language per-message, or (b)
+   a one-shot backfill script runs. The plumbing is correct; data
+   population is deferred.
+
+2. **`POST /v1/auth/change-password` is NOT implemented on the
+   server.** The Tauri `change_password_cmd` is mockito-verified but
+   will 404 against the real server. Add the route on
+   `worktree-phase2-hybrid-search` before merging Sub-plan 5; the
+   plan's Step 1 snippet (Task B16) sketches the implementation.
+
+3. **`VersionGate` calls `quit_app_cmd`.** Shipped as a tiny Rust
+   command in `gui/src-tauri/src/lib.rs` (commit `f2862d8`) that uses
+   `app.exit(0)`. The component also has a `window.close()` fallback.
+   No follow-up needed.
+
+4. **`MessageDetail.matched_chunks` is optional and may not be in any
+   current server response.** `DebugChunks` degrades gracefully when
+   absent. A future server-side enhancement could populate it without
+   GUI changes.
+
+5. **VersionGate mounted twice** (Router + MainView). Both render
+   only on api_major mismatch so the double-mount is harmless, but a
+   minor cleanup could remove one — defer until the manual smoke
+   confirms behaviour.
+
+6. **The `B5`-via-`B15` race during batch 3 produced a transient
+   12-failure window** before sibling agents finished. Reproduced
+   from agent reports — fixed once all batch-3 agents completed (final
+   state: all 204 tests green). If recreating the workflow, run B5
+   *after* B15 to avoid the noise.
+
+7. **Plan deviations** (recorded in agent reports):
+   - `imagePolicy` has 3 values (`block | ask | allow`) instead of
+     the plan's 2 — both UI and tests handle this.
+   - Cargo `VersionInfo` struct uses the 4-field `server_version` /
+     `build_hash` shape (matching what the TS agent had already shipped),
+     not the 5-field shape the plan sketched.
+   - Tests use `vi.mock` + `vi.hoisted` rather than `vi.spyOn` —
+     matches the existing `auth.test.ts` pattern.
+
+## Exact commands to resume
+
+```bash
+# Get to the worktree:
+cd /Users/hherb/src/localmail/.claude/worktrees/gui-client-5
+
+# Verify still-green baseline:
+cd gui
+npm test -- --run                  # → 33 files, 215 tests passing
+(cd src-tauri && cargo test)       # → 69 tests passing
+npm run check                      # → 0 errors
+
+# B24: bundle smoke (after replacing icons if branded):
+npm run tauri build -- --bundles dmg
+open src-tauri/target/release/bundle/dmg/*.dmg
+
+# B25: open PR after manual smoke
+gh pr create --base main --head gui-client-5 \
+  --title "GUI client Sub-plan 5: polish + packaging" \
+  --body "Closes the v1 GUI feature surface. See plan + handoff."
+
+# Don't forget: add the change-password route on the server side
+cd /Users/hherb/src/localmail/.claude/worktrees/phase2-hybrid-search
+# implement POST /v1/auth/change-password in src/localmail/serve/routes/auth.py
+git push origin worktree-phase2-hybrid-search
+```
+
+## Known gotchas (still load-bearing — don't repeat them)
+
+All gotchas from prior handoffs still apply. Specific to Sub-plan 5:
+
+- **`@testing-library/jest-dom` is NOT installed.** Use `toBeTruthy()` /
+  `.textContent` / `querySelector` checks. Never `toBeInTheDocument()`.
+- **jsdom lacks `window.localStorage` by default.** `settings.test.ts`,
+  `mail.test.ts`, and `MainView.test.ts` install an in-memory shim
+  before module import. Copy the pattern for any new test that needs
+  localStorage.
+- **jsdom lacks `PointerEvent`.** `Splitter.test.ts` polyfills a
+  `MouseEvent` subclass in `beforeAll` so the plan's drag assertions
+  pass.
+- **Rust command argument structs need `#[derive(Deserialize)]`.**
+- **`vi.mock("@tauri-apps/api/core", ...)` is the preferred mocking
+  pattern** — see `src/lib/stores/auth.test.ts` for the `vi.hoisted`
+  template.
+- **`unset VIRTUAL_ENV && uv run …`** — required for ad-hoc Python
+  commands so the wrong venv doesn't get picked up.
+- **`LOCALMAIL_TEST_DSN` defaults to `postgresql://localmail:local%40%40mail@localhost:5532/localmail_test`.**
+  If your local PG runs on the default port without the `localmail`
+  user, override with `LOCALMAIL_TEST_DSN=postgresql:///localmail_test`.
+- **Sub-plan 5 introduces ReadingPane sub-modes** (HTML/Plain/Raw);
+  `bodyMode` is sticky across messages but `externalImagesAllowed`
+  resets per-message — don't conflate them.
+
+## File map (post-Sub-plan 5)
+
+```
+docs/superpowers/specs/2026-05-17-localmail-gui-design.md            # design spec
+docs/superpowers/plans/2026-05-18-localmail-gui-client-5-polish-packaging.md  # plan (now executed)
+docs/handoffs/2026-05-18T1043-sub-plan-5-shipped.md                  # snapshot of THIS doc
+
+.claude/worktrees/
+  phase2-hybrid-search/                # Phase A landed here (lang: token + filter forwarding)
+  gui-client-5/                        # Phase B landed here (5 commits past plan)
+
+gui/src/                               # +10 components, +6 stores, +6 API wrappers, +1 screen
+gui/src-tauri/src/commands/            # +4 new commands (version, raw_message, full_headers, auth_change_password)
+gui/src-tauri/src/lib.rs               # +quit_app_cmd
+gui/src-tauri/tauri.conf.json          # bundle metadata polished
+```
+
+End of Sub-plan 5 execution session. Hand off to a user-validation
+session for B24/B25.

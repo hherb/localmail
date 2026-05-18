@@ -62,6 +62,11 @@ class SearchConfig(BaseModel):
     # --- embedding ---
     embedding_backend: Literal["fastembed", "ollama", "auto"] = "fastembed"
     embedding_model: str = "embeddinggemma"
+    # Optional override: full provider model path (e.g. "google/embeddinggemma-300m").
+    # When None, the backend resolves `embedding_model` through its own
+    # registry; setting this lets operators pin a sibling model size
+    # ("-instruct", "-1b", …) without a code change.
+    embedding_model_path: str | None = None
     embedding_dim: int = 768
     ollama_host: str = "http://localhost:11434"
     ollama_retry_max_attempts: int = 5

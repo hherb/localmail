@@ -5,10 +5,17 @@ Each attachment payload is stored exactly once on disk, at
 `attachment_blobs` table keyed on the 32-byte sha256. A message's
 `messages.attachments` JSONB column records, per attachment in that message:
 
-    {"filename": "<original filename from this email>", "sha256": "<hex>"}
+    {"filename": "<original filename from this email>",
+     "sha256": "<hex>",
+     "content_id": "<inline-cid-without-brackets>"}  # omitted when None
 
-The original `filename` is preserved per-message so files can be restored with
-the names they had when received. The bytes are deduplicated across all
+`content_id` is the message-local Content-Id header value with the angle
+brackets stripped (e.g. "image1@example"). Downstream HTML rendering uses it
+to rewrite `<img src="cid:…">` references to actual blob URLs so inline
+images render. Non-inline attachments omit the key.
+
+The original `filename` is preserved per-message so files can be restored
+with the names they had when received. The bytes are deduplicated across all
 messages and accounts.
 """
 
@@ -52,8 +59,10 @@ def write_attachments(
     root: Path,
 ) -> list[dict]:
     """Write any not-yet-stored attachment payloads to the blob tree and upsert
-    `attachment_blobs` rows. Return the list of `{filename, sha256}` entries
-    ready for `messages.attachments`.
+    `attachment_blobs` rows. Return the per-message entries ready for
+    `messages.attachments` JSONB. Each entry has `filename` and `sha256`; an
+    inline attachment also carries `content_id` (sans angle brackets) so
+    HTML body `cid:` references can be rewritten on render.
 
     The caller owns the surrounding transaction; this function does not commit.
     """
@@ -82,6 +91,9 @@ def write_attachments(
                 (digest, str(path.resolve()), att.mime_type, len(att.payload)),
             )
 
-            rows.append({"filename": sanitize_filename(att.filename), "sha256": sha_hex})
+            row: dict = {"filename": sanitize_filename(att.filename), "sha256": sha_hex}
+            if att.content_id:
+                row["content_id"] = att.content_id
+            rows.append(row)
 
     return rows

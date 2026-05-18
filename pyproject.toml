@@ -31,6 +31,7 @@ dependencies = [
     "argon2-cffi>=23.1",
     "bleach[css]>=6.2",
     "cryptography>=43.0",
+    "sqlparse>=0.5",
 ]
 
 [project.optional-dependencies]

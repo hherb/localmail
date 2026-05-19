@@ -114,3 +114,42 @@ def test_search_unavailable_when_no_searcher(db_dsn: str, api_token: str) -> Non
     body = r.json()
     assert body["type"] == "/problems/feature-unavailable"
     assert body["status"] == 503
+
+
+def test_search_malformed_account_id_in_filter_returns_400(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """Non-digit account_ids filter entry surfaces as problem+json 400 via
+    parse_int_id — the same uniform shape as path-param malformed IDs."""
+    _seed_acct_and_grant(db_conn, api_user.id)
+    app = create_app(db_dsn=db_dsn, searcher=_fake_searcher_returning_one_hit())
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "x", "filters": {"account_ids": ["-1"]}, "limit": 5},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["type"] == "/problems/validation-failed"
+    assert "account_id" in body["detail"]
+
+
+def test_search_malformed_folder_id_in_filter_returns_400(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """Non-digit folder_ids filter entry surfaces as problem+json 400."""
+    _seed_acct_and_grant(db_conn, api_user.id)
+    app = create_app(db_dsn=db_dsn, searcher=_fake_searcher_returning_one_hit())
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "x", "filters": {"folder_ids": ["not-a-number"]}, "limit": 5},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["type"] == "/problems/validation-failed"
+    assert "folder_id" in body["detail"]

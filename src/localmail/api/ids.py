@@ -22,6 +22,11 @@ def parse_int_id(value: str, *, field: str) -> int:
     must encode IDs as plain base-10 strings, matching what the server
     emits in response bodies (``str(id)``).
 
+    Leading zeros are accepted (``"01"`` resolves to ``1``), so two stable
+    encodings of the same int are both valid path params. Harmless for SQL,
+    but callers treating the wire form as an opaque key (cache, audit log,
+    ETag) should canonicalise via ``str(parse_int_id(value, field=...))``.
+
     Args:
         value: The string ID as it arrived on the wire.
         field: Name of the field for the error message

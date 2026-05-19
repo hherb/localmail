@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 
 from localmail.api.acl import allowed_account_ids
-from localmail.api.errors import ValidationFailed
+from localmail.api.ids import parse_int_id
 from localmail.config import ServeConfig
 from localmail.serve.middleware import get_authenticated_user
 
@@ -37,16 +37,7 @@ def changes(
     see it. The horizon trades a few seconds of latency for monotonic
     delivery.
     """
-    since_id: int | None
-    if since is None:
-        since_id = None
-    else:
-        try:
-            since_id = int(since)
-        except ValueError as exc:
-            raise ValidationFailed(
-                f"since cursor must be a base-10 integer, got {since!r}"
-            ) from exc
+    since_id = None if since is None else parse_int_id(since, field="since cursor")
 
     serve_cfg: ServeConfig = getattr(request.app.state, "serve_config", None) or ServeConfig()
     horizon_s = serve_cfg.changes_safe_horizon_s

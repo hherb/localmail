@@ -138,7 +138,15 @@ Three processes, two hosts (or one host in the single-machine case):
   `next_cursor` (`null` when done) and `total_estimate` where cheap to
   compute, omitted otherwise.
 - **Time**: ISO 8601 UTC.
-- **IDs**: server-side integer PKs serialized as strings in JSON.
+- **IDs**: server-side integer PKs are **strings on the wire** in *both*
+  directions — response bodies emit `str(id)` and path/query parameters
+  accept digit-strings only (validated by
+  `localmail.api.ids.parse_int_id`, rejected with `400
+  /problems/validation-failed` on non-digits). This keeps the JSON
+  contract safe for BIGSERIAL values beyond JS Number's `2^53` range and
+  matches what JSON-strict consumers (Tauri client, planned MCP server)
+  expect. Internally the api/ layer takes `int` — the cast happens once,
+  at the transport boundary.
 - **CORS**: explicitly absent. The API is consumed by the Tauri client,
   not browsers. Browser clients fail loud.
 

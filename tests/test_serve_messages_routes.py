@@ -81,3 +81,46 @@ def test_get_raw(
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("message/rfc822")
     assert r.content == b"RAW"
+
+
+def test_get_message_malformed_id_returns_400(db_dsn: str, api_token: str) -> None:
+    """Non-integer message_id surfaces as problem+json 400, not FastAPI 422."""
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        "/v1/messages/not-a-number",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["type"] == "/problems/validation-failed"
+    assert "message_id" in body["detail"]
+
+
+def test_get_raw_malformed_id_returns_400(db_dsn: str, api_token: str) -> None:
+    """Non-integer message_id on the /raw subpath also returns problem+json 400."""
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        "/v1/messages/not-a-number/raw",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["type"] == "/problems/validation-failed"
+    assert "message_id" in body["detail"]
+
+
+def test_get_message_string_id_works(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    """Path param accepts well-formed digit string and resolves to the same row."""
+    mid = _seed_msg(db_conn)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/messages/{mid!s}",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["subject"] == "hello"

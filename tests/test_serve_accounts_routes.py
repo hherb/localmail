@@ -58,3 +58,18 @@ def test_list_folders_for_account(
     body = r.json()
     assert len(body) == 1
     assert body[0]["name"] == "INBOX"
+
+
+def test_list_folders_malformed_account_id_returns_400(
+    db_dsn: str, api_token: str,
+) -> None:
+    """Non-integer account_id surfaces as problem+json 400, not FastAPI 422."""
+    r = _client(db_dsn).get(
+        "/v1/accounts/not-a-number/folders",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["type"] == "/problems/validation-failed"
+    assert "account_id" in body["detail"]

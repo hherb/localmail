@@ -308,9 +308,10 @@ def test_messages_body_lang_pending_index_is_eligible_for_worker_query(db_conn) 
 
     Force the planner to prefer indexes (seqscan off) and verify EXPLAIN
     reports a scan of `messages_body_lang_pending_idx` for the exact
-    `body_lang IS NULL AND body_text IS NOT NULL` shape from
-    `run_lang_detect_pass`. An empty table would let the planner pick
-    seq-scan even with the flag off, so seed two rows first.
+    `WHERE body_lang IS NULL AND body_text IS NOT NULL ORDER BY id LIMIT N
+    FOR UPDATE SKIP LOCKED` shape from `run_lang_detect_pass`. An empty
+    table would let the planner pick seq-scan even with the flag off, so
+    seed two rows first.
     """
     with db_conn.cursor() as cur:
         cur.execute(
@@ -333,7 +334,7 @@ def test_messages_body_lang_pending_index_is_eligible_for_worker_query(db_conn) 
         cur.execute(
             "EXPLAIN SELECT id, body_text FROM messages "
             "WHERE body_lang IS NULL AND body_text IS NOT NULL "
-            "ORDER BY id LIMIT 1"
+            "ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"
         )
         plan = "\n".join(r[0] for r in cur.fetchall())
     assert "messages_body_lang_pending_idx" in plan, plan

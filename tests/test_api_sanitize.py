@@ -1,3 +1,5 @@
+import pytest
+
 from localmail.api.sanitize import sanitize_html
 
 
@@ -386,3 +388,76 @@ def test_data_substring_in_title_attribute_preserved() -> None:
     out = sanitize_html(html, cid_to_sha={})
     assert 'title="see data:image/png... discussion"' in out
     assert ">x</span>" in out
+
+
+@pytest.mark.parametrize("leading", [
+    " ",      # ASCII space
+    "\t",     # tab
+    "\n",     # LF
+    "\r",     # CR
+    "\x0c",   # form-feed
+    "  \t\n", # mixed run
+])
+def test_href_with_leading_whitespace_data_scheme_stripped(leading: str) -> None:
+    """Leading whitespace / C0 controls must not bypass the ``data:`` deny.
+
+    The WHATWG URL parser strips leading C0 controls + ASCII whitespace
+    before identifying the scheme, and so does ammonia's scheme allowlist
+    check — but nh3 hands the raw, *un*stripped value to the
+    ``attribute_filter``. A naive ``startswith("data:")`` therefore lets
+    payloads like ``<a href=" data:text/html,...">`` (space) or
+    ``<a href="\\tdata:...">`` (tab) survive, even though a browser would
+    happily navigate to them. The filter normalises the value via
+    ``_LEADING_URL_TRIM_RE`` before the prefix match to close this gap.
+    """
+    html = f'<a href="{leading}data:text/html,<script>alert(1)</script>">click</a>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "data:" not in out
+    assert "<script" not in out
+    assert "alert" not in out
+    assert ">click</a>" in out
+
+
+@pytest.mark.parametrize("leading", [" ", "\t", "\n", "\r", "\x0c"])
+def test_href_with_leading_whitespace_cid_scheme_stripped(leading: str) -> None:
+    """Same bypass surface for ``cid:`` — same normalisation must catch it.
+
+    Pre-existing since the bleach→nh3 migration; surfaced while fixing #45.
+    A ``<a href=" cid:foo">`` would otherwise let a clicked link fetch an
+    internal attachment despite the explicit href deny.
+    """
+    html = f'<a href="{leading}cid:foo">click</a>'
+    out = sanitize_html(html, cid_to_sha={"foo": "abc123"})
+    assert "cid:" not in out.lower()
+    assert "/v1/attachments/" not in out
+    assert ">click</a>" in out
+
+
+def test_href_with_html_entity_space_data_scheme_stripped() -> None:
+    """``&#x20;data:...`` decodes to ``" data:..."`` in html5ever.
+
+    The literal-whitespace bypass also reaches the filter via an HTML
+    numeric character reference for U+0020. Same normalisation path
+    (``_LEADING_URL_TRIM_RE``) closes it.
+    """
+    html = '<a href="&#x20;data:text/html,<script>alert(1)</script>">click</a>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "data:" not in out
+    assert "<script" not in out
+    assert "alert" not in out
+    assert ">click</a>" in out
+
+
+def test_href_with_leading_whitespace_legit_scheme_preserved() -> None:
+    """Normalisation must not over-reach to schemes outside the deny list.
+
+    Leading whitespace on a legit ``https:`` URL should not cause the
+    filter to drop the href — only ``cid:`` and ``data:`` are denied.
+    nh3 itself preserves the literal whitespace in the output (the WHATWG
+    parser would strip it at navigation time), and the deny check is the
+    only thing that uses the normalised value.
+    """
+    html = '<a href=" https://example.com">ok</a>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert 'href=" https://example.com"' in out
+    assert ">ok</a>" in out

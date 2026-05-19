@@ -152,8 +152,22 @@ _ALLOWED_STYLE_PROPERTIES: frozenset[str] = frozenset({
 #     any renderer that doesn't sandbox top-level navigation to data URLs
 #     (closes #45).
 # Schemes are compared lowercased; the tuple is the prefix set for
-# ``str.startswith``.
+# ``str.startswith``. Leading C0 controls + ASCII whitespace are stripped
+# first (see ``_LEADING_URL_TRIM_RE``).
 _HREF_DENY_SCHEMES: tuple[str, ...] = ("cid:", "data:")
+
+# WHATWG URL parser (and ammonia's scheme allowlist check, by extension)
+# strips leading C0 controls + ASCII whitespace before identifying the
+# scheme. nh3 then hands the raw, *un*stripped value to the
+# ``attribute_filter``, which means a literal-leading-whitespace payload
+# like ``<a href=" data:text/html,...">`` would pass the allowlist (scheme
+# parses as ``data``) yet bypass a naive ``startswith("data:")`` prefix
+# check. HTML entities decoded by html5ever (e.g. ``&#x20;data:...``) hit
+# the filter the same way. Mirror the URL parser's leading-trim here.
+# Range ``\x00-\x20`` covers NULL, every C0 control (tab/LF/FF/CR included),
+# and the space character — exactly what a browser will discard before
+# navigating.
+_LEADING_URL_TRIM_RE = re.compile(r"^[\x00-\x20]+")
 
 _CID_RE = re.compile(r"^cid:(.+)$", re.IGNORECASE)
 # Full-match (not prefix-match) so the rewriter never echoes an attacker-
@@ -220,13 +234,20 @@ def _make_attribute_filter(
        them on ``<a href>`` would re-expose an attachment fetch on click
        (cid) or a ``javascript:``-equivalent payload in renderers that
        don't sandbox top-level navigation to data URLs (data). The deny
-       list is stored in ``_HREF_DENY_SCHEMES``.
+       list is stored in ``_HREF_DENY_SCHEMES``. Leading C0 controls +
+       ASCII whitespace are stripped before the prefix match because the
+       WHATWG URL parser does the same before scheme detection — without
+       this normalisation a payload like ``<a href=" data:...">`` or its
+       entity-decoded equivalent (``&#x20;data:...``) would pass the
+       scheme allowlist yet bypass a naive prefix check.
     """
     def _filter(tag: str, attr: str, value: str) -> str | None:
         if tag == "img" and attr == "src":
             return _rewrite_img_src(value, cid_to_sha)
-        if attr == "href" and value.lower().startswith(_HREF_DENY_SCHEMES):
-            return None
+        if attr == "href":
+            normalised = _LEADING_URL_TRIM_RE.sub("", value).lower()
+            if normalised.startswith(_HREF_DENY_SCHEMES):
+                return None
         return value
 
     return _filter

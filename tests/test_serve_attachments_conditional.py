@@ -146,8 +146,11 @@ def test_if_none_match_with_current_etag_returns_304(
     db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
 ) -> None:
     """Conditional GET with a matching ETag → 304 Not Modified, empty
-    body. Lets a downstream proxy or browser skip the bytes when its
-    cache is already current."""
+    body, ETag-only headers. Lets a downstream proxy or browser skip
+    the bytes when its cache is already current. Per RFC 9110 §15.4.5
+    a 304 MUST NOT include Content-Disposition / Accept-Ranges /
+    Content-Length — guards against a regression that leaks the
+    force-download headers onto the cache-hit response."""
     sha = "20" * 32
     _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
     grant_alice_all_accounts()
@@ -162,6 +165,9 @@ def test_if_none_match_with_current_etag_returns_304(
     assert r.status_code == 304
     assert r.content == b""
     assert r.headers["etag"] == _strong_etag(sha)
+    assert "content-disposition" not in r.headers
+    assert "accept-ranges" not in r.headers
+    assert "content-length" not in r.headers
 
 
 def test_if_none_match_with_weak_etag_returns_304(
@@ -239,6 +245,31 @@ def test_if_none_match_takes_precedence_over_range(
     )
     assert r.status_code == 304
     assert r.content == b""
+
+
+def test_if_none_match_non_matching_does_not_suppress_range(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """Negative-precedence guard: a non-matching If-None-Match must NOT
+    fire the 304 shortcut, so a co-sent Range still gets honoured with
+    a 206. Closes the precedence matrix together with
+    `test_if_none_match_takes_precedence_over_range`."""
+    sha = "25" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    other = '"' + ("9" * 64) + '"'
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "If-None-Match": other,
+            "Range": "bytes=0-9",
+        },
+    )
+    assert r.status_code == 206
+    assert r.content == _PDF_PAYLOAD[:10]
+    assert r.headers["etag"] == _strong_etag(sha)
 
 
 # ---------- If-Range with Range ----------------------------------------------

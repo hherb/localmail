@@ -170,12 +170,15 @@ def stream_blob(
     headers: ``Content-Disposition: attachment`` with both ASCII and RFC 5987
     filename forms, and a clamped MIME for script-executable types.
 
-    Conditional GET (#59): every 200/206/416 advertises a strong
+    Conditional GET (#59): every 200/206/304/416 advertises a strong
     ``ETag: "<sha256-hex>"``. ``If-None-Match`` (weak compare, ``*``
-    accepted) shortcuts to 304. ``If-Range`` (strong compare only) on a
-    request that also carries ``Range`` either lets the partial proceed
-    or — on mismatch — falls back to a full 200 so a resumed download
-    cannot stitch two distinct representations together.
+    accepted) shortcuts to 304 with no body and only the ``ETag``
+    header (§15.4.5 representation-metadata rules — no
+    Content-Disposition / Accept-Ranges on 304). ``If-Range`` (strong
+    compare only) on a request that also carries ``Range`` either lets
+    the partial proceed or — on mismatch — falls back to a full 200 so
+    a resumed download cannot stitch two distinct representations
+    together.
     """
     pool = request.app.state.pool
     with pool.connection() as conn:

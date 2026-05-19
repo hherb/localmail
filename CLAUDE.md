@@ -370,10 +370,11 @@ for the full design.
   Comparison rules per RFC 9110:
     - `If-None-Match` (§13.1.2) uses **weak** compare. `*`, exact
       strong, and weak (`W/"…"`) variants of the current SHA all match
-      → 304 Not Modified with body and `ETag` header only (no
-      Content-Disposition / Accept-Ranges — §15.4.5 representation-
-      metadata rules). Evaluated **before** Range, so a 304 never
-      degrades to 206 even when both headers are present.
+      → 304 Not Modified with **no body**, carrying only the `ETag`
+      header (no Content-Disposition / Accept-Ranges / Content-Length
+      — §15.4.5 representation-metadata rules). Evaluated **before**
+      Range, so a 304 never degrades to 206 even when both headers
+      are present.
     - `If-Range` (§13.1.5) uses **strong** compare. On match, the
       Range proceeds and a 206 is served as today. On mismatch (weak
       tag, HTTP-date, garbage, or simply the wrong SHA) the Range is

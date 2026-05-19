@@ -103,7 +103,7 @@ class SearchConfig(BaseModel):
     # --- retrieval / fusion ---
     candidates_per_arm: int = 50
     rrf_k: int = 60
-    rerank_pool_size: int = 50
+    rerank_pool_size: int = 20
     page_size_default: int = 20
     page_size_max: int = 200
     hnsw_ef_search: int = 64
@@ -113,7 +113,7 @@ class SearchConfig(BaseModel):
     reranker_enabled: bool = True
     reranker_backend: Literal["fastembed"] = "fastembed"
     reranker_model: str = "jinaai/jina-reranker-v2-base-multilingual"
-    rerank_max_chars: int = 4000
+    rerank_max_chars: int = 1500
 
     # --- query rewriter (Phase 4) ---
     rewriter_enabled_by_default: bool = False

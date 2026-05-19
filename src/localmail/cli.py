@@ -41,6 +41,37 @@ def _is_loopback_bind(bind: str) -> bool:
         return False
 
 
+def _warm_reranker_in_background(reranker) -> None:
+    """Pre-load the ONNX session so the first user search doesn't pay
+    session-init cost on top of inference. Runs in a daemon thread so
+    `serve` returns immediately.
+
+    This is a marginal speedup (~0.5s on first query). The dominant cost
+    of reranking — the per-pair forward pass — is paid on every query;
+    that's controlled by ``search.rerank_pool_size`` /
+    ``search.rerank_max_chars``, not by warmup.
+
+    Also serves as a startup smoke test: if the model can't load at all,
+    the WARNING fires here rather than waiting for the first user query.
+    """
+    import threading
+    import time
+
+    def _warm() -> None:
+        log = logging.getLogger("localmail.search")
+        model = getattr(reranker, "model", type(reranker).__name__)
+        log.info("warming reranker %r (this loads the ONNX session)", model)
+        t0 = time.monotonic()
+        try:
+            reranker.rerank("warmup", ["the quick brown fox"])
+        except Exception as exc:
+            log.warning("reranker warmup failed (%s) — first user search may be slow", exc)
+            return
+        log.info("reranker %r warm in %.1fs", model, time.monotonic() - t0)
+
+    threading.Thread(target=_warm, name="reranker-warmup", daemon=True).start()
+
+
 def _account_or_die(cfg: Config, name: str) -> AccountConfig:
     for a in cfg.accounts:
         if a.name == name:
@@ -936,6 +967,9 @@ def serve_cmd(
     except Exception as exc:
         click.echo(f"warning: search disabled ({exc})", err=True)
         searcher = None
+
+    if searcher is not None and searcher._reranker is not None:
+        _warm_reranker_in_background(searcher._reranker)
 
     app = create_app(db_dsn=dsn, searcher=searcher, serve_config=serve_cfg)
 

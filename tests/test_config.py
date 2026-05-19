@@ -95,7 +95,7 @@ def test_search_config_has_sane_defaults():
     assert cfg.embedding_dim == 768
     assert cfg.candidates_per_arm == 50
     assert cfg.rrf_k == 60
-    assert cfg.rerank_pool_size == 50
+    assert cfg.rerank_pool_size == 20
     assert cfg.page_size_default == 20
     assert cfg.page_size_max == 200
     assert cfg.snippet_width_chars == 200

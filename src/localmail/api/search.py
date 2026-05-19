@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from localmail.api.errors import ValidationFailed
+from localmail.api.ids import parse_int_id
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
 
 
@@ -50,19 +51,12 @@ def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
 
 def _filter_tokens(filters: dict[str, Any]) -> list[str]:
     out: list[str] = []
-    try:
-        if (vs := filters.get("account_ids")):
-            for v in vs:
-                out.append(f"account_id:{int(v)}")
-        if (vs := filters.get("folder_ids")):
-            for vs_v in vs:
-                out.append(f"folder_id:{int(vs_v)}")
-    except (TypeError, ValueError) as exc:
-        raise ValidationFailed(
-            f"account_ids / folder_ids: each value must be an integer or "
-            f"integer-string, got {filters.get('account_ids')!r} / "
-            f"{filters.get('folder_ids')!r}"
-        ) from exc
+    if (vs := filters.get("account_ids")):
+        for v in vs:
+            out.append(f"account_id:{parse_int_id(str(v), field='account_id')}")
+    if (vs := filters.get("folder_ids")):
+        for vs_v in vs:
+            out.append(f"folder_id:{parse_int_id(str(vs_v), field='folder_id')}")
     if (v := filters.get("from")):
         out.append(f'from:{_quote_value(v)}')
     if (v := filters.get("to")):
@@ -160,13 +154,7 @@ def _scope_filters_by_acl(
         return None
     caller_ids = filters.get("account_ids")
     if caller_ids:
-        try:
-            caller_set = {int(v) for v in caller_ids}
-        except (TypeError, ValueError) as exc:
-            raise ValidationFailed(
-                f"account_ids: each value must be an integer or integer-string, "
-                f"got {caller_ids!r}"
-            ) from exc
+        caller_set = {parse_int_id(str(v), field="account_id") for v in caller_ids}
         intersection = sorted(caller_set & set(allowed_account_ids))
         if not intersection:
             return None

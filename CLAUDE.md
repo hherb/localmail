@@ -327,6 +327,17 @@ for the full design.
   wire as defense in depth (the DB row is untouched). `Accept-Ranges:
   none` is set explicitly so clients don't hang on retry expecting
   partial-content. Range support is deferred (phase 2 of #32).
+- **ID typing (#33)**: every entity ID is a **string on the wire** in
+  both directions — response bodies emit `str(id)` and path/query
+  parameters accept digit-strings only. `localmail.api.ids.parse_int_id`
+  is the single boundary cast: route handlers call it on `account_id` /
+  `message_id` / `since` cursor and surface a uniform `400
+  /problems/validation-failed` on non-digit input (including `+`/`-`,
+  whitespace, decimals, hex prefixes, Unicode digits). The api/ layer
+  still takes `int`, so the cast happens exactly once per request. When
+  adding a new ID-bearing endpoint or MCP tool, declare the parameter
+  as `str` and call `parse_int_id(...)`; never accept `int` directly
+  from the wire, and never bypass the helper.
 
 ## Conventions
 

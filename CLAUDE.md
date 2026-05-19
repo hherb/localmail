@@ -96,7 +96,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0016_user_accounts.sql
+migrations/         # 0001_init.sql … 0017_messages_body_lang_pending_index.sql
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py)
@@ -323,7 +323,7 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0016_user_accounts.sql`; next would be `0017_*.sql`.
+  Latest is `0017_messages_body_lang_pending_index.sql`; next would be `0018_*.sql`.
 
 ## Testing notes
 

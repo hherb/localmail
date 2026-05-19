@@ -29,6 +29,32 @@ from localmail.search.reranker import Reranker
 log = logging.getLogger("localmail.search.searcher")
 
 
+def _safe_rerank(
+    reranker: Reranker,
+    query: str,
+    snippets: list[str],
+    *,
+    fallback: list[float],
+) -> list[float]:
+    """Call the reranker, but degrade to ``fallback`` if it raises.
+
+    A broken reranker (wrong output shape, missing model file, OOM) should
+    not turn a search into a 500 — the RRF-fused scores from the retrieval
+    arms are usable on their own. The mismatch is logged as a WARNING so
+    ops sees the degraded quality.
+    """
+    try:
+        return reranker.rerank(query, snippets)
+    except Exception as exc:
+        log.warning(
+            "reranker %r raised %s: %s — falling back to fused RRF scores",
+            getattr(reranker, "model", type(reranker).__name__),
+            type(exc).__name__,
+            exc,
+        )
+        return fallback
+
+
 @dataclass(frozen=True)
 class ArmHit:
     """One hit from one retrieval arm."""
@@ -496,7 +522,12 @@ class Searcher:
         if self._reranker and hydrated:
             cap = self._cfg.rerank_max_chars
             snippets = [item["snippet_source_text"][:cap] for item in hydrated]
-            scores = self._reranker.rerank(parsed.rewritten_text or parsed.free_text, snippets)
+            scores = _safe_rerank(
+                self._reranker,
+                parsed.rewritten_text or parsed.free_text,
+                snippets,
+                fallback=[item["fused"].rrf_score for item in hydrated],
+            )
         else:
             scores = [item["fused"].rrf_score for item in hydrated]
         timing["rerank"] = (time.monotonic() - t) * 1000
@@ -572,8 +603,11 @@ class Searcher:
                 item["snippet_source_text"][: cfg.rerank_max_chars]
                 for item in hydrated
             ]
-            scores = reranker.rerank(
-                parsed.rewritten_text or parsed.free_text, snippets_for_rerank,
+            scores = _safe_rerank(
+                reranker,
+                parsed.rewritten_text or parsed.free_text,
+                snippets_for_rerank,
+                fallback=[item["fused"].rrf_score for item in hydrated],
             )
         else:
             scores = [item["fused"].rrf_score for item in hydrated]

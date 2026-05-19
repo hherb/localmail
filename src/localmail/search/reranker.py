@@ -40,9 +40,13 @@ class FastEmbedReranker:
     def rerank(self, query: str, candidates: list[str]) -> list[float]:
         if not candidates:
             return []
-        # fastembed's API: rerank returns scored results; preserve input order
-        raw = list(self._inner.rerank(query, candidates))
-        scores = [0.0] * len(candidates)
-        for entry in raw:
-            scores[entry["index"]] = float(entry["score"])
+        # fastembed's TextCrossEncoder.rerank returns Iterable[float], one per
+        # document in input order. (The older Iterable[{"index","score"}] dict
+        # shape lives on rerank_pairs; don't conflate the two.)
+        scores = [float(s) for s in self._inner.rerank(query, candidates)]
+        if len(scores) != len(candidates):
+            raise ValueError(
+                f"reranker returned {len(scores)} scores for "
+                f"{len(candidates)} candidates"
+            )
         return scores

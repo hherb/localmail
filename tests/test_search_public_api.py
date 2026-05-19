@@ -18,6 +18,47 @@ def test_public_names_importable():
     )
 
 
+def test_create_searcher_degrades_when_reranker_init_fails(db_dsn, caplog, monkeypatch):
+    """A reranker init failure (e.g. fastembed dropped the configured model name)
+    must not disable search — Searcher should be returned with _reranker=None
+    and a WARNING logged."""
+    import logging
+
+    from localmail.config import LocalmailConfig
+    from localmail.search import Searcher, create_searcher
+
+    class _StubEmbedder:
+        name = "stub"
+        model = "stub"
+        dimension = 768
+
+        def embed_documents(self, texts):
+            return [[0.5] * 768 for _ in texts]
+
+        def embed_query(self, text):
+            return [0.5] * 768
+
+        def health_check(self):
+            pass
+
+    def _boom(cfg):
+        raise RuntimeError("Model X is not supported in TextCrossEncoder.")
+
+    monkeypatch.setattr("localmail.search.reranker.FastEmbedReranker", _boom)
+
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}, "accounts": []})
+    with caplog.at_level(logging.WARNING, logger="localmail.search"):
+        searcher = create_searcher(cfg=cfg, embeddings=_StubEmbedder())
+    try:
+        assert isinstance(searcher, Searcher)
+        assert searcher._reranker is None
+        assert any(
+            "reranker init failed" in rec.message for rec in caplog.records
+        ), caplog.records
+    finally:
+        searcher._pool.close()
+
+
 def test_create_searcher_returns_searcher(db_dsn):
     """create_searcher builds a Searcher with a live pool; pool closes cleanly."""
     from localmail.config import LocalmailConfig

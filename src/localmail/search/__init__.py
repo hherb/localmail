@@ -53,6 +53,8 @@ def create_searcher(
         Pass ``reranker=None`` together with a config where
         ``reranker_enabled=False`` to disable reranking entirely.
     """
+    import logging
+
     from localmail.config import LocalmailConfig, load_config
     from localmail.db import open_pool
     from localmail.search.embeddings import FastEmbedBackend
@@ -68,7 +70,17 @@ def create_searcher(
         embeddings = FastEmbedBackend(cfg.search)
 
     if reranker is _UNSET:
-        reranker = FastEmbedReranker(cfg.search) if cfg.search.reranker_enabled else None
+        if cfg.search.reranker_enabled:
+            try:
+                reranker = FastEmbedReranker(cfg.search)
+            except Exception as exc:
+                logging.getLogger("localmail.search").warning(
+                    "reranker init failed (%s=%r): %s — continuing without rerank",
+                    "reranker_model", cfg.search.reranker_model, exc,
+                )
+                reranker = None
+        else:
+            reranker = None
 
     return Searcher(
         pool=pool,

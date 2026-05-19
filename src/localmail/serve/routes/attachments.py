@@ -92,7 +92,7 @@ def stream_blob(
         original = get_attachment_filename(
             conn, sha256, allowed_account_ids=allowed,
         )
-    filename = original or _fallback_filename(sha256)
+    filename = (original or "").strip() or _fallback_filename(sha256)
 
     def gen():
         try:

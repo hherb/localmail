@@ -124,12 +124,17 @@ def get_attachment_filename(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT a->>'filename' "
-            "FROM messages, jsonb_array_elements(attachments) AS a "
-            "WHERE account_id = ANY(%s) "
-            "  AND a->>'sha256' = %s "
-            "ORDER BY messages.id ASC "
+            "FROM ("
+            "  SELECT id, attachments FROM messages "
+            "  WHERE account_id = ANY(%s) "
+            "    AND attachments @> jsonb_build_array("
+            "          jsonb_build_object('sha256', %s::text)"
+            "        ) "
+            "  ORDER BY id ASC LIMIT 1"
+            ") m, jsonb_array_elements(m.attachments) AS a "
+            "WHERE a->>'sha256' = %s "
             "LIMIT 1",
-            (allowed_account_ids, sha256_hex),
+            (allowed_account_ids, sha256_hex, sha256_hex),
         )
         row = cur.fetchone()
     if row is None or row[0] is None:

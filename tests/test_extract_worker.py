@@ -344,6 +344,23 @@ def test_is_transient_rejects_plain_extractor_error() -> None:
     assert not _is_transient(ExtractorError("pypdf: malformed PDF"))
 
 
+def test_is_transient_respects_suppress_context() -> None:
+    """``raise X from None`` sets ``__suppress_context__`` — the walk must
+    stop there instead of falling through to the implicit ``__context__``.
+    Matches Python's traceback-printing behaviour and lets a caller
+    deliberately mask a transient cause."""
+    from localmail.search.extract_worker import _is_transient
+    from localmail.search.extractor import ExtractorError
+
+    try:
+        try:
+            raise ConnectionError("would otherwise be transient")
+        except ConnectionError:
+            raise ExtractorError("deliberately not transient") from None
+    except ExtractorError as exc:
+        assert not _is_transient(exc)
+
+
 def test_extract_worker_does_not_record_transient_error(
     db_conn, tmp_path, monkeypatch
 ) -> None:

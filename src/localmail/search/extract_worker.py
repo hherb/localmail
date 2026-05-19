@@ -46,6 +46,12 @@ Transient vs poison-pill classification (#36)
   upsert ``failed_extractions`` with retry_count += 1, permanently skipped
   once retry_count >= ``cfg.extract_worker_max_retries``. Mirrors the
   embed_worker's batch-level rollback policy for backend errors.
+- Precedence when both extractors raise: docling's exception wins (it's
+  raised last, and lightweight's is held in ``lw_raised``). If docling is
+  transient the whole blob is treated as transient and the underlying
+  lightweight failure is not recorded — on the next sweep docling will
+  usually succeed and supersede lightweight anyway, so the masking is
+  self-correcting in practice.
 
 Allowlist filter is applied in Python (not SQL) because the allowlist lists
 live in ``SearchConfig`` and may be customised per-deployment.
@@ -95,10 +101,10 @@ def _is_transient(exc: BaseException) -> bool:
     """True iff ``exc`` (or any cause/context in its chain) signals a
     transient extraction failure.
 
-    Walks ``__cause__`` first (explicit ``raise X from Y``) and then
-    ``__context__`` (implicit during-handling chain), so the helper
-    recognises both ``raise ExtractorError(...) from ConnectionError()``
-    and ``ConnectionError`` re-raised without an explicit ``from``.
+    Walks ``__cause__`` first (explicit ``raise X from Y``) and falls back
+    to ``__context__`` (implicit during-handling chain) only when
+    ``__suppress_context__`` is False — so ``raise X from None`` correctly
+    stops the walk, matching Python's own traceback-printing behaviour.
     A small ``seen`` set prevents infinite loops on pathological cycles.
     """
     seen: set[int] = set()
@@ -109,7 +115,10 @@ def _is_transient(exc: BaseException) -> bool:
             return True
         if isinstance(cur, _TRANSIENT_EXC_TYPES):
             return True
-        cur = cur.__cause__ or cur.__context__
+        nxt = cur.__cause__
+        if nxt is None and not cur.__suppress_context__:
+            nxt = cur.__context__
+        cur = nxt
     return False
 
 

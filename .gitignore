@@ -27,3 +27,6 @@ gui/dist/
 gui/src-tauri/target/
 gui/src-tauri/gen/
 gui/.svelte-kit/
+
+# Cloudflare Pages build output (copied from docs/manual/users by site/build.sh)
+site/manual/

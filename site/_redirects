@@ -1,0 +1,16 @@
+# Cloudflare Pages — URL rewrites & redirects.
+# Format: <from>  <to>  <status>
+# https://developers.cloudflare.com/pages/configuration/redirects/
+
+# Friendlier aliases.
+/docs          /manual/                 301
+/docs/*        /manual/:splat           301
+/repo          https://github.com/hherb/localmail   302
+/issues        https://github.com/hherb/localmail/issues  302
+
+# Pretty directory URLs — make /manual/daemon resolve to /manual/daemon/index.html.
+# Cloudflare Pages auto-serves index.html for trailing-slash URLs, so these
+# only catch the no-slash form.
+/manual/daemon         /manual/daemon/index.html       200
+/manual/cli-use        /manual/cli-use/index.html      200
+/manual/desktop-app    /manual/desktop-app/index.html  200

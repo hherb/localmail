@@ -13,6 +13,48 @@ def open_pool(dsn: str, *, min_size: int = 1, max_size: int = 4) -> ConnectionPo
     return ConnectionPool(conninfo=dsn, min_size=min_size, max_size=max_size, open=True)
 
 
+POOL_BASELINE_MIN = 4
+"""Floor for ``compute_daemon_pool_size``. Single-account / no-worker
+deployments still get a few slots so brief contention during sweep
+transitions (one worker re-acquiring while another is mid-query) doesn't
+serialise every thread through a one-slot pool."""
+
+POOL_HEADROOM = 2
+"""Slack over the (2N + workers) computed budget. Workers release and
+re-acquire connections at sweep boundaries; the headroom absorbs that
+turnover plus the migration runner in ``init-db`` running alongside an
+unrelated daemon process sharing the same Postgres."""
+
+_SLOTS_PER_ACCOUNT = 2
+"""Each account runs one IDLE thread on INBOX and one poll thread on the
+remaining folders; both hold a connection from the shared pool."""
+
+
+def compute_daemon_pool_size(
+    *,
+    n_accounts: int,
+    run_embed: bool,
+    run_extract: bool,
+    baseline_min: int = POOL_BASELINE_MIN,
+    headroom: int = POOL_HEADROOM,
+) -> int:
+    """Return the recommended ``ConnectionPool.max_size`` for a daemon.
+
+    The daemon shares one pool across every long-running thread it spawns:
+    two per account (IDLE + poll), one for the embed worker (if enabled),
+    and one for the extract worker (if enabled). On top of that we keep
+    ``headroom`` slots to absorb the brief window where a worker releases
+    its connection at a sweep boundary while another acquires. The
+    ``baseline_min`` floor keeps even a single-account, no-worker daemon
+    from serialising every thread through a tiny pool.
+
+    This function is pure and side-effect-free so it can be unit-tested
+    without touching Postgres.
+    """
+    workers = (1 if run_embed else 0) + (1 if run_extract else 0)
+    return max(baseline_min, _SLOTS_PER_ACCOUNT * n_accounts + workers + headroom)
+
+
 def _migrations_dir() -> Path:
     # migrations/ sits at the repo root, next to pyproject.toml.
     # When installed as a wheel the directory is shipped via tool.hatch (see below).

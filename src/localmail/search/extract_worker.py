@@ -66,9 +66,9 @@ import logging
 import threading
 import traceback as tb_mod
 from pathlib import Path
-from typing import Callable
 
 import psycopg
+from psycopg_pool import ConnectionPool
 
 from localmail.config import SearchConfig
 from localmail.search.extractor import (
@@ -469,61 +469,56 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
     return touched
 
 
+_INITIAL_BACKOFF_S = 1.0
+"""Starting backoff when a connection acquisition or sweep raises."""
+
+_MAX_BACKOFF_S = 60.0
+"""Cap on the doubling backoff; matches the daemon's IDLE/poll reconnect cap."""
+
+
 def run_extract_worker(
     *,
-    conn_factory: Callable[[], psycopg.Connection],
+    pool: ConnectionPool,
     cfg: SearchConfig,
     stop_event: threading.Event,
 ) -> None:
     """Background loop: drain the extraction queue, sleep, repeat.
 
-    Opens a fresh connection via ``conn_factory`` for each outer iteration so
-    that server-side idle timeouts and transaction-state leaks cannot
-    accumulate across sweeps. Reconnects with exponential backoff (1 s → 60 s
-    cap) when ``conn_factory`` raises.  Exits cleanly as soon as
-    ``stop_event`` is set — including during the inter-sweep sleep so the
-    thread joins promptly.
+    Acquires a fresh connection from ``pool`` for each drain iteration via
+    ``pool.connection()`` so server-side idle timeouts and transaction-state
+    leaks cannot accumulate across sweeps. The pool slot is released before
+    the inter-sweep sleep so the connection isn't pinned during the (long)
+    poll interval. Reconnects with exponential backoff (1 s → 60 s cap) when
+    the pool raises. Exits cleanly as soon as ``stop_event`` is set —
+    including during the inter-sweep sleep so the thread joins promptly.
 
     Args:
-        conn_factory: Zero-argument callable that returns a fresh
-            ``psycopg.Connection``.  The worker owns the connection's
-            lifecycle (close is called in ``finally``).
+        pool: The shared daemon ``ConnectionPool``. The worker borrows a
+            connection per drain via ``pool.connection()`` and releases it
+            before each idle sleep.
         cfg: ``SearchConfig`` supplying all tunables: poll interval, batch
             size, retry cap, and the master enable flag.
-        stop_event: Set this to request graceful shutdown.  The loop checks
+        stop_event: Set this to request graceful shutdown. The loop checks
             the event before each sweep and uses ``stop_event.wait`` for
             inter-sweep sleeps so cancellation is near-instantaneous.
     """
-    backoff = 1.0
+    backoff = _INITIAL_BACKOFF_S
     while not stop_event.is_set():
         try:
-            conn = conn_factory()
-        except Exception:
-            _LOG.warning(
-                "extract_worker: connect failed; backing off %.0fs", backoff
-            )
-            if stop_event.wait(timeout=backoff):
-                return
-            backoff = min(backoff * 2, 60.0)
-            continue
-
-        backoff = 1.0
-        try:
-            while not stop_event.is_set():
-                touched = run_extract_worker_once(conn, cfg)
-                if touched == 0:
-                    break
-            if stop_event.is_set():
-                break
-            if stop_event.wait(timeout=cfg.extract_worker_poll_interval_s):
-                break
+            with pool.connection() as conn:
+                while not stop_event.is_set():
+                    touched = run_extract_worker_once(conn, cfg)
+                    if touched == 0:
+                        break
         except Exception:
             _LOG.exception("extract_worker: error during sweep")
             if stop_event.wait(timeout=backoff):
                 return
-            backoff = min(backoff * 2, 60.0)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            backoff = min(backoff * 2, _MAX_BACKOFF_S)
+            continue
+
+        backoff = _INITIAL_BACKOFF_S
+        if stop_event.is_set():
+            break
+        if stop_event.wait(timeout=cfg.extract_worker_poll_interval_s):
+            break

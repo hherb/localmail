@@ -7,10 +7,8 @@ import signal
 import threading
 from typing import Any
 
-from psycopg_pool import ConnectionPool
-
 from .config import Config
-from .db import open_pool
+from .db import compute_daemon_pool_size, open_pool
 from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
 from .worker import WorkerContext
@@ -31,10 +29,35 @@ class Daemon:
         self.ssl = ssl
         self._dsn = dsn or cfg.database.dsn
         self._stop_event = threading.Event()
-        self.pool = open_pool(self._dsn, min_size=1, max_size=max(4, 2 * len(cfg.accounts)))
+        configured_max_size = cfg.daemon.pool_max_size
+        if configured_max_size is None:
+            resolved_max_size = compute_daemon_pool_size(
+                n_accounts=len(cfg.accounts),
+                run_embed=cfg.search.run_embed_worker,
+                run_extract=cfg.search.run_extract_worker,
+            )
+        else:
+            resolved_max_size = configured_max_size
+        resolved_min_size = min(
+            len(cfg.accounts) * 2
+            + (1 if cfg.search.run_embed_worker else 0)
+            + (1 if cfg.search.run_extract_worker else 0)
+            or 1,
+            resolved_max_size,
+        )
+        log.info(
+            "daemon pool sizing: max_size=%d min_size=%d (accounts=%d, embed=%s, extract=%s)",
+            resolved_max_size,
+            resolved_min_size,
+            len(cfg.accounts),
+            cfg.search.run_embed_worker,
+            cfg.search.run_extract_worker,
+        )
+        self.pool = open_pool(
+            self._dsn, min_size=resolved_min_size, max_size=resolved_max_size
+        )
         self.threads: list[threading.Thread] = []
         self._embedding_backend_factory = embedding_backend_factory
-        self._embed_pool: ConnectionPool | None = None
         self._started = False
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
@@ -87,11 +110,9 @@ class Daemon:
             else:
                 backend = self._embedding_backend_factory(self.cfg.search)
             lang_detector = make_detector(self.cfg.search)
-            embed_pool = open_pool(self._dsn)
-            self._embed_pool = embed_pool
             t_embed = threading.Thread(
                 target=run_embed_worker,
-                args=(self._stop_event, embed_pool, self.cfg.search, backend),
+                args=(self._stop_event, self.pool, self.cfg.search, backend),
                 kwargs={"lang_detector": lang_detector},
                 name="embed_worker",
                 daemon=True,
@@ -104,14 +125,12 @@ class Daemon:
             )
 
         if self.cfg.search.run_extract_worker:
-            import psycopg  # noqa: PLC0415
             from localmail.search.extract_worker import run_extract_worker  # noqa: PLC0415
 
-            dsn = self._dsn
             t_extract = threading.Thread(
                 target=run_extract_worker,
                 kwargs={
-                    "conn_factory": lambda: psycopg.connect(dsn),
+                    "pool": self.pool,
                     "cfg": self.cfg.search,
                     "stop_event": self._stop_event,
                 },
@@ -130,20 +149,10 @@ class Daemon:
         """Signal all threads to stop."""
         self._stop_event.set()
 
-    def _close_embed_pool(self) -> None:
-        """Close the embed worker's connection pool, logging any error."""
-        if self._embed_pool is None:
-            return
-        try:
-            self._embed_pool.close()
-        except Exception as exc:  # noqa: BLE001 — shutdown best-effort
-            log.warning("error closing embed pool: %s", exc, exc_info=True)
-
     def join(self, timeout: float | None = None) -> None:
-        """Wait for all worker threads to finish and close pools."""
+        """Wait for all worker threads to finish."""
         for t in self.threads:
             t.join(timeout=timeout)
-        self._close_embed_pool()
 
     def run_forever(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -160,5 +169,4 @@ class Daemon:
             for t in self.threads:
                 t.join(timeout=10)
             self.pool.close()
-            self._close_embed_pool()
             log.info("daemon stopped")

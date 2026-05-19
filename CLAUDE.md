@@ -156,10 +156,18 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
   `--limit-per-folder K` caps how many UIDs are processed per mailbox per run;
   the next run resumes from `mailboxes.uidnext`.
 - Daemon via `localmail run`: per account, **two threads** — one IDLE on INBOX,
-  one periodic poll on every other folder. They share a `psycopg_pool`
-  ConnectionPool, coordinate via a `threading.Event` stop signal, and reconnect
-  with exponential backoff (1s → 60s cap) on failure. SIGTERM/SIGINT cleanly
-  stop IDLE and join threads.
+  one periodic poll on every other folder. **All daemon threads share a single
+  `psycopg_pool.ConnectionPool`** (`Daemon.pool`): IDLE + poll per account,
+  plus the optional `embed_worker` and `extract_worker` threads. They
+  coordinate via a `threading.Event` stop signal and reconnect with
+  exponential backoff (1s → 60s cap) on failure. SIGTERM/SIGINT cleanly stop
+  IDLE and join threads.
+
+  Pool sizing: by default `compute_daemon_pool_size(...)` in `db.py` derives
+  the cap from `(2 * n_accounts) + workers + headroom`, floored at
+  `POOL_BASELINE_MIN`. Set `daemon.pool_max_size` in `config.toml` to
+  override for tight Postgres `max_connections` budgets or higher concurrency.
+  The chosen value is logged at startup ("daemon pool sizing: max_size=…").
 
 `sync_mailbox` checkpoints `mailboxes.uidnext` after each 50-message batch, so
 a crash mid-run loses at most one batch of progress. Re-running is safe — the

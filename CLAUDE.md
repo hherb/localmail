@@ -98,7 +98,8 @@ src/localmail/
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
 migrations/         # 0001_init.sql … 0016_user_accounts.sql
 tests/
-  acceptance/       # standalone eval harness (run_recall_eval.py)
+  acceptance/       # standalone eval harnesses (run_recall_eval.py,
+                    # run_attachment_eval.py, run_rrf_k_sweep.py)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
   _eml.py           # MIME fixture builders (no .eml files on disk)
   _fake_imap.py     # in-memory IMAP fake with IDLE support
@@ -271,8 +272,18 @@ statement are dropped; comments attached to a real statement are preserved.
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
 MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for
 de/en/es/ja. Norwegian is reported but not gated. Requires the fastembed model
-to be installed (known deferred concern: `google/embeddinggemma-300m` must be
-in the fastembed registry).
+`google/embeddinggemma-300m` to be in the local fastembed cache (downloaded
+on first invocation, ~250 MB).
+
+**RRF sweep harness**: `tests/acceptance/run_rrf_k_sweep.py` (added for #35)
+seeds the chosen corpus + drains the workers exactly once, then re-runs the
+query suite for each candidate `rrf_k` against the same chunk pool — only
+fusion varies between sweeps. Use `--corpus {multilingual,attachment}`,
+`--rrf-ks`, `--candidates-per-arm`. The #35 measurement showed that both
+synthetic corpora are insensitive to `rrf_k` across [1, 1000] — fusion is
+dominated by a single arm — so the default `rrf_k=60` is fine until
+production data or an adversarial corpus exposes the bias hypothesised in
+#35.
 
 ## GUI server (Phase 1 of GUI)
 

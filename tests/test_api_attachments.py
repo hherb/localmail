@@ -7,6 +7,7 @@ import psycopg
 import pytest
 
 from localmail.api.attachments import (
+    get_attachment_filename,
     get_attachment_metadata,
     get_attachment_text,
     open_attachment_bytes,
@@ -146,6 +147,91 @@ def test_malformed_sha256_raises_validation(db_conn: psycopg.Connection, bad_sha
     Without this, a request like GET /v1/attachments/foo would crash with
     bytes.fromhex ValueError and the user would see an opaque 500.
     """
-    for fn in (get_attachment_metadata, get_attachment_text, open_attachment_bytes):
+    for fn in (
+        get_attachment_metadata,
+        get_attachment_text,
+        open_attachment_bytes,
+        get_attachment_filename,
+    ):
         with pytest.raises(ValidationFailed):
             fn(db_conn, bad_sha, allowed_account_ids=_ANY_ACCOUNT)
+
+
+def test_get_attachment_filename_returns_jsonb_filename(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    sha = "5a" * 32
+    aid = _seed_blob(db_conn, tmp_path, sha, b"%PDF", )
+    db_conn.commit()
+    assert get_attachment_filename(db_conn, sha, allowed_account_ids=[aid]) == "x.pdf"
+
+
+def test_get_attachment_filename_returns_none_when_no_acl_match(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    sha = "5b" * 32
+    _seed_blob(db_conn, tmp_path, sha, b"%PDF")
+    db_conn.commit()
+    assert get_attachment_filename(db_conn, sha, allowed_account_ids=[]) is None
+    assert get_attachment_filename(db_conn, sha, allowed_account_ids=[99999]) is None
+
+
+def test_get_attachment_filename_returns_none_when_jsonb_has_no_filename(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """If the attachments JSONB row lacks a 'filename' key, return None."""
+    sha = "5c" * 32
+    fanout = tmp_path / "blobs" / sha[:2] / sha[2:4]
+    fanout.mkdir(parents=True, exist_ok=True)
+    blob_path = fanout / sha
+    blob_path.write_bytes(b"x")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, mime_type, size_bytes, path) "
+            "VALUES (%s, %s, %s, %s)",
+            (bytes.fromhex(sha), "application/octet-stream", 1, str(blob_path)),
+        )
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method) "
+            "VALUES ('a', 'h@e.com', 'imap.e.com', 'password') RETURNING id"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        aid = int(row[0])
+        raw = b"x"
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_bytes, raw_sha256, "
+            "size_bytes, headers, attachments, date_sent) "
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)",
+            (
+                aid, f"<{sha}@x>", raw, hashlib.sha256(raw).digest(), 1, "{}",
+                psycopg.types.json.Jsonb([{"sha256": sha}]),
+                datetime.now(timezone.utc),
+            ),
+        )
+    db_conn.commit()
+    assert get_attachment_filename(db_conn, sha, allowed_account_ids=[aid]) is None
+
+
+def test_get_attachment_filename_prefers_first_carrying_message(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """When multiple messages carry the same blob with different filenames,
+    return a deterministic pick (the earliest-inserted carrier)."""
+    sha = "5d" * 32
+    aid = _seed_blob(db_conn, tmp_path, sha, b"%PDF")
+    with db_conn.cursor() as cur:
+        raw = b"second"
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_bytes, raw_sha256, "
+            "size_bytes, headers, attachments, date_sent) "
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)",
+            (
+                aid, f"<second-{sha}@x>", raw, hashlib.sha256(raw).digest(), len(raw),
+                "{}",
+                psycopg.types.json.Jsonb([{"filename": "renamed.pdf", "sha256": sha}]),
+                datetime.now(timezone.utc),
+            ),
+        )
+    db_conn.commit()
+    assert get_attachment_filename(db_conn, sha, allowed_account_ids=[aid]) == "x.pdf"

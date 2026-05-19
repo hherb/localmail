@@ -317,6 +317,16 @@ for the full design.
 - TLS is on by default; `--no-tls` is only accepted with `--bind 127.0.0.1`.
 - The HTTP server and the sync daemon never call each other — they share
   Postgres and can run independently.
+- **Attachment download policy (#32 phase 1)**: `/v1/attachments/{sha256}`
+  always emits `Content-Disposition: attachment` with both the legacy
+  ASCII `filename=` and the RFC 5987 `filename*=UTF-8''…` form, so the
+  browser is forced into a download (never inline render — the XSS sink
+  in stored HTML/SVG blobs). MIME types in `_INLINE_RISKY_MIMES`
+  (`text/html`, `application/xhtml+xml`, `image/svg+xml`, `text/xml`,
+  `application/xml`) are clamped to `application/octet-stream` on the
+  wire as defense in depth (the DB row is untouched). `Accept-Ranges:
+  none` is set explicitly so clients don't hang on retry expecting
+  partial-content. Range support is deferred (phase 2 of #32).
 
 ## Conventions
 

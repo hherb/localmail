@@ -105,6 +105,43 @@ def open_attachment_bytes(
     return p.open("rb"), mime, int(size)
 
 
+def get_attachment_filename(
+    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
+) -> str | None:
+    """Return the original per-message filename for a blob, or None.
+
+    Blobs are content-addressable and may be referenced by multiple messages
+    (potentially with different filenames). We pick the earliest carrying
+    message in any ACL-allowed account — `ORDER BY messages.id LIMIT 1` —
+    so the choice is deterministic and the same blob always serves the same
+    download name to a given user. Returns None when no allowed message
+    references the blob, or when the message JSONB has no 'filename' key.
+    The route layer turns None into a generic sha-prefix fallback.
+    """
+    _parse_sha256_hex(sha256_hex)
+    if not allowed_account_ids:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT a->>'filename' "
+            "FROM ("
+            "  SELECT id, attachments FROM messages "
+            "  WHERE account_id = ANY(%s) "
+            "    AND attachments @> jsonb_build_array("
+            "          jsonb_build_object('sha256', %s::text)"
+            "        ) "
+            "  ORDER BY id ASC LIMIT 1"
+            ") m, jsonb_array_elements(m.attachments) AS a "
+            "WHERE a->>'sha256' = %s "
+            "LIMIT 1",
+            (allowed_account_ids, sha256_hex, sha256_hex),
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
+
+
 def get_attachment_text(
     conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
 ) -> str:

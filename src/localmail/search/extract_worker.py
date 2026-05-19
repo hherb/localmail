@@ -33,6 +33,26 @@ SAVEPOINT discipline (mirrors embed_worker.py)
   so a logging failure can't abort the outer transaction.
 - ``conn.commit()`` is called once at the end of the batch (not per-blob).
 
+Transient vs poison-pill classification (#36)
+---------------------------------------------
+- ``TransientExtractorError`` and built-in ``ConnectionError`` /
+  ``TimeoutError`` / ``MemoryError`` (anywhere in the cause chain) are
+  treated as *transient*: ROLLBACK to ``extract_blob``, WARNING log, no
+  ``failed_extractions`` row. The blob stays eligible for the next sweep
+  with retry_count untouched — so a docling model-download blip or a
+  one-off OOM doesn't permanently poison a perfectly fine PDF.
+- Everything else (corrupt PDF, encrypted file, parser raise, unexpected
+  RuntimeError from a poison blob) is treated as a *poison pill*: ROLLBACK,
+  upsert ``failed_extractions`` with retry_count += 1, permanently skipped
+  once retry_count >= ``cfg.extract_worker_max_retries``. Mirrors the
+  embed_worker's batch-level rollback policy for backend errors.
+- Precedence when both extractors raise: docling's exception wins (it's
+  raised last, and lightweight's is held in ``lw_raised``). If docling is
+  transient the whole blob is treated as transient and the underlying
+  lightweight failure is not recorded — on the next sweep docling will
+  usually succeed and supersede lightweight anyway, so the masking is
+  self-correcting in practice.
+
 Allowlist filter is applied in Python (not SQL) because the allowlist lists
 live in ``SearchConfig`` and may be customised per-deployment.
 
@@ -56,11 +76,50 @@ from localmail.search.extractor import (
     ExtractedText,
     ExtractorError,
     LightweightExtractor,
+    TransientExtractorError,
     _try_import_docling,
     warn_docling_missing,
 )
 
 _LOG = logging.getLogger(__name__)
+
+
+_TRANSIENT_EXC_TYPES: tuple[type[BaseException], ...] = (
+    ConnectionError,
+    TimeoutError,
+    MemoryError,
+)
+"""Built-in exception classes treated as transient when found anywhere in
+an extractor exception's cause chain. Network blips, model-download
+timeouts, and OOM rarely indicate a poison-pill blob — they're worth
+retrying. Narrow on purpose: a broader allowlist (e.g. plain ``OSError``)
+would mis-classify permanent ENOENT/EACCES failures as transient and let
+genuinely broken blobs loop forever."""
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True iff ``exc`` (or any cause/context in its chain) signals a
+    transient extraction failure.
+
+    Walks ``__cause__`` first (explicit ``raise X from Y``) and falls back
+    to ``__context__`` (implicit during-handling chain) only when
+    ``__suppress_context__`` is False — so ``raise X from None`` correctly
+    stops the walk, matching Python's own traceback-printing behaviour.
+    A small ``seen`` set prevents infinite loops on pathological cycles.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, TransientExtractorError):
+            return True
+        if isinstance(cur, _TRANSIENT_EXC_TYPES):
+            return True
+        nxt = cur.__cause__
+        if nxt is None and not cur.__suppress_context__:
+            nxt = cur.__context__
+        cur = nxt
+    return False
 
 
 def _is_allowlisted(mime_type: str | None, path: str, cfg: SearchConfig) -> bool:
@@ -285,7 +344,11 @@ def _process_blob(
         try:
             dl_text = dl.extract(blob_path, mime_type)
         except Exception as exc:
-            # Docling raised → record docling failure.
+            # Transient (network blip during model fetch, OOM): propagate
+            # so the outer SAVEPOINT handler rolls back without recording —
+            # the blob stays eligible for the next sweep.
+            if _is_transient(exc):
+                raise
             _record_failure_safely(conn, sha256, dl.name, exc)
             return False
 
@@ -296,7 +359,8 @@ def _process_blob(
 
         # Docling returned empty.
         if lw_raised is not None:
-            # Lightweight had raised earlier — record lightweight failure.
+            if _is_transient(lw_raised):
+                raise lw_raised
             _record_failure_safely(conn, sha256, lw.name, lw_raised)
             return False
 
@@ -315,7 +379,8 @@ def _process_blob(
         warn_docling_missing()
 
     if lw_raised is not None:
-        # Lightweight raised — record failure (no fallback available).
+        if _is_transient(lw_raised):
+            raise lw_raised
         _record_failure_safely(conn, sha256, lw.name, lw_raised)
         return False
 
@@ -387,7 +452,17 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
         except Exception as exc:  # noqa: BLE001 — outer safety net
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT extract_blob")
-            if _record_failure_safely(conn, sha256, "unexpected", exc):
+            if _is_transient(exc):
+                # Transient: blob stays un-touched (no failed_extractions
+                # row) so the next sweep re-attempts it without bumping
+                # retry_count toward extract_worker_max_retries.
+                _LOG.warning(
+                    "transient extractor error for blob %s "
+                    "(will retry next sweep): %s",
+                    sha256.hex(),
+                    exc,
+                )
+            elif _record_failure_safely(conn, sha256, "unexpected", exc):
                 touched += 1
 
     conn.commit()

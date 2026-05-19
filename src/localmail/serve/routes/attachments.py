@@ -14,6 +14,11 @@ from localmail.api.attachments import (
     get_attachment_text,
     open_attachment_bytes,
 )
+from localmail.api.conditional import (
+    etag_for_sha256,
+    if_none_match_satisfies,
+    if_range_allows_partial,
+)
 from localmail.api.range_requests import (
     ByteRange,
     UnsatisfiableRange,
@@ -26,6 +31,7 @@ from localmail.serve.middleware import get_authenticated_user
 logger = logging.getLogger("localmail.serve")
 
 _CHUNK = 64 * 1024
+_HTTP_NOT_MODIFIED = 304
 _HTTP_PARTIAL_CONTENT = 206
 _HTTP_RANGE_NOT_SATISFIABLE = 416
 
@@ -163,6 +169,13 @@ def stream_blob(
     Every response — including 416 — carries the same #32 force-download
     headers: ``Content-Disposition: attachment`` with both ASCII and RFC 5987
     filename forms, and a clamped MIME for script-executable types.
+
+    Conditional GET (#59): every 200/206/416 advertises a strong
+    ``ETag: "<sha256-hex>"``. ``If-None-Match`` (weak compare, ``*``
+    accepted) shortcuts to 304. ``If-Range`` (strong compare only) on a
+    request that also carries ``Range`` either lets the partial proceed
+    or — on mismatch — falls back to a full 200 so a resumed download
+    cannot stitch two distinct representations together.
     """
     pool = request.app.state.pool
     with pool.connection() as conn:
@@ -176,7 +189,17 @@ def stream_blob(
     filename = (original or "").strip() or _fallback_filename(sha256)
     disposition = _content_disposition(filename)
     response_mime = _safe_response_mime(mime)
+    etag = etag_for_sha256(sha256)
+
+    if if_none_match_satisfies(request.headers.get("if-none-match"), etag):
+        fp.close()
+        return Response(status_code=_HTTP_NOT_MODIFIED, headers={"ETag": etag})
+
     range_header = request.headers.get("range")
+    if range_header is not None and not if_range_allows_partial(
+        request.headers.get("if-range"), etag,
+    ):
+        range_header = None
 
     try:
         byte_range = parse_byte_range(range_header, size)
@@ -189,6 +212,7 @@ def stream_blob(
                 "Content-Range": unsatisfiable_content_range(size),
                 "Content-Disposition": disposition,
                 "Accept-Ranges": "bytes",
+                "ETag": etag,
             },
         )
 
@@ -200,6 +224,7 @@ def stream_blob(
                 "Content-Length": str(size),
                 "Content-Disposition": disposition,
                 "Accept-Ranges": "bytes",
+                "ETag": etag,
             },
         )
 
@@ -212,6 +237,7 @@ def stream_blob(
             "Content-Range": content_range_header(byte_range, size),
             "Content-Disposition": disposition,
             "Accept-Ranges": "bytes",
+            "ETag": etag,
         },
     )
 

@@ -359,6 +359,33 @@ for the full design.
   consumer ever needs a pre-stream sanity check, add a `stat()` gate
   before the headers go out; the issue body for #58 explicitly scoped
   that out as not necessary.
+- **Conditional GET — ETag / If-None-Match / If-Range (#59)**: the
+  attachment route advertises a **strong** ETag of `"<sha256-hex>"` on
+  every 200 / 206 / 416 response — content-addressable URLs make the
+  ETag canonically strong and immutable, so it can be cached
+  indefinitely. Parsing lives in
+  [`src/localmail/api/conditional.py`](src/localmail/api/conditional.py)
+  as a pure module (no IO, no FastAPI) for the same reason
+  `range_requests.py` is — future transports (MCP, etc.) reuse it.
+  Comparison rules per RFC 9110:
+    - `If-None-Match` (§13.1.2) uses **weak** compare. `*`, exact
+      strong, and weak (`W/"…"`) variants of the current SHA all match
+      → 304 Not Modified with **no body**, carrying only the `ETag`
+      header (no Content-Disposition / Accept-Ranges / Content-Length
+      — §15.4.5 representation-metadata rules). Evaluated **before**
+      Range, so a 304 never degrades to 206 even when both headers
+      are present.
+    - `If-Range` (§13.1.5) uses **strong** compare. On match, the
+      Range proceeds and a 206 is served as today. On mismatch (weak
+      tag, HTTP-date, garbage, or simply the wrong SHA) the Range is
+      **ignored** and a full 200 is served — never stitch a resumed
+      download onto a stale prefix.
+    - `If-Range` without `Range` is a no-op (RFC 9110 forbids it; we
+      tolerate it gracefully).
+  Note that the ETag is `"<sha>"` quoted — `etag_for_sha256` returns
+  exactly that; don't double-quote. The pure helpers are
+  intentionally generic over `etag` so non-SHA streaming endpoints
+  could reuse them.
 - **ID typing (#33)**: every entity ID is a **string on the wire** in
   both directions — response bodies emit `str(id)` and path/query
   parameters accept digit-strings only. `localmail.api.ids.parse_int_id`

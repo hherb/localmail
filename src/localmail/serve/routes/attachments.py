@@ -1,6 +1,7 @@
 """Attachment streaming + extracted-text routes."""
 from __future__ import annotations
 
+import logging
 from typing import BinaryIO, Iterator
 from urllib.parse import quote
 
@@ -21,6 +22,8 @@ from localmail.api.range_requests import (
     unsatisfiable_content_range,
 )
 from localmail.serve.middleware import get_authenticated_user
+
+logger = logging.getLogger("localmail.serve")
 
 _CHUNK = 64 * 1024
 _HTTP_PARTIAL_CONTENT = 206
@@ -84,29 +87,56 @@ def _fallback_filename(sha256_hex: str) -> str:
     return f"attachment-{sha256_hex[:_SHA_PREFIX_LEN_FOR_FALLBACK_NAME]}.bin"
 
 
-def _stream_full(fp: BinaryIO) -> Iterator[bytes]:
-    """Iterate the rest of ``fp`` in fixed chunks, closing on exit."""
+def _log_truncation(sha256_hex: str, expected: int, sent: int) -> None:
+    """Surface a short-read against the DB-recorded blob size.
+
+    By the time the streamer notices, headers are already flushed and the
+    client sees a stalled / prematurely-closed connection. We can't fix the
+    response — only flag it for ops to investigate (#58).
+    """
+    logger.warning(
+        "attachment stream truncated: sha256=%s expected=%d sent=%d",
+        sha256_hex, expected, sent,
+    )
+
+
+def _stream_full(fp: BinaryIO, sha256_hex: str, expected: int) -> Iterator[bytes]:
+    """Iterate the rest of ``fp`` in fixed chunks, closing on exit.
+
+    Logs a WARNING if the file ends before ``expected`` bytes have been
+    sent — i.e. on-disk blob is shorter than ``attachment_blobs.size_bytes``.
+    """
+    sent = 0
     try:
         while chunk := fp.read(_CHUNK):
+            sent += len(chunk)
             yield chunk
+        if sent < expected:
+            _log_truncation(sha256_hex, expected, sent)
     finally:
         fp.close()
 
 
-def _stream_range(fp: BinaryIO, byte_range: ByteRange) -> Iterator[bytes]:
+def _stream_range(
+    fp: BinaryIO, byte_range: ByteRange, sha256_hex: str,
+) -> Iterator[bytes]:
     """Iterate exactly the bytes covered by ``byte_range``, closing on exit.
 
     Seeks once to ``byte_range.start`` then reads in ``_CHUNK``-sized blocks
-    without slurping the whole blob into memory.
+    without slurping the whole blob into memory. Logs a WARNING if the file
+    runs short of the requested slice length.
     """
+    sent = 0
     try:
         fp.seek(byte_range.start)
         remaining = byte_range.length
         while remaining > 0:
             chunk = fp.read(min(_CHUNK, remaining))
             if not chunk:
+                _log_truncation(sha256_hex, byte_range.length, sent)
                 break
             remaining -= len(chunk)
+            sent += len(chunk)
             yield chunk
     finally:
         fp.close()
@@ -164,7 +194,7 @@ def stream_blob(
 
     if byte_range is None:
         return StreamingResponse(
-            _stream_full(fp),
+            _stream_full(fp, sha256, size),
             media_type=response_mime,
             headers={
                 "Content-Length": str(size),
@@ -174,7 +204,7 @@ def stream_blob(
         )
 
     return StreamingResponse(
-        _stream_range(fp, byte_range),
+        _stream_range(fp, byte_range, sha256),
         status_code=_HTTP_PARTIAL_CONTENT,
         media_type=response_mime,
         headers={

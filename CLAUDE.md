@@ -346,6 +346,19 @@ for the full design.
   Streaming uses `.seek(start)` + bounded chunked `read()` (never slurps
   the whole blob into memory) and still goes through `open_attachment_bytes`,
   so the per-user ACL applies to ranged requests too.
+- **Short-read detection (#58)**: both `_stream_full` and `_stream_range`
+  in [`src/localmail/serve/routes/attachments.py`](src/localmail/serve/routes/attachments.py)
+  count bytes actually yielded and call `_log_truncation()` (WARNING on
+  the `localmail.serve` logger, message
+  `attachment stream truncated: sha256=… expected=… sent=…`) when the
+  on-disk blob runs out before the DB-recorded `attachment_blobs.size_bytes`
+  (or, on the 206 path, before the requested slice length). Headers are
+  already flushed at that point, so the response is short and the client
+  sees a stalled / prematurely-closed connection — the log is the only
+  ops signal. Don't try to "patch up" the wire here. If a downstream
+  consumer ever needs a pre-stream sanity check, add a `stat()` gate
+  before the headers go out; the issue body for #58 explicitly scoped
+  that out as not necessary.
 - **ID typing (#33)**: every entity ID is a **string on the wire** in
   both directions — response bodies emit `str(id)` and path/query
   parameters accept digit-strings only. `localmail.api.ids.parse_int_id`

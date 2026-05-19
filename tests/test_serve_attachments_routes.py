@@ -2,10 +2,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import hashlib
+import logging
+
 import psycopg
 from fastapi.testclient import TestClient
 
 from localmail.serve.app import create_app
+
+_SERVE_LOGGER = "localmail.serve"
 
 
 def _seed_blob_with_carrier(
@@ -459,3 +463,125 @@ def test_416_response_clamps_risky_mime(
     )
     assert r.status_code == 416
     assert r.headers["content-type"].startswith("application/octet-stream")
+
+
+def _truncate_blob_on_disk(tmp_path: Path, sha_hex: str, new_size: int) -> None:
+    """Shrink the on-disk blob without touching the DB-recorded size.
+
+    Simulates filesystem corruption, partial sync, or manual `rm`+restore —
+    the DB still says ``size_bytes = N`` but the file holds ``new_size < N``.
+    """
+    p = tmp_path / "blobs" / sha_hex[:2] / sha_hex[2:4] / sha_hex
+    data = p.read_bytes()
+    assert new_size < len(data), "test set-up bug: new_size must shrink the file"
+    p.write_bytes(data[:new_size])
+
+
+def _truncation_warnings_for(records: list[logging.LogRecord], sha_hex: str) -> list[str]:
+    """Pull WARNING messages for ``sha_hex`` out of caplog records."""
+    return [
+        rec.getMessage() for rec in records
+        if rec.levelno == logging.WARNING and sha_hex in rec.getMessage()
+    ]
+
+
+def test_stream_full_logs_warning_when_on_disk_blob_truncated(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+    grant_alice_all_accounts, caplog,
+) -> None:
+    """If the on-disk blob is shorter than ``attachment_blobs.size_bytes``,
+    the full-GET streamer must log a WARNING with sha + expected + actual
+    bytes (#58). Headers are already flushed, so logging is the only signal
+    ops have. The response body is the short content; we don't try to patch
+    Content-Length after the fact."""
+    sha = "1a" * 32
+    full_size = len(_PDF_PAYLOAD)
+    truncated_size = full_size // 2
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    _truncate_blob_on_disk(tmp_path, sha, truncated_size)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    with caplog.at_level(logging.WARNING, logger=_SERVE_LOGGER):
+        r = c.get(
+            f"/v1/attachments/{sha}",
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+    assert r.status_code == 200
+    assert r.content == _PDF_PAYLOAD[:truncated_size]
+    warnings = _truncation_warnings_for(caplog.records, sha)
+    assert len(warnings) == 1, f"expected one WARNING, got {warnings!r}"
+    msg = warnings[0]
+    assert str(full_size) in msg, f"expected size {full_size} missing from {msg!r}"
+    assert str(truncated_size) in msg, f"sent count {truncated_size} missing from {msg!r}"
+
+
+def test_stream_range_logs_warning_when_on_disk_blob_truncated(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+    grant_alice_all_accounts, caplog,
+) -> None:
+    """Same correctness contract as the full-GET path, but on the 206 path
+    (#58). The Range header asks for the whole file; on-disk is truncated;
+    streamer must log expected slice length and actual bytes sent."""
+    sha = "1b" * 32
+    full_size = len(_PDF_PAYLOAD)
+    truncated_size = full_size // 2
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    _truncate_blob_on_disk(tmp_path, sha, truncated_size)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    last = full_size - 1
+    with caplog.at_level(logging.WARNING, logger=_SERVE_LOGGER):
+        r = c.get(
+            f"/v1/attachments/{sha}",
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Range": f"bytes=0-{last}",
+            },
+        )
+    assert r.status_code == 206
+    assert r.content == _PDF_PAYLOAD[:truncated_size]
+    warnings = _truncation_warnings_for(caplog.records, sha)
+    assert len(warnings) == 1, f"expected one WARNING, got {warnings!r}"
+    msg = warnings[0]
+    assert str(full_size) in msg, f"expected range length {full_size} missing from {msg!r}"
+    assert str(truncated_size) in msg, f"sent count {truncated_size} missing from {msg!r}"
+
+
+def test_stream_full_does_not_warn_when_blob_matches_db_size(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+    grant_alice_all_accounts, caplog,
+) -> None:
+    """Happy path: no truncation, no spurious WARNINGs. Guards against a
+    fix that fires the warning on every download (#58)."""
+    sha = "1c" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    with caplog.at_level(logging.WARNING, logger=_SERVE_LOGGER):
+        r = c.get(
+            f"/v1/attachments/{sha}",
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+    assert r.status_code == 200
+    assert r.content == _PDF_PAYLOAD
+    assert _truncation_warnings_for(caplog.records, sha) == []
+
+
+def test_stream_range_does_not_warn_when_slice_is_fully_satisfiable(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+    grant_alice_all_accounts, caplog,
+) -> None:
+    """Happy path: 206 with a satisfiable slice over an intact blob must
+    not log a WARNING (#58)."""
+    sha = "1d" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    with caplog.at_level(logging.WARNING, logger=_SERVE_LOGGER):
+        r = c.get(
+            f"/v1/attachments/{sha}",
+            headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=0-9"},
+        )
+    assert r.status_code == 206
+    assert r.content == _PDF_PAYLOAD[:10]
+    assert _truncation_warnings_for(caplog.records, sha) == []

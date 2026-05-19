@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a href="../setup/postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="../setup/install.html">2. Install localmail</a></li>
+        <li><a href="../setup/accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="../daemon/index.html">Daemon</a></li>
+        <li><a class="active" href="index.html">CLI</a></li>
+        <li><a href="../desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Using localmail</div>
+      <h1>Use the CLI</h1>
+      <p class="lede">Every operation localmail performs is reachable from
+      the <code>localmail</code> command. This page is a tour of the most
+      common workflows; <code>localmail --help</code> and
+      <code>localmail COMMAND --help</code> have the authoritative flag
+      list.</p>
+    </header>
+
+    <h2>Accounts &amp; credentials</h2>
+    <table>
+      <tr><th>Command</th><th>What it does</th></tr>
+      <tr>
+        <td><code>localmail list-accounts</code></td>
+        <td>Show every account in <code>config.toml</code> and whether a
+          credential (password or OAuth refresh token) is in the keyring.</td>
+      </tr>
+      <tr>
+        <td><code>localmail add-account NAME</code></td>
+        <td>Prompt for an IMAP password (or app password) and store it.</td>
+      </tr>
+      <tr>
+        <td><code>localmail oauth-login NAME</code></td>
+        <td>Run the Gmail OAuth desktop flow. Browser opens; refresh token
+          is stored.</td>
+      </tr>
+      <tr>
+        <td><code>localmail remove-account NAME</code></td>
+        <td>Drop both password and refresh token from the keyring. The
+          account entry in <code>config.toml</code> is untouched.</td>
+      </tr>
+    </table>
+
+    <h2>One-shot sync</h2>
+    <p>If you don't want a daemon — e.g. you want to run a sync from cron
+    every 15 minutes — <code>localmail sync</code> is the one-shot
+    incremental sync command.</p>
+    <pre><code>localmail sync                                  # every account, every folder
+localmail sync --account horst-gmail            # one account
+localmail sync --account horst-gmail --limit-per-folder 10
+                                                # smoke test / staged backfill</code></pre>
+    <p>It is safe to interrupt — Postgres SAVEPOINTs and
+    <code>mailboxes.uidnext</code> checkpoints mean the next run resumes
+    cleanly. The daemon and one-shot sync share exactly the same code
+    path, so anything that works in one works in the other.</p>
+
+    <h3>Cron example</h3>
+    <pre><code># /etc/crontab or `crontab -e`
+*/15 * * * *  yourusername  /home/yourusername/.local/bin/localmail sync &gt;&gt; ~/.local/state/localmail-cron.log 2&gt;&amp;1</code></pre>
+
+    <h2 id="backfill">Initial backfill workflow</h2>
+    <p>On a fresh archive with several years of mail, you typically want to
+    do the heavy lifting up front, in the foreground, so you can watch
+    progress:</p>
+
+    <ol class="steps">
+      <li>
+        <h3>Mirror mail bytes.</h3>
+        <pre><code>localmail sync</code></pre>
+        <p>Run for as long as it takes. Hours for tens of thousands of
+        messages with attachments. Re-run if interrupted.</p>
+      </li>
+
+      <li>
+        <h3>Detect message body languages.</h3>
+        <pre><code>localmail lang-backfill</code></pre>
+        <p>Populates <code>messages.body_lang</code> so <code>lang:</code>
+        filters work in search. Required once on a fresh install.</p>
+      </li>
+
+      <li>
+        <h3>Extract attachment text.</h3>
+        <pre><code>localmail extract-backfill</code></pre>
+        <p>Runs the extract worker until the queue is empty. PDFs, DOCXs,
+        XLSX, HTML, etc. become searchable. Requires the
+        <code>extraction</code> extra if you want full Docling support;
+        the lightweight extractor handles 11 formats with no extra deps.</p>
+      </li>
+
+      <li>
+        <h3>Compute embeddings.</h3>
+        <pre><code>localmail embed-backfill</code></pre>
+        <p>Drains the embedding queue. First run downloads ~250 MB of
+        model weights to <code>~/.cache/fastembed/</code>.</p>
+      </li>
+
+      <li>
+        <h3>Check status.</h3>
+        <pre><code>localmail search-status</code></pre>
+        <p>Reports message/chunk/extraction counts and how many rows still
+        have <code>body_lang</code> pending.</p>
+      </li>
+    </ol>
+
+    <h2>Search</h2>
+    <pre><code>localmail search "Berlin conference"
+localmail search "invoice has:attachment after:2025-01-01 from:anna"
+localmail search "Heizung" --format json | jq
+localmail search "minutes lang:en before:2025-06-01"</code></pre>
+
+    <h3>Search DSL operators</h3>
+    <table>
+      <tr><th>Operator</th><th>Example</th><th>Notes</th></tr>
+      <tr><td><code>from:</code></td>      <td><code>from:anna@example.com</code></td>     <td>Substring match on the sender header.</td></tr>
+      <tr><td><code>to:</code></td>        <td><code>to:team@example.com</code></td>       <td>Substring match on the recipient header.</td></tr>
+      <tr><td><code>subject:</code></td>   <td><code>subject:invoice</code></td>           <td>Token match on Subject.</td></tr>
+      <tr><td><code>label:</code></td>     <td><code>label:Receipts</code></td>            <td>Gmail label / IMAP folder display name.</td></tr>
+      <tr><td><code>account:</code></td>   <td><code>account:horst-gmail</code></td>       <td>By <code>config.toml</code> account name.</td></tr>
+      <tr><td><code>folder:</code></td>    <td><code>folder:INBOX</code></td>              <td>By folder name.</td></tr>
+      <tr><td><code>account_id:</code></td><td><code>account_id:1</code></td>              <td>By DB id (faster).</td></tr>
+      <tr><td><code>folder_id:</code></td> <td><code>folder_id:42</code></td>              <td>By DB id.</td></tr>
+      <tr><td><code>after:</code></td>     <td><code>after:2025-01-01</code></td>          <td>YYYY-MM-DD, inclusive.</td></tr>
+      <tr><td><code>before:</code></td>    <td><code>before:2025-06-01</code></td>         <td>YYYY-MM-DD, exclusive.</td></tr>
+      <tr><td><code>lang:</code></td>      <td><code>lang:en</code></td>                   <td>ISO 639-1. Repeatable; <code>lang:en lang:de</code> matches either.</td></tr>
+      <tr><td><code>has:attachment</code></td><td><code>has:attachment</code></td>         <td>Restrict to messages with attachments.</td></tr>
+    </table>
+
+    <p>Operators stack with free-text query terms. Anything not matching an
+    operator is fed to the hybrid retriever.</p>
+
+    <h2>Failure recovery</h2>
+    <p>localmail wraps every per-message and per-attachment operation in a
+    Postgres SAVEPOINT. A single bad message can't take down a batch — it
+    lands in <code>failed_messages</code> with its full raw bytes, error
+    class, and traceback, ready to retry later.</p>
+
+    <pre><code>localmail list-failed                  # show poisoned messages
+localmail list-failed --limit 50
+localmail retry-failed                 # re-process every failed message
+localmail retry-failed --account NAME
+
+localmail list-failed-extractions      # attachments the extractor choked on
+localmail retry-failed-extractions
+
+localmail list-failed-embeddings
+localmail retry-failed-embeddings</code></pre>
+
+    <p>Successful retries delete the failure row and insert the message
+    where it belongs. Permanent failures bump <code>retry_count</code>
+    and stay listed.</p>
+
+    <h2>Status &amp; health</h2>
+    <pre><code>localmail search-status                # row counts + backlog
+localmail search-status --format json  # for monitoring scripts</code></pre>
+
+    <h2>GUI server (HTTPS API)</h2>
+    <p>If you want the desktop app — or any other tool — to reach the
+    archive over a network boundary instead of direct DB access, run
+    <code>localmail serve</code>. See the
+    <a href="../desktop-app/index.html">Desktop app page</a> for the
+    end-to-end flow.</p>
+    <pre><code>localmail rotate-tls --cert ~/.config/localmail/tls.crt \
+                     --key  ~/.config/localmail/tls.key
+localmail add-api-user alice
+localmail grant-account alice horst-gmail
+localmail serve --bind 127.0.0.1 --port 8443 \
+                --tls-cert ~/.config/localmail/tls.crt \
+                --tls-key  ~/.config/localmail/tls.key</code></pre>
+
+    <h2>Useful one-liners</h2>
+    <p>Once you have a populated archive, everything is in Postgres, so you
+    can mix shell and SQL however you like:</p>
+    <pre><code># Largest senders, all accounts, last 12 months.
+psql -d localmail -c "
+  SELECT from_addr, COUNT(*)
+    FROM messages
+   WHERE date_sent &gt; now() - interval '12 months'
+   GROUP BY from_addr
+   ORDER BY 2 DESC
+   LIMIT 20;"
+
+# Total bytes of unique attachments stored on disk.
+find ~/localmail/blobs -type f -printf '%s\n' | awk '{s+=$1} END {print s}'
+
+# Search and pipe results to less.
+localmail search "subject:weekly" --format json | jq -r '.results[].subject' | less</code></pre>
+
+    <div class="page-nav">
+      <a class="prev" href="../daemon/index.html">
+        <span class="dir">Back</span>
+        <strong>Daemon</strong>
+      </a>
+      <a class="next" href="../desktop-app/index.html">
+        <span class="dir">Next</span>
+        <strong>Desktop app</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daemon · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a href="../setup/postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="../setup/install.html">2. Install localmail</a></li>
+        <li><a href="../setup/accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a class="active" href="index.html">Daemon</a></li>
+        <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a href="../desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Using localmail</div>
+      <h1>Run the daemon</h1>
+      <p class="lede">The daemon keeps your local archive in sync with your
+      IMAP accounts in real time. It uses IMAP IDLE on each INBOX for
+      instant push, and falls back to periodic polling on every other
+      folder.</p>
+    </header>
+
+    <h2>What the daemon does</h2>
+    <p>For each account in <code>config.toml</code>, the daemon spawns
+    <strong>two threads</strong>:</p>
+    <ul>
+      <li>An <strong>IDLE</strong> thread that subscribes to INBOX and
+        receives push notifications when new mail arrives. RFC 2177 caps an
+        IDLE session at 29 minutes; the daemon re-issues it before that
+        limit (default every 1740 s).</li>
+      <li>A <strong>poll</strong> thread that scans every other folder on a
+        timer (default 300 s) for new UIDs. IMAP servers don't push for
+        non-INBOX folders, so polling is the only option.</li>
+    </ul>
+    <p>Both threads share a Postgres connection pool and a
+    <code>threading.Event</code> stop signal. On any failure they reconnect
+    with exponential backoff (1 s → 60 s cap). SIGTERM / SIGINT shut them
+    down cleanly.</p>
+
+    <h2>Run it in the foreground</h2>
+    <pre><code>localmail run</code></pre>
+    <p>Useful for the first run so you can watch the logs and confirm every
+    account connects. <kbd>Ctrl</kbd>+<kbd>C</kbd> stops it cleanly.</p>
+
+    <p>Common flags:</p>
+    <pre><code>localmail run --log-level debug     # verbose
+localmail run --no-ssl              # plain IMAP for dev mail servers</code></pre>
+
+    <h2>Run it as a background service</h2>
+
+    <h3>Linux — systemd (user service)</h3>
+    <p>A user service runs as your normal user, has access to your keyring,
+    and starts with your desktop session. Recommended for laptops.</p>
+
+    <p>Create <code>~/.config/systemd/user/localmail.service</code>:</p>
+    <pre><code>[Unit]
+Description=localmail IMAP mirror daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/localmail run
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target</code></pre>
+
+    <p>Then:</p>
+    <pre><code>systemctl --user daemon-reload
+systemctl --user enable --now localmail.service
+systemctl --user status localmail.service
+journalctl --user -u localmail.service -f          # live logs</code></pre>
+
+    <div class="callout warn">
+      <span class="label">Keyring access on headless servers</span>
+      <p>On a headless Linux server with no logged-in graphical session,
+      the Secret Service daemon may not be running, so localmail can't
+      read passwords from the keyring. Two options: install
+      <code>gnome-keyring</code> + <code>dbus-x11</code> and run it under
+      <code>dbus-run-session</code>, or store credentials with a different
+      backend (e.g. <code>keyrings.cryptfile</code>) configured via
+      <code>~/.local/share/python_keyring/keyringrc.cfg</code>.</p>
+    </div>
+
+    <h3>Linux — systemd (system service)</h3>
+    <p>For an always-on server that mirrors mail regardless of who's logged
+    in. Use the Docker recipe in the README, or run as a dedicated
+    <code>localmail</code> user. The unit file is the same as above with
+    <code>%h</code> replaced by an absolute home path, dropped in
+    <code>/etc/systemd/system/</code>, and enabled with
+    <code>sudo systemctl</code>.</p>
+
+    <h3>macOS — launchd</h3>
+    <p>Create <code>~/Library/LaunchAgents/com.localmail.daemon.plist</code>:</p>
+    <pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;
+&lt;plist version="1.0"&gt;
+&lt;dict&gt;
+  &lt;key&gt;Label&lt;/key&gt;            &lt;string&gt;com.localmail.daemon&lt;/string&gt;
+  &lt;key&gt;ProgramArguments&lt;/key&gt; &lt;array&gt;
+    &lt;string&gt;/Users/YOUR_USER/.local/bin/localmail&lt;/string&gt;
+    &lt;string&gt;run&lt;/string&gt;
+  &lt;/array&gt;
+  &lt;key&gt;RunAtLoad&lt;/key&gt;       &lt;true/&gt;
+  &lt;key&gt;KeepAlive&lt;/key&gt;       &lt;true/&gt;
+  &lt;key&gt;StandardOutPath&lt;/key&gt; &lt;string&gt;/tmp/localmail.out.log&lt;/string&gt;
+  &lt;key&gt;StandardErrorPath&lt;/key&gt;&lt;string&gt;/tmp/localmail.err.log&lt;/string&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;</code></pre>
+
+    <p>Then:</p>
+    <pre><code>launchctl load -w ~/Library/LaunchAgents/com.localmail.daemon.plist
+launchctl list | grep localmail            # confirm it's running
+tail -f /tmp/localmail.out.log /tmp/localmail.err.log</code></pre>
+
+    <p>To stop:</p>
+    <pre><code>launchctl unload -w ~/Library/LaunchAgents/com.localmail.daemon.plist</code></pre>
+
+    <h2>Tuning</h2>
+    <p>The defaults live under <code>[daemon]</code> in
+    <code>config.toml</code>:</p>
+    <pre><code>[daemon]
+idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling
+poll_seconds       = 300    # poll non-INBOX folders every 5 minutes</code></pre>
+
+    <table>
+      <tr>
+        <th>Knob</th>
+        <th>Effect of raising</th>
+        <th>Effect of lowering</th>
+      </tr>
+      <tr>
+        <td><code>idle_renew_seconds</code></td>
+        <td>Fewer reconnects; risk hitting the 29-minute IDLE ceiling.</td>
+        <td>More reconnects; safer near server-side timeouts that are
+          tighter than 29 min.</td>
+      </tr>
+      <tr>
+        <td><code>poll_seconds</code></td>
+        <td>Lower IMAP server load; new mail in non-INBOX folders shows up
+          later.</td>
+        <td>More responsive non-INBOX folders; more IMAP server load. Don't
+          go below 60 s on hosted providers.</td>
+      </tr>
+    </table>
+
+    <h2>What to expect in the logs</h2>
+    <p>A healthy daemon writes one INFO line per significant event and
+    nothing during normal idle time. Examples:</p>
+    <pre><code>INFO  [horst-gmail] idle: starting on INBOX
+INFO  [horst-gmail] idle: woke for 1 new message(s)
+INFO  [horst-gmail] poll: 0 new in [Gmail]/Sent Mail
+INFO  [work-fastmail] idle: re-issuing after 1740s</code></pre>
+
+    <p>WARNINGs are surfaced for transient problems (connection blip,
+    backend error). ERRORs indicate a stuck connection or persistent
+    auth failure — the daemon will back off and keep retrying.</p>
+
+    <h2>Search workers</h2>
+    <p>Two more threads run alongside the IMAP threads, gated by config
+    flags in <code>[search]</code>:</p>
+    <ul>
+      <li><strong>Embed worker</strong> — chunks new messages and computes
+        embeddings for vector search. Runs continuously while the daemon is
+        up. Skip with <code>run_embed_worker = false</code> if you don't
+        need vector search.</li>
+      <li><strong>Extract worker</strong> — extracts text from attachments
+        (PDF, DOCX, …) so they're searchable too. Skip with
+        <code>run_extract_worker = false</code>.</li>
+    </ul>
+
+    <p>If you start with a large backlog and want it caught up before the
+    daemon is fully responsive, the CLI has one-shot backfill commands —
+    see the <a href="../cli-use/index.html#backfill">CLI page</a>.</p>
+
+    <h2>Stopping the daemon</h2>
+    <p>SIGTERM and SIGINT both trigger a clean shutdown. The daemon:</p>
+    <ol>
+      <li>Signals all per-account threads to stop.</li>
+      <li>Lets each thread finish its current batch (so
+        <code>uidnext</code> stays consistent).</li>
+      <li>Closes IMAP connections and the Postgres pool.</li>
+      <li>Exits with status 0.</li>
+    </ol>
+    <p>If you ever need a forced exit, send SIGKILL — the SAVEPOINT
+    discipline means the database stays consistent, you just lose the
+    in-flight batch (up to 50 messages).</p>
+
+    <div class="page-nav">
+      <a class="prev" href="../setup/accounts.html">
+        <span class="dir">Back</span>
+        <strong>3. Add email accounts</strong>
+      </a>
+      <a class="next" href="../cli-use/index.html">
+        <span class="dir">Next</span>
+        <strong>Use the CLI</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

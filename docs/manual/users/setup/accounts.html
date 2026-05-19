@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3. Add email accounts · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a href="postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="install.html">2. Install localmail</a></li>
+        <li><a class="active" href="accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="../daemon/index.html">Daemon</a></li>
+        <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a href="../desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Step 3 of 3 · Getting started</div>
+      <h1>Add email accounts</h1>
+      <p class="lede">Tell localmail which mailboxes to mirror. Each account
+      is one entry in <code>config.toml</code> plus one credential stored in
+      the OS keyring. The recipes below cover the major providers.</p>
+    </header>
+
+    <div class="provider-strip">
+      <a href="#gmail">Gmail</a>
+      <a href="#microsoft">Microsoft 365 / Outlook</a>
+      <a href="#fastmail">Fastmail</a>
+      <a href="#protonmail">Proton Mail</a>
+      <a href="#icloud">iCloud</a>
+      <a href="#yahoo">Yahoo / AOL</a>
+      <a href="#generic">Generic IMAP / Exchange / Dovecot</a>
+    </div>
+
+    <h2>How accounts are defined</h2>
+    <p>Every account is an <code>[[accounts]]</code> array entry. The
+    <code>name</code> is what you'll use everywhere on the CLI (it's also
+    the keyring identifier). The <code>auth_method</code> is either
+    <code>"password"</code> (anything with an app password or plain IMAP
+    password) or <code>"oauth2"</code> (currently Gmail only).</p>
+
+    <pre><code>[[accounts]]
+name        = "work-fastmail"        # used on the CLI: localmail add-account work-fastmail
+email       = "you@example.com"
+imap_host   = "imap.fastmail.com"
+imap_port   = 993
+auth_method = "password"             # or "oauth2"
+# Optional folder filters — see end of page
+# folder_allow      = ["INBOX", "Archive"]
+# folder_deny       = ["Drafts"]
+# folder_deny_flags = ["\\Trash", "\\Junk", "\\All"]</code></pre>
+
+    <p>Add as many <code>[[accounts]]</code> entries as you like. Each one
+    runs in its own pair of daemon threads, so accounts don't block each
+    other.</p>
+
+    <div class="callout">
+      <span class="label">After every edit</span>
+      <p>Run <code>localmail list-accounts</code> to confirm localmail
+      sees the new entry and whether a credential is stored. It's a quick
+      sanity check.</p>
+    </div>
+
+    <hr>
+
+    <h2 id="gmail">Gmail</h2>
+    <p>Gmail dropped plain-IMAP password support in 2022. You must use
+    OAuth2. localmail uses the standard Google "desktop application"
+    OAuth flow — you create your own Google Cloud project (free, no
+    billing) so the credentials are yours, not someone else's.</p>
+
+    <ol class="steps">
+      <li>
+        <h3>Create a Google Cloud project.</h3>
+        <p>Visit <a href="https://console.cloud.google.com/projectcreate">console.cloud.google.com/projectcreate</a>.
+        Pick any name. No billing required.</p>
+      </li>
+
+      <li>
+        <h3>Configure the OAuth consent screen.</h3>
+        <p>APIs &amp; Services → OAuth consent screen.</p>
+        <ul>
+          <li>User type: <strong>External</strong>.</li>
+          <li>Fill in app name, support email, developer email.</li>
+          <li>Scopes: leave blank in the form — the IMAP scope is requested
+            at runtime, not registered here.</li>
+        </ul>
+
+        <div class="callout danger">
+          <span class="label">Don't skip this</span>
+          <p>OAuth consent screen → <strong>Audience</strong> →
+          <strong>Test users</strong> → <strong>+ Add users</strong> →
+          add the exact Google account address you'll sign in with. If you
+          skip this step you'll get <code>Error 403: access_denied</code>
+          at consent time. Google ignores dots in Gmail addresses for
+          routing, but the test-users list expects the canonical form.</p>
+          <p>Leave the project in <strong>Testing</strong> status —
+          promoting to production would require Google's verification
+          audit because <code>https://mail.google.com/</code> is a
+          restricted scope.</p>
+        </div>
+      </li>
+
+      <li>
+        <h3>Enable the Gmail API.</h3>
+        <p>APIs &amp; Services → Library → Gmail API → <strong>Enable</strong>.</p>
+      </li>
+
+      <li>
+        <h3>Create OAuth client credentials.</h3>
+        <p>APIs &amp; Services → Credentials → Create Credentials → OAuth
+        client ID.</p>
+        <ul>
+          <li>Application type: <strong>Desktop</strong>.</li>
+          <li>After creation, click <strong>Download JSON</strong>. Save it
+            as:
+            <pre><code>~/.config/localmail/gmail_client_secret.json</code></pre>
+          </li>
+        </ul>
+      </li>
+
+      <li>
+        <h3>Add the account to <code>config.toml</code>.</h3>
+        <pre><code>[gmail_oauth]
+client_secrets_file = "~/.config/localmail/gmail_client_secret.json"
+
+[[accounts]]
+name              = "horst-gmail"
+email             = "you@gmail.com"
+imap_host         = "imap.gmail.com"
+imap_port         = 993
+auth_method       = "oauth2"
+oauth_provider    = "gmail"
+# Deny "All Mail" — every message is already under INBOX or a label,
+# so syncing All Mail roughly doubles the work for zero new content.
+folder_deny_flags = ["\\Trash", "\\Junk", "\\All"]</code></pre>
+      </li>
+
+      <li>
+        <h3>Run the consent flow.</h3>
+        <pre><code>localmail oauth-login horst-gmail</code></pre>
+        <p>A browser opens, you grant access, and the refresh token is
+        written to your keyring. From now on localmail mints short-lived
+        access tokens automatically — no further interaction needed unless
+        you revoke access at
+        <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</p>
+      </li>
+
+      <li>
+        <h3>Test it.</h3>
+        <pre><code>localmail sync --account horst-gmail --limit-per-folder 10</code></pre>
+        <p>This pulls the first 10 messages from each folder. Subsequent
+        runs resume from where this left off.</p>
+      </li>
+    </ol>
+
+    <hr>
+
+    <h2 id="microsoft">Microsoft 365 / Outlook / Exchange Online</h2>
+    <p>Microsoft is mid-deprecation of basic IMAP authentication. As of
+    September 2024, personal Outlook.com and consumer accounts still allow
+    IMAP with an <em>app password</em>; Microsoft 365 (work / school)
+    tenants vary depending on whether your admin has enabled IMAP and
+    allowed app passwords. Check with your IT admin if you're on a
+    corporate tenant.</p>
+
+    <h3>Personal Outlook.com / Hotmail / Live</h3>
+    <ol class="steps">
+      <li>
+        <h3>Turn on two-step verification.</h3>
+        <p>Required before you can create an app password. Visit
+        <a href="https://account.microsoft.com/security">account.microsoft.com/security</a>
+        → Advanced security options → Two-step verification.</p>
+      </li>
+
+      <li>
+        <h3>Generate an app password.</h3>
+        <p>Same Advanced security page → App passwords → Create a new app
+        password. Copy the 16-character string immediately — you cannot
+        view it again.</p>
+      </li>
+
+      <li>
+        <h3>Add the account to <code>config.toml</code>.</h3>
+        <pre><code>[[accounts]]
+name              = "personal-outlook"
+email             = "you@outlook.com"
+imap_host         = "outlook.office365.com"
+imap_port         = 993
+auth_method       = "password"
+folder_deny_flags = ["\\Trash", "\\Junk"]</code></pre>
+      </li>
+
+      <li>
+        <h3>Store the app password.</h3>
+        <pre><code>localmail add-account personal-outlook
+# Paste the 16-character app password at the prompt.</code></pre>
+      </li>
+    </ol>
+
+    <h3>Microsoft 365 (work / school)</h3>
+    <p>Most M365 tenants now require <strong>Modern Auth</strong> (OAuth2)
+    for IMAP and have basic auth disabled. localmail does not yet ship a
+    Microsoft OAuth provider — track
+    <a href="https://github.com/hherb/localmail/issues">the issue
+    tracker</a> for progress. If your admin still allows IMAP + app
+    passwords, follow the consumer recipe above (the IMAP host is the
+    same: <code>outlook.office365.com</code>). If they don't, you cannot
+    currently use localmail with that account.</p>
+
+    <h3>On-premises Exchange Server</h3>
+    <p>If your organisation runs Exchange Server (not Exchange Online) with
+    the IMAP role enabled, treat it as a generic IMAP server —
+    <code>auth_method = "password"</code>, ask your admin for the IMAP
+    host name and port (usually <code>993</code>). See the
+    <a href="#generic">generic IMAP</a> section below.</p>
+
+    <hr>
+
+    <h2 id="fastmail">Fastmail</h2>
+    <p>Fastmail requires an app password for IMAP — your account password
+    won't work.</p>
+
+    <ol class="steps">
+      <li>
+        <h3>Create an app password.</h3>
+        <p>Sign in at <a href="https://app.fastmail.com/settings/security/devicekeys/list">
+        app.fastmail.com → Settings → Privacy &amp; Security → Connected
+        apps &amp; API tokens</a>. Click <strong>New app password</strong>,
+        give it a name like "localmail", restrict access to
+        <strong>Mail (IMAP/SMTP)</strong>.</p>
+      </li>
+
+      <li>
+        <h3>Add it.</h3>
+        <pre><code>[[accounts]]
+name        = "work-fastmail"
+email       = "you@fastmail.com"
+imap_host   = "imap.fastmail.com"
+imap_port   = 993
+auth_method = "password"
+
+# Then:
+localmail add-account work-fastmail</code></pre>
+      </li>
+    </ol>
+
+    <hr>
+
+    <h2 id="protonmail">Proton Mail</h2>
+    <p>Proton Mail does not expose an IMAP server directly — mail is
+    end-to-end encrypted on Proton's infrastructure. To mirror it you
+    install <strong>Proton Mail Bridge</strong>, which runs locally,
+    decrypts your mail, and exposes a local IMAP server that localmail
+    can talk to.</p>
+
+    <ol class="steps">
+      <li>
+        <h3>Install Proton Mail Bridge.</h3>
+        <p>Download from
+        <a href="https://proton.me/mail/bridge">proton.me/mail/bridge</a>.
+        Requires a paid Proton plan (Plus, Unlimited, etc.).</p>
+      </li>
+
+      <li>
+        <h3>Sign in and add your account in Bridge.</h3>
+        <p>The Bridge app shows you, per account: <strong>IMAP host</strong>
+        (always <code>127.0.0.1</code>), <strong>IMAP port</strong> (a
+        random high port like <code>1143</code>), <strong>username</strong>
+        (your Proton email), and a <strong>Bridge password</strong>
+        (machine-generated; different from your Proton password).</p>
+      </li>
+
+      <li>
+        <h3>Add to <code>config.toml</code>.</h3>
+        <pre><code>[[accounts]]
+name        = "proton"
+email       = "you@proton.me"
+imap_host   = "127.0.0.1"
+imap_port   = 1143               # use the port Bridge shows you
+auth_method = "password"
+# Bridge presents a self-signed TLS cert. Bridge installs its root
+# into the OS trust store; if STARTTLS verification still fails on
+# your system, set:
+# ssl_verify = false</code></pre>
+      </li>
+
+      <li>
+        <h3>Store the Bridge password.</h3>
+        <pre><code>localmail add-account proton
+# Paste the Bridge password from the Bridge UI.</code></pre>
+      </li>
+    </ol>
+
+    <div class="callout warn">
+      <span class="label">Bridge must be running</span>
+      <p>localmail talks to Bridge over local IMAP. If Bridge isn't running,
+      the daemon will fail to connect and retry with exponential backoff.
+      Set Bridge to launch on login (its preferences offer this) so the
+      mirror keeps working unattended.</p>
+    </div>
+
+    <hr>
+
+    <h2 id="icloud">iCloud</h2>
+    <p>iCloud Mail requires an app-specific password. Two-factor auth must
+    be enabled on your Apple ID.</p>
+
+    <ol class="steps">
+      <li>
+        <h3>Generate an app-specific password.</h3>
+        <p>Sign in at
+        <a href="https://account.apple.com/account/manage">account.apple.com</a>
+        → Sign-In and Security → App-Specific Passwords → Generate. Label
+        it "localmail". Copy the 19-character password Apple shows you.</p>
+      </li>
+
+      <li>
+        <h3>Add to config.</h3>
+        <pre><code>[[accounts]]
+name        = "icloud"
+email       = "you@icloud.com"
+imap_host   = "imap.mail.me.com"
+imap_port   = 993
+auth_method = "password"
+
+# Then:
+localmail add-account icloud</code></pre>
+      </li>
+    </ol>
+
+    <hr>
+
+    <h2 id="yahoo">Yahoo Mail / AOL Mail</h2>
+    <p>Both require an app password.</p>
+    <ul>
+      <li><strong>Yahoo:</strong> Account Security → Generate app password
+        (requires 2FA enabled). Host: <code>imap.mail.yahoo.com</code>,
+        port 993.</li>
+      <li><strong>AOL:</strong> Same flow at
+        <a href="https://login.aol.com/account/personal-info">login.aol.com</a>.
+        Host: <code>imap.aol.com</code>, port 993.</li>
+    </ul>
+    <pre><code>[[accounts]]
+name        = "yahoo"
+email       = "you@yahoo.com"
+imap_host   = "imap.mail.yahoo.com"
+imap_port   = 993
+auth_method = "password"</code></pre>
+
+    <hr>
+
+    <h2 id="generic">Generic IMAP — your own server, Dovecot, Exchange on-prem, …</h2>
+    <p>Anything that speaks IMAP with a plain password (or app password)
+    works the same way.</p>
+
+    <pre><code>[[accounts]]
+name        = "self-hosted"
+email       = "you@yourdomain.com"
+imap_host   = "mail.yourdomain.com"
+imap_port   = 993                  # 143 with STARTTLS also supported
+auth_method = "password"
+
+# Optional knobs:
+# starttls   = true                # for port 143
+# ssl_verify = false               # if your server uses a self-signed cert</code></pre>
+
+    <p>Then:</p>
+    <pre><code>localmail add-account self-hosted</code></pre>
+
+    <hr>
+
+    <h2>Filtering folders</h2>
+    <p>You almost always want to skip Trash and Junk — they're noise. Three
+    knobs are available on each <code>[[accounts]]</code> entry:</p>
+
+    <table>
+      <tr>
+        <th>Knob</th>
+        <th>What it does</th>
+        <th>When to use</th>
+      </tr>
+      <tr>
+        <td><code>folder_allow</code></td>
+        <td>Whitelist by exact folder name.</td>
+        <td>You only care about a few folders (e.g.
+          <code>["INBOX", "Archive"]</code>).</td>
+      </tr>
+      <tr>
+        <td><code>folder_deny</code></td>
+        <td>Blacklist by exact folder name.</td>
+        <td>You want everything <em>except</em> a few folders. Brittle —
+          the folder name <code>"Trash"</code> on Fastmail is
+          <code>"[Gmail]/Bin"</code> on Gmail.</td>
+      </tr>
+      <tr>
+        <td><code>folder_deny_flags</code></td>
+        <td>Blacklist by RFC 6154 IMAP special-use flag.</td>
+        <td><strong>Preferred.</strong> Provider-independent. Common
+          values: <code>"\\Trash"</code>, <code>"\\Junk"</code>,
+          <code>"\\All"</code>, <code>"\\Drafts"</code>.</td>
+      </tr>
+    </table>
+
+    <p>Use double backslashes inside TOML strings — the IMAP flag literally
+    starts with <code>\</code>, and TOML treats <code>\</code> as an escape.</p>
+
+    <h2>Test, then run a full sync</h2>
+    <p>For each account you added, do a small sync first to confirm
+    everything works:</p>
+    <pre><code>localmail sync --account work-fastmail --limit-per-folder 50</code></pre>
+    <p>Then drop the limit to mirror the rest. The next page describes
+    long-running options.</p>
+
+    <div class="callout tip">
+      <span class="label">You're done with setup</span>
+      <p>From here on, the manual is reference material. Pick whichever
+      interface you'd like to start with: the
+      <a href="../daemon/index.html">daemon</a> for an always-on mirror,
+      the <a href="../cli-use/index.html">CLI</a> for scripted sync and
+      search, or the <a href="../desktop-app/index.html">desktop app</a>
+      for a window to read your archive.</p>
+    </div>
+
+    <div class="page-nav">
+      <a class="prev" href="install.html">
+        <span class="dir">Back</span>
+        <strong>2. Install localmail</strong>
+      </a>
+      <a class="next" href="../daemon/index.html">
+        <span class="dir">Next</span>
+        <strong>Run the daemon</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

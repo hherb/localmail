@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop app · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a href="../setup/postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="../setup/install.html">2. Install localmail</a></li>
+        <li><a href="../setup/accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="../daemon/index.html">Daemon</a></li>
+        <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a class="active" href="index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Using localmail</div>
+      <h1>Run the desktop app</h1>
+      <p class="lede">A native desktop client for reading, searching, and
+      managing your local archive. Built with Tauri 2 + Svelte 5; runs on
+      macOS, Linux, and Windows.</p>
+    </header>
+
+    <h2>How the pieces fit together</h2>
+    <p>The desktop app does <strong>not</strong> talk to Postgres directly.
+    It talks HTTPS to a <code>localmail serve</code> process that you run
+    locally (or on a LAN host). That gives you:</p>
+    <ul>
+      <li>A clean network boundary you could expose to a phone over Tailscale.</li>
+      <li>Per-user account ACLs — give your spouse an account that only
+        sees the shared family inbox, for example.</li>
+      <li>The same HTTPS API any future client (e.g. a planned MCP server)
+        will speak.</li>
+    </ul>
+
+    <pre><code>┌─────────────┐ HTTPS ┌─────────────────┐  pg  ┌─────────┐
+│ Desktop app │ ─────► │ localmail serve │ ───► │ Postgres│
+└─────────────┘        └─────────────────┘      └─────────┘
+                              ▲
+                              │ same DB, separately
+                              │
+                       ┌──────┴──────┐
+                       │ localmail   │  IMAP IDLE / poll
+                       │ run (daemon)│  ────► your mail providers
+                       └─────────────┘</code></pre>
+
+    <h2>Set up the server</h2>
+
+    <ol class="steps">
+      <li>
+        <h3>Generate a TLS cert.</h3>
+        <p>The server speaks HTTPS by default. For localhost / LAN use a
+        self-signed cert is fine — the app supports a trust-on-first-use
+        pinning flow.</p>
+        <pre><code>localmail rotate-tls \
+  --cert ~/.config/localmail/tls.crt \
+  --key  ~/.config/localmail/tls.key</code></pre>
+
+        <div class="callout">
+          <span class="label">Localhost-only?</span>
+          <p>If you'll only ever connect from the same machine, you can
+          run with <code>--no-tls --bind 127.0.0.1</code> and skip the
+          cert step. TLS is refused for any non-loopback bind without a
+          cert.</p>
+        </div>
+      </li>
+
+      <li>
+        <h3>Create an API user.</h3>
+        <p>The desktop app authenticates with a username + password (which
+        the server stores as an argon2id hash). The password is yours to
+        pick; there's no link to your IMAP credentials.</p>
+        <pre><code>localmail add-api-user alice</code></pre>
+      </li>
+
+      <li>
+        <h3>Grant the user access to one or more accounts.</h3>
+        <p>By default, a new API user has access to <strong>no</strong>
+        accounts and every API call returns empty lists. You explicitly
+        grant access per (user, account) pair:</p>
+        <pre><code>localmail grant-account alice horst-gmail
+localmail grant-account alice work-fastmail
+localmail list-api-users --with-grants</code></pre>
+      </li>
+
+      <li>
+        <h3>Start the server.</h3>
+        <pre><code>localmail serve \
+  --bind 127.0.0.1 --port 8443 \
+  --tls-cert ~/.config/localmail/tls.crt \
+  --tls-key  ~/.config/localmail/tls.key</code></pre>
+
+        <p>For an always-on setup, wrap this in a systemd / launchd unit
+        the same way you did the daemon — see the
+        <a href="../daemon/index.html">Daemon page</a> for templates.
+        The two processes are independent: <code>localmail run</code>
+        mirrors mail; <code>localmail serve</code> serves it.</p>
+      </li>
+    </ol>
+
+    <h2>Install and run the desktop app</h2>
+
+    <p>Pre-built bundles are produced from the <code>gui/</code> directory
+    of the repository. Until the project ships signed installers, the
+    quickest path is to build from source.</p>
+
+    <h3>Build prerequisites</h3>
+    <table>
+      <tr><th>Platform</th><th>What you need</th></tr>
+      <tr>
+        <td>macOS</td>
+        <td>Xcode command-line tools (<code>xcode-select --install</code>);
+          WebView ships with the system.</td>
+      </tr>
+      <tr>
+        <td>Linux</td>
+        <td><code>sudo apt install libwebkit2gtk-4.1-dev build-essential
+          curl wget file libssl-dev libayatana-appindicator3-dev
+          librsvg2-dev</code> (Debian/Ubuntu) or distro equivalents.</td>
+      </tr>
+      <tr>
+        <td>Windows</td>
+        <td>WebView2 (pre-installed on Windows 11; runtime installer on
+          older).</td>
+      </tr>
+      <tr>
+        <td>All</td>
+        <td>Node.js 20+, npm, Rust 1.80+ via
+          <a href="https://rustup.rs/">rustup</a>.</td>
+      </tr>
+    </table>
+
+    <h3>Build &amp; run</h3>
+    <pre><code>git clone https://github.com/hherb/localmail
+cd localmail/gui
+npm install
+npm run tauri dev          # development window with hot reload
+
+# Or build a release bundle:
+npm run tauri build
+# Output in src-tauri/target/release/bundle/</code></pre>
+
+    <h2>First-run flow inside the app</h2>
+
+    <ol class="steps">
+      <li>
+        <h3>Connect.</h3>
+        <p>The app opens to a Connect screen pre-filled with
+        <code>https://localhost:8443</code>. Adjust if your server is
+        elsewhere, then click <strong>Connect</strong>.</p>
+      </li>
+      <li>
+        <h3>Trust the certificate (once).</h3>
+        <p>For a self-signed cert, the app shows you the SHA-256
+        fingerprint of the cert it just saw. Compare it with the
+        fingerprint <code>localmail rotate-tls</code> printed, then click
+        <strong>Trust this certificate</strong>. The app pins it; future
+        connects don't ask again unless the cert changes.</p>
+
+        <div class="callout warn">
+          <span class="label">Fingerprint mismatch</span>
+          <p>If you ever see the trust dialog when you weren't expecting
+          it, the cert changed. Either you regenerated it (fine — re-trust),
+          or someone has interposed themselves between the app and the
+          server. Verify out-of-band before clicking trust.</p>
+        </div>
+      </li>
+      <li>
+        <h3>Sign in.</h3>
+        <p>Enter the username and password you set with
+        <code>add-api-user</code>. The app gets back a bearer token,
+        stores it locally, and uses it on every subsequent request.</p>
+      </li>
+      <li>
+        <h3>Browse and search.</h3>
+        <p>The header shows the accounts you've been granted access to.
+        The search bar talks to the same hybrid retriever the
+        <code>localmail search</code> CLI uses, with the same DSL —
+        operators, dates, languages, attachments.</p>
+      </li>
+    </ol>
+
+    <h2>What the app can do today</h2>
+    <ul>
+      <li>List accounts and folders.</li>
+      <li>List, read, and full-text search messages.</li>
+      <li>Inspect headers, decoded body (plain and HTML), and the
+        <code>messages.attachments</code> JSONB metadata.</li>
+      <li>Download attachments by SHA-256.</li>
+      <li>Tail recent changes via the <code>/v1/changes</code> stream.</li>
+    </ul>
+
+    <h2>What the app does not do</h2>
+    <ul>
+      <li>Send mail. localmail is read-only with respect to upstream.</li>
+      <li>Delete or modify messages on the IMAP server.</li>
+      <li>Make changes to <code>config.toml</code> — account topology is
+        controlled by the CLI / config file, not the GUI.</li>
+    </ul>
+
+    <h2>Connecting from another machine</h2>
+    <p>For phone, tablet, or another laptop on your LAN:</p>
+    <ol>
+      <li>Re-issue the TLS cert with a hostname covering the other
+        machine — <code>localmail rotate-tls --cert … --key …
+        --hostname localmail.local --force</code>.</li>
+      <li>Run <code>localmail serve</code> bound to a reachable address —
+        <code>--bind 0.0.0.0</code>, or a Tailscale / WireGuard IP.</li>
+      <li>From the client device, point the app at
+        <code>https://localmail.local:8443</code> and trust the new
+        fingerprint.</li>
+    </ol>
+
+    <div class="callout tip">
+      <span class="label">Mobile</span>
+      <p>There's no native mobile app yet. The HTTPS API is documented and
+      stable, so a third-party client is possible. Watch the project
+      repository for updates.</p>
+    </div>
+
+    <div class="page-nav">
+      <a class="prev" href="../cli-use/index.html">
+        <span class="dir">Back</span>
+        <strong>CLI</strong>
+      </a>
+      <a class="next" href="../index.html">
+        <span class="dir">Back to overview</span>
+        <strong>Overview</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

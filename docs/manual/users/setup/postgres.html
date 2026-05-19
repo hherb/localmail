@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1. Set up PostgreSQL · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a class="active" href="postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="install.html">2. Install localmail</a></li>
+        <li><a href="accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="../daemon/index.html">Daemon</a></li>
+        <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a href="../desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Step 1 of 3 · Getting started</div>
+      <h1>Set up PostgreSQL</h1>
+      <p class="lede">localmail stores every message, label, and piece of
+      metadata in a PostgreSQL database. Before you install localmail, you
+      need a running Postgres instance and a dedicated database for it.</p>
+    </header>
+
+    <h2>What you need</h2>
+    <ul>
+      <li><strong>PostgreSQL 14 or newer.</strong> 16 is recommended.</li>
+      <li>The <code>pgvector</code> extension. localmail uses it for the
+        vector search index. Postgres 14+ supports it via the standard
+        extension mechanism.</li>
+      <li>Roughly <strong>1.5×</strong> the on-disk size of your raw mail.
+        IMAP servers store RFC822 bytes; localmail keeps those plus parsed
+        columns and search indexes.</li>
+    </ul>
+
+    <div class="callout">
+      <span class="label">Already have Postgres?</span>
+      <p>Skip ahead to <a href="#create-db">Create the database and role</a>.
+      You only need to install the <code>pgvector</code> extension and create
+      one fresh database — there is no need to re-install Postgres itself.</p>
+    </div>
+
+    <h2>Install PostgreSQL</h2>
+
+    <h3>macOS — Postgres.app (easiest)</h3>
+    <ol>
+      <li>Download <a href="https://postgresapp.com/">Postgres.app</a> and drag
+        it to <code>/Applications</code>.</li>
+      <li>Open it, click <strong>Initialize</strong> to create a default cluster.</li>
+      <li>Add the CLI tools to your <code>PATH</code>:
+        <pre><code>sudo mkdir -p /etc/paths.d
+echo /Applications/Postgres.app/Contents/Versions/latest/bin \
+  | sudo tee /etc/paths.d/postgresapp</code></pre>
+        Open a new terminal so the change takes effect.</li>
+      <li>Verify:
+        <pre><code>psql --version
+psql -l       # lists databases</code></pre></li>
+    </ol>
+
+    <h3>macOS — Homebrew</h3>
+    <pre><code>brew install postgresql@16 pgvector
+brew services start postgresql@16</code></pre>
+
+    <h3>Linux — Debian / Ubuntu</h3>
+    <pre><code>sudo apt update
+sudo apt install postgresql postgresql-contrib postgresql-16-pgvector
+sudo systemctl enable --now postgresql</code></pre>
+    <p>Older releases (Ubuntu 22.04 and earlier) may not have a
+    <code>postgresql-16-pgvector</code> package. Use the
+    <a href="https://www.postgresql.org/download/linux/ubuntu/">PostgreSQL APT
+    repository</a> to pull a current version, or build pgvector from source
+    (see below).</p>
+
+    <h3>Linux — Fedora / RHEL</h3>
+    <pre><code>sudo dnf install postgresql-server postgresql-contrib pgvector
+sudo postgresql-setup --initdb
+sudo systemctl enable --now postgresql</code></pre>
+
+    <h3>Docker (any OS)</h3>
+    <p>If you would rather not install Postgres on your host, use the official
+    <code>pgvector</code> image. The example below matches the DSN in
+    <code>config.example.toml</code> exactly, so you can copy-paste through
+    the rest of the manual:</p>
+    <pre><code>docker run -d \
+  --name localmail-postgres \
+  --restart unless-stopped \
+  -e POSTGRES_USER=localmail \
+  -e POSTGRES_PASSWORD='local@@mail' \
+  -e POSTGRES_DB=localmail \
+  -p 5532:5432 \
+  -v localmail-pgdata:/var/lib/postgresql/data \
+  pgvector/pgvector:pg16</code></pre>
+    <p>The container exposes Postgres on host port <strong>5532</strong>
+    (note the non-standard port to avoid clashing with a local install).
+    Data persists in the <code>localmail-pgdata</code> volume.</p>
+
+    <div class="callout tip">
+      <span class="label">Docker shortcut</span>
+      <p>If you used the Docker recipe above, the <code>localmail</code>
+      database, the <code>localmail</code> role, and the password are already
+      set up — you can skip the rest of this page and jump to
+      <a href="install.html">Step 2 — Install localmail</a>. You still need
+      to run <code>CREATE EXTENSION vector;</code> once, which the next-step
+      <code>localmail init-db</code> will trigger via migrations.</p>
+    </div>
+
+    <h2 id="create-db">Create the database and role</h2>
+
+    <p>You will create a dedicated Postgres role and database so localmail's
+    credentials never overlap with anything else on your system.</p>
+
+    <ol class="steps">
+      <li>
+        <h3>Open a superuser <code>psql</code> session.</h3>
+        <p>On macOS with Postgres.app or Homebrew the current Unix user is
+        already a superuser:</p>
+        <pre><code>psql postgres</code></pre>
+        <p>On Linux with the system Postgres package, switch to the
+        <code>postgres</code> user first:</p>
+        <pre><code>sudo -u postgres psql</code></pre>
+      </li>
+
+      <li>
+        <h3>Create the role and database.</h3>
+        <p>Pick a strong password and remember it — you will put it in
+        <code>config.toml</code> in Step 2. The example uses
+        <code>local@@mail</code> (matches <code>config.example.toml</code>);
+        replace it with your own.</p>
+        <pre><code>CREATE ROLE localmail WITH LOGIN PASSWORD 'local@@mail';
+CREATE DATABASE localmail OWNER localmail;
+\q</code></pre>
+      </li>
+
+      <li>
+        <h3>Enable the <code>pgvector</code> extension.</h3>
+        <p>Connect to the newly-created database <em>as a superuser</em>
+        (extensions can only be enabled by superusers) and create the
+        extension:</p>
+        <pre><code>psql -d localmail
+-- or: sudo -u postgres psql -d localmail
+CREATE EXTENSION IF NOT EXISTS vector;
+\q</code></pre>
+        <p>If you get <code>could not open extension control file ...
+        vector.control</code>, the <code>pgvector</code> package is missing.
+        Re-check the install commands above for your platform.</p>
+      </li>
+
+      <li>
+        <h3>Verify the credentials work.</h3>
+        <p>Open a new shell and connect <em>as the <code>localmail</code>
+        role</em>:</p>
+        <pre><code>psql 'postgresql://localmail:local%40%40mail@localhost:5432/localmail'</code></pre>
+        <p>(If you used the Docker recipe, port is <code>5532</code> not
+        <code>5432</code>.) You should land at a <code>localmail=&gt;</code>
+        prompt with no errors. <kbd>\q</kbd> to quit.</p>
+        <div class="callout warn">
+          <span class="label">URL-encode special chars</span>
+          <p>The <code>@</code> in a password must appear in the DSN as
+          <code>%40</code>; an unescaped <code>@</code> would be parsed as
+          the host separator. Other characters that need encoding:
+          <code>:</code>&nbsp;→&nbsp;<code>%3A</code>,
+          <code>/</code>&nbsp;→&nbsp;<code>%2F</code>,
+          <code> </code>&nbsp;→&nbsp;<code>%20</code>.</p>
+        </div>
+      </li>
+    </ol>
+
+    <h2>What about backups?</h2>
+    <p>Now is a good moment to plan backups, even though there is nothing in
+    the database yet. localmail's archive is the <em>only</em> copy of any
+    mail you sync after you delete the original from the IMAP server, so a
+    backup strategy matters. Two simple options:</p>
+    <ul>
+      <li><strong>Daily <code>pg_dump</code></strong> piped to your normal
+        backup tool (Time Machine, Backblaze, restic, …):
+        <pre><code>pg_dump -Fc -d localmail -f localmail-$(date +%F).dump</code></pre>
+      </li>
+      <li><strong>Filesystem-level backup</strong> of the Postgres data
+        directory plus the <code>~/localmail/</code> attachments tree. Stop
+        the daemon and Postgres before the snapshot to ensure consistency.</li>
+    </ul>
+
+    <h2>Troubleshooting</h2>
+    <table>
+      <tr>
+        <th>Symptom</th>
+        <th>Fix</th>
+      </tr>
+      <tr>
+        <td><code>connection refused</code> on <code>psql</code></td>
+        <td>Postgres isn't running. <code>brew services start
+          postgresql@16</code> / <code>sudo systemctl start postgresql</code>
+          / <code>docker start localmail-postgres</code>.</td>
+      </tr>
+      <tr>
+        <td><code>FATAL: password authentication failed</code></td>
+        <td>You typed the password wrong, or the host's
+          <code>pg_hba.conf</code> requires <code>peer</code> authentication.
+          On Linux, edit <code>/etc/postgresql/16/main/pg_hba.conf</code>,
+          change the <code>local</code> rule from <code>peer</code> to
+          <code>md5</code>, then <code>sudo systemctl reload
+          postgresql</code>.</td>
+      </tr>
+      <tr>
+        <td><code>extension "vector" is not available</code></td>
+        <td>The <code>pgvector</code> package is missing or not in the same
+          installation as the running server. Install it for the matching
+          major version (e.g. <code>postgresql-16-pgvector</code> for PG 16),
+          then restart Postgres.</td>
+      </tr>
+    </table>
+
+    <div class="page-nav">
+      <a class="prev" href="../index.html">
+        <span class="dir">Back</span>
+        <strong>Overview</strong>
+      </a>
+      <a class="next" href="install.html">
+        <span class="dir">Next</span>
+        <strong>2. Install localmail</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

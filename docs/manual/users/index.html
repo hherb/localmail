@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>localmail · User manual</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" type="image/png" href="assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="index.html" style="text-decoration:none;border:0;">
+      <img src="assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a class="active" href="index.html">Overview</a></li>
+        <li><a href="setup/postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="setup/install.html">2. Install localmail</a></li>
+        <li><a href="setup/accounts.html">3. Add email accounts</a></li>
+      </ul>
+
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="daemon/index.html">Daemon</a></li>
+        <li><a href="cli-use/index.html">CLI</a></li>
+        <li><a href="desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+
+    <div class="foot">
+      <p>Need the source? See the<br>
+      <a href="https://github.com/hherb/localmail" style="color:#c8d0de;">GitHub repo</a>.</p>
+    </div>
+  </aside>
+
+  <main class="content">
+
+    <section class="hero">
+      <div>
+        <div class="eyebrow">User manual</div>
+        <h1>Your mail, on your terms.</h1>
+        <p>localmail mirrors every IMAP account you own into a local PostgreSQL
+        database and content-addressable file tree — searchable, scriptable,
+        and yours. This manual walks you from a blank machine to a running
+        archive, step by step.</p>
+      </div>
+      <img src="assets/logo.png" alt="localmail logo">
+    </section>
+
+    <h2>How the manual is organised</h2>
+    <p>The three "Getting started" pages are sequential — work through them
+    once, in order, on a fresh machine. The "Using localmail" pages are
+    reference material; jump to whichever interface you prefer.</p>
+
+    <h2>Getting started</h2>
+    <div class="card-grid">
+      <a class="card" href="setup/postgres.html">
+        <div class="card-eyebrow">Step 1</div>
+        <h3>Set up PostgreSQL</h3>
+        <p>Install Postgres, create the <code>localmail</code> database and
+        role. Works on macOS, Linux, and Docker.</p>
+      </a>
+      <a class="card" href="setup/install.html">
+        <div class="card-eyebrow">Step 2</div>
+        <h3>Install localmail</h3>
+        <p>Install <code>uv</code>, then install the <code>localmail</code>
+        CLI as a global tool and apply the database schema.</p>
+      </a>
+      <a class="card" href="setup/accounts.html">
+        <div class="card-eyebrow">Step 3</div>
+        <h3>Add email accounts</h3>
+        <p>Provider-by-provider recipes: Gmail (OAuth2), Microsoft 365 /
+        Exchange, Fastmail, Proton Mail, iCloud, generic IMAP.</p>
+      </a>
+    </div>
+
+    <h2>Using localmail</h2>
+    <div class="card-grid">
+      <a class="card" href="daemon/index.html">
+        <div class="card-eyebrow">Reference</div>
+        <h3>Run the daemon</h3>
+        <p>Keep your archive up to date in real time. systemd / launchd unit
+        templates, log inspection, restart strategy.</p>
+      </a>
+      <a class="card" href="cli-use/index.html">
+        <div class="card-eyebrow">Reference</div>
+        <h3>Use the CLI</h3>
+        <p>One-shot syncs, search, status, failure recovery, attachment
+        text extraction, language detection.</p>
+      </a>
+      <a class="card" href="desktop-app/index.html">
+        <div class="card-eyebrow">Reference</div>
+        <h3>Run the desktop app</h3>
+        <p>Browse, search, and read mail from a native window. Connect the
+        app to a local <code>localmail serve</code> instance.</p>
+      </a>
+    </div>
+
+    <h2>What you'll have at the end</h2>
+    <ul>
+      <li>A PostgreSQL database called <code>localmail</code> holding every
+        message header, body, and label from every account you connected.</li>
+      <li>A directory tree of attachments, content-addressable by SHA-256, so
+        identical bytes are stored exactly once across all your accounts.</li>
+      <li>A background daemon that keeps the archive current using IMAP IDLE
+        on the INBOX and periodic polling on other folders.</li>
+      <li>A hybrid lexical-plus-vector search index across messages and
+        attachment text — runnable from the CLI, Python, or the desktop app.</li>
+    </ul>
+
+    <div class="callout tip">
+      <span class="label">Estimated time</span>
+      <p>~30 minutes for the three setup steps if you already have Postgres
+      and <code>uv</code> installed; ~60 minutes from a completely blank
+      machine. The initial mail sync runs in the background after that and
+      depends on how large your mailboxes are.</p>
+    </div>
+
+    <div class="page-nav">
+      <span></span>
+      <a class="next" href="setup/postgres.html">
+        <span class="dir">Next</span>
+        <strong>1. Set up PostgreSQL</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

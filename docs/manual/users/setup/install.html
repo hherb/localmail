@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2. Install localmail · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a href="postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a class="active" href="install.html">2. Install localmail</a></li>
+        <li><a href="accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="../daemon/index.html">Daemon</a></li>
+        <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a href="../desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Step 2 of 3 · Getting started</div>
+      <h1>Install localmail</h1>
+      <p class="lede">Install the <code>localmail</code> command-line tool
+      globally, point it at the Postgres database you created in Step 1, and
+      apply the schema migrations.</p>
+    </header>
+
+    <h2>What you need</h2>
+    <ul>
+      <li>A running Postgres database from <a href="postgres.html">Step 1</a>
+        (you should know its DSN).</li>
+      <li><strong>Python 3.12 or newer</strong> &mdash; managed automatically
+        by <code>uv</code>, you don't have to install Python yourself.</li>
+      <li>About <strong>1 GB</strong> of disk for the Python environment and
+        (later) the embedding model cache.</li>
+    </ul>
+
+    <ol class="steps">
+
+      <li>
+        <h3>Install <code>uv</code>.</h3>
+        <p><code>uv</code> is a fast Python package manager from Astral.
+        localmail uses it to manage its environment and provide a globally
+        installed CLI.</p>
+
+        <p><strong>macOS / Linux:</strong></p>
+        <pre><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code></pre>
+
+        <p><strong>Windows (PowerShell):</strong></p>
+        <pre><code>powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"</code></pre>
+
+        <p>Open a new terminal so the updated <code>PATH</code> takes effect,
+        then verify:</p>
+        <pre><code>uv --version</code></pre>
+      </li>
+
+      <li>
+        <h3>Install the <code>localmail</code> CLI.</h3>
+        <p><code>uv tool install</code> installs a Python package and exposes
+        its console scripts on your <code>PATH</code>, in an isolated
+        environment so it doesn't conflict with anything else.</p>
+        <pre><code>uv tool install \
+  --python 3.12 \
+  --from git+https://github.com/hherb/localmail \
+  localmail</code></pre>
+
+        <p>To include the optional attachment-extraction dependencies (Docling,
+        for higher-fidelity PDF parsing) install the <code>extraction</code>
+        extra:</p>
+        <pre><code>uv tool install \
+  --python 3.12 \
+  --from git+https://github.com/hherb/localmail \
+  --with 'localmail[extraction]' \
+  localmail</code></pre>
+
+        <p>Verify the binary is on your <code>PATH</code>:</p>
+        <pre><code>localmail --version
+localmail --help</code></pre>
+
+        <div class="callout">
+          <span class="label">Updating later</span>
+          <p>Re-run the same <code>uv tool install</code> command with
+          <code>--reinstall</code>, or simply <code>uv tool upgrade
+          localmail</code>.</p>
+        </div>
+      </li>
+
+      <li>
+        <h3>Create the config file.</h3>
+        <p>localmail looks for <code>~/.config/localmail/config.toml</code>
+        by default. Override with <code>$LOCALMAIL_CONFIG</code> or
+        <code>localmail --config PATH …</code>.</p>
+        <pre><code>mkdir -p ~/.config/localmail
+curl -fLo ~/.config/localmail/config.toml \
+  https://raw.githubusercontent.com/hherb/localmail/main/config.example.toml</code></pre>
+
+        <p>Open the file in your editor and update the two required sections:</p>
+        <pre><code>[database]
+# Match the DSN you verified in Step 1. URL-encode special chars in
+# the password (e.g. '@' -> %40, ':' -> %3A).
+dsn = "postgresql://localmail:local%40%40mail@localhost:5532/localmail"
+
+[attachments]
+# Where attachment blobs land on disk. ~/localmail is fine. Pick a
+# drive with room for the attachments your mail accounts will pull in.
+root = "~/localmail"</code></pre>
+
+        <p>Leave the <code>[daemon]</code> block at its defaults for now.
+        You will add <code>[[accounts]]</code> entries in Step 3, so don't
+        worry about them yet.</p>
+      </li>
+
+      <li>
+        <h3>Apply the schema migrations.</h3>
+        <p>This is the first command that actually touches the database.
+        It is idempotent — re-running it never harms anything.</p>
+        <pre><code>localmail init-db</code></pre>
+        <p>You should see one line per migration applied
+        (<code>0001_init.sql</code> &hellip;
+        <code>0017_messages_body_lang_pending_index.sql</code> at the time
+        of writing) and a final <code>OK</code>.</p>
+
+        <div class="callout warn">
+          <span class="label">If init-db fails</span>
+          <p>The most common cause is a wrong DSN: typo, wrong port, password
+          not URL-encoded. Test the DSN with <code>psql</code> first using
+          the exact connection string from <code>config.toml</code>. The
+          second most common cause is the <code>pgvector</code> extension
+          not being installed (see <a href="postgres.html">Step 1</a>).</p>
+        </div>
+      </li>
+
+      <li>
+        <h3>Confirm everything is wired up.</h3>
+        <pre><code>localmail list-accounts</code></pre>
+        <p>You should get an empty list with no error. That's expected — you
+        haven't added any accounts yet. Connecting to Postgres is the only
+        thing this command tries to do, so a clean run here means the DSN,
+        schema, and CLI all line up correctly.</p>
+      </li>
+
+    </ol>
+
+    <h2>What the install gave you</h2>
+    <table>
+      <tr>
+        <th>Path</th>
+        <th>What lives there</th>
+      </tr>
+      <tr>
+        <td><code>~/.local/bin/localmail</code></td>
+        <td>The CLI entry point. <code>uv tool install</code> placed it here.</td>
+      </tr>
+      <tr>
+        <td><code>~/.config/localmail/config.toml</code></td>
+        <td>Your topology — DSN, attachments root, daemon settings, accounts.</td>
+      </tr>
+      <tr>
+        <td><code>~/localmail/blobs/</code></td>
+        <td>Empty for now. Attachments will land here, organised by SHA-256.</td>
+      </tr>
+      <tr>
+        <td>OS keyring (Keychain / Secret Service)</td>
+        <td>Where passwords and OAuth refresh tokens will be stored — not
+          in any file.</td>
+      </tr>
+      <tr>
+        <td>Postgres database <code>localmail</code></td>
+        <td>Schema is now in place. Empty tables until the first sync.</td>
+      </tr>
+    </table>
+
+    <h2>Alternative: install from a checkout</h2>
+    <p>If you want to hack on localmail or track a specific branch, clone the
+    repository and use <code>uv sync</code> instead:</p>
+    <pre><code>git clone https://github.com/hherb/localmail
+cd localmail
+uv sync                       # installs deps into .venv
+uv run localmail --help       # invoke through uv run
+uv run localmail init-db</code></pre>
+    <p>Every command in this manual still works — just prefix it with
+    <code>uv run</code>.</p>
+
+    <div class="page-nav">
+      <a class="prev" href="postgres.html">
+        <span class="dir">Back</span>
+        <strong>1. Set up PostgreSQL</strong>
+      </a>
+      <a class="next" href="accounts.html">
+        <span class="dir">Next</span>
+        <strong>3. Add email accounts</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

@@ -24,6 +24,7 @@ import {
   type Capabilities,
   type ProbeResult,
 } from "../tauri";
+import { formatError } from "../format_error";
 
 export type AuthState =
   | { phase: "connecting" }
@@ -139,21 +140,6 @@ class AuthStore {
       this.#state = { phase: "logged_out", errorMessage: formatError(err) };
     }
   }
-}
-
-function formatError(err: unknown): string {
-  if (err && typeof err === "object") {
-    const o = err as { kind?: string; detail?: unknown };
-    if (o.kind && o.detail !== undefined) {
-      const detailStr =
-        typeof o.detail === "object" && o.detail !== null
-          ? formatError(o.detail)
-          : String(o.detail);
-      return `${o.kind}: ${detailStr}`;
-    }
-    if (o.kind) return String(o.kind);
-  }
-  return String(err);
 }
 
 export const auth = new AuthStore();

@@ -231,15 +231,183 @@ def test_stream_attachment_preserves_safe_mimes(
     assert r.headers["content-type"].startswith("image/png")
 
 
-def test_stream_attachment_accept_ranges_none(
+def test_stream_attachment_advertises_accept_ranges_bytes(
     db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
 ) -> None:
-    """We don't (yet) implement Range — be explicit so clients don't hang on
-    retry expecting partial-content."""
+    """Range support is on (#54): full-GET responses must advertise it so
+    clients can resume on dropped connections and seek into media."""
     sha = "e8" * 32
     _seed_blob_with_carrier(db_conn, tmp_path, sha, b"x")
     grant_alice_all_accounts()
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
     r = c.get(f"/v1/attachments/{sha}", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200
-    assert r.headers["accept-ranges"] == "none"
+    assert r.headers["accept-ranges"] == "bytes"
+
+
+_PDF_PAYLOAD = b"%PDF-content-here-some-bytes-for-range-tests-XYZ"
+
+
+def test_range_first_ten_bytes_returns_206(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """``Range: bytes=0-9`` → 206 Partial Content with the first 10 bytes."""
+    sha = "f1" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=0-9"},
+    )
+    assert r.status_code == 206
+    assert r.content == _PDF_PAYLOAD[:10]
+    assert r.headers["content-range"] == f"bytes 0-9/{len(_PDF_PAYLOAD)}"
+    assert r.headers["content-length"] == "10"
+    assert r.headers["accept-ranges"] == "bytes"
+
+
+def test_range_open_ended_from_offset_returns_206(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """``Range: bytes=10-`` → 206 with bytes 10..end."""
+    sha = "f2" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=10-"},
+    )
+    assert r.status_code == 206
+    assert r.content == _PDF_PAYLOAD[10:]
+    last = len(_PDF_PAYLOAD) - 1
+    assert r.headers["content-range"] == f"bytes 10-{last}/{len(_PDF_PAYLOAD)}"
+    assert r.headers["content-length"] == str(len(_PDF_PAYLOAD) - 10)
+
+
+def test_range_suffix_returns_trailing_bytes(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """``Range: bytes=-10`` → 206 with the trailing 10 bytes."""
+    sha = "f3" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=-10"},
+    )
+    assert r.status_code == 206
+    assert r.content == _PDF_PAYLOAD[-10:]
+    total = len(_PDF_PAYLOAD)
+    assert r.headers["content-range"] == f"bytes {total - 10}-{total - 1}/{total}"
+    assert r.headers["content-length"] == "10"
+
+
+def test_range_start_past_eof_returns_416(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """A start position past EOF is unsatisfiable → 416 with ``bytes */N``."""
+    sha = "f4" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=9999999-"},
+    )
+    assert r.status_code == 416
+    assert r.headers["content-range"] == f"bytes */{len(_PDF_PAYLOAD)}"
+
+
+def test_range_end_past_eof_is_clamped(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """``bytes=0-<huge>`` with start in range → 206 with end clamped to size-1
+    (RFC 9110 §14.1.2)."""
+    sha = "f5" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=0-9999999"},
+    )
+    assert r.status_code == 206
+    assert r.content == _PDF_PAYLOAD
+    total = len(_PDF_PAYLOAD)
+    assert r.headers["content-range"] == f"bytes 0-{total - 1}/{total}"
+
+
+def test_malformed_range_falls_through_to_200(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """RFC 9110: servers MAY ignore unparseable Range — we serve full 200."""
+    sha = "f6" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=abc-"},
+    )
+    assert r.status_code == 200
+    assert r.content == _PDF_PAYLOAD
+
+
+def test_multi_range_falls_through_to_200(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """Multi-range requests fall through to 200 — we don't emit multipart."""
+    sha = "f7" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=0-9,20-29"},
+    )
+    assert r.status_code == 200
+    assert r.content == _PDF_PAYLOAD
+
+
+def test_range_request_preserves_content_disposition_and_mime_clamp(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """A 206 must go through the same #32 path as a full GET: download-only
+    Content-Disposition + risky-MIME clamp."""
+    sha = "f8" * 32
+    _seed_blob_with_carrier(
+        db_conn, tmp_path, sha, b"<script>alert(1)</script>" * 4,
+        filename="evil.html", mime="text/html",
+    )
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=0-9"},
+    )
+    assert r.status_code == 206
+    assert r.headers["content-type"].startswith("application/octet-stream")
+    cd = r.headers["content-disposition"]
+    assert cd.startswith("attachment;")
+    assert "filename=" in cd
+
+
+def test_416_response_preserves_content_disposition(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """A 416 must still set Content-Disposition: attachment so a downstream
+    proxy or naive client can't be tricked into rendering an error body
+    inline if it ever has one."""
+    sha = "f9" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=9999999-"},
+    )
+    assert r.status_code == 416
+    assert r.headers["content-disposition"].startswith("attachment;")

@@ -324,9 +324,28 @@ for the full design.
   in stored HTML/SVG blobs). MIME types in `_INLINE_RISKY_MIMES`
   (`text/html`, `application/xhtml+xml`, `image/svg+xml`, `text/xml`,
   `application/xml`) are clamped to `application/octet-stream` on the
-  wire as defense in depth (the DB row is untouched). `Accept-Ranges:
-  none` is set explicitly so clients don't hang on retry expecting
-  partial-content. Range support is deferred (phase 2 of #32).
+  wire as defense in depth (the DB row is untouched). These invariants
+  apply to **every** response — full GET, 206 Partial Content, *and*
+  416 — so a proxy or client can never be tricked into rendering a
+  ranged slice inline.
+- **Range support (#54, phase 2 of #32)**: `/v1/attachments/{sha256}`
+  advertises `Accept-Ranges: bytes` and honours `Range: bytes=…` per
+  RFC 9110 §14.1. Parsing lives in
+  [`src/localmail/api/range_requests.py`](src/localmail/api/range_requests.py)
+  as a pure module (no IO, no FastAPI) so it's reusable by future
+  transports (MCP, etc.). Contract:
+    - Single closed range (`bytes=0-9`), open-ended (`bytes=10-`), and
+      suffix (`bytes=-10`) → 206 with `Content-Range: bytes start-end/total`.
+    - End past EOF is **clamped** to `size - 1` (RFC 9110 §14.1.2).
+    - Start past EOF or suffix-of-0 → 416 with `Content-Range: bytes */N`.
+    - Unparseable Range headers fall through to 200 full-response (RFC
+      permissive branch — servers MAY ignore unsupported syntax).
+    - Multi-range (`bytes=0-9,20-29`) also falls through to 200 — we
+      don't emit `multipart/byteranges`; single-range covers PDF/video
+      seek and connection-resume, which is all the GUI needs.
+  Streaming uses `.seek(start)` + bounded chunked `read()` (never slurps
+  the whole blob into memory) and still goes through `open_attachment_bytes`,
+  so the per-user ACL applies to ranged requests too.
 - **ID typing (#33)**: every entity ID is a **string on the wire** in
   both directions — response bodies emit `str(id)` and path/query
   parameters accept digit-strings only. `localmail.api.ids.parse_int_id`

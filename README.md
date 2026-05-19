@@ -387,3 +387,10 @@ Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for de/en/es/ja.
 Norwegian is reported but not gated. Author 20 queries per language in
 `tests/fixtures/multilingual_queries.json` (see the `.example.json` for
 format) before running the gate.
+
+A companion sweep harness at `tests/acceptance/run_rrf_k_sweep.py` seeds
+the corpus once and re-evaluates the query suite for each candidate
+`rrf_k`, so the expensive embed pass is not repeated. Pass `--corpus
+attachment` to exercise arm 4. The current default (`rrf_k=60`) was
+verified against both synthetic corpora in #35 — see that issue for
+the full table.

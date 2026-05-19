@@ -53,6 +53,22 @@ class ExtractorError(Exception):
     """
 
 
+class TransientExtractorError(ExtractorError):
+    """Raised by an extractor when the failure is *not* the blob's fault.
+
+    Transient conditions — model-download blips, OCR backend OOM, retried-
+    once IO hiccups — must not increment a blob's ``failed_extractions``
+    retry_count. The worker classifies these via ``_is_transient`` and
+    rolls back the SAVEPOINT without recording, leaving the blob eligible
+    for the next sweep.
+
+    Extractors may raise this directly when they detect the cause is
+    transient. Otherwise the worker falls back to walking the exception's
+    cause chain for built-in transient classes (ConnectionError,
+    TimeoutError, MemoryError).
+    """
+
+
 @runtime_checkable
 class AttachmentExtractor(Protocol):
     """The contract every attachment extractor must implement.

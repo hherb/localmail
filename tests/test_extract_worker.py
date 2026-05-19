@@ -272,3 +272,265 @@ def test_run_extract_worker_stops_immediately_when_event_set(db_conn) -> None:
 
     # Should exit in <1s, well under the 30s poll interval.
     assert elapsed < 1.0
+
+
+# --- Transient vs poison-pill classification (#36) ---------------------------
+#
+# The extract_worker must distinguish transient extractor errors (network
+# blips, OOM, model-download timeouts) from genuine poison-pill blobs
+# (corrupt bytes, encrypted, MIME mismatch). Transient errors must NOT be
+# recorded in failed_extractions — the blob should remain eligible for the
+# next sweep with its retry_count intact. Poison-pills continue to follow
+# the existing _record_failure_safely path so they're permanently skipped
+# after extract_worker_max_retries.
+
+
+def test_is_transient_recognises_transient_extractor_error() -> None:
+    """A TransientExtractorError instance is unconditionally transient."""
+    from localmail.search.extract_worker import _is_transient
+    from localmail.search.extractor import TransientExtractorError
+
+    assert _is_transient(TransientExtractorError("simulated blip"))
+
+
+def test_is_transient_recognises_connection_error_in_cause_chain() -> None:
+    """An ExtractorError caused by ConnectionError (docling model fetch
+    blip) walks its cause chain and is recognised as transient."""
+    from localmail.search.extract_worker import _is_transient
+    from localmail.search.extractor import ExtractorError
+
+    try:
+        try:
+            raise ConnectionError("dns refused")
+        except ConnectionError as inner:
+            raise ExtractorError("docling wrap") from inner
+    except ExtractorError as exc:
+        assert _is_transient(exc)
+
+
+def test_is_transient_recognises_timeout_error_in_cause_chain() -> None:
+    """TimeoutError anywhere in the cause chain is transient."""
+    from localmail.search.extract_worker import _is_transient
+    from localmail.search.extractor import ExtractorError
+
+    try:
+        try:
+            raise TimeoutError("read timed out")
+        except TimeoutError as inner:
+            raise ExtractorError("docling wrap") from inner
+    except ExtractorError as exc:
+        assert _is_transient(exc)
+
+
+def test_is_transient_recognises_memory_error() -> None:
+    """A raw MemoryError is transient (OOM resolves once other procs free)."""
+    from localmail.search.extract_worker import _is_transient
+
+    assert _is_transient(MemoryError("oom"))
+
+
+def test_is_transient_rejects_value_error() -> None:
+    """ValueError is a permanent poison-pill class (parse failures, etc.)."""
+    from localmail.search.extract_worker import _is_transient
+
+    assert not _is_transient(ValueError("malformed bytes"))
+
+
+def test_is_transient_rejects_plain_extractor_error() -> None:
+    """A bare ExtractorError without a transient cause chain is permanent."""
+    from localmail.search.extract_worker import _is_transient
+    from localmail.search.extractor import ExtractorError
+
+    assert not _is_transient(ExtractorError("pypdf: malformed PDF"))
+
+
+def test_extract_worker_does_not_record_transient_error(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """An extractor raising TransientExtractorError must NOT produce a
+    failed_extractions row — the blob remains eligible for retry."""
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha = _seed_blob(db_conn, b"text content", "text/plain", tmp_path, "a.txt")
+
+    def _fail_transient(self, blob_path, mime_type):
+        raise TransientExtractorError("simulated network blip")
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM failed_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        row_failed = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM attachment_text WHERE sha256 = %s",
+            (sha,),
+        )
+        row_text = cur.fetchone()
+
+    assert row_failed is not None and row_failed[0] == 0
+    assert row_text is not None and row_text[0] == 0
+
+
+def test_extract_worker_does_not_record_connection_error(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """An ExtractorError caused by ConnectionError (docling model fetch
+    blip) is classified transient and not recorded."""
+    from localmail.search.extractor import (
+        ExtractorError,
+        LightweightExtractor,
+    )
+
+    sha = _seed_blob(db_conn, b"text content", "text/plain", tmp_path, "a.txt")
+
+    def _fail_with_connection_error(self, blob_path, mime_type):
+        try:
+            raise ConnectionError("model fetch failed")
+        except ConnectionError as inner:
+            raise ExtractorError("wrapped") from inner
+
+    monkeypatch.setattr(
+        LightweightExtractor, "extract", _fail_with_connection_error
+    )
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM failed_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_extract_worker_records_permanent_extractor_error(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """Regression: a plain ExtractorError (no transient cause) IS still
+    recorded as a poison-pill in failed_extractions."""
+    from localmail.search.extractor import (
+        ExtractorError,
+        LightweightExtractor,
+    )
+
+    sha = _seed_blob(db_conn, b"text content", "text/plain", tmp_path, "a.txt")
+
+    def _fail_permanently(self, blob_path, mime_type):
+        raise ExtractorError("pypdf: bad header")
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _fail_permanently)
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extractor, error_class FROM failed_extractions "
+            "WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "lightweight"
+    assert row[1] == "ExtractorError"
+
+
+def test_extract_worker_transient_does_not_poison_batch(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """A transient failure on blob A must not block blob B in the same
+    batch from being processed. Mirrors the batch_isolation guarantee
+    that the existing poison-pill path already provides."""
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha_a = _seed_blob(
+        db_conn, b"fragile network blob", "text/plain", tmp_path, "a.txt"
+    )
+    sha_b = _seed_blob(
+        db_conn, b"healthy second blob", "text/plain", tmp_path, "b.txt"
+    )
+
+    real_extract = LightweightExtractor.extract
+
+    def _maybe_transient(self, blob_path, mime_type):
+        if blob_path.name == sha_a.hex():
+            raise TransientExtractorError("simulated blip")
+        return real_extract(self, blob_path, mime_type)
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _maybe_transient)
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM failed_extractions WHERE sha256 = %s",
+            (sha_a,),
+        )
+        a_fail = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM attachment_text WHERE sha256 = %s",
+            (sha_a,),
+        )
+        a_text = cur.fetchone()
+        cur.execute(
+            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s",
+            (sha_b,),
+        )
+        b_row = cur.fetchone()
+
+    assert a_fail is not None and a_fail[0] == 0
+    assert a_text is not None and a_text[0] == 0
+    assert b_row is not None and "healthy second blob" in b_row[0]
+
+
+def test_extract_worker_transient_blob_eligible_next_sweep(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """After a transient error, the next sweep can pick the same blob up
+    again (no failed_extractions row gating it out)."""
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha = _seed_blob(
+        db_conn, b"will recover", "text/plain", tmp_path, "a.txt"
+    )
+
+    real_extract = LightweightExtractor.extract
+    calls = {"n": 0}
+
+    def _flaky(self, blob_path, mime_type):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientExtractorError("first call blips")
+        return real_extract(self, blob_path, mime_type)
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _flaky)
+
+    # First sweep: transient error.
+    run_extract_worker_once(db_conn, SearchConfig())
+    # Second sweep: should succeed because the blob isn't gated by any
+    # failed_extractions row.
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert "will recover" in row[0]
+    assert calls["n"] >= 2

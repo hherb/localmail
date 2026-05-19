@@ -1,10 +1,11 @@
 """Attachment streaming + extracted-text routes."""
 from __future__ import annotations
 
+from typing import BinaryIO, Iterator
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from localmail.api.acl import allowed_account_ids
 from localmail.api.attachments import (
@@ -12,9 +13,18 @@ from localmail.api.attachments import (
     get_attachment_text,
     open_attachment_bytes,
 )
+from localmail.api.range_requests import (
+    ByteRange,
+    UnsatisfiableRange,
+    content_range_header,
+    parse_byte_range,
+    unsatisfiable_content_range,
+)
 from localmail.serve.middleware import get_authenticated_user
 
 _CHUNK = 64 * 1024
+_HTTP_PARTIAL_CONTENT = 206
+_HTTP_RANGE_NOT_SATISFIABLE = 416
 
 # MIME types that browsers happily render — and execute scripts from —
 # when served inline. Content-Disposition: attachment is the primary
@@ -74,6 +84,34 @@ def _fallback_filename(sha256_hex: str) -> str:
     return f"attachment-{sha256_hex[:_SHA_PREFIX_LEN_FOR_FALLBACK_NAME]}.bin"
 
 
+def _stream_full(fp: BinaryIO) -> Iterator[bytes]:
+    """Iterate the rest of ``fp`` in fixed chunks, closing on exit."""
+    try:
+        while chunk := fp.read(_CHUNK):
+            yield chunk
+    finally:
+        fp.close()
+
+
+def _stream_range(fp: BinaryIO, byte_range: ByteRange) -> Iterator[bytes]:
+    """Iterate exactly the bytes covered by ``byte_range``, closing on exit.
+
+    Seeks once to ``byte_range.start`` then reads in ``_CHUNK``-sized blocks
+    without slurping the whole blob into memory.
+    """
+    try:
+        fp.seek(byte_range.start)
+        remaining = byte_range.length
+        while remaining > 0:
+            chunk = fp.read(min(_CHUNK, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+    finally:
+        fp.close()
+
+
 router = APIRouter()
 
 
@@ -82,7 +120,20 @@ def stream_blob(
     sha256: str,
     request: Request,
     user=Depends(get_authenticated_user),
-) -> StreamingResponse:
+) -> Response:
+    """Stream an attachment blob, optionally honouring ``Range: bytes=…``.
+
+    Full GET returns 200 with the entire blob and ``Accept-Ranges: bytes``.
+    A satisfiable Range header returns 206 Partial Content with a
+    ``Content-Range`` header and exactly the requested slice. A valid-but-
+    unsatisfiable Range (start past EOF, suffix of zero, etc.) returns 416
+    with ``Content-Range: bytes */<size>``. Unparseable Range headers fall
+    through to a full 200 (RFC 9110 §14.1.2 permissive branch).
+
+    Every response — including 416 — carries the same #32 force-download
+    headers: ``Content-Disposition: attachment`` with both ASCII and RFC 5987
+    filename forms, and a clamped MIME for script-executable types.
+    """
     pool = request.app.state.pool
     with pool.connection() as conn:
         allowed = allowed_account_ids(conn, user.id)
@@ -93,21 +144,44 @@ def stream_blob(
             conn, sha256, allowed_account_ids=allowed,
         )
     filename = (original or "").strip() or _fallback_filename(sha256)
+    disposition = _content_disposition(filename)
+    response_mime = _safe_response_mime(mime)
+    range_header = request.headers.get("range")
 
-    def gen():
-        try:
-            while chunk := fp.read(_CHUNK):
-                yield chunk
-        finally:
-            fp.close()
+    try:
+        byte_range = parse_byte_range(range_header, size)
+    except UnsatisfiableRange:
+        fp.close()
+        return Response(
+            status_code=_HTTP_RANGE_NOT_SATISFIABLE,
+            media_type=response_mime,
+            headers={
+                "Content-Range": unsatisfiable_content_range(size),
+                "Content-Disposition": disposition,
+                "Accept-Ranges": "bytes",
+            },
+        )
+
+    if byte_range is None:
+        return StreamingResponse(
+            _stream_full(fp),
+            media_type=response_mime,
+            headers={
+                "Content-Length": str(size),
+                "Content-Disposition": disposition,
+                "Accept-Ranges": "bytes",
+            },
+        )
 
     return StreamingResponse(
-        gen(),
-        media_type=_safe_response_mime(mime),
+        _stream_range(fp, byte_range),
+        status_code=_HTTP_PARTIAL_CONTENT,
+        media_type=response_mime,
         headers={
-            "Content-Length": str(size),
-            "Content-Disposition": _content_disposition(filename),
-            "Accept-Ranges": "none",
+            "Content-Length": str(byte_range.length),
+            "Content-Range": content_range_header(byte_range, size),
+            "Content-Disposition": disposition,
+            "Accept-Ranges": "bytes",
         },
     )
 

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>localmail · your mail, on your terms</title>
+<meta name="description" content="localmail mirrors your IMAP accounts into a local PostgreSQL database. Open, searchable, scriptable, read-only with respect to upstream. Free and open source.">
+<meta name="theme-color" content="#1c2230">
+
+<meta property="og:title" content="localmail">
+<meta property="og:description" content="Mirror every email account you own into a local Postgres archive — searchable, scriptable, yours.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://mylocalmail.org/">
+<meta property="og:image" content="https://mylocalmail.org/assets/banner.png">
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="localmail">
+<meta name="twitter:description" content="Mirror every email account you own into a local Postgres archive — searchable, scriptable, yours.">
+<meta name="twitter:image" content="https://mylocalmail.org/assets/banner.png">
+
+<link rel="canonical" href="https://mylocalmail.org/">
+<link rel="icon" type="image/png" href="assets/logo.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/">
+      <img src="assets/logo.png" alt="">
+      <span>localmail</span>
+    </a>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#quickstart">Install</a>
+      <a href="/manual/">Manual</a>
+      <a class="btn-github" href="https://github.com/hherb/localmail">GitHub →</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="hero-inner">
+    <div class="hero-copy">
+      <div class="eyebrow">Free &amp; open source</div>
+      <h1>Your mail,<br><span class="accent">on your terms.</span></h1>
+      <p class="lede">localmail mirrors every IMAP account you own into a
+      local PostgreSQL database and a content-addressable file tree.
+      Searchable, scriptable, and yours — never deletes, modifies, or
+      sends mail upstream.</p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="/manual/">Read the manual →</a>
+        <a class="btn btn-secondary" href="https://github.com/hherb/localmail">View on GitHub</a>
+      </div>
+    </div>
+    <div class="hero-art">
+      <img src="assets/logo.png" alt="localmail logo">
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="section-inner">
+    <div class="section-head">
+      <div class="eyebrow">Why localmail</div>
+      <h2>An archive built for the long term.</h2>
+      <p>Mail providers come and go. Your archive shouldn't. localmail keeps
+      every byte you've ever received in a database you fully control.</p>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <div class="icon">◆</div>
+        <h3>You own the archive</h3>
+        <p>Plain PostgreSQL. Plain files. Standard formats. Inspect, back up,
+        export, or grep your mail any way you like — no proprietary blob,
+        no lock-in.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">◈</div>
+        <h3>Read-only upstream</h3>
+        <p>localmail never deletes, modifies, or sends mail. The IMAP server
+        is treated as the source of truth; the mirror is strictly downstream
+        of it.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">▲</div>
+        <h3>Hybrid search</h3>
+        <p>Lexical full-text plus vector embeddings, fused with reciprocal
+        rank fusion. Searches message bodies <em>and</em> the text inside
+        PDF, DOCX, XLSX, and 8 other attachment formats.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">●</div>
+        <h3>Multi-account</h3>
+        <p>Mix Gmail (OAuth2), Microsoft 365, Fastmail, Proton Mail (via
+        Bridge), iCloud, self-hosted, anything that speaks IMAP. Per-account
+        sync threads, per-user access control.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">◉</div>
+        <h3>Secrets in the keyring</h3>
+        <p>Passwords and OAuth refresh tokens live in macOS Keychain or
+        Linux Secret Service — never in a config file, never in the
+        repository.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">◇</div>
+        <h3>Dedup &amp; content-address</h3>
+        <p>Attachments are stored by SHA-256 — the same PDF sent to ten
+        different accounts lives on disk exactly once. Original filenames
+        preserved per-message.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart" class="quickstart">
+  <div class="section-inner">
+    <div class="quickstart-grid">
+      <div>
+        <div class="eyebrow" style="font-size:0.78rem;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent);margin-bottom:0.6rem;">Quickstart</div>
+        <h2>From zero to mirrored mail in about an hour.</h2>
+        <p>Three short steps in the user manual walk you through it,
+        from a blank machine to a running archive:</p>
+        <ol>
+          <li>Set up PostgreSQL (Docker or native).</li>
+          <li>Install the <code>localmail</code> CLI with <code>uv</code>.</li>
+          <li>Add your accounts (Gmail, Outlook, Fastmail, Proton, …).</li>
+        </ol>
+        <div class="links">
+          <a class="btn btn-primary" href="/manual/">Open the manual →</a>
+          <a href="/manual/setup/postgres.html">Start with Postgres →</a>
+        </div>
+      </div>
+      <div>
+<pre><code><span style="color:#8b94a4;"># 1. Install uv (the Python package manager)</span>
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+<span style="color:#8b94a4;"># 2. Install localmail globally</span>
+uv tool install --python 3.12 \
+  --from git+https://github.com/hherb/localmail \
+  localmail
+
+<span style="color:#8b94a4;"># 3. Drop in a config &amp; init the database</span>
+curl -fLo ~/.config/localmail/config.toml \
+  https://raw.githubusercontent.com/hherb/localmail/main/config.example.toml
+localmail init-db
+
+<span style="color:#8b94a4;"># 4. Add an account &amp; sync</span>
+localmail add-account work-fastmail
+localmail sync --account work-fastmail</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="faces">
+  <div class="section-inner">
+    <div class="section-head">
+      <div class="eyebrow">Three ways to use it</div>
+      <h2>Pick the interface that fits.</h2>
+      <p>Same archive, same hybrid search index, three front ends —
+      each documented in the manual.</p>
+    </div>
+
+    <div class="face-cards">
+      <a class="face-card" href="/manual/daemon/">
+        <h3>Daemon</h3>
+        <p>Real-time sync with IMAP IDLE on the INBOX and periodic poll on
+        every other folder. systemd / launchd templates included. Survives
+        network blips with exponential backoff.</p>
+        <span class="face-cta">Read about the daemon →</span>
+      </a>
+      <a class="face-card" href="/manual/cli-use/">
+        <h3>CLI</h3>
+        <p>One-shot sync, search with a rich DSL
+        (<code>from:</code>, <code>has:attachment</code>,
+        <code>lang:</code>, <code>after:</code>), status, failure recovery,
+        backfill workflows. Scriptable end-to-end.</p>
+        <span class="face-cta">Read about the CLI →</span>
+      </a>
+      <a class="face-card" href="/manual/desktop-app/">
+        <h3>Desktop app</h3>
+        <p>Native Tauri 2 + Svelte 5 client. Connects to a local
+        <code>localmail serve</code> instance over HTTPS with
+        certificate pinning and per-user account ACLs.</p>
+        <span class="face-cta">Read about the desktop app →</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+<section class="privacy">
+  <div class="section-inner">
+    <div>
+      <div class="eyebrow" style="font-size:0.78rem;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent);margin-bottom:0.6rem;">Built for privacy</div>
+      <h2>Your mail never leaves your machine.</h2>
+      <p>No upload, no third-party indexer, no telemetry. Search runs
+      locally against your own database. Embedding model downloads once
+      and runs offline thereafter.</p>
+    </div>
+    <div>
+      <ul>
+        <li><strong>Local-first.</strong> Postgres on your machine or LAN; attachments on your disk.</li>
+        <li><strong>OS-native secrets.</strong> Keychain on macOS, Secret Service on Linux.</li>
+        <li><strong>No SaaS dependency.</strong> Gmail's OAuth flow uses <em>your</em> Google Cloud project.</li>
+        <li><strong>Auditable.</strong> Python + PostgreSQL + standard libraries. Read the code; run the tests.</li>
+        <li><strong>Source-available, freely licensed.</strong> Hack it, fork it, audit it.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-inner">
+    <div>
+      <div class="footer-brand">
+        <img src="assets/logo.png" alt="">
+        <span>localmail</span>
+      </div>
+      <p class="footer-tag">An open-source local mail archive. Mirror every
+      IMAP account you own into PostgreSQL — searchable, scriptable, yours.</p>
+    </div>
+    <div>
+      <h4>Manual</h4>
+      <ul>
+        <li><a href="/manual/">Overview</a></li>
+        <li><a href="/manual/setup/postgres.html">Postgres setup</a></li>
+        <li><a href="/manual/setup/install.html">Install</a></li>
+        <li><a href="/manual/setup/accounts.html">Email accounts</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Reference</h4>
+      <ul>
+        <li><a href="/manual/daemon/">Daemon</a></li>
+        <li><a href="/manual/cli-use/">CLI</a></li>
+        <li><a href="/manual/desktop-app/">Desktop app</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Project</h4>
+      <ul>
+        <li><a href="https://github.com/hherb/localmail">GitHub</a></li>
+        <li><a href="https://github.com/hherb/localmail/issues">Issues</a></li>
+        <li><a href="https://github.com/hherb/localmail/blob/main/README.md">README</a></li>
+        <li><a href="https://github.com/hherb/localmail/blob/main/CLAUDE.md">CLAUDE.md</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© <span id="year">2026</span> localmail contributors.</span>
+    <span>Hosted on Cloudflare Pages.</span>
+  </div>
+</footer>
+
+<script>document.getElementById('year').textContent = new Date().getFullYear();</script>
+</body>
+</html>

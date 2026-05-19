@@ -154,6 +154,7 @@ def stream_blob(
         fp.close()
         return Response(
             status_code=_HTTP_RANGE_NOT_SATISFIABLE,
+            media_type=response_mime,
             headers={
                 "Content-Range": unsatisfiable_content_range(size),
                 "Content-Disposition": disposition,

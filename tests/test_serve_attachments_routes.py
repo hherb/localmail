@@ -411,3 +411,51 @@ def test_416_response_preserves_content_disposition(
     )
     assert r.status_code == 416
     assert r.headers["content-disposition"].startswith("attachment;")
+
+
+def test_range_spans_multiple_chunk_boundaries(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """Ranges larger than _CHUNK (64 KiB) must reassemble correctly across
+    multiple read iterations — guards against off-by-one in the
+    ``remaining -= len(chunk)`` accounting in ``_stream_range``."""
+    sha = "fa" * 32
+    chunk_size = 64 * 1024
+    payload = bytes((i % 256) for i in range(chunk_size * 3 + 1234))
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, payload)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    start = chunk_size - 100
+    end = chunk_size * 2 + 500
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Range": f"bytes={start}-{end}",
+        },
+    )
+    assert r.status_code == 206
+    assert r.content == payload[start:end + 1]
+    assert r.headers["content-length"] == str(end - start + 1)
+    assert r.headers["content-range"] == f"bytes {start}-{end}/{len(payload)}"
+
+
+def test_416_response_clamps_risky_mime(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    """A 416 must clamp script-executable MIME types to octet-stream — same
+    defense-in-depth as 200 / 206. The 416 body is empty so this is belt-and-
+    braces, but matches the route docstring's promise."""
+    sha = "fb" * 32
+    _seed_blob_with_carrier(
+        db_conn, tmp_path, sha, _PDF_PAYLOAD,
+        filename="evil.html", mime="text/html",
+    )
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}", "Range": "bytes=9999999-"},
+    )
+    assert r.status_code == 416
+    assert r.headers["content-type"].startswith("application/octet-stream")

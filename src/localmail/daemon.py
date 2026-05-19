@@ -29,21 +29,33 @@ class Daemon:
         self.ssl = ssl
         self._dsn = dsn or cfg.database.dsn
         self._stop_event = threading.Event()
-        pool_max_size = cfg.daemon.pool_max_size
-        if pool_max_size is None:
-            pool_max_size = compute_daemon_pool_size(
+        configured_max_size = cfg.daemon.pool_max_size
+        if configured_max_size is None:
+            resolved_max_size = compute_daemon_pool_size(
                 n_accounts=len(cfg.accounts),
                 run_embed=cfg.search.run_embed_worker,
                 run_extract=cfg.search.run_extract_worker,
             )
+        else:
+            resolved_max_size = configured_max_size
+        resolved_min_size = min(
+            len(cfg.accounts) * 2
+            + (1 if cfg.search.run_embed_worker else 0)
+            + (1 if cfg.search.run_extract_worker else 0)
+            or 1,
+            resolved_max_size,
+        )
         log.info(
-            "daemon pool sizing: max_size=%d (accounts=%d, embed=%s, extract=%s)",
-            pool_max_size,
+            "daemon pool sizing: max_size=%d min_size=%d (accounts=%d, embed=%s, extract=%s)",
+            resolved_max_size,
+            resolved_min_size,
             len(cfg.accounts),
             cfg.search.run_embed_worker,
             cfg.search.run_extract_worker,
         )
-        self.pool = open_pool(self._dsn, min_size=1, max_size=pool_max_size)
+        self.pool = open_pool(
+            self._dsn, min_size=resolved_min_size, max_size=resolved_max_size
+        )
         self.threads: list[threading.Thread] = []
         self._embedding_backend_factory = embedding_backend_factory
         self._started = False

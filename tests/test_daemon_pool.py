@@ -11,7 +11,6 @@ These pin down the contract that:
 
 from __future__ import annotations
 
-import threading
 import time
 
 from localmail.config import DaemonConfig, LocalmailConfig
@@ -113,26 +112,45 @@ def test_daemon_pool_max_size_respects_explicit_override(db_dsn) -> None:
         d.pool.close()
 
 
-def test_daemon_uses_single_pool_for_all_workers(db_dsn) -> None:
-    """Embed + extract workers must run off ``self.pool``, no second pool.
+def test_daemon_uses_single_pool_for_all_workers(db_dsn, monkeypatch) -> None:
+    """Embed + extract workers must run off the *same* ``self.pool`` object.
 
     The previous design opened a second pool for embed_worker and used a raw
     ``psycopg.connect`` per sweep for extract_worker. That meant the
     three pool sources didn't share a budget and could over-subscribe
     ``max_connections`` without any one of them noticing.
+
+    Patching both worker entry points lets us pin pool *identity* rather
+    than just the absence of a private attribute — a stronger invariant
+    that survives renames.
     """
+    captured: dict[str, object] = {}
+
+    def fake_embed_worker(stop, pool, cfg, backend, **_kwargs) -> None:
+        captured["embed_pool"] = pool
+        stop.wait(timeout=5)
+
+    def fake_extract_worker(*, pool, cfg, stop_event) -> None:
+        captured["extract_pool"] = pool
+        stop_event.wait(timeout=5)
+
+    import localmail.search.embed_worker as embed_mod
+    import localmail.search.extract_worker as extract_mod
+
+    monkeypatch.setattr(embed_mod, "run_embed_worker", fake_embed_worker)
+    monkeypatch.setattr(extract_mod, "run_extract_worker", fake_extract_worker)
+
     cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_embed_worker = True
     cfg.search.run_extract_worker = True
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _FakeBackend())
     d.start()
     try:
-        time.sleep(0.4)
-        names = {t.name for t in threading.enumerate()}
-        assert "embed_worker" in names
-        assert "extract_worker" in names
-        # No separate embed pool object; the single self.pool is reused.
-        assert getattr(d, "_embed_pool", None) is None
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(captured) < 2:
+            time.sleep(0.05)
+        assert captured["embed_pool"] is d.pool
+        assert captured["extract_pool"] is d.pool
     finally:
         d.stop()
         d.join(timeout=5)

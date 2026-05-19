@@ -14,14 +14,16 @@ def open_pool(dsn: str, *, min_size: int = 1, max_size: int = 4) -> ConnectionPo
 
 
 POOL_BASELINE_MIN = 4
-"""Floor for ``compute_daemon_pool_size`` — every daemon gets at least this
-many slots so single-account / no-worker deployments still have headroom
-for ad-hoc CLI commands that grab a connection alongside the sync loop."""
+"""Floor for ``compute_daemon_pool_size``. Single-account / no-worker
+deployments still get a few slots so brief contention during sweep
+transitions (one worker re-acquiring while another is mid-query) doesn't
+serialise every thread through a one-slot pool."""
 
 POOL_HEADROOM = 2
-"""Extra slots over the (2N + workers) computed budget. Reserved for
-short-lived ad-hoc operations like ``localmail retry-failed`` or
-migrations that may run alongside a live daemon."""
+"""Slack over the (2N + workers) computed budget. Workers release and
+re-acquire connections at sweep boundaries; the headroom absorbs that
+turnover plus the migration runner in ``init-db`` running alongside an
+unrelated daemon process sharing the same Postgres."""
 
 _SLOTS_PER_ACCOUNT = 2
 """Each account runs one IDLE thread on INBOX and one poll thread on the
@@ -40,9 +42,11 @@ def compute_daemon_pool_size(
 
     The daemon shares one pool across every long-running thread it spawns:
     two per account (IDLE + poll), one for the embed worker (if enabled),
-    and one for the extract worker (if enabled). On top of that we keep a
-    small headroom for ad-hoc operations. The floor (``baseline_min``)
-    guarantees even an idle daemon can service an ad-hoc CLI invocation.
+    and one for the extract worker (if enabled). On top of that we keep
+    ``headroom`` slots to absorb the brief window where a worker releases
+    its connection at a sweep boundary while another acquires. The
+    ``baseline_min`` floor keeps even a single-account, no-worker daemon
+    from serialising every thread through a tiny pool.
 
     This function is pure and side-effect-free so it can be unit-tested
     without touching Postgres.

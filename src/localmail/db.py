@@ -13,6 +13,44 @@ def open_pool(dsn: str, *, min_size: int = 1, max_size: int = 4) -> ConnectionPo
     return ConnectionPool(conninfo=dsn, min_size=min_size, max_size=max_size, open=True)
 
 
+POOL_BASELINE_MIN = 4
+"""Floor for ``compute_daemon_pool_size`` — every daemon gets at least this
+many slots so single-account / no-worker deployments still have headroom
+for ad-hoc CLI commands that grab a connection alongside the sync loop."""
+
+POOL_HEADROOM = 2
+"""Extra slots over the (2N + workers) computed budget. Reserved for
+short-lived ad-hoc operations like ``localmail retry-failed`` or
+migrations that may run alongside a live daemon."""
+
+_SLOTS_PER_ACCOUNT = 2
+"""Each account runs one IDLE thread on INBOX and one poll thread on the
+remaining folders; both hold a connection from the shared pool."""
+
+
+def compute_daemon_pool_size(
+    *,
+    n_accounts: int,
+    run_embed: bool,
+    run_extract: bool,
+    baseline_min: int = POOL_BASELINE_MIN,
+    headroom: int = POOL_HEADROOM,
+) -> int:
+    """Return the recommended ``ConnectionPool.max_size`` for a daemon.
+
+    The daemon shares one pool across every long-running thread it spawns:
+    two per account (IDLE + poll), one for the embed worker (if enabled),
+    and one for the extract worker (if enabled). On top of that we keep a
+    small headroom for ad-hoc operations. The floor (``baseline_min``)
+    guarantees even an idle daemon can service an ad-hoc CLI invocation.
+
+    This function is pure and side-effect-free so it can be unit-tested
+    without touching Postgres.
+    """
+    workers = (1 if run_embed else 0) + (1 if run_extract else 0)
+    return max(baseline_min, _SLOTS_PER_ACCOUNT * n_accounts + workers + headroom)
+
+
 def _migrations_dir() -> Path:
     # migrations/ sits at the repo root, next to pyproject.toml.
     # When installed as a wheel the directory is shipped via tool.hatch (see below).

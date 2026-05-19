@@ -26,6 +26,11 @@ class AttachmentsConfig(BaseModel):
 class DaemonConfig(BaseModel):
     idle_renew_seconds: int = 1740
     poll_seconds: int = 300
+    # When None, the daemon picks `db.compute_daemon_pool_size(...)` based on
+    # the number of configured accounts and which optional workers are on.
+    # Set explicitly to override for tight Postgres `max_connections` budgets
+    # or for operators who want more concurrency than the formula gives.
+    pool_max_size: int | None = None
 
 
 class ServeConfig(BaseModel):

@@ -14,6 +14,8 @@ root = "~/localmail"
 [daemon]
 idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling
 poll_seconds       = 300    # poll non-INBOX folders every 5 minutes
+# pool_max_size    = 12     # uncomment to override auto-computed pool cap
+                            # (defaults to 2*N_accounts + workers + 2 + floor)
 
 # Only required when at least one account uses auth_method = "oauth2".
 # See README.md for how to obtain this file from Google Cloud Console.

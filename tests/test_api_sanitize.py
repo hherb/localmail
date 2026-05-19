@@ -335,3 +335,54 @@ def test_cid_substring_in_title_attribute_preserved() -> None:
     out = sanitize_html(html, cid_to_sha={})
     assert 'title="see cid:foo for the inline image"' in out
     assert ">x</span>" in out
+
+
+def test_href_with_data_scheme_stripped() -> None:
+    """``<a href="data:...">`` must have the href stripped.
+
+    ``data`` is in ``_ALLOWED_URL_SCHEMES`` to support inline
+    ``<img src="data:image/...;base64,...">`` images (validated end-to-end
+    by ``_DATA_IMAGE_RE``). The same scheme on ``<a href>`` is a
+    long-standing XSS vector — modern browsers block top-level navigation
+    to ``data:`` URLs and the serve middleware applies CSP, but the
+    sanitiser should not hand the renderer a ``javascript:``-equivalent
+    payload and rely on downstream defences to neutralise it. The
+    ``attribute_filter`` therefore drops ``data:`` on ``a/href``
+    defensively. Closes issue #45.
+    """
+    html = '<a href="data:text/html,<script>alert(1)</script>">click</a>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "data:" not in out
+    assert "<script" not in out
+    assert "alert" not in out
+    assert ">click</a>" in out
+
+
+def test_href_with_uppercase_data_scheme_stripped() -> None:
+    """URL schemes are case-insensitive per RFC 3986; ``DATA:`` must be dropped too.
+
+    The ``attribute_filter`` lowercases the value before matching the
+    ``data:`` prefix, so case-variant attacks (``DATA:``, ``Data:``,
+    ``dAtA:``) cannot bypass the href defence.
+    """
+    html = '<a href="DATA:text/html,<script>alert(1)</script>">click</a>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert "DATA:" not in out
+    assert "data:" not in out.lower()
+    assert "<script" not in out
+    assert ">click</a>" in out
+
+
+def test_data_substring_in_title_attribute_preserved() -> None:
+    """The ``data:`` href block must not over-reach into non-URL attributes.
+
+    A ``title`` attribute happens to allow free text including ``data:``
+    substrings. The filter's ``href``-only ``data:`` block must not also
+    strip ``title`` values; the only attributes that can act on a URL
+    are ``img/src`` (where ``data:image/...`` images are validated by
+    ``_DATA_IMAGE_RE``) and ``a/href`` (data: dropped).
+    """
+    html = '<span title="see data:image/png... discussion">x</span>'
+    out = sanitize_html(html, cid_to_sha={})
+    assert 'title="see data:image/png... discussion"' in out
+    assert ">x</span>" in out

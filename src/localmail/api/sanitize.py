@@ -77,13 +77,16 @@ _ALLOWED_ATTRS: dict[str, set[str]] = {
 # the ``attribute_filter`` (when the scheme is rejected up front nh3
 # strips the attribute before the filter ever runs). The filter rewrites
 # img/src cid: URLs to scheme-relative ``/v1/attachments/<sha>`` paths
-# and returns ``None`` for cid: on every other URL attribute (currently
-# only ``<a href>``), so an attacker cannot turn a clicked link into an
-# internal attachment fetch.
+# and drops cid: on every other URL attribute (currently only
+# ``<a href>`` via ``_HREF_DENY_SCHEMES``), so an attacker cannot turn a
+# clicked link into an internal attachment fetch.
 #
 # ``data`` enables inline base64 image URIs validated end-to-end by
 # ``_DATA_IMAGE_RE`` (full match, base64 alphabet only — no embedded
-# quote/lt/gt that could confuse the parser).
+# quote/lt/gt that could confuse the parser). The filter drops data: on
+# ``<a href>`` too — ``data:text/html,...`` is a ``javascript:``-equivalent
+# payload in renderers that don't sandbox top-level navigation to
+# data URLs.
 _ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({
     "mailto", "http", "https", "data", "cid",
 })
@@ -137,6 +140,20 @@ _ALLOWED_STYLE_PROPERTIES: frozenset[str] = frozenset({
     "unicode-bidi", "vertical-align", "voice-family", "volume",
     "white-space", "width",
 })
+
+# SECURITY-CRITICAL: URL schemes that must be dropped from ``<a href>``
+# even though they appear in ``_ALLOWED_URL_SCHEMES``. ``cid`` and ``data``
+# are in the scheme allowlist so that the ``attribute_filter`` reaches
+# ``img/src`` values (where ``cid:`` is rewritten to attachment URLs and
+# ``data:image/...`` is validated by ``_DATA_IMAGE_RE``). Surfacing either
+# scheme on ``<a href>`` re-introduces an XSS / exfil vector:
+#   - ``cid:`` would let a clicked link fetch an internal attachment;
+#   - ``data:text/html,...`` is a ``javascript:``-equivalent payload in
+#     any renderer that doesn't sandbox top-level navigation to data URLs
+#     (closes #45).
+# Schemes are compared lowercased; the tuple is the prefix set for
+# ``str.startswith``.
+_HREF_DENY_SCHEMES: tuple[str, ...] = ("cid:", "data:")
 
 _CID_RE = re.compile(r"^cid:(.+)$", re.IGNORECASE)
 # Full-match (not prefix-match) so the rewriter never echoes an attacker-
@@ -196,16 +213,19 @@ def _make_attribute_filter(
        everything else on ``img/src`` (this is the sole defence against
        image trackers — ``http``/``https`` are in ``_ALLOWED_URL_SCHEMES``
        so nh3 itself would let them through).
-    2. **Block ``cid:`` on non-img URL attributes** (currently just
-       ``<a href>``). ``cid`` is in ``_ALLOWED_URL_SCHEMES`` so that
-       cid values reach this filter for the img/src rewrite above;
-       defence-in-depth, the same scheme must never survive on any
-       attribute a browser dereferences via user action.
+    2. **Block ``cid:`` and ``data:`` on non-img URL attributes**
+       (currently just ``<a href>``). Both schemes are in
+       ``_ALLOWED_URL_SCHEMES`` so that their values reach this filter for
+       img/src handling (cid rewrite, data:image validation). Surfacing
+       them on ``<a href>`` would re-expose an attachment fetch on click
+       (cid) or a ``javascript:``-equivalent payload in renderers that
+       don't sandbox top-level navigation to data URLs (data). The deny
+       list is stored in ``_HREF_DENY_SCHEMES``.
     """
     def _filter(tag: str, attr: str, value: str) -> str | None:
         if tag == "img" and attr == "src":
             return _rewrite_img_src(value, cid_to_sha)
-        if attr == "href" and value.lower().startswith("cid:"):
+        if attr == "href" and value.lower().startswith(_HREF_DENY_SCHEMES):
             return None
         return value
 

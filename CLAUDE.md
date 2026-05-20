@@ -405,6 +405,25 @@ for the full design.
   exactly that; don't double-quote. The pure helpers are
   intentionally generic over `etag` so non-SHA streaming endpoints
   could reuse them.
+- **304 short-circuit skips file-open + filename lookup (#62)**: the
+  `stream_blob` route uses a cheap two-step probe before deciding to
+  serve a body. First `get_attachment_blob_info` (DB-only: ACL +
+  `attachment_blobs` row → `(mime, size)`, no `Path.exists()`, no
+  JSONB filename scan). Then `if_none_match_satisfies` → if it fires,
+  return 304 and never call `open_attachment_bytes` /
+  `get_attachment_filename`. Only the body-carrying path pays for the
+  file open and the JSONB scan that picks the per-message original
+  filename. **The probe runs the same ACL check as
+  `open_attachment_bytes`**, so a caller without a grant still sees
+  404 — never 304 — even when their `If-None-Match` would otherwise
+  satisfy. Tested by
+  [`test_serve_attachments_conditional.py::test_304_does_not_call_open_attachment_bytes_or_filename`](tests/test_serve_attachments_conditional.py)
+  (spy-on-imports asserts zero invocations) and
+  [`test_304_acl_denied_returns_404_not_304`](tests/test_serve_attachments_conditional.py)
+  (no grant → 404 even with matching If-None-Match). When adding any
+  new conditional-GET endpoint, follow the same probe → conditional
+  → expensive-IO ordering; never put the expensive call before the
+  precondition check.
 - **ID typing (#33)**: every entity ID is a **string on the wire** in
   both directions — response bodies emit `str(id)` and path/query
   parameters accept digit-strings only. `localmail.api.ids.parse_int_id`

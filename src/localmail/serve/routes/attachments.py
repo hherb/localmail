@@ -10,6 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from localmail.api.acl import allowed_account_ids
 from localmail.api.attachments import (
+    get_attachment_blob_info,
     get_attachment_filename,
     get_attachment_text,
     open_attachment_bytes,
@@ -183,7 +184,13 @@ def stream_blob(
     pool = request.app.state.pool
     with pool.connection() as conn:
         allowed = allowed_account_ids(conn, user.id)
-        fp, mime, size = open_attachment_bytes(
+        mime, size = get_attachment_blob_info(
+            conn, sha256, allowed_account_ids=allowed,
+        )
+        etag = etag_for_sha256(sha256)
+        if if_none_match_satisfies(request.headers.get("if-none-match"), etag):
+            return Response(status_code=_HTTP_NOT_MODIFIED, headers={"ETag": etag})
+        fp, _mime, _size = open_attachment_bytes(
             conn, sha256, allowed_account_ids=allowed,
         )
         original = get_attachment_filename(
@@ -192,11 +199,6 @@ def stream_blob(
     filename = (original or "").strip() or _fallback_filename(sha256)
     disposition = _content_disposition(filename)
     response_mime = _safe_response_mime(mime)
-    etag = etag_for_sha256(sha256)
-
-    if if_none_match_satisfies(request.headers.get("if-none-match"), etag):
-        fp.close()
-        return Response(status_code=_HTTP_NOT_MODIFIED, headers={"ETag": etag})
 
     range_header = request.headers.get("range")
     if range_header is not None and not if_range_allows_partial(

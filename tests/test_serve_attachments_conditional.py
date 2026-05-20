@@ -416,3 +416,82 @@ def test_if_range_mismatch_preserves_full_content_disposition(
     cd = r.headers["content-disposition"]
     assert cd.startswith("attachment;")
     assert 'filename="evil.html"' in cd
+
+
+# ---------- 304 short-circuit skips file-open + filename lookup (#62) ---------
+
+
+def test_304_does_not_call_open_attachment_bytes_or_filename(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+    grant_alice_all_accounts, monkeypatch,
+) -> None:
+    """#62 acceptance: the conditional-GET 304 short-circuit must NOT
+    invoke `open_attachment_bytes` (file pointer + Path.exists) or
+    `get_attachment_filename` (JSONB scan across messages). The whole
+    point of the refactor is to skip those costs when we know the
+    client's cache is already current — the cheap probe in the api/
+    layer is enough to evaluate the precondition. Spy on both via
+    monkeypatch and assert zero invocations on the cache-hit path."""
+    sha = "40" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+
+    import localmail.serve.routes.attachments as routes
+
+    open_calls: list[tuple] = []
+    filename_calls: list[tuple] = []
+
+    real_open = routes.open_attachment_bytes
+    real_filename = routes.get_attachment_filename
+
+    def spy_open(*args, **kwargs):
+        open_calls.append((args, kwargs))
+        return real_open(*args, **kwargs)
+
+    def spy_filename(*args, **kwargs):
+        filename_calls.append((args, kwargs))
+        return real_filename(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "open_attachment_bytes", spy_open)
+    monkeypatch.setattr(routes, "get_attachment_filename", spy_filename)
+
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "If-None-Match": _strong_etag(sha),
+        },
+    )
+    assert r.status_code == 304
+    assert open_calls == [], (
+        "open_attachment_bytes was called on the 304 short-circuit; "
+        "#62 requires the route to skip the file open on a cache hit"
+    )
+    assert filename_calls == [], (
+        "get_attachment_filename was called on the 304 short-circuit; "
+        "#62 requires the route to skip the JSONB filename scan on a cache hit"
+    )
+
+
+def test_304_acl_denied_returns_404_not_304(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+) -> None:
+    """#62 acceptance: ACL must run **before** the conditional check.
+    Without this guarantee, a 304 response leaks 'this sha exists on
+    the server somewhere' to a user who has no grant to any account
+    that carries the blob. Note: this test deliberately does NOT call
+    `grant_alice_all_accounts` — alice can authenticate but cannot see
+    any account, so every attachment lookup must surface as 404 even
+    when the request would otherwise satisfy `If-None-Match`."""
+    sha = "41" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "If-None-Match": _strong_etag(sha),
+        },
+    )
+    assert r.status_code == 404

@@ -7,6 +7,7 @@ import psycopg
 import pytest
 
 from localmail.api.attachments import (
+    get_attachment_blob_info,
     get_attachment_filename,
     get_attachment_metadata,
     get_attachment_text,
@@ -148,6 +149,7 @@ def test_malformed_sha256_raises_validation(db_conn: psycopg.Connection, bad_sha
     bytes.fromhex ValueError and the user would see an opaque 500.
     """
     for fn in (
+        get_attachment_blob_info,
         get_attachment_metadata,
         get_attachment_text,
         open_attachment_bytes,
@@ -235,3 +237,52 @@ def test_get_attachment_filename_prefers_first_carrying_message(
         )
     db_conn.commit()
     assert get_attachment_filename(db_conn, sha, allowed_account_ids=[aid]) == "x.pdf"
+
+
+def test_get_attachment_blob_info_returns_mime_and_size(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """Cheap probe used before the conditional-GET 304 short-circuit (#62)
+    must return the same `(mime, size)` an open call would surface."""
+    sha = "60" * 32
+    aid = _seed_blob(db_conn, tmp_path, sha, b"%PDF-1.4 probe")
+    db_conn.commit()
+    mime, size = get_attachment_blob_info(db_conn, sha, allowed_account_ids=[aid])
+    assert mime == "application/pdf"
+    assert size == len(b"%PDF-1.4 probe")
+
+
+def test_get_attachment_blob_info_not_found(db_conn: psycopg.Connection) -> None:
+    with pytest.raises(NotFound):
+        get_attachment_blob_info(db_conn, "00" * 32, allowed_account_ids=_ANY_ACCOUNT)
+
+
+def test_get_attachment_blob_info_acl_deny(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """ACL must run first — an empty grant list yields NotFound, never a
+    leak that the sha exists. Underpins the #62 acceptance criterion that
+    a 404 still wins over a 304 for unauthorised users."""
+    sha = "61" * 32
+    _seed_blob(db_conn, tmp_path, sha, b"%PDF")
+    db_conn.commit()
+    with pytest.raises(NotFound):
+        get_attachment_blob_info(db_conn, sha, allowed_account_ids=[])
+    with pytest.raises(NotFound):
+        get_attachment_blob_info(db_conn, sha, allowed_account_ids=[99999])
+
+
+def test_get_attachment_blob_info_does_not_touch_filesystem(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """Probe must succeed even if the on-disk blob has been deleted —
+    that is the cost-saving over `open_attachment_bytes` and is the
+    whole reason #62 introduces a separate probe function."""
+    sha = "62" * 32
+    aid = _seed_blob(db_conn, tmp_path, sha, b"%PDF-1.4 probe")
+    db_conn.commit()
+    blob_path = tmp_path / "blobs" / sha[:2] / sha[2:4] / sha
+    blob_path.unlink()
+    mime, size = get_attachment_blob_info(db_conn, sha, allowed_account_ids=[aid])
+    assert mime == "application/pdf"
+    assert size == len(b"%PDF-1.4 probe")

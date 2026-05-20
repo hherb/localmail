@@ -147,6 +147,63 @@ def test_searcher_empty_query_returns_messages_by_coalesce_internal_date_date_se
     assert ids == [mid_b, mid_c, mid_a]
 
 
+def test_searcher_sort_date_orders_results_by_internal_date_desc(db_dsn, db_conn):
+    """`sort="date"` re-orders the hybrid result page by
+    ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC`` while
+    still drawing candidates from the same hybrid retrieval pool — i.e.
+    "find relevant matches, then show them newest first" rather than
+    "by relevance".
+
+    The seed gives every message the same query term so all three are
+    eligible; without the sort flag the reranker would pick a different
+    order. The flag must override that.
+    """
+    now = datetime.now(timezone.utc)
+    mid_oldest, mid_middle, mid_newest = _seed_with_dates(db_conn, [
+        ("a", "berlin lunch 2022", now - timedelta(days=365), now - timedelta(days=365)),
+        ("a", "berlin lunch 2024", now - timedelta(days=60), now - timedelta(days=60)),
+        ("a", "berlin lunch today", now - timedelta(hours=1), now - timedelta(hours=1)),
+    ])
+    cfg = SearchConfig()
+    run_embed_worker_once(db_conn, cfg, _Embedder())
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
+                     reranker=_Reranker(), rewriter=None)
+        page = s.search("berlin", sort="date")
+    finally:
+        pool.close()
+    ids = [r.message_id for r in page.results]
+    assert ids == [mid_newest, mid_middle, mid_oldest]
+
+
+def test_searcher_sort_rank_is_default_and_uses_rerank_score(db_dsn, db_conn):
+    """Sanity: the default `sort="rank"` keeps the existing behavior of
+    ordering by rerank score, even when dates would have produced a
+    different order. Pins the rerank path against accidental re-sort
+    regressions when `sort` lands.
+    """
+    now = datetime.now(timezone.utc)
+    # All same date_sent / internal_date so date-sort would be ambiguous.
+    same_when = now - timedelta(hours=1)
+    mid_a, mid_b = _seed_with_dates(db_conn, [
+        ("a", "irrelevant subject", same_when, same_when),
+        ("a", "berlin conference", same_when, same_when),
+    ])
+    cfg = SearchConfig()
+    run_embed_worker_once(db_conn, cfg, _Embedder())
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
+                     reranker=_Reranker(), rewriter=None)
+        # _Reranker prefers candidates with the query verbatim → mid_b wins.
+        page = s.search("berlin")
+    finally:
+        pool.close()
+    ids = [r.message_id for r in page.results]
+    assert ids[0] == mid_b
+
+
 def test_searcher_empty_query_respects_account_filter(db_dsn, db_conn):
     """The empty-query fallback must still honor structured filters — an
     account scope clicked in the GUI tree should narrow the recent-mail

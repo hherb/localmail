@@ -7,7 +7,7 @@ flattened into a cursor string.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from localmail.api.errors import ValidationFailed
 from localmail.api.ids import parse_int_id
@@ -117,6 +117,7 @@ def run_search(
     limit: int,
     allowed_account_ids: list[int],
     user_id: int,
+    sort: Literal["rank", "date"] = "rank",
 ) -> dict[str, Any]:
     """Run a search and return the API-shaped response, scoped to ``allowed_account_ids``.
 
@@ -124,6 +125,10 @@ def run_search(
     ACL is computed before calling the underlying Searcher; an empty
     intersection short-circuits to an empty result set without running any
     arm queries.
+
+    ``sort`` controls page ordering: ``"rank"`` (default) by rerank score,
+    ``"date"`` by ``COALESCE(internal_date, date_sent) DESC`` over the same
+    hybrid candidate pool.
 
     v1 does not paginate — ``next_cursor`` is always ``None`` (per the design
     doc's "null when done" semantics). Paging will land via a follow-up that
@@ -133,7 +138,7 @@ def run_search(
     if scoped_filters is None:
         return {"results": [], "next_cursor": None, "total_estimate": 0, "took_ms": 0.0}
     query = build_query_string(free_text=free_text, filters=scoped_filters)
-    page: SearchPage = searcher.search(query, page_size=limit, user_id=user_id)
+    page: SearchPage = searcher.search(query, page_size=limit, user_id=user_id, sort=sort)
     return {
         "results": [_to_api_result(r) for r in page.results],
         "next_cursor": None,

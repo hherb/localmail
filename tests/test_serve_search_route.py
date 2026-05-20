@@ -66,6 +66,62 @@ def test_search_returns_results(db_dsn: str, api_token: str, db_conn, api_user) 
     assert body["next_cursor"] is None
 
 
+def test_search_sort_param_is_forwarded_to_searcher(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """The HTTP layer must pass `sort` through to `searcher.search()`. A
+    silently-ignored sort param is the worst kind of bug: the API
+    accepts the field, the client sees a 200, but the user keeps getting
+    the same rank-ordered results.
+    """
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake_searcher = _fake_searcher_returning_one_hit()
+    app = create_app(db_dsn=db_dsn, searcher=fake_searcher)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20, "sort": "date"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    fake_searcher.search.assert_called_once()
+    call_kwargs = fake_searcher.search.call_args.kwargs
+    assert call_kwargs["sort"] == "date"
+
+
+def test_search_sort_defaults_to_rank_when_omitted(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """Omitting `sort` must default to "rank" — backward-compatible with
+    callers who don't know about the new field."""
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake_searcher = _fake_searcher_returning_one_hit()
+    app = create_app(db_dsn=db_dsn, searcher=fake_searcher)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert fake_searcher.search.call_args.kwargs["sort"] == "rank"
+
+
+def test_search_sort_invalid_value_is_rejected(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """An out-of-enum `sort` value must 422, not silently fall back."""
+    _seed_acct_and_grant(db_conn, api_user.id)
+    app = create_app(db_dsn=db_dsn, searcher=_fake_searcher_returning_one_hit())
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20, "sort": "popularity"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 422
+
+
 def test_search_validation_failure(db_dsn: str, api_token: str, db_conn, api_user) -> None:
     _seed_acct_and_grant(db_conn, api_user.id)
     app = create_app(db_dsn=db_dsn, searcher=_fake_searcher_returning_one_hit())

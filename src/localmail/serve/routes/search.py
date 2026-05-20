@@ -1,7 +1,7 @@
 """POST /v1/search endpoint."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -37,6 +37,11 @@ class SearchRequest(BaseModel):
     query: str
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
+    # "rank" (default) orders by rerank relevance; "date" keeps the same
+    # candidate pool but orders the page by COALESCE(internal_date,
+    # date_sent) DESC NULLS LAST. The empty-query branch is already
+    # date-ordered so this is a no-op there.
+    sort: Literal["rank", "date"] = "rank"
 
 
 @router.post("")
@@ -59,4 +64,5 @@ def search_endpoint(
         limit=req.limit,
         allowed_account_ids=allowed,
         user_id=user.id,
+        sort=req.sort,
     )

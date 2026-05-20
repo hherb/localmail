@@ -8,12 +8,36 @@ top.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import MINYEAR, datetime, timezone
 from typing import Any, Literal
+
+SortMode = Literal["rank", "date"]
+
+# Sentinel for "no usable date" — sorts strictly older than any real
+# timestamp so NULLs land at the end of a `sort=date` page under
+# Python's reverse=True ordering.
+_DATE_SORT_NULL_SENTINEL = datetime(MINYEAR, 1, 1, tzinfo=timezone.utc)
+
+
+def _date_sort_key(item: dict) -> tuple[int, datetime]:
+    """Key for ``COALESCE(internal_date, date_sent) DESC NULLS LAST``.
+
+    Returned tuple uses (1, dt) for rows with a usable date and (0,
+    sentinel) for NULLs, so Python's default ascending sort puts NULLs
+    first; ``sorted(..., reverse=True)`` then reverses to (newest, ...,
+    older, NULLs-last) — matching the canonical ordering in the SQL
+    paths.
+    """
+    msg = item.get("msg") or {}
+    dt = msg.get("internal_date") or msg.get("date_sent")
+    if dt is None:
+        return (0, _DATE_SORT_NULL_SENTINEL)
+    return (1, dt)
 
 import psycopg
 from psycopg_pool import ConnectionPool
@@ -360,10 +384,11 @@ class Searcher:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT id, account_id, subject, from_addr, from_name, date_sent,"
-                " body_text FROM messages WHERE id = ANY(%s)", (msg_ids,))
-            for mid, acct, subj, fa, fn, ds, body in cur.fetchall():
+                " internal_date, body_text FROM messages WHERE id = ANY(%s)", (msg_ids,))
+            for mid, acct, subj, fa, fn, ds, intd, body in cur.fetchall():
                 msgs[mid] = {"account_id": acct, "subject": subj, "from_addr": fa,
-                             "from_name": fn, "date_sent": ds, "body_text": body}
+                             "from_name": fn, "date_sent": ds, "internal_date": intd,
+                             "body_text": body}
 
             # Fetch message_chunks text+kind for Arms 2 and 3 hits.
             msg_chunk_ids = [
@@ -423,6 +448,7 @@ class Searcher:
         page: int,
         page_size: int,
         conn: psycopg.Connection | None = None,
+        sort: SortMode = "rank",
     ) -> list[SearchResult]:
         """Assemble SearchResult objects for one page from the ordered hydrated pool.
 
@@ -430,12 +456,25 @@ class Searcher:
         that attachment_filename can be resolved via a JSONB lookup. It is optional
         (and unused) when no attachment hits are present, preserving backward
         compatibility with callers that hold no live connection at this point.
+
+        `sort="rank"` (default) orders by rerank score — the relevance-first
+        behavior. `sort="date"` keeps the same retrieval pool (so "what
+        matches" is unchanged) but orders the page by
+        ``COALESCE(internal_date, date_sent) DESC NULLS LAST`` so callers
+        that want "relevant emails, newest first" don't have to bolt on a
+        separate date-list endpoint.
         """
         terms = parsed.free_text.split()
-        ordered = sorted(
-            zip(hydrated, rerank_scores, strict=True),
-            key=lambda x: x[1], reverse=True,
-        )
+        if sort == "date":
+            ordered = sorted(
+                zip(hydrated, rerank_scores, strict=True),
+                key=lambda x: _date_sort_key(x[0]), reverse=True,
+            )
+        else:
+            ordered = sorted(
+                zip(hydrated, rerank_scores, strict=True),
+                key=lambda x: x[1], reverse=True,
+            )
         start = (page - 1) * page_size
         end = start + page_size
         out: list[SearchResult] = []
@@ -515,16 +554,17 @@ class Searcher:
         needs_filename = any(
             item["fused"].best_chunk_table == "attachment_chunks" for item in hydrated
         )
+        sort: SortMode = entry.get("sort", "rank")
         if needs_filename:
             with self._pool.connection() as conn:
                 results = self._build_results(
                     hydrated, entry["parsed"], entry["scores"], page, page_size,
-                    conn=conn,
+                    conn=conn, sort=sort,
                 )
         else:
             results = self._build_results(
                 hydrated, entry["parsed"], entry["scores"], page, page_size,
-                conn=None,
+                conn=None, sort=sort,
             )
         return SearchPage(
             results=results, page=page, page_size=page_size, pool_size=pool_size,
@@ -548,17 +588,19 @@ class Searcher:
         if user_id is not None and entry.get("user_id") != user_id:
             raise CacheMissError(search_token)
         parsed = entry["parsed"]
+        sort: SortMode = entry.get("sort", "rank")
         self._cache.invalidate(search_token)
         # rerank pool grows proportionally so the larger arm output isn't wasted
         rps = max(candidates_per_arm, entry["rerank_pool_size"])
         page = self._search_with_parsed(parsed, page_size=entry["page_size"],
                                         candidates_per_arm=candidates_per_arm,
                                         rerank_pool_size=rps, use_cache=True,
-                                        user_id=user_id)
+                                        user_id=user_id, sort=sort)
         return page
 
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
-                            rerank_pool_size, use_cache, user_id: int | None = None):
+                            rerank_pool_size, use_cache, user_id: int | None = None,
+                            sort: SortMode = "rank"):
         """Variant of search() that takes an already-parsed query.
 
         Connection scope: retrieval + hydrate inside one 'with' block. The
@@ -594,10 +636,12 @@ class Searcher:
         if needs_filename:
             with self._pool.connection() as conn:
                 results = self._build_results(hydrated, parsed, scores, page=1,
-                                              page_size=page_size, conn=conn)
+                                              page_size=page_size, conn=conn,
+                                              sort=sort)
         else:
             results = self._build_results(hydrated, parsed, scores, page=1,
-                                          page_size=page_size, conn=None)
+                                          page_size=page_size, conn=None,
+                                          sort=sort)
         timing["total"] = (time.monotonic() - t0) * 1000
         token = uuid.uuid4().hex[:16] if use_cache else None
         if token:
@@ -606,6 +650,7 @@ class Searcher:
                 "candidates_per_arm": candidates_per_arm,
                 "rerank_pool_size": rerank_pool_size, "page_size": page_size,
                 "user_id": user_id,
+                "sort": sort,
             })
         return SearchPage(
             results=results, page=1, page_size=page_size, pool_size=len(hydrated),
@@ -625,11 +670,19 @@ class Searcher:
         smart: bool = False,
         disable_rerank: bool = False,
         user_id: int | None = None,
+        sort: SortMode = "rank",
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
 
         `disable_rerank=True` short-circuits the cross-encoder and ranks by
         RRF score only. Useful for low-latency or debugging paths.
+
+        `sort="date"` keeps the hybrid retrieval pool (same candidates as
+        rank order) but re-sorts the page by
+        ``COALESCE(internal_date, date_sent) DESC NULLS LAST``. The
+        empty-query branch is already date-ordered, so the param has no
+        effect there. ``continue_page`` honors whichever sort was used
+        when the cursor was minted.
         """
         t0 = time.monotonic()
         cfg = self._cfg
@@ -700,10 +753,12 @@ class Searcher:
         if needs_filename:
             with self._pool.connection() as conn:
                 results = self._build_results(hydrated, parsed, scores, page=1,
-                                              page_size=effective_page_size, conn=conn)
+                                              page_size=effective_page_size, conn=conn,
+                                              sort=sort)
         else:
             results = self._build_results(hydrated, parsed, scores, page=1,
-                                          page_size=effective_page_size, conn=None)
+                                          page_size=effective_page_size, conn=None,
+                                          sort=sort)
         timing["total"] = (time.monotonic() - t0) * 1000
 
         token: str | None = None
@@ -714,6 +769,7 @@ class Searcher:
                 "candidates_per_arm": cpa, "rerank_pool_size": rps,
                 "page_size": effective_page_size,
                 "user_id": user_id,
+                "sort": sort,
             })
         pool_size = len(hydrated)
         return SearchPage(

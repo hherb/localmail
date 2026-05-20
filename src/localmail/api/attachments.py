@@ -78,6 +78,35 @@ def get_attachment_metadata(
     }
 
 
+def get_attachment_blob_info(
+    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
+) -> tuple[str, int]:
+    """Return ``(mime_type, size_bytes)`` for a blob — DB-only, no file open.
+
+    Lightweight probe used by the streaming route before evaluating the
+    conditional-GET preconditions (#62). It enforces the same ACL check
+    as ``open_attachment_bytes`` so a 404 still wins over a 304 for
+    callers who cannot read the blob, but it deliberately skips the
+    ``Path.exists()`` / file-open work and the JSONB filename scan that
+    are wasted when ``If-None-Match`` is going to short-circuit to 304.
+
+    Raises ``NotFound`` if the blob row is missing or the caller's ACL
+    does not include any account that references the blob.
+    """
+    sha_bytes = _parse_sha256_hex(sha256_hex)
+    if not _caller_can_read_blob(conn, sha256_hex, allowed_account_ids):
+        raise NotFound(f"attachment {sha256_hex} not found")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT mime_type, size_bytes FROM attachment_blobs WHERE sha256 = %s",
+            (sha_bytes,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise NotFound(f"attachment {sha256_hex} not found")
+    return row[0], int(row[1])
+
+
 def open_attachment_bytes(
     conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
 ) -> tuple[BinaryIO, str, int]:

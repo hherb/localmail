@@ -176,3 +176,92 @@ describe("MessageList with search results", () => {
     expect(screen.getByText(/no matches/i)).toBeTruthy();
   });
 });
+
+describe("MessageList — pagination affordances", () => {
+  beforeEach(() => {
+    mail.reset();
+    search.reset();
+  });
+
+  it("renders a Load more button when mail has more pages", async () => {
+    mocks.listMessages.mockResolvedValue({
+      messages: [
+        { message_id: "1", subject: "a",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+      ],
+      next_cursor: "tok",
+    });
+    await mail.loadInitialMessages();
+    render(MessageList);
+    expect(screen.getByRole("button", { name: /load more/i })).toBeTruthy();
+  });
+
+  it("Load more button fires mail.loadMoreMessages when not searching", async () => {
+    mocks.listMessages
+      .mockResolvedValueOnce({
+        messages: [
+          { message_id: "1", subject: "a",
+            from: { address: null, name: null }, date: null,
+            account: { id: "1", name: "x" } },
+        ],
+        next_cursor: "tok",
+      })
+      .mockResolvedValueOnce({
+        messages: [
+          { message_id: "2", subject: "b",
+            from: { address: null, name: null }, date: null,
+            account: { id: "1", name: "x" } },
+        ],
+        next_cursor: null,
+      });
+    await mail.loadInitialMessages();
+    render(MessageList);
+    const btn = screen.getByRole("button", { name: /load more/i });
+    await fireEvent.click(btn);
+    expect(mail.snapshot.messages).toHaveLength(2);
+  });
+
+  it("renders 'N new messages' banner when pendingNewMessages is non-empty", async () => {
+    mocks.listMessages.mockResolvedValue({
+      messages: [], next_cursor: null,
+    });
+    await mail.loadInitialMessages();
+    const changes = await import("../lib/api/changes");
+    vi.spyOn(changes, "getChanges").mockResolvedValue({
+      new_messages: [
+        { message_id: "10", subject: "fresh",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+        { message_id: "11", subject: "fresh2",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+      ],
+      next_cursor: "12",
+    });
+    await mail.pollOnce();
+    render(MessageList);
+    expect(screen.getByText(/2 new messages/i)).toBeTruthy();
+  });
+
+  it("clicking the banner merges pendingNewMessages and dismisses", async () => {
+    mocks.listMessages.mockResolvedValue({
+      messages: [], next_cursor: null,
+    });
+    await mail.loadInitialMessages();
+    const changes = await import("../lib/api/changes");
+    vi.spyOn(changes, "getChanges").mockResolvedValue({
+      new_messages: [
+        { message_id: "10", subject: "fresh",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+      ],
+      next_cursor: "11",
+    });
+    await mail.pollOnce();
+    render(MessageList);
+    await fireEvent.click(screen.getByText(/1 new message/i));
+    expect(mail.snapshot.pendingNewMessages).toEqual([]);
+    expect(mail.snapshot.messages).toHaveLength(1);
+  });
+});

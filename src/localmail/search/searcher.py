@@ -273,11 +273,23 @@ class Searcher:
         parsed: ParsedQuery,
         limit: int,
     ) -> list["SearchResult"]:
-        """Empty-query fallback: SELECT messages ORDER BY date_received DESC.
+        """Empty-query fallback: SELECT messages ORDER BY date_sent DESC NULLS LAST.
 
-        Shares `_filter_sql` with the retrieval arms so structured filters
-        (account_id, folder_id, from/to/subject substrings, date ranges,
-        has_attachment, lang) behave identically here and in the
+        User intent: "date the original email was received at the IMAP
+        server, or if unavailable, date it was sent" — i.e.
+        ``COALESCE(INTERNALDATE, date_sent) DESC``. The schema's
+        ``date_received`` column should hold INTERNALDATE but
+        ``sync.py:upsert_message`` doesn't pass it through, so the column
+        is ``DEFAULT now()`` (= sync time). Until that's fixed and
+        existing rows backfilled, ``date_sent`` is the only column with
+        meaningful per-message variance for an existing archive — a 2023
+        archive message backfilled yesterday gets a fresher
+        ``date_received`` than mail synced last week, defeating the user
+        expectation of "newest email on top".
+
+        Shares ``_filter_sql`` with the retrieval arms so structured
+        filters (account_id, folder_id, from/to/subject substrings, date
+        ranges, has_attachment, lang) behave identically here and in the
         full-pipeline path. Returns ``SearchResult`` so the API layer can
         marshal results uniformly regardless of which branch fired.
         """
@@ -288,7 +300,7 @@ class Searcher:
               FROM messages m
              WHERE TRUE
              {where_extra}
-             ORDER BY m.date_received DESC, m.id DESC
+             ORDER BY m.date_sent DESC NULLS LAST, m.id DESC
              LIMIT %s
         """
         params: list[Any] = [*where_params, limit]

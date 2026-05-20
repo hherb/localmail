@@ -100,21 +100,25 @@ def _seed_msg_with_dates(
         return row[0]
 
 
-def test_changes_no_cursor_orders_by_date_received_desc(
+def test_changes_no_cursor_orders_by_date_sent_desc(
     db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
 ) -> None:
-    """Initial-load `/v1/changes` must return messages by `date_received DESC`.
+    """Initial-load `/v1/changes` must return messages by `date_sent DESC`.
 
     `m.id` reflects local insertion order — for a sync that processes archive
     folders after the inbox, ordering by `id DESC` surfaces decade-old
-    messages at the top. The canonical default order for "show me my mail" is
-    `date_received DESC`, matching the empty-query search fallback.
+    messages at the top. `date_received` looks more natural but is populated
+    by ``DEFAULT now()`` (sync doesn't pass IMAP INTERNALDATE through), so a
+    backfilled archive row gets a fresher `date_received` than mail that
+    actually arrived earlier. `date_sent` is the email's own header date —
+    the only column with meaningful per-message variance for an existing
+    archive.
 
     The seed deliberately diverges `date_sent` from `date_received` so the
-    test fails if anyone "helpfully" switches the ORDER BY to `date_sent`.
+    test fails if anyone switches the ORDER BY back to `date_received`.
     """
     now = datetime.now(timezone.utc)
-    # mid_a: received recently, but the email itself dates from years ago.
+    # mid_a: received recently, but the email's date_sent dates from years ago.
     mid_a = _seed_msg_with_dates(
         db_conn, date_sent=now - timedelta(days=365), date_received=now - timedelta(hours=1),
         suffix="aa",
@@ -124,7 +128,7 @@ def test_changes_no_cursor_orders_by_date_received_desc(
         db_conn, date_sent=now - timedelta(hours=1), date_received=now - timedelta(days=2),
         suffix="bb",
     )
-    # mid_c: middle by date_received, oldest by date_sent.
+    # mid_c: middle by both date_sent and date_received.
     mid_c = _seed_msg_with_dates(
         db_conn, date_sent=now - timedelta(days=30), date_received=now - timedelta(days=1),
         suffix="cc",
@@ -135,7 +139,7 @@ def test_changes_no_cursor_orders_by_date_received_desc(
     r = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200
     ids = [m["message_id"] for m in r.json()["new_messages"]]
-    assert ids == [str(mid_a), str(mid_c), str(mid_b)]
+    assert ids == [str(mid_b), str(mid_c), str(mid_a)]
 
 
 def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db_conn) -> None:

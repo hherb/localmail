@@ -83,14 +83,14 @@ def test_searcher_timing_ms_populated(db_dsn, db_conn):
 
 
 def _seed_with_dates(conn, rows):
-    """Seed messages with explicit (account_name, subject, date_received).
+    """Seed messages with explicit (account_name, subject, date_sent, date_received).
 
     Returns the list of inserted message IDs in seed order.
     """
     ids = []
     accounts: dict[str, int] = {}
     with conn.cursor() as cur:
-        for i, (acct_name, subject, date_received) in enumerate(rows):
+        for i, (acct_name, subject, date_sent, date_received) in enumerate(rows):
             if acct_name not in accounts:
                 cur.execute(
                     "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
@@ -100,31 +100,40 @@ def _seed_with_dates(conn, rows):
                 accounts[acct_name] = cur.fetchone()[0]
             cur.execute(
                 "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
-                " body_text, headers, raw_bytes, size_bytes, date_received)"
-                " VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, 'r', 1, %s) RETURNING id",
-                (accounts[acct_name], f"<m{i}>", bytes([i + 1]) * 32, subject, "body", date_received),
+                " body_text, headers, raw_bytes, size_bytes, date_sent, date_received)"
+                " VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, 'r', 1, %s, %s) RETURNING id",
+                (accounts[acct_name], f"<m{i}>", bytes([i + 1]) * 32, subject, "body",
+                 date_sent, date_received),
             )
             ids.append(cur.fetchone()[0])
     conn.commit()
     return ids
 
 
-def test_searcher_empty_query_returns_messages_by_date_received_desc(db_dsn, db_conn):
+def test_searcher_empty_query_returns_messages_by_date_sent_desc(db_dsn, db_conn):
     """An empty free-text query is the canonical "show me my mail" default.
 
     The hybrid pipeline degenerates badly for empty queries: BM25 arms
     return [] (no terms to match), and vector arms rank by cosine distance
     to the embedding of the empty string — producing exactly
     `rerank_pool_size` (default 20) arbitrary-looking hits. The Searcher
-    must detect this and fall back to `SELECT messages ORDER BY
-    date_received DESC` so callers (GUI, MCP, programmatic) see a
-    predictable list of recent mail.
+    must detect this and fall back to a date-ordered list.
+
+    Ordering is `date_sent DESC NULLS LAST` because `messages.date_received`
+    is populated by `DEFAULT now()` (sync.py doesn't pass IMAP INTERNALDATE
+    through), so a backfilled 2023 archive row gets a fresher
+    `date_received` than mail synced last week. The seed diverges
+    `date_sent` from `date_received` so the test fails if anyone switches
+    back to `date_received`.
     """
     now = datetime.now(timezone.utc)
-    mid_oldest, mid_middle, mid_newest = _seed_with_dates(db_conn, [
-        ("a", "old archive mail", now - timedelta(days=30)),
-        ("a", "from last week", now - timedelta(days=7)),
-        ("a", "fresh arrival", now - timedelta(hours=1)),
+    mid_a, mid_b, mid_c = _seed_with_dates(db_conn, [
+        # date_sent oldest, date_received NEWEST: archive backfilled today.
+        ("a", "archive backfill", now - timedelta(days=365), now - timedelta(hours=1)),
+        # date_sent newest, date_received oldest.
+        ("a", "fresh email", now - timedelta(hours=1), now - timedelta(days=5)),
+        # date_sent middle.
+        ("a", "middle", now - timedelta(days=30), now - timedelta(days=2)),
     ])
     cfg = SearchConfig()
     pool = open_pool(db_dsn)
@@ -135,7 +144,7 @@ def test_searcher_empty_query_returns_messages_by_date_received_desc(db_dsn, db_
     finally:
         pool.close()
     ids = [r.message_id for r in page.results]
-    assert ids == [mid_newest, mid_middle, mid_oldest]
+    assert ids == [mid_b, mid_c, mid_a]
 
 
 def test_searcher_empty_query_respects_account_filter(db_dsn, db_conn):
@@ -145,9 +154,9 @@ def test_searcher_empty_query_respects_account_filter(db_dsn, db_conn):
     """
     now = datetime.now(timezone.utc)
     mid_a1, mid_b1, mid_a2 = _seed_with_dates(db_conn, [
-        ("acct_a", "a-1", now - timedelta(days=5)),
-        ("acct_b", "b-1", now - timedelta(days=3)),
-        ("acct_a", "a-2", now - timedelta(days=1)),
+        ("acct_a", "a-1", now - timedelta(days=5), now - timedelta(days=5)),
+        ("acct_b", "b-1", now - timedelta(days=3), now - timedelta(days=3)),
+        ("acct_a", "a-2", now - timedelta(days=1), now - timedelta(days=1)),
     ])
     # Resolve acct_a's id for the filter.
     with db_conn.cursor() as cur:

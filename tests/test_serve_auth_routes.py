@@ -118,3 +118,31 @@ def test_change_password_keeps_token_valid(
     r2 = c.get("/v1/auth/whoami", headers={"Authorization": f"Bearer {api_token}"})
     assert r2.status_code == 200
     assert r2.json()["username"] == api_user.username
+
+
+def test_login_429_carries_retry_after_and_cap(db_dsn: str, api_user, db_conn) -> None:
+    """Global cap trips, 429 carries Retry-After header and cap field."""
+    from localmail.api.auth import _record_login_attempt
+    from localmail.config import AuthConfig
+
+    for u in ("a", "b", "c", "d", "e"):
+        _record_login_attempt(db_conn, u, "9.9.9.9", "failure")
+    db_conn.commit()
+
+    c = _client(db_dsn)
+    original = c.app.state.auth_config
+    c.app.state.auth_config = AuthConfig(login_global_max=5, login_global_window_s=60)
+    try:
+        resp = c.post(
+            "/v1/auth/login",
+            json={"username": api_user.username, "password": api_user.password},
+        )
+    finally:
+        c.app.state.auth_config = original
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "60"
+    body = resp.json()
+    assert body["status"] == 429
+    assert body["cap"] == "global"
+    assert body["retry_after_s"] == 60

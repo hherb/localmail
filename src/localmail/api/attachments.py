@@ -34,7 +34,7 @@ def _parse_sha256_hex(sha256_hex: str) -> bytes:
 
 
 def _caller_can_read_blob(
-    conn: psycopg.Connection, sha256_hex: str, allowed_account_ids: list[int],
+    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
 ) -> bool:
     """True iff some message in an allowed account references the blob.
 
@@ -71,7 +71,9 @@ def _lookup_blob_row(
     not include any account that references the blob.
     """
     sha_bytes = _parse_sha256_hex(sha256_hex)
-    if not _caller_can_read_blob(conn, sha256_hex, allowed_account_ids):
+    if not _caller_can_read_blob(
+        conn, sha256_hex, allowed_account_ids=allowed_account_ids,
+    ):
         raise NotFound(f"attachment {sha256_hex} not found")
     with conn.cursor() as cur:
         cur.execute(
@@ -198,7 +200,9 @@ def get_attachment_text(
     or if the caller cannot read any carrying message.
     """
     sha_bytes = _parse_sha256_hex(sha256_hex)
-    if not _caller_can_read_blob(conn, sha256_hex, allowed_account_ids):
+    if not _caller_can_read_blob(
+        conn, sha256_hex, allowed_account_ids=allowed_account_ids,
+    ):
         raise NotFound(f"no extracted text for attachment {sha256_hex}")
     with conn.cursor() as cur:
         cur.execute(

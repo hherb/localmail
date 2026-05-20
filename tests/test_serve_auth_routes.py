@@ -50,7 +50,7 @@ def test_logout_revokes_token(db_dsn: str, api_token: str) -> None:
 
 
 def test_change_password_success_and_rotates_credentials(
-    db_dsn: str, api_token: str, api_user
+    db_conn, db_dsn: str, api_token: str, api_user
 ) -> None:
     c = _client(db_dsn)
     r = c.post(
@@ -60,7 +60,8 @@ def test_change_password_success_and_rotates_credentials(
     )
     assert r.status_code == 204
     from localmail.api.auth import reset_login_rate_limiter
-    reset_login_rate_limiter()
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
     r_old = c.post(
         "/v1/auth/login",
         json={"username": api_user.username, "password": api_user.password},

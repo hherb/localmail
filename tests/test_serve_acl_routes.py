@@ -78,7 +78,8 @@ def _seed_alice_and_bob(db_conn, tmp_path):
     Returns a dict with keys: alice (token), bob (token), a_account_id,
     a_message_id, a_sha_hex, b_account_id, b_message_id, b_sha_hex.
     """
-    reset_login_rate_limiter()
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
     a_aid, a_mid, a_sha = _seed_acct_msg_blob(db_conn, "acct-a", b"%PDF-A-payload", tmp_path)
     b_aid, b_mid, b_sha = _seed_acct_msg_blob(db_conn, "acct-b", b"%PDF-B-payload", tmp_path)
     alice_uid = create_user(db_conn, "alice", "hunter2")

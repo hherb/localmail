@@ -79,7 +79,8 @@ def test_change_password_keeps_existing_tokens_valid(db_conn, api_user, api_toke
 def test_change_password_allows_login_with_new_password(db_conn, api_user) -> None:
     change_password(db_conn, api_user.id, api_user.password, "new-secret")
     db_conn.commit()
-    reset_login_rate_limiter()
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
     token, _expires = login(db_conn, api_user.username, "new-secret")
     assert token
 
@@ -87,6 +88,7 @@ def test_change_password_allows_login_with_new_password(db_conn, api_user) -> No
 def test_change_password_blocks_login_with_old_password(db_conn, api_user) -> None:
     change_password(db_conn, api_user.id, api_user.password, "new-secret")
     db_conn.commit()
-    reset_login_rate_limiter()
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
     with pytest.raises(AuthenticationFailed):
         login(db_conn, api_user.username, api_user.password)

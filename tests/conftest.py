@@ -95,7 +95,8 @@ class SeededUser:
 def api_user(db_conn):
     """Create a single API user, return SeededUser."""
     from localmail.api.auth import create_user, reset_login_rate_limiter
-    reset_login_rate_limiter()
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
     username = "alice"
     password = "hunter2"
     uid = create_user(db_conn, username, password)

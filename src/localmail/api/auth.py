@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import threading
-import time as _time
-from collections import OrderedDict
+import time as _monotonic_time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -52,96 +50,16 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 TOKEN_TTL_DAYS = 30
 
-LOGIN_MAX_FAILURES = 5
-LOGIN_LOCKOUT_SECONDS = 60
 
-# Global cap on /v1/auth/login attempts (all usernames, success or failure).
-# Bounds the argon2 CPU work an unauthenticated attacker can induce on the
-# server. Per-username limiter (above) does not help here because an attacker
-# can rotate usernames; this limiter does. Tuned for a single-user local
-# deployment — bump if you actually have many concurrent legit logins.
-LOGIN_GLOBAL_MAX_PER_WINDOW = 30
-LOGIN_GLOBAL_WINDOW_SECONDS = 60
+def reset_login_rate_limiter(conn: psycopg.Connection) -> None:
+    """Truncate api_login_attempts. Test-only helper.
 
-# Hard cap on distinct usernames tracked in the per-username failure dict.
-# An attacker rotating usernames past the global limiter could otherwise grow
-# the dict unboundedly; once we exceed this cap we evict the oldest entry
-# (LRU) so memory is bounded regardless of input pattern.
-LOGIN_FAILURES_MAX_USERS = 1024
-
-_LOGIN_FAILURES_LOCK = threading.Lock()
-# OrderedDict so we can evict the least-recently-touched username on overflow.
-_LOGIN_FAILURES: "OrderedDict[str, list[float]]" = OrderedDict()
-
-_LOGIN_GLOBAL_LOCK = threading.Lock()
-_LOGIN_GLOBAL_ATTEMPTS: list[float] = []
-
-
-def reset_login_rate_limiter() -> None:
-    """Clear all per-username and global attempt history. Test-only helper."""
-    with _LOGIN_FAILURES_LOCK:
-        _LOGIN_FAILURES.clear()
-    with _LOGIN_GLOBAL_LOCK:
-        _LOGIN_GLOBAL_ATTEMPTS.clear()
-
-
-def _check_login_global_rate_limit() -> None:
-    cutoff = _time.monotonic() - LOGIN_GLOBAL_WINDOW_SECONDS
-    with _LOGIN_GLOBAL_LOCK:
-        _LOGIN_GLOBAL_ATTEMPTS[:] = [t for t in _LOGIN_GLOBAL_ATTEMPTS if t > cutoff]
-        if len(_LOGIN_GLOBAL_ATTEMPTS) >= LOGIN_GLOBAL_MAX_PER_WINDOW:
-            raise RateLimited(
-                f"server-wide login rate limit exceeded "
-                f"({LOGIN_GLOBAL_MAX_PER_WINDOW} attempts per "
-                f"{LOGIN_GLOBAL_WINDOW_SECONDS}s); retry shortly"
-            )
-        _LOGIN_GLOBAL_ATTEMPTS.append(_time.monotonic())
-
-
-def _sweep_login_failures_locked(now: float) -> None:
-    """Drop usernames whose newest attempt is older than the lockout window.
-
-    Caller must hold ``_LOGIN_FAILURES_LOCK``. Runs in O(n) over the dict —
-    cheap because we cap size at LOGIN_FAILURES_MAX_USERS.
+    Takes an explicit connection because in production we never wipe the
+    audit trail; only test fixtures want a fast reset between cases.
+    Caller commits.
     """
-    cutoff = now - LOGIN_LOCKOUT_SECONDS
-    stale = [u for u, attempts in _LOGIN_FAILURES.items() if not attempts or attempts[-1] <= cutoff]
-    for u in stale:
-        _LOGIN_FAILURES.pop(u, None)
-
-
-def _check_login_rate_limit(username: str) -> None:
-    now = _time.monotonic()
-    cutoff = now - LOGIN_LOCKOUT_SECONDS
-    with _LOGIN_FAILURES_LOCK:
-        recent = [t for t in _LOGIN_FAILURES.get(username, []) if t > cutoff]
-        if recent:
-            _LOGIN_FAILURES[username] = recent
-            _LOGIN_FAILURES.move_to_end(username)
-        else:
-            _LOGIN_FAILURES.pop(username, None)
-        if len(recent) >= LOGIN_MAX_FAILURES:
-            raise RateLimited(
-                f"too many failed login attempts; try again in "
-                f"{LOGIN_LOCKOUT_SECONDS} seconds"
-            )
-
-
-def _record_login_failure(username: str) -> None:
-    now = _time.monotonic()
-    with _LOGIN_FAILURES_LOCK:
-        attempts = _LOGIN_FAILURES.setdefault(username, [])
-        attempts.append(now)
-        _LOGIN_FAILURES.move_to_end(username)
-        if len(_LOGIN_FAILURES) > LOGIN_FAILURES_MAX_USERS:
-            _sweep_login_failures_locked(now)
-            while len(_LOGIN_FAILURES) > LOGIN_FAILURES_MAX_USERS:
-                _LOGIN_FAILURES.popitem(last=False)
-
-
-def _clear_login_failures(username: str) -> None:
-    with _LOGIN_FAILURES_LOCK:
-        _LOGIN_FAILURES.pop(username, None)
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE api_login_attempts RESTART IDENTITY")
 
 
 def _record_login_attempt(
@@ -291,6 +209,29 @@ def _check_login_rate_limits(
         )
 
 
+# Per-worker last-sweep timestamp so cleanup runs at most once per
+# AuthConfig.login_cleanup_interval_s wall-clock per process. The PG
+# advisory lock in _sweep_login_attempts further dedupes across workers.
+_LAST_SWEEP_AT_MONOTONIC: float = 0.0
+
+
+def _maybe_sweep(conn: psycopg.Connection, cfg: AuthConfig) -> None:
+    """Run the cleanup sweep if it's been >= cfg.login_cleanup_interval_s
+    since this worker's last sweep."""
+    global _LAST_SWEEP_AT_MONOTONIC
+    now = _monotonic_time.monotonic()
+    if now - _LAST_SWEEP_AT_MONOTONIC < cfg.login_cleanup_interval_s:
+        return
+    _LAST_SWEEP_AT_MONOTONIC = now
+    _sweep_login_attempts(conn, retention_s=cfg.login_attempt_retention_s)
+
+
+def _reset_sweep_clock_for_tests() -> None:
+    """Test-only: clear the per-worker last-sweep timestamp."""
+    global _LAST_SWEEP_AT_MONOTONIC
+    _LAST_SWEEP_AT_MONOTONIC = 0.0
+
+
 @dataclass(frozen=True)
 class AuthenticatedUser:
     """The user behind a valid bearer token."""
@@ -380,19 +321,27 @@ def create_user(conn: psycopg.Connection, username: str, password: str) -> int:
         return row[0]
 
 
-def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, datetime]:
+def login(
+    conn: psycopg.Connection,
+    username: str,
+    password: str,
+    *,
+    client_ip: str | None = None,
+    cfg: AuthConfig | None = None,
+) -> tuple[str, datetime]:
     """Verify credentials and mint a token.
 
     Raises:
-      RateLimited if either the global or per-username failure threshold was hit.
+      RateLimited (with .cap and .retry_after_s) if any cap is exceeded.
       AuthenticationFailed for bad credentials or disabled users.
 
-    The global limit is checked before the per-username limit because the
-    former protects against argon2 CPU amplification from any unauthenticated
-    caller, regardless of which username they target.
+    ``cfg`` defaults to ``AuthConfig()`` so test call sites that don't
+    care about thresholds still work. Production callers should pass the
+    loaded ``LocalmailConfig.auth``.
     """
-    _check_login_global_rate_limit()
-    _check_login_rate_limit(username)
+    if cfg is None:
+        cfg = AuthConfig()
+    _check_login_rate_limits(conn, username, client_ip, cfg=cfg)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash FROM api_users "
@@ -402,12 +351,15 @@ def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, 
         row = cur.fetchone()
     if row is None:
         verify_password(password, _DUMMY_PASSWORD_HASH)
-        _record_login_failure(username)
+        _record_login_attempt(conn, username, client_ip, "failure")
+        _maybe_sweep(conn, cfg)
         raise AuthenticationFailed("invalid username or password")
     if not verify_password(password, row[1]):
-        _record_login_failure(username)
+        _record_login_attempt(conn, username, client_ip, "failure")
+        _maybe_sweep(conn, cfg)
         raise AuthenticationFailed("invalid username or password")
-    _clear_login_failures(username)
+    _record_login_attempt(conn, username, client_ip, "success")
+    _maybe_sweep(conn, cfg)
     return issue_token(conn, row[0])
 
 

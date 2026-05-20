@@ -194,3 +194,88 @@ def test_sweep_no_op_when_lock_contended(db_conn: psycopg.Connection, db_dsn: st
         with other.cursor() as cur:
             cur.execute("SELECT pg_advisory_unlock(%s)", (auth_mod._SWEEP_ADVISORY_LOCK_KEY,))
         other.close()
+
+
+# --- Task 8: login() integration with the DB-backed limiter ----------------
+
+from localmail.api.auth import create_user, login, reset_login_rate_limiter
+from localmail.api.errors import AuthenticationFailed
+
+
+@pytest.fixture(autouse=True)
+def _truncate_attempts(db_conn: psycopg.Connection) -> None:
+    """Tests in this file rely on a clean attempts table."""
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
+
+
+def test_login_records_failure_with_ip(db_conn: psycopg.Connection) -> None:
+    create_user(db_conn, "alice", "hunter2")
+    db_conn.commit()
+    with pytest.raises(AuthenticationFailed):
+        login(db_conn, "alice", "wrong", client_ip="9.9.9.9")
+    db_conn.commit()
+    assert _count(
+        db_conn,
+        "SELECT count(*) FROM api_login_attempts "
+        "WHERE username = 'alice' AND ip = '9.9.9.9' AND outcome = 'failure'",
+    ) == 1
+
+
+def test_login_records_success_with_ip(db_conn: psycopg.Connection) -> None:
+    create_user(db_conn, "alice", "hunter2")
+    db_conn.commit()
+    tok, _exp = login(db_conn, "alice", "hunter2", client_ip="9.9.9.9")
+    db_conn.commit()
+    assert tok
+    assert _count(
+        db_conn,
+        "SELECT count(*) FROM api_login_attempts "
+        "WHERE username = 'alice' AND outcome = 'success'",
+    ) == 1
+
+
+def test_login_records_unknown_user_failure(db_conn: psycopg.Connection) -> None:
+    """An attempt against a non-existent username still lands a row so the
+    per-IP cap closes the enumeration vector."""
+    with pytest.raises(AuthenticationFailed):
+        login(db_conn, "ghost", "anything", client_ip="9.9.9.9")
+    db_conn.commit()
+    assert _count(
+        db_conn,
+        "SELECT count(*) FROM api_login_attempts "
+        "WHERE username = 'ghost' AND ip = '9.9.9.9' AND outcome = 'failure'",
+    ) == 1
+
+
+def test_login_two_connections_see_each_others_failures(
+    db_conn: psycopg.Connection, db_dsn: str,
+) -> None:
+    """Multi-worker semantics — two distinct connections share state via PG."""
+    create_user(db_conn, "alice", "hunter2")
+    db_conn.commit()
+    # Drive failures on connection A.
+    for _ in range(4):
+        with pytest.raises(AuthenticationFailed):
+            login(db_conn, "alice", "wrong", client_ip="9.9.9.9")
+    db_conn.commit()
+
+    # Connection B sees them and trips the per-user cap on attempt 5.
+    other = psycopg.connect(db_dsn, autocommit=False)
+    try:
+        with pytest.raises(AuthenticationFailed):
+            login(other, "alice", "wrong", client_ip="9.9.9.9")
+        other.commit()
+        with pytest.raises(RateLimited):
+            login(other, "alice", "wrong", client_ip="9.9.9.9")
+    finally:
+        other.close()
+
+
+def test_reset_login_rate_limiter_truncates(db_conn: psycopg.Connection) -> None:
+    auth_mod._record_login_attempt(db_conn, "alice", "1.1.1.1", "failure")
+    db_conn.commit()
+    assert _count(db_conn, "SELECT count(*) FROM api_login_attempts") == 1
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
+    assert _count(db_conn, "SELECT count(*) FROM api_login_attempts") == 0

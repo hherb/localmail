@@ -269,6 +269,50 @@ def test_sort_date_with_text_is_unbounded_lexical_paginated(db_dsn, db_conn):
     assert all_ids == ids
 
 
+def test_sort_date_lexical_paginates_across_dated_then_null_tail(db_dsn, db_conn):
+    """Lexical-date path must cleanly walk dated rows first, then the
+    NULLS-LAST tail of un-backfilled rows, with no duplicates across the
+    boundary.
+
+    Why: the keyset WHERE clause includes
+    ``OR COALESCE(internal_date, date_sent) IS NULL`` so the planner can
+    transition from "still in dated portion" to "in NULLS tail" mid-walk
+    without a separate query. The risk is double-emitting NULL rows on the
+    transition page; ORDER BY ... DESC NULLS LAST + LIMIT keeps them out
+    until dated is exhausted, but only an end-to-end walk proves it.
+    """
+    now = datetime.now(timezone.utc)
+    rows: list[tuple[str, str, object, object]] = []
+    # 5 dated rows (matching), newest → oldest.
+    for i in range(5):
+        rows.append(("a", f"invoice batch #{i:02d}", None, now - timedelta(hours=i)))
+    # 3 NULL-date rows (matching), both date columns NULL.
+    for i in range(3):
+        rows.append(("a", f"invoice undated #{i:02d}", None, None))
+    seeded = _seed_with_dates(db_conn, rows)
+    dated_ids = seeded[:5]
+    null_ids = seeded[5:]
+    cfg = SearchConfig()
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
+                     reranker=None, rewriter=None)
+        all_ids: list[int] = []
+        page = s.search("invoice", page_size=2, sort="date")
+        all_ids.extend(r.message_id for r in page.results)
+        while page.next_keyset is not None:
+            page = s.search("invoice", page_size=2, sort="date",
+                            keyset_cursor=page.next_keyset)
+            all_ids.extend(r.message_id for r in page.results)
+    finally:
+        pool.close()
+    # Dated rows newest-first, then NULL rows in id DESC (NULLS-LAST tail).
+    expected = dated_ids + list(reversed(null_ids))
+    assert all_ids == expected
+    # No row appears twice — the dated→NULL boundary is the risky transition.
+    assert len(all_ids) == len(set(all_ids))
+
+
 def test_searcher_no_cache_returns_token_none(db_dsn, db_conn):
     _seed(db_conn)
     cfg = SearchConfig()

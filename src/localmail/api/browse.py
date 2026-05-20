@@ -93,9 +93,8 @@ def list_messages(
     ]
     next_cursor: str | None = None
     if has_more and page_rows:
-        last = page_rows[-1]
-        _, _, _, _, last_date_sent, last_internal_date, _, _, _ = last
-        last_mid = last[0]
+        (last_mid, _, _, _, last_date_sent, last_internal_date,
+         _, _, _) = page_rows[-1]
         keyset_ts = last_internal_date or last_date_sent
         next_cursor = encode_browse_cursor(
             BrowseCursor(ts=keyset_ts, id=int(last_mid))

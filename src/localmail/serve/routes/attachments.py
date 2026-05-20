@@ -184,14 +184,15 @@ def stream_blob(
     pool = request.app.state.pool
     with pool.connection() as conn:
         allowed = allowed_account_ids(conn, user.id)
-        mime, size = get_attachment_blob_info(
+        blob_row = get_attachment_blob_info(
             conn, sha256, allowed_account_ids=allowed,
         )
+        mime, size, _path = blob_row
         etag = etag_for_sha256(sha256)
         if if_none_match_satisfies(request.headers.get("if-none-match"), etag):
             return Response(status_code=_HTTP_NOT_MODIFIED, headers={"ETag": etag})
         fp, _mime, _size = open_attachment_bytes(
-            conn, sha256, allowed_account_ids=allowed,
+            conn, sha256, allowed_account_ids=allowed, prefetched=blob_row,
         )
         original = get_attachment_filename(
             conn, sha256, allowed_account_ids=allowed,

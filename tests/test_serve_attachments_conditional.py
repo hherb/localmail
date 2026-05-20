@@ -495,3 +495,46 @@ def test_304_acl_denied_returns_404_not_304(
         },
     )
     assert r.status_code == 404
+
+
+# ---------- 200 path collapses to one ACL + one blob SELECT (#64) ------------
+
+
+def test_200_runs_exactly_one_acl_check(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+    grant_alice_all_accounts, monkeypatch,
+) -> None:
+    """#64 acceptance: a 200 response must run exactly **one**
+    ``_caller_can_read_blob`` EXISTS predicate end-to-end. Prior to
+    #64 the route ran it twice — once in ``get_attachment_blob_info``
+    (the #62 cheap probe) and again inside ``open_attachment_bytes``.
+    Passing the probe's full ``(mime, size, path)`` tuple through as
+    ``prefetched=`` skips the second call. ``get_attachment_filename``
+    has its own JSONB scan but does not go through this helper, so it
+    is intentionally not counted here."""
+    sha = "50" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+
+    import localmail.api.attachments as att
+
+    acl_calls: list[tuple] = []
+    real_acl = att._caller_can_read_blob
+
+    def spy_acl(*args, **kwargs):
+        acl_calls.append((args, kwargs))
+        return real_acl(*args, **kwargs)
+
+    monkeypatch.setattr(att, "_caller_can_read_blob", spy_acl)
+
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert r.content == _PDF_PAYLOAD
+    assert len(acl_calls) == 1, (
+        f"#64 requires exactly one _caller_can_read_blob on a 200; "
+        f"got {len(acl_calls)}"
+    )

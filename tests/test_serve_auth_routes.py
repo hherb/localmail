@@ -120,6 +120,42 @@ def test_change_password_keeps_token_valid(
     assert r2.json()["username"] == api_user.username
 
 
+def test_route_driven_login_failures_persist_audit_rows(db_dsn: str, api_user) -> None:
+    """Failed logins through the HTTP route must persist audit rows
+    despite the route's outer-rollback-on-error transaction semantics.
+
+    Regression for the bug found in the final cross-task review of #7:
+    _record_login_attempt previously deferred its commit to the route,
+    but the route raises AuthenticationFailed (or rate-limited variants)
+    and the outer rollback discarded the audit row — defeating the
+    per-user and per-IP failure caps in production.
+    """
+    import psycopg
+
+    c = _client(db_dsn)
+    for _ in range(3):
+        resp = c.post(
+            "/v1/auth/login",
+            json={"username": api_user.username, "password": "wrong"},
+        )
+        assert resp.status_code == 401
+
+    # A FRESH connection (modeling a different worker) sees the rows.
+    other = psycopg.connect(db_dsn)
+    try:
+        with other.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM api_login_attempts "
+                "WHERE username = %s AND outcome = 'failure'",
+                (api_user.username,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == 3
+    finally:
+        other.close()
+
+
 def test_login_429_carries_retry_after_and_cap(db_dsn: str, api_user, db_conn) -> None:
     """Global cap trips, 429 carries Retry-After header and cap field."""
     from localmail.api.auth import _record_login_attempt

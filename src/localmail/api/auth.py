@@ -6,6 +6,7 @@ This module is transport-free; HTTP concerns live in localmail.serve.
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 import time as _monotonic_time
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from localmail.api.errors import (
     ValidationFailed,
 )
 from localmail.config import AuthConfig
+
+logger = logging.getLogger("localmail.api.auth")
 
 _HASHER = PasswordHasher()
 
@@ -68,11 +71,17 @@ def _record_login_attempt(
     client_ip: str | None,
     outcome: Literal["success", "failure"],
 ) -> None:
-    """Append a row to api_login_attempts.
+    """Append a row to api_login_attempts and commit it eagerly.
 
-    Uses a nested SAVEPOINT so a logging failure (table missing, transient
-    error) cannot abort the outer login transaction — the limiter is
-    defense-in-depth, never a correctness gate for credential verification.
+    The SAVEPOINT (``conn.transaction()``) isolates CheckViolation so a
+    bad ``outcome`` label can't poison the outer transaction. The explicit
+    ``conn.commit()`` after the SAVEPOINT releases is load-bearing: HTTP
+    route handlers raise ``AuthenticationFailed`` on bad credentials,
+    which propagates out of ``pool.connection()`` and triggers a rollback
+    that would otherwise discard this audit row. Without the eager commit
+    the per-user and per-IP failure caps never trip from production
+    traffic (every failure rolls back). Login is read-only up to this
+    point — only the audit row is in flight — so committing here is safe.
     """
     try:
         with conn.transaction():
@@ -82,16 +91,19 @@ def _record_login_attempt(
                     "VALUES (%s, %s, %s)",
                     (username, client_ip, outcome),
                 )
+        conn.commit()
     except psycopg.errors.CheckViolation:
         # Bad outcome label — only the internal callers can hit this; surface
         # so tests can verify the constraint. Outer transaction stays open
         # because the SAVEPOINT rolled back.
         raise
-    except psycopg.Error:
-        # Anything else (table missing during migration race, transient IO)
-        # silently fails — better to issue a token without an audit row than
-        # to deny a legit login because the audit table is unavailable.
-        pass
+    except psycopg.Error as exc:
+        # Table missing during migration race, transient IO, etc. — better
+        # to issue a token without an audit row than to deny a legit login
+        # because the audit table is unavailable. Log so an operator with
+        # a chronically-broken audit table sees the signal rather than
+        # silent rate-limiter loss.
+        logger.warning("api_login_attempts insert failed: %s", exc)
 
 
 # Stable advisory-lock key for the cleanup sweep. Any nonzero int64 works;
@@ -217,19 +229,24 @@ _LAST_SWEEP_AT_MONOTONIC: float = 0.0
 
 def _maybe_sweep(conn: psycopg.Connection, cfg: AuthConfig) -> None:
     """Run the cleanup sweep if it's been >= cfg.login_cleanup_interval_s
-    since this worker's last sweep."""
+    since this worker's last sweep, committing the DELETE eagerly.
+
+    Like ``_record_login_attempt``, the eager commit is required because
+    every login attempt eventually raises AuthenticationFailed (failure
+    path) or returns through the route's outer commit (success path).
+    Under failure-only traffic the route's outer rollback would discard
+    the sweep DELETE and the table would grow unbounded. The advance of
+    ``_LAST_SWEEP_AT_MONOTONIC`` happens BEFORE the sweep so concurrent
+    requests in this process race to the advisory lock rather than all
+    issuing simultaneous DELETEs.
+    """
     global _LAST_SWEEP_AT_MONOTONIC
     now = _monotonic_time.monotonic()
     if now - _LAST_SWEEP_AT_MONOTONIC < cfg.login_cleanup_interval_s:
         return
     _LAST_SWEEP_AT_MONOTONIC = now
     _sweep_login_attempts(conn, retention_s=cfg.login_attempt_retention_s)
-
-
-def _reset_sweep_clock_for_tests() -> None:
-    """Test-only: clear the per-worker last-sweep timestamp."""
-    global _LAST_SWEEP_AT_MONOTONIC
-    _LAST_SWEEP_AT_MONOTONIC = 0.0
+    conn.commit()
 
 
 @dataclass(frozen=True)

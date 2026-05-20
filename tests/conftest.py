@@ -75,7 +75,7 @@ def db_conn(db_dsn):
                 "attachment_blobs, failed_messages, message_chunks, "
                 "failed_embeddings, embedding_models, failed_chunkings, "
                 "attachment_text, attachment_chunks, failed_extractions, "
-                "api_users, api_tokens, user_accounts "
+                "api_users, api_tokens, user_accounts, api_login_attempts "
                 "RESTART IDENTITY CASCADE"
             )
         conn.commit()
@@ -95,7 +95,8 @@ class SeededUser:
 def api_user(db_conn):
     """Create a single API user, return SeededUser."""
     from localmail.api.auth import create_user, reset_login_rate_limiter
-    reset_login_rate_limiter()
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
     username = "alice"
     password = "hunter2"
     uid = create_user(db_conn, username, password)

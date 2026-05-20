@@ -117,7 +117,8 @@ def test_login_timing_unknown_user_vs_wrong_password(db_conn: psycopg.Connection
     samples_wrong_pw: list[float] = []
     n_samples = 7
     for i in range(n_samples + 1):
-        reset_login_rate_limiter()
+        reset_login_rate_limiter(db_conn)
+        db_conn.commit()
         t0 = time.perf_counter()
         try:
             login(db_conn, f"ghost_{i}", "any-password")
@@ -125,7 +126,8 @@ def test_login_timing_unknown_user_vs_wrong_password(db_conn: psycopg.Connection
             pass
         elapsed_unknown = time.perf_counter() - t0
 
-        reset_login_rate_limiter()
+        reset_login_rate_limiter(db_conn)
+        db_conn.commit()
         t0 = time.perf_counter()
         try:
             login(db_conn, "alice", "wrong-password")
@@ -137,7 +139,8 @@ def test_login_timing_unknown_user_vs_wrong_password(db_conn: psycopg.Connection
             continue  # discard warmup (first-call argon2 / JIT / page cache)
         samples_unknown.append(elapsed_unknown)
         samples_wrong_pw.append(elapsed_wrong_pw)
-    reset_login_rate_limiter()
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
 
     med_unknown = sorted(samples_unknown)[len(samples_unknown) // 2]
     med_wrong_pw = sorted(samples_wrong_pw)[len(samples_wrong_pw) // 2]

@@ -7,8 +7,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 
-from localmail.api.errors import APIError
-from localmail.config import ServeConfig
+from localmail.api.errors import APIError, RateLimited
+from localmail.config import AuthConfig, ServeConfig
 from localmail.serve.middleware import APIErrorHandlerMiddleware, RequestIdMiddleware
 from localmail.serve.routes import accounts as accounts_routes
 from localmail.serve.routes import auth as auth_routes
@@ -24,6 +24,7 @@ def create_app(
     db_dsn: str,
     searcher=None,
     serve_config: ServeConfig | None = None,
+    auth_config: AuthConfig | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a Postgres pool and (optionally) a Searcher.
 
@@ -33,6 +34,7 @@ def create_app(
     deployment.
     """
     cfg = serve_config or ServeConfig()
+    auth_cfg = auth_config or AuthConfig()
     pool = ConnectionPool(
         db_dsn,
         min_size=cfg.pool_min_size,
@@ -51,17 +53,21 @@ def create_app(
     app.state.pool = pool
     app.state.searcher = searcher
     app.state.serve_config = cfg
+    app.state.auth_config = auth_cfg
 
     # Exception handler for APIError raised inside route handlers / dependencies.
     # FastAPI's DI layer catches these before BaseHTTPMiddleware sees them, so we
     # need both this handler and the middleware to cover all cases.
     @app.exception_handler(APIError)
     async def api_error_handler(request, exc: APIError):
-        return JSONResponse(
+        response = JSONResponse(
             exc.to_problem(),
             status_code=exc.http_status,
             media_type="application/problem+json",
         )
+        if isinstance(exc, RateLimited) and exc.retry_after_s is not None:
+            response.headers["Retry-After"] = str(exc.retry_after_s)
+        return response
 
     # Middleware are added in reverse order of execution: the LAST add_middleware
     # call wraps the OUTERMOST middleware. We want RequestId outermost so every

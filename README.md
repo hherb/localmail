@@ -236,6 +236,28 @@ uv run localmail serve \
 `--bind 0.0.0.0` requires TLS (refused otherwise). `--no-tls` is only
 honoured on `127.0.0.1` for local dev.
 
+### Login rate-limit config
+
+```toml
+[auth]
+# Login rate-limit thresholds (all Postgres-backed; survive
+# uvicorn --workers N and serve restarts).
+login_per_user_max = 5
+login_per_user_window_s = 60
+login_per_ip_max = 20
+login_per_ip_window_s = 60
+login_global_max = 30
+login_global_window_s = 60
+login_attempt_retention_s = 86400  # 24h
+login_cleanup_interval_s = 300     # 5m
+```
+
+> The three login-rate-limit caps (global / per-IP / per-user) are
+> Postgres-backed, so they survive `localmail serve` restarts and apply
+> consistently across `uvicorn --workers N`. Behind a reverse proxy the
+> per-IP cap is not effective until `auth.trust_proxy_headers` lands
+> (see issue tracker) — bump `login_global_max` to compensate.
+
 ## GUI client
 
 A Tauri 2 + Svelte 5 desktop client lives in [gui/](gui/). It talks to a

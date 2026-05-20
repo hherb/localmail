@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from localmail.config import Config, LocalmailConfig, SearchConfig, load_config
+from localmail.config import AuthConfig, Config, LocalmailConfig, SearchConfig, load_config
 
 
 def write(path: Path, body: str) -> Path:
@@ -170,3 +170,37 @@ def test_search_config_phase2_custom_overrides() -> None:
     assert cfg.extractor_max_blob_bytes == 10 * 1024 * 1024
     assert cfg.extractor_ocr_languages == ["en", "de", "ja"]
     assert cfg.arm4_fanout_cap == 25
+
+
+def test_auth_config_defaults_preserve_pre_pg_thresholds() -> None:
+    cfg = AuthConfig()
+    assert cfg.login_per_user_max == 5
+    assert cfg.login_per_user_window_s == 60
+    assert cfg.login_per_ip_max == 20
+    assert cfg.login_per_ip_window_s == 60
+    assert cfg.login_global_max == 30
+    assert cfg.login_global_window_s == 60
+    assert cfg.login_attempt_retention_s == 86400
+    assert cfg.login_cleanup_interval_s == 300
+
+
+def test_auth_config_round_trip_from_toml(tmp_path: Path) -> None:
+    toml_text = """
+[database]
+dsn = "postgresql:///localmail_test"
+
+[auth]
+login_per_user_max = 3
+login_per_ip_max = 7
+login_global_max = 11
+login_attempt_retention_s = 3600
+"""
+    p = tmp_path / "config.toml"
+    p.write_text(toml_text)
+    cfg = load_config(p)
+    assert cfg.auth.login_per_user_max == 3
+    assert cfg.auth.login_per_ip_max == 7
+    assert cfg.auth.login_global_max == 11
+    assert cfg.auth.login_attempt_retention_s == 3600
+    # Defaults fill in the rest.
+    assert cfg.auth.login_per_user_window_s == 60

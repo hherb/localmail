@@ -17,6 +17,18 @@ poll_seconds       = 300    # poll non-INBOX folders every 5 minutes
 # pool_max_size    = 12     # uncomment to override auto-computed pool cap
                             # (defaults to 2*N_accounts + workers + 2 + floor)
 
+[auth]
+# Login rate-limit thresholds (all Postgres-backed; survive
+# uvicorn --workers N and serve restarts).
+login_per_user_max = 5
+login_per_user_window_s = 60
+login_per_ip_max = 20
+login_per_ip_window_s = 60
+login_global_max = 30
+login_global_window_s = 60
+login_attempt_retention_s = 86400  # 24h
+login_cleanup_interval_s = 300     # 5m
+
 # Only required when at least one account uses auth_method = "oauth2".
 # See README.md for how to obtain this file from Google Cloud Console.
 [gmail_oauth]

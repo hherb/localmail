@@ -6,12 +6,12 @@ This module is transport-free; HTTP concerns live in localmail.serve.
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
-import threading
-import time as _time
-from collections import OrderedDict
+import time as _monotonic_time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 import psycopg
 from argon2 import PasswordHasher
@@ -23,6 +23,9 @@ from localmail.api.errors import (
     RateLimited,
     ValidationFailed,
 )
+from localmail.config import AuthConfig
+
+logger = logging.getLogger("localmail.api.auth")
 
 _HASHER = PasswordHasher()
 
@@ -50,96 +53,214 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 TOKEN_TTL_DAYS = 30
 
-LOGIN_MAX_FAILURES = 5
-LOGIN_LOCKOUT_SECONDS = 60
 
-# Global cap on /v1/auth/login attempts (all usernames, success or failure).
-# Bounds the argon2 CPU work an unauthenticated attacker can induce on the
-# server. Per-username limiter (above) does not help here because an attacker
-# can rotate usernames; this limiter does. Tuned for a single-user local
-# deployment — bump if you actually have many concurrent legit logins.
-LOGIN_GLOBAL_MAX_PER_WINDOW = 30
-LOGIN_GLOBAL_WINDOW_SECONDS = 60
+def reset_login_rate_limiter(conn: psycopg.Connection) -> None:
+    """Truncate api_login_attempts. Test-only helper.
 
-# Hard cap on distinct usernames tracked in the per-username failure dict.
-# An attacker rotating usernames past the global limiter could otherwise grow
-# the dict unboundedly; once we exceed this cap we evict the oldest entry
-# (LRU) so memory is bounded regardless of input pattern.
-LOGIN_FAILURES_MAX_USERS = 1024
-
-_LOGIN_FAILURES_LOCK = threading.Lock()
-# OrderedDict so we can evict the least-recently-touched username on overflow.
-_LOGIN_FAILURES: "OrderedDict[str, list[float]]" = OrderedDict()
-
-_LOGIN_GLOBAL_LOCK = threading.Lock()
-_LOGIN_GLOBAL_ATTEMPTS: list[float] = []
-
-
-def reset_login_rate_limiter() -> None:
-    """Clear all per-username and global attempt history. Test-only helper."""
-    with _LOGIN_FAILURES_LOCK:
-        _LOGIN_FAILURES.clear()
-    with _LOGIN_GLOBAL_LOCK:
-        _LOGIN_GLOBAL_ATTEMPTS.clear()
-
-
-def _check_login_global_rate_limit() -> None:
-    cutoff = _time.monotonic() - LOGIN_GLOBAL_WINDOW_SECONDS
-    with _LOGIN_GLOBAL_LOCK:
-        _LOGIN_GLOBAL_ATTEMPTS[:] = [t for t in _LOGIN_GLOBAL_ATTEMPTS if t > cutoff]
-        if len(_LOGIN_GLOBAL_ATTEMPTS) >= LOGIN_GLOBAL_MAX_PER_WINDOW:
-            raise RateLimited(
-                f"server-wide login rate limit exceeded "
-                f"({LOGIN_GLOBAL_MAX_PER_WINDOW} attempts per "
-                f"{LOGIN_GLOBAL_WINDOW_SECONDS}s); retry shortly"
-            )
-        _LOGIN_GLOBAL_ATTEMPTS.append(_time.monotonic())
-
-
-def _sweep_login_failures_locked(now: float) -> None:
-    """Drop usernames whose newest attempt is older than the lockout window.
-
-    Caller must hold ``_LOGIN_FAILURES_LOCK``. Runs in O(n) over the dict —
-    cheap because we cap size at LOGIN_FAILURES_MAX_USERS.
+    Takes an explicit connection because in production we never wipe the
+    audit trail; only test fixtures want a fast reset between cases.
+    Caller commits. Also resets the per-process sweep cadence so a test
+    that monkeypatches ``login_cleanup_interval_s`` low isn't shadowed by
+    a sweep timestamp left behind by an earlier test in the same process.
     """
-    cutoff = now - LOGIN_LOCKOUT_SECONDS
-    stale = [u for u, attempts in _LOGIN_FAILURES.items() if not attempts or attempts[-1] <= cutoff]
-    for u in stale:
-        _LOGIN_FAILURES.pop(u, None)
+    global _LAST_SWEEP_AT_MONOTONIC
+    _LAST_SWEEP_AT_MONOTONIC = 0.0
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE api_login_attempts RESTART IDENTITY")
 
 
-def _check_login_rate_limit(username: str) -> None:
-    now = _time.monotonic()
-    cutoff = now - LOGIN_LOCKOUT_SECONDS
-    with _LOGIN_FAILURES_LOCK:
-        recent = [t for t in _LOGIN_FAILURES.get(username, []) if t > cutoff]
-        if recent:
-            _LOGIN_FAILURES[username] = recent
-            _LOGIN_FAILURES.move_to_end(username)
-        else:
-            _LOGIN_FAILURES.pop(username, None)
-        if len(recent) >= LOGIN_MAX_FAILURES:
-            raise RateLimited(
-                f"too many failed login attempts; try again in "
-                f"{LOGIN_LOCKOUT_SECONDS} seconds"
+def _record_login_attempt(
+    conn: psycopg.Connection,
+    username: str,
+    client_ip: str | None,
+    outcome: Literal["success", "failure"],
+) -> None:
+    """Append a row to api_login_attempts and commit it eagerly.
+
+    The SAVEPOINT (``conn.transaction()``) isolates CheckViolation so a
+    bad ``outcome`` label can't poison the outer transaction. The explicit
+    ``conn.commit()`` after the SAVEPOINT releases is load-bearing: HTTP
+    route handlers raise ``AuthenticationFailed`` on bad credentials,
+    which propagates out of ``pool.connection()`` and triggers a rollback
+    that would otherwise discard this audit row. Without the eager commit
+    the per-user and per-IP failure caps never trip from production
+    traffic (every failure rolls back). Login is read-only up to this
+    point — only the audit row is in flight — so committing here is safe.
+    """
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO api_login_attempts (username, ip, outcome) "
+                    "VALUES (%s, %s, %s)",
+                    (username, client_ip, outcome),
+                )
+        conn.commit()
+    except psycopg.errors.CheckViolation:
+        # Bad outcome label — only the internal callers can hit this; surface
+        # so tests can verify the constraint. Outer transaction stays open
+        # because the SAVEPOINT rolled back.
+        raise
+    except (psycopg.errors.UndefinedTable, psycopg.OperationalError) as exc:
+        # Narrow fail-open: only "table missing during migration race" and
+        # "connection-level transient IO" are recoverable in a way where
+        # silently dropping the audit row is preferable to a 500 on a
+        # legit login. Anything else (ProgrammingError, DataError,
+        # IntegrityError, etc.) is almost certainly a bug we'd rather
+        # surface than mask — let it propagate to the route's 500 handler.
+        logger.warning("api_login_attempts insert failed: %s", exc)
+
+
+# Stable advisory-lock key for the cleanup sweep. Any nonzero int64 works;
+# choose a fixed value so all workers in the cluster contend on the same
+# lock. The number itself is arbitrary — chosen for "localmail" mnemonic.
+_SWEEP_ADVISORY_LOCK_KEY = 0x6C_6F_63_61_6C_6D_61_69  # "localmai" in ASCII
+
+
+def _sweep_login_attempts(
+    conn: psycopg.Connection,
+    *,
+    retention_s: int,
+) -> int:
+    """Best-effort DELETE of expired rows. Returns deleted row count.
+
+    Gated by ``pg_try_advisory_lock`` so concurrent workers don't pile up
+    parallel DELETEs. Returns 0 if the lock is held by another worker —
+    not an error; the next worker around will get to it.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_try_advisory_lock(%s)", (_SWEEP_ADVISORY_LOCK_KEY,)
+        )
+        row = cur.fetchone()
+        assert row is not None
+        if not row[0]:
+            return 0
+        try:
+            cur.execute(
+                "DELETE FROM api_login_attempts "
+                "WHERE ts < now() - make_interval(secs => %s)",
+                (retention_s,),
+            )
+            return cur.rowcount
+        finally:
+            cur.execute(
+                "SELECT pg_advisory_unlock(%s)", (_SWEEP_ADVISORY_LOCK_KEY,)
             )
 
 
-def _record_login_failure(username: str) -> None:
-    now = _time.monotonic()
-    with _LOGIN_FAILURES_LOCK:
-        attempts = _LOGIN_FAILURES.setdefault(username, [])
-        attempts.append(now)
-        _LOGIN_FAILURES.move_to_end(username)
-        if len(_LOGIN_FAILURES) > LOGIN_FAILURES_MAX_USERS:
-            _sweep_login_failures_locked(now)
-            while len(_LOGIN_FAILURES) > LOGIN_FAILURES_MAX_USERS:
-                _LOGIN_FAILURES.popitem(last=False)
+def _check_login_rate_limits(
+    conn: psycopg.Connection,
+    username: str,
+    client_ip: str | None,
+    *,
+    cfg: AuthConfig,
+) -> None:
+    """Evaluate global / per-IP / per-user caps in one round trip.
+
+    Order is global → per-IP → per-user so a hit on the broader cap wins
+    the cap label — telling the caller which knob to bump is more useful
+    than reporting whichever cap was tripped first by SQL evaluation.
+
+    TOCTOU note: the check is read-only; the audit INSERT happens in
+    ``_record_login_attempt`` after credential verification. Under
+    concurrent traffic ``workers`` requests can each pass the check
+    before any inserts land, so a cap of N can be exceeded by up to
+    ``workers - 1`` in flight. This bounds argon2 CPU work to
+    ``cap * workers`` rather than ``cap``, which is acceptable —
+    tightening would require a SELECT … FOR UPDATE on a hot row and is
+    not worth the contention for the threat model.
+    """
+    widest_window_s = max(
+        cfg.login_global_window_s,
+        cfg.login_per_ip_window_s,
+        cfg.login_per_user_window_s,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (
+                WHERE ts > now() - make_interval(secs => %s)
+              ) AS global_attempts,
+              COUNT(*) FILTER (
+                WHERE ip = %s
+                  AND outcome = 'failure'
+                  AND ts > now() - make_interval(secs => %s)
+              ) AS ip_failures,
+              COUNT(*) FILTER (
+                WHERE username = %s
+                  AND outcome = 'failure'
+                  AND ts > now() - make_interval(secs => %s)
+                  AND ts > COALESCE(
+                    (SELECT MAX(ts) FROM api_login_attempts
+                      WHERE username = %s AND outcome = 'success'),
+                    '-infinity'::timestamptz
+                  )
+              ) AS user_failures
+            FROM api_login_attempts
+            WHERE ts > now() - make_interval(secs => %s)
+            """,
+            (
+                cfg.login_global_window_s,
+                client_ip, cfg.login_per_ip_window_s,
+                username, cfg.login_per_user_window_s, username,
+                widest_window_s,
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        global_attempts, ip_failures, user_failures = row
+
+    if global_attempts >= cfg.login_global_max:
+        raise RateLimited(
+            f"server-wide login rate limit exceeded "
+            f"({cfg.login_global_max} attempts per {cfg.login_global_window_s}s)",
+            cap="global",
+            retry_after_s=cfg.login_global_window_s,
+        )
+    if client_ip is not None and ip_failures >= cfg.login_per_ip_max:
+        raise RateLimited(
+            f"too many failed logins from this IP "
+            f"({cfg.login_per_ip_max} per {cfg.login_per_ip_window_s}s)",
+            cap="ip",
+            retry_after_s=cfg.login_per_ip_window_s,
+        )
+    if user_failures >= cfg.login_per_user_max:
+        raise RateLimited(
+            f"too many failed login attempts; try again in "
+            f"{cfg.login_per_user_window_s} seconds",
+            cap="user",
+            retry_after_s=cfg.login_per_user_window_s,
+        )
 
 
-def _clear_login_failures(username: str) -> None:
-    with _LOGIN_FAILURES_LOCK:
-        _LOGIN_FAILURES.pop(username, None)
+# Per-worker last-sweep timestamp so cleanup runs at most once per
+# AuthConfig.login_cleanup_interval_s wall-clock per process. The PG
+# advisory lock in _sweep_login_attempts further dedupes across workers.
+_LAST_SWEEP_AT_MONOTONIC: float = 0.0
+
+
+def _maybe_sweep(conn: psycopg.Connection, cfg: AuthConfig) -> None:
+    """Run the cleanup sweep if it's been >= cfg.login_cleanup_interval_s
+    since this worker's last sweep, committing the DELETE eagerly.
+
+    Like ``_record_login_attempt``, the eager commit is required because
+    every login attempt eventually raises AuthenticationFailed (failure
+    path) or returns through the route's outer commit (success path).
+    Under failure-only traffic the route's outer rollback would discard
+    the sweep DELETE and the table would grow unbounded. The advance of
+    ``_LAST_SWEEP_AT_MONOTONIC`` happens BEFORE the sweep so concurrent
+    requests in this process race to the advisory lock rather than all
+    issuing simultaneous DELETEs.
+    """
+    global _LAST_SWEEP_AT_MONOTONIC
+    now = _monotonic_time.monotonic()
+    if now - _LAST_SWEEP_AT_MONOTONIC < cfg.login_cleanup_interval_s:
+        return
+    _LAST_SWEEP_AT_MONOTONIC = now
+    _sweep_login_attempts(conn, retention_s=cfg.login_attempt_retention_s)
+    conn.commit()
 
 
 @dataclass(frozen=True)
@@ -231,19 +352,36 @@ def create_user(conn: psycopg.Connection, username: str, password: str) -> int:
         return row[0]
 
 
-def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, datetime]:
+def login(
+    conn: psycopg.Connection,
+    username: str,
+    password: str,
+    *,
+    client_ip: str | None = None,
+    cfg: AuthConfig | None = None,
+) -> tuple[str, datetime]:
     """Verify credentials and mint a token.
 
     Raises:
-      RateLimited if either the global or per-username failure threshold was hit.
+      RateLimited (with .cap and .retry_after_s) if any cap is exceeded.
       AuthenticationFailed for bad credentials or disabled users.
 
-    The global limit is checked before the per-username limit because the
-    former protects against argon2 CPU amplification from any unauthenticated
-    caller, regardless of which username they target.
+    ``cfg`` defaults to ``AuthConfig()`` so test call sites that don't
+    care about thresholds still work. Production callers should pass the
+    loaded ``LocalmailConfig.auth``.
+
+    Caller invariant: ``conn`` must have no uncommitted writes when this
+    is invoked. ``_record_login_attempt`` and ``_maybe_sweep`` each call
+    ``conn.commit()`` eagerly so the audit row + sweep DELETE survive the
+    route's outer rollback on ``AuthenticationFailed`` — any uncommitted
+    work on the connection would be force-committed alongside the audit
+    row, which is almost never what the caller wants. The HTTP route in
+    ``localmail.serve.routes.auth`` only runs read-only work before
+    ``login()`` so this is safe; new callers must obey the same rule.
     """
-    _check_login_global_rate_limit()
-    _check_login_rate_limit(username)
+    if cfg is None:
+        cfg = AuthConfig()
+    _check_login_rate_limits(conn, username, client_ip, cfg=cfg)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash FROM api_users "
@@ -253,12 +391,22 @@ def login(conn: psycopg.Connection, username: str, password: str) -> tuple[str, 
         row = cur.fetchone()
     if row is None:
         verify_password(password, _DUMMY_PASSWORD_HASH)
-        _record_login_failure(username)
+        _record_login_attempt(conn, username, client_ip, "failure")
+        _maybe_sweep(conn, cfg)
         raise AuthenticationFailed("invalid username or password")
     if not verify_password(password, row[1]):
-        _record_login_failure(username)
+        _record_login_attempt(conn, username, client_ip, "failure")
+        _maybe_sweep(conn, cfg)
         raise AuthenticationFailed("invalid username or password")
-    _clear_login_failures(username)
+    # On the success path we commit the "success" audit row BEFORE
+    # ``issue_token`` runs its INSERT. If the token INSERT then fails we'd
+    # leave a "success" row without a usable token — the per-user counter
+    # resets but the caller has to retry. The blast radius is bounded
+    # (one stale-success at most; user just logs in again) and reversing
+    # the order would defeat the survives-route-rollback guarantee
+    # documented on ``_record_login_attempt``.
+    _record_login_attempt(conn, username, client_ip, "success")
+    _maybe_sweep(conn, cfg)
     return issue_token(conn, row[0])
 
 

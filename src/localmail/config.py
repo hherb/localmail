@@ -46,6 +46,28 @@ class ServeConfig(BaseModel):
     changes_safe_horizon_s: int = 5
 
 
+class AuthConfig(BaseModel):
+    """Tunables for the login rate limiter (Postgres-backed)."""
+
+    login_per_user_max: int = 5
+    login_per_user_window_s: int = 60
+
+    login_per_ip_max: int = 20
+    login_per_ip_window_s: int = 60
+
+    login_global_max: int = 30
+    login_global_window_s: int = 60
+
+    # Best-effort retention: rows older than this are deleted by the
+    # in-process sweep. Independent of the sliding-window caps above —
+    # raise to keep audit history further back without affecting limits.
+    login_attempt_retention_s: int = 86400
+
+    # Per-worker cadence for the sweep. Gated by a PG advisory lock so
+    # concurrent workers don't pile up DELETEs.
+    login_cleanup_interval_s: int = 300
+
+
 class GmailOAuthConfig(BaseModel):
     client_secrets_file: Path
 
@@ -223,6 +245,7 @@ class Config(BaseModel):
     attachments: AttachmentsConfig = AttachmentsConfig()
     daemon: DaemonConfig = DaemonConfig()
     serve: ServeConfig = Field(default_factory=ServeConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     gmail_oauth: GmailOAuthConfig | None = None
     accounts: list[AccountConfig] = Field(default_factory=list)
     search: SearchConfig = Field(default_factory=SearchConfig)

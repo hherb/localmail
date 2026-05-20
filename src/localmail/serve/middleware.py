@@ -12,7 +12,7 @@ from psycopg_pool import ConnectionPool
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from localmail.api.auth import AuthenticatedUser, verify_token
-from localmail.api.errors import APIError, InvalidToken
+from localmail.api.errors import APIError, InvalidToken, RateLimited
 
 logger = logging.getLogger("localmail.serve")
 
@@ -38,11 +38,14 @@ class APIErrorHandlerMiddleware(BaseHTTPMiddleware):
         try:
             return await call_next(request)
         except APIError as err:
-            return JSONResponse(
+            response = JSONResponse(
                 err.to_problem(),
                 status_code=err.http_status,
                 media_type="application/problem+json",
             )
+            if isinstance(err, RateLimited) and err.retry_after_s is not None:
+                response.headers["Retry-After"] = str(err.retry_after_s)
+            return response
 
 
 def get_authenticated_user(request: Request) -> AuthenticatedUser:

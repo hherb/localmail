@@ -33,8 +33,12 @@ class ChangePasswordRequest(BaseModel):
 @router.post("/login", response_model=TokenResponse)
 def login(req: LoginRequest, request: Request) -> TokenResponse:
     pool = request.app.state.pool
+    client_ip = request.client.host if request.client else None
+    cfg = request.app.state.auth_config
     with pool.connection() as conn:
-        token, expires_at = auth_svc.login(conn, req.username, req.password)
+        token, expires_at = auth_svc.login(
+            conn, req.username, req.password, client_ip=client_ip, cfg=cfg
+        )
         conn.commit()
     return TokenResponse(token=token, expires_at=expires_at.isoformat())
 

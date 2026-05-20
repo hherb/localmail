@@ -49,6 +49,25 @@ class RateLimited(APIError):
     problem_type = "/problems/rate-limited"
     title = "Too many requests"
 
+    def __init__(
+        self,
+        detail: str,
+        *,
+        cap: str | None = None,
+        retry_after_s: int | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.cap = cap
+        self.retry_after_s = retry_after_s
+
+    def to_problem(self) -> dict[str, object]:
+        payload = super().to_problem()
+        if self.cap is not None:
+            payload["cap"] = self.cap
+        if self.retry_after_s is not None:
+            payload["retry_after_s"] = self.retry_after_s
+        return payload
+
 
 class ValidationFailed(APIError):
     http_status = 400

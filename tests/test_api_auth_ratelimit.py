@@ -1,85 +1,74 @@
-import time
-
+"""Port of the original per-username + global rate-limit tests to the
+Postgres-backed limiter. Multi-worker / per-IP semantics live in
+test_api_auth_rate_limiter.py."""
 import psycopg
 import pytest
 
-from localmail.api.auth import LOGIN_LOCKOUT_SECONDS, LOGIN_MAX_FAILURES, create_user, login, reset_login_rate_limiter
+from localmail.api import auth as auth_mod
+from localmail.api.auth import create_user, login, reset_login_rate_limiter
 from localmail.api.errors import AuthenticationFailed, RateLimited
+from localmail.config import AuthConfig
 
 
 @pytest.fixture(autouse=True)
-def _reset_limiter():
-    reset_login_rate_limiter()
+def _reset(db_conn: psycopg.Connection):
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
     yield
-    reset_login_rate_limiter()
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
 
 
 def test_login_rate_limited_after_max_failures(db_conn: psycopg.Connection) -> None:
+    cfg = AuthConfig(login_per_user_max=5)
     create_user(db_conn, "alice", "hunter2")
     db_conn.commit()
-    for _ in range(LOGIN_MAX_FAILURES):
+    for _ in range(cfg.login_per_user_max):
         with pytest.raises(AuthenticationFailed):
-            login(db_conn, "alice", "wrong")
+            login(db_conn, "alice", "wrong", cfg=cfg)
+        db_conn.commit()
     with pytest.raises(RateLimited):
-        login(db_conn, "alice", "wrong")
+        login(db_conn, "alice", "wrong", cfg=cfg)
 
 
 def test_rate_limit_does_not_leak_across_usernames(db_conn: psycopg.Connection) -> None:
+    cfg = AuthConfig(login_per_user_max=5, login_per_ip_max=100, login_global_max=100)
     create_user(db_conn, "alice", "hunter2")
     create_user(db_conn, "bob", "correct horse")
     db_conn.commit()
-    for _ in range(LOGIN_MAX_FAILURES):
+    for _ in range(cfg.login_per_user_max):
         with pytest.raises(AuthenticationFailed):
-            login(db_conn, "alice", "wrong")
-    token, _ = login(db_conn, "bob", "correct horse")
+            login(db_conn, "alice", "wrong", cfg=cfg)
+        db_conn.commit()
+    token, _ = login(db_conn, "bob", "correct horse", cfg=cfg)
+    db_conn.commit()
     assert token
 
 
-def test_successful_login_resets_failure_count(db_conn: psycopg.Connection) -> None:
+def test_successful_login_resets_user_failure_count(db_conn: psycopg.Connection) -> None:
+    cfg = AuthConfig(login_per_user_max=5)
     create_user(db_conn, "alice", "hunter2")
     db_conn.commit()
-    for _ in range(LOGIN_MAX_FAILURES - 1):
+    for _ in range(cfg.login_per_user_max - 1):
         with pytest.raises(AuthenticationFailed):
-            login(db_conn, "alice", "wrong")
-    token, _ = login(db_conn, "alice", "hunter2")
+            login(db_conn, "alice", "wrong", cfg=cfg)
+        db_conn.commit()
+    token, _ = login(db_conn, "alice", "hunter2", cfg=cfg)
     db_conn.commit()
     assert token
     with pytest.raises(AuthenticationFailed):
-        login(db_conn, "alice", "wrong")  # one failure tolerated again
+        login(db_conn, "alice", "wrong", cfg=cfg)
 
 
-def test_login_failures_dict_is_bounded(monkeypatch) -> None:
-    """Memory cannot grow unboundedly under a username-rotating attacker.
-
-    The per-username failure dict has a hard size cap; once exceeded, the
-    least-recently-touched usernames are evicted (LRU). This is what stops
-    `dict[str, ...]` blowing up to RAM-pressure size on adversarial traffic
-    that rotates usernames faster than entries expire on their own.
-    """
-    from localmail.api import auth
-
-    monkeypatch.setattr(auth, "LOGIN_FAILURES_MAX_USERS", 4)
-    auth.reset_login_rate_limiter()
-    for i in range(50):
-        auth._record_login_failure(f"user-{i}")
-    assert len(auth._LOGIN_FAILURES) <= 4
-
-
-def test_global_login_rate_limit_caps_all_usernames(db_conn: psycopg.Connection, monkeypatch) -> None:
-    """Global limiter bounds argon2 CPU work no matter which username is tried.
-
-    Without this, an attacker can rotate usernames to bypass the per-username
-    limit and induce unbounded argon2 verifies on the server.
-    """
-    from localmail.api import auth
-
-    monkeypatch.setattr(auth, "LOGIN_GLOBAL_MAX_PER_WINDOW", 3)
-    auth.reset_login_rate_limiter()
+def test_global_login_rate_limit_caps_all_usernames(db_conn: psycopg.Connection) -> None:
+    """Global limiter bounds argon2 CPU work no matter which username is tried."""
+    cfg = AuthConfig(login_global_max=3, login_per_ip_max=100)
     create_user(db_conn, "alice", "hunter2")
     db_conn.commit()
-
     for u in ("alice", "bob", "charlie"):
         with pytest.raises(AuthenticationFailed):
-            auth.login(db_conn, u, "wrong")
-    with pytest.raises(RateLimited):
-        auth.login(db_conn, "dave", "wrong")
+            login(db_conn, u, "wrong", cfg=cfg)
+        db_conn.commit()
+    with pytest.raises(RateLimited) as ei:
+        login(db_conn, "dave", "wrong", cfg=cfg)
+    assert ei.value.cap == "global"

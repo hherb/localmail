@@ -35,12 +35,13 @@ def _wait_for_port(port: int, timeout: float = 5.0) -> None:
 
 @pytest.mark.integration
 def test_e2e_login_capabilities(db_dsn: str, tmp_path: Path) -> None:
-    reset_login_rate_limiter()
     cert = tmp_path / "cert.pem"
     key = tmp_path / "key.pem"
     ensure_self_signed_cert(cert_path=cert, key_path=key, hostname="localhost")
 
     with psycopg.connect(db_dsn) as conn:
+        reset_login_rate_limiter(conn)
+        conn.commit()
         with conn.cursor() as cur:
             cur.execute("DELETE FROM api_users WHERE username = 'alice'")
         conn.commit()

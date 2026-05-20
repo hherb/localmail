@@ -79,3 +79,15 @@ class FeatureUnavailable(APIError):
     http_status = 503
     problem_type = "/problems/feature-unavailable"
     title = "Feature unavailable"
+
+
+class SearchCursorExpired(APIError):
+    """The page cursor pool has been evicted (TTL, LRU, cross-user replay).
+
+    Clients should re-run the original query without a cursor and resume
+    scrolling from where they left off — the transparent recovery path is
+    documented in the pagination spec.
+    """
+    http_status = 409
+    problem_type = "/problems/search-cursor-expired"
+    title = "Search cursor expired"

@@ -24,6 +24,7 @@ from localmail.api.errors import (
     RateLimited,
     ValidationFailed,
 )
+from localmail.config import AuthConfig
 
 _HASHER = PasswordHasher()
 
@@ -173,6 +174,83 @@ def _record_login_attempt(
         # silently fails — better to issue a token without an audit row than
         # to deny a legit login because the audit table is unavailable.
         pass
+
+
+def _check_login_rate_limits(
+    conn: psycopg.Connection,
+    username: str,
+    client_ip: str | None,
+    *,
+    cfg: AuthConfig,
+) -> None:
+    """Evaluate global / per-IP / per-user caps in one round trip.
+
+    Order is global → per-IP → per-user so a hit on the broader cap wins
+    the cap label — telling the caller which knob to bump is more useful
+    than reporting whichever cap was tripped first by SQL evaluation.
+    """
+    widest_window_s = max(
+        cfg.login_global_window_s,
+        cfg.login_per_ip_window_s,
+        cfg.login_per_user_window_s,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (
+                WHERE ts > now() - make_interval(secs => %s)
+              ) AS global_attempts,
+              COUNT(*) FILTER (
+                WHERE ip = %s
+                  AND outcome = 'failure'
+                  AND ts > now() - make_interval(secs => %s)
+              ) AS ip_failures,
+              COUNT(*) FILTER (
+                WHERE username = %s
+                  AND outcome = 'failure'
+                  AND ts > now() - make_interval(secs => %s)
+                  AND ts > COALESCE(
+                    (SELECT MAX(ts) FROM api_login_attempts
+                      WHERE username = %s AND outcome = 'success'),
+                    '-infinity'::timestamptz
+                  )
+              ) AS user_failures
+            FROM api_login_attempts
+            WHERE ts > now() - make_interval(secs => %s)
+            """,
+            (
+                cfg.login_global_window_s,
+                client_ip, cfg.login_per_ip_window_s,
+                username, cfg.login_per_user_window_s, username,
+                widest_window_s,
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        global_attempts, ip_failures, user_failures = row
+
+    if global_attempts >= cfg.login_global_max:
+        raise RateLimited(
+            f"server-wide login rate limit exceeded "
+            f"({cfg.login_global_max} attempts per {cfg.login_global_window_s}s)",
+            cap="global",
+            retry_after_s=cfg.login_global_window_s,
+        )
+    if client_ip is not None and ip_failures >= cfg.login_per_ip_max:
+        raise RateLimited(
+            f"too many failed logins from this IP "
+            f"({cfg.login_per_ip_max} per {cfg.login_per_ip_window_s}s)",
+            cap="ip",
+            retry_after_s=cfg.login_per_ip_window_s,
+        )
+    if user_failures >= cfg.login_per_user_max:
+        raise RateLimited(
+            f"too many failed login attempts; try again in "
+            f"{cfg.login_per_user_window_s} seconds",
+            cap="user",
+            retry_after_s=cfg.login_per_user_window_s,
+        )
 
 
 @dataclass(frozen=True)

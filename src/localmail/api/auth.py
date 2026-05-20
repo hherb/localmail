@@ -12,6 +12,7 @@ import time as _time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 import psycopg
 from argon2 import PasswordHasher
@@ -140,6 +141,38 @@ def _record_login_failure(username: str) -> None:
 def _clear_login_failures(username: str) -> None:
     with _LOGIN_FAILURES_LOCK:
         _LOGIN_FAILURES.pop(username, None)
+
+
+def _record_login_attempt(
+    conn: psycopg.Connection,
+    username: str,
+    client_ip: str | None,
+    outcome: Literal["success", "failure"],
+) -> None:
+    """Append a row to api_login_attempts.
+
+    Uses a nested SAVEPOINT so a logging failure (table missing, transient
+    error) cannot abort the outer login transaction — the limiter is
+    defense-in-depth, never a correctness gate for credential verification.
+    """
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO api_login_attempts (username, ip, outcome) "
+                    "VALUES (%s, %s, %s)",
+                    (username, client_ip, outcome),
+                )
+    except psycopg.errors.CheckViolation:
+        # Bad outcome label — only the internal callers can hit this; surface
+        # so tests can verify the constraint. Outer transaction stays open
+        # because the SAVEPOINT rolled back.
+        raise
+    except psycopg.Error:
+        # Anything else (table missing during migration race, transient IO)
+        # silently fails — better to issue a token without an audit row than
+        # to deny a legit login because the audit table is unavailable.
+        pass
 
 
 @dataclass(frozen=True)

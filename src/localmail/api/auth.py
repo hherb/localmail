@@ -176,6 +176,44 @@ def _record_login_attempt(
         pass
 
 
+# Stable advisory-lock key for the cleanup sweep. Any nonzero int64 works;
+# choose a fixed value so all workers in the cluster contend on the same
+# lock. The number itself is arbitrary — chosen for "localmail" mnemonic.
+_SWEEP_ADVISORY_LOCK_KEY = 0x6C_6F_63_61_6C_6D_61_69  # "localmai" in ASCII
+
+
+def _sweep_login_attempts(
+    conn: psycopg.Connection,
+    *,
+    retention_s: int,
+) -> int:
+    """Best-effort DELETE of expired rows. Returns deleted row count.
+
+    Gated by ``pg_try_advisory_lock`` so concurrent workers don't pile up
+    parallel DELETEs. Returns 0 if the lock is held by another worker —
+    not an error; the next worker around will get to it.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_try_advisory_lock(%s)", (_SWEEP_ADVISORY_LOCK_KEY,)
+        )
+        row = cur.fetchone()
+        assert row is not None
+        if not row[0]:
+            return 0
+        try:
+            cur.execute(
+                "DELETE FROM api_login_attempts "
+                "WHERE ts < now() - make_interval(secs => %s)",
+                (retention_s,),
+            )
+            return cur.rowcount
+        finally:
+            cur.execute(
+                "SELECT pg_advisory_unlock(%s)", (_SWEEP_ADVISORY_LOCK_KEY,)
+            )
+
+
 def _check_login_rate_limits(
     conn: psycopg.Connection,
     username: str,

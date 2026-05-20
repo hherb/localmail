@@ -155,3 +155,42 @@ def test_check_order_global_first(db_conn: psycopg.Connection) -> None:
     with pytest.raises(RateLimited) as ei:
         auth_mod._check_login_rate_limits(db_conn, "alice", "1.1.1.1", cfg=cfg)
     assert ei.value.cap == "global"
+
+
+def test_sweep_deletes_expired_rows(db_conn: psycopg.Connection) -> None:
+    # Two recent rows, three old rows.
+    for u in ("alice", "bob"):
+        auth_mod._record_login_attempt(db_conn, u, "1.1.1.1", "failure")
+    for u in ("carol", "dave", "eve"):
+        auth_mod._record_login_attempt(db_conn, u, "2.2.2.2", "failure")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_login_attempts SET ts = now() - interval '1 day' "
+            "WHERE username IN ('carol','dave','eve')"
+        )
+    db_conn.commit()
+    deleted = auth_mod._sweep_login_attempts(db_conn, retention_s=60)
+    db_conn.commit()
+    assert deleted == 3
+    assert _count(db_conn, "SELECT count(*) FROM api_login_attempts") == 2
+
+
+def test_sweep_no_op_when_lock_contended(db_conn: psycopg.Connection, db_dsn: str) -> None:
+    """Second worker can't pile up DELETEs while another holds the lock."""
+    auth_mod._record_login_attempt(db_conn, "alice", "1.1.1.1", "failure")
+    with db_conn.cursor() as cur:
+        cur.execute("UPDATE api_login_attempts SET ts = now() - interval '1 day'")
+    db_conn.commit()
+
+    other = psycopg.connect(db_dsn, autocommit=False)
+    try:
+        # Acquire the sweep advisory lock on `other` for the whole test.
+        with other.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (auth_mod._SWEEP_ADVISORY_LOCK_KEY,))
+        # `db_conn` tries to sweep — must short-circuit.
+        deleted = auth_mod._sweep_login_attempts(db_conn, retention_s=60)
+        assert deleted == 0  # lock not acquired → did not run
+    finally:
+        with other.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (auth_mod._SWEEP_ADVISORY_LOCK_KEY,))
+        other.close()

@@ -267,6 +267,54 @@ class Searcher:
         from dataclasses import replace
         return replace(parsed, filters=replace(parsed.filters, accounts=ids))
 
+    def _list_recent_messages(
+        self,
+        conn: psycopg.Connection,
+        parsed: ParsedQuery,
+        limit: int,
+    ) -> list["SearchResult"]:
+        """Empty-query fallback: SELECT messages ORDER BY date_received DESC.
+
+        Shares `_filter_sql` with the retrieval arms so structured filters
+        (account_id, folder_id, from/to/subject substrings, date ranges,
+        has_attachment, lang) behave identically here and in the
+        full-pipeline path. Returns ``SearchResult`` so the API layer can
+        marshal results uniformly regardless of which branch fired.
+        """
+        from localmail.search.arms import _filter_sql
+        where_extra, where_params = _filter_sql(parsed.filters)
+        sql = f"""
+            SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name, m.date_sent
+              FROM messages m
+             WHERE TRUE
+             {where_extra}
+             ORDER BY m.date_received DESC, m.id DESC
+             LIMIT %s
+        """
+        params: list[Any] = [*where_params, limit]
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        out: list[SearchResult] = []
+        for rank, (mid, account_id, subject, from_addr, from_name, date_sent) in enumerate(rows, start=1):
+            out.append(SearchResult(
+                message_id=mid,
+                account_id=account_id,
+                rank=rank,
+                score=1.0 / rank,
+                rrf_score=0.0,
+                subject=subject,
+                from_addr=from_addr,
+                from_name=from_name,
+                date_sent=date_sent,
+                snippet="",
+                snippet_source="header",
+                attachment_filename=None,
+                matched_chunk_id=None,
+                matched_chunk_table="message",
+            ))
+        return out
+
     def _retrieve_pool(
         self,
         conn: psycopg.Connection,
@@ -587,6 +635,30 @@ class Searcher:
         t = time.monotonic()
         parsed = parse_query(query)
         timing["parse"] = (time.monotonic() - t) * 1000
+
+        # Empty-query fallback: an empty `free_text` is the canonical
+        # "show me my mail" signal. The hybrid pipeline degenerates badly
+        # for it — BM25 arms early-return [] (no terms to match) and the
+        # vector arms rank by cosine distance to the embedding of the empty
+        # string, producing exactly `rerank_pool_size` (default 20)
+        # arbitrary-looking hits. We short-circuit to a date-sorted list so
+        # callers (GUI, MCP, programmatic API) get a predictable result —
+        # structured filters still apply via `_filter_sql`.
+        if not parsed.free_text.strip():
+            t = time.monotonic()
+            with self._pool.connection() as conn:
+                parsed = self._resolve_account_names(conn, parsed)
+                self._maybe_warn_unpopulated_body_lang(conn, parsed)
+                results = self._list_recent_messages(conn, parsed, effective_page_size)
+            timing["retrieve"] = (time.monotonic() - t) * 1000
+            timing["rerank"] = 0.0
+            timing["total"] = (time.monotonic() - t0) * 1000
+            return SearchPage(
+                results=results, page=1, page_size=effective_page_size,
+                pool_size=len(results), candidates_per_arm=cpa,
+                has_more_in_pool=False, can_grow_pool=False,
+                search_token=None, query=parsed, timing_ms=timing,
+            )
 
         with self._pool.connection() as conn:
             parsed = self._resolve_account_names(conn, parsed)

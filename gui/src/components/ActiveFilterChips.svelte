@@ -29,6 +29,14 @@
 
   async function remove(c: Chip) {
     c.clear();
+    // If clearing this chip leaves nothing to scope by (no query, no other
+    // chip, no account/folder narrowing), reset instead of submitting. An
+    // empty-query search returns ~`rerank_pool_size` (20) arbitrary
+    // vector-arm hits — the GUI should revert to the recent-mail list.
+    if (search.hasNoScope()) {
+      search.reset();
+      return;
+    }
     await search.submit();
   }
 </script>

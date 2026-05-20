@@ -28,9 +28,12 @@ describe("ActiveFilterChips", () => {
     expect(screen.getByText(/has attachment/i)).toBeTruthy();
   });
 
-  it("clicking a chip's × removes that filter and re-submits", async () => {
+  it("clicking a chip's × removes that filter and re-submits when scope remains", async () => {
+    // A remaining accountIds scope means there's still something narrower
+    // than "all recent mail" to search for, so re-submitting is correct.
+    search.setQuery("hello");
     search.setFilters({
-      accountIds: [], folderIds: [],
+      accountIds: ["1"], folderIds: [],
       from: "anna", to: "", subject: "", after: "", before: "", hasAttachment: null,
     });
     render(ActiveFilterChips);
@@ -38,6 +41,27 @@ describe("ActiveFilterChips", () => {
     expect(search.snapshot.filters.from).toBe("");
     const { runSearch } = await import("../lib/tauri");
     expect(runSearch).toHaveBeenCalledOnce();
+  });
+
+  it("clicking the last chip's × with no remaining scope resets instead of submitting", async () => {
+    // Empty-query search degenerates to vector-arm hits against the
+    // embedding of the empty string -> exactly `rerank_pool_size` (default
+    // 20) arbitrary results. When the user clears their final scoping
+    // signal, fall back to the recent-mail view (mail.messages) rather than
+    // run a meaningless search.
+    search.setFilters({
+      accountIds: [], folderIds: [],
+      from: "anna", to: "", subject: "", after: "", before: "", hasAttachment: null,
+    });
+    // Seed tookMs so we can assert reset() was the path taken.
+    const { __setSearchResultsForTest } = await import("../lib/stores/search.svelte");
+    __setSearchResultsForTest([], 12);
+    render(ActiveFilterChips);
+    await fireEvent.click(screen.getByRole("button", { name: /remove from/i }));
+    expect(search.snapshot.filters.from).toBe("");
+    expect(search.snapshot.tookMs).toBeNull();
+    const { runSearch } = await import("../lib/tauri");
+    expect(runSearch).not.toHaveBeenCalled();
   });
 
   it("does not show chips for accountIds/folderIds (tree owns those)", () => {

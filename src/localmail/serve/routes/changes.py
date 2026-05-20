@@ -49,13 +49,20 @@ def changes(
             return {"new_messages": [], "next_cursor": since or "0"}
         with conn.cursor() as cur:
             if since_id is None:
+                # Initial-load order: `date_received DESC, m.id DESC`. `m.id`
+                # alone reflects insertion order — a sync that processes an
+                # archive folder after the inbox would surface decade-old
+                # messages at the top. This matches the canonical default
+                # used by the empty-query search fallback so the UI shows the
+                # same ordering whether the user is in "All Mail" or in a
+                # cleared search.
                 cur.execute(
                     """SELECT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
                               m.account_id, a.name
                          FROM messages m JOIN accounts a ON a.id = m.account_id
                         WHERE m.date_received < now() - make_interval(secs => %s)
                           AND m.account_id = ANY(%s)
-                        ORDER BY m.id DESC
+                        ORDER BY m.date_received DESC, m.id DESC
                         LIMIT %s""",
                     (horizon_s, allowed, _DEFAULT_LIMIT),
                 )

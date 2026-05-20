@@ -62,6 +62,24 @@ class SearchStore {
     this.#submitSeq++;
   }
 
+  /**
+   * Returns true when the store has no scoping signal — no free-text query,
+   * no chip filters, no account/folder narrowing. In that state, submit()
+   * would fall through to a vector-arm-only retrieval against the embedding
+   * of the empty string, which produces ~`rerank_pool_size` arbitrary hits.
+   * Callers that just cleared the user's last filter should call `reset()`
+   * instead, which flips MessageList back to the recent-mail view.
+   */
+  hasNoScope(): boolean {
+    const s = this.#state;
+    if (s.query.trim() !== "") return false;
+    const f = s.filters;
+    if (f.accountIds.length > 0 || f.folderIds.length > 0) return false;
+    if (f.from || f.to || f.subject || f.after || f.before) return false;
+    if (f.hasAttachment === true) return false;
+    return true;
+  }
+
   async submit(): Promise<void> {
     const seq = ++this.#submitSeq;
     this.#state.loading = true;

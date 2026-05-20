@@ -156,12 +156,22 @@ describe("AccountTree dispatches server-side search on selection", () => {
     expect(mocks.runSearch).toHaveBeenCalled();
   });
 
-  it("clicking All Mail clears accountIds/folderIds and submits", async () => {
+  it("clicking All Mail resets the search store (no submit)", async () => {
+    // "All Mail" is the "go home, show all recent mail" affordance. It must
+    // NOT fire a search — an empty-query search degenerates to vector-arm
+    // hits against the embedding of the empty string, which surfaces
+    // exactly `rerank_pool_size` (default 20) arbitrary-looking results.
+    // Resetting the store clears `tookMs`, flipping MessageList back to the
+    // mail.messages (recent-by-date) view.
     search.setFilters({ ...search.snapshot.filters, accountIds: ["5"], folderIds: ["42"] });
+    // Seed tookMs so we can assert reset() was the path taken.
+    const { __setSearchResultsForTest } = await import("../lib/stores/search.svelte");
+    __setSearchResultsForTest([], 12);
     render(AccountTree);
     await fireEvent.click(screen.getByText(/all mail/i));
     expect(search.snapshot.filters.accountIds).toEqual([]);
     expect(search.snapshot.filters.folderIds).toEqual([]);
-    expect(mocks.runSearch).toHaveBeenCalled();
+    expect(search.snapshot.tookMs).toBeNull();
+    expect(mocks.runSearch).not.toHaveBeenCalled();
   });
 });

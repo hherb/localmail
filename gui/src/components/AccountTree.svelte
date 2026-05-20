@@ -16,8 +16,11 @@
 
   async function selectAll(): Promise<void> {
     mail.setSelection({ kind: "all" });
-    search.setFilters({ ...search.snapshot.filters, accountIds: [], folderIds: [] });
-    await search.submit();
+    // "All Mail" is the "go home" affordance — no scope means nothing to
+    // search for. reset() clears tookMs so MessageList falls back to
+    // mail.messages (recent-by-date), avoiding the empty-query / vector-arm
+    // result pool (~20 arbitrary hits) that submit() would produce.
+    search.reset();
   }
 
   async function selectAccount(accountId: string): Promise<void> {

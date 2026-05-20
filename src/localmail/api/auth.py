@@ -59,8 +59,12 @@ def reset_login_rate_limiter(conn: psycopg.Connection) -> None:
 
     Takes an explicit connection because in production we never wipe the
     audit trail; only test fixtures want a fast reset between cases.
-    Caller commits.
+    Caller commits. Also resets the per-process sweep cadence so a test
+    that monkeypatches ``login_cleanup_interval_s`` low isn't shadowed by
+    a sweep timestamp left behind by an earlier test in the same process.
     """
+    global _LAST_SWEEP_AT_MONOTONIC
+    _LAST_SWEEP_AT_MONOTONIC = 0.0
     with conn.cursor() as cur:
         cur.execute("TRUNCATE api_login_attempts RESTART IDENTITY")
 
@@ -97,12 +101,13 @@ def _record_login_attempt(
         # so tests can verify the constraint. Outer transaction stays open
         # because the SAVEPOINT rolled back.
         raise
-    except psycopg.Error as exc:
-        # Table missing during migration race, transient IO, etc. — better
-        # to issue a token without an audit row than to deny a legit login
-        # because the audit table is unavailable. Log so an operator with
-        # a chronically-broken audit table sees the signal rather than
-        # silent rate-limiter loss.
+    except (psycopg.errors.UndefinedTable, psycopg.OperationalError) as exc:
+        # Narrow fail-open: only "table missing during migration race" and
+        # "connection-level transient IO" are recoverable in a way where
+        # silently dropping the audit row is preferable to a 500 on a
+        # legit login. Anything else (ProgrammingError, DataError,
+        # IntegrityError, etc.) is almost certainly a bug we'd rather
+        # surface than mask — let it propagate to the route's 500 handler.
         logger.warning("api_login_attempts insert failed: %s", exc)
 
 
@@ -156,6 +161,15 @@ def _check_login_rate_limits(
     Order is global → per-IP → per-user so a hit on the broader cap wins
     the cap label — telling the caller which knob to bump is more useful
     than reporting whichever cap was tripped first by SQL evaluation.
+
+    TOCTOU note: the check is read-only; the audit INSERT happens in
+    ``_record_login_attempt`` after credential verification. Under
+    concurrent traffic ``workers`` requests can each pass the check
+    before any inserts land, so a cap of N can be exceeded by up to
+    ``workers - 1`` in flight. This bounds argon2 CPU work to
+    ``cap * workers`` rather than ``cap``, which is acceptable —
+    tightening would require a SELECT … FOR UPDATE on a hot row and is
+    not worth the contention for the threat model.
     """
     widest_window_s = max(
         cfg.login_global_window_s,
@@ -355,6 +369,15 @@ def login(
     ``cfg`` defaults to ``AuthConfig()`` so test call sites that don't
     care about thresholds still work. Production callers should pass the
     loaded ``LocalmailConfig.auth``.
+
+    Caller invariant: ``conn`` must have no uncommitted writes when this
+    is invoked. ``_record_login_attempt`` and ``_maybe_sweep`` each call
+    ``conn.commit()`` eagerly so the audit row + sweep DELETE survive the
+    route's outer rollback on ``AuthenticationFailed`` — any uncommitted
+    work on the connection would be force-committed alongside the audit
+    row, which is almost never what the caller wants. The HTTP route in
+    ``localmail.serve.routes.auth`` only runs read-only work before
+    ``login()`` so this is safe; new callers must obey the same rule.
     """
     if cfg is None:
         cfg = AuthConfig()
@@ -375,6 +398,13 @@ def login(
         _record_login_attempt(conn, username, client_ip, "failure")
         _maybe_sweep(conn, cfg)
         raise AuthenticationFailed("invalid username or password")
+    # On the success path we commit the "success" audit row BEFORE
+    # ``issue_token`` runs its INSERT. If the token INSERT then fails we'd
+    # leave a "success" row without a usable token — the per-user counter
+    # resets but the caller has to retry. The blast radius is bounded
+    # (one stale-success at most; user just logs in again) and reversing
+    # the order would defeat the survives-route-rollback guarantee
+    # documented on ``_record_login_attempt``.
     _record_login_attempt(conn, username, client_ip, "success")
     _maybe_sweep(conn, cfg)
     return issue_token(conn, row[0])

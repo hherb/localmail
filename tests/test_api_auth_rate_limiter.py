@@ -5,6 +5,9 @@ import psycopg
 import pytest
 
 from localmail.api import auth as auth_mod
+from localmail.api.auth import create_user, login, reset_login_rate_limiter
+from localmail.api.errors import AuthenticationFailed, RateLimited
+from localmail.config import AuthConfig
 
 
 def _count(conn: psycopg.Connection, sql: str, *params) -> int:
@@ -43,8 +46,59 @@ def test_record_login_attempt_rejects_bad_outcome(db_conn: psycopg.Connection) -
     db_conn.rollback()
 
 
-from localmail.api.errors import RateLimited
-from localmail.config import AuthConfig
+def test_record_login_attempt_swallows_undefined_table(
+    db_conn: psycopg.Connection, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Migration-race fail-open: missing audit table must not 500 the login.
+
+    Mimics the rare window between ``localmail init-db`` and ``localmail
+    serve`` start where ``api_login_attempts`` doesn't exist yet. The
+    insert must log at WARNING and return cleanly — the rate limiter is
+    effectively bypassed for that request, but the user can still log in.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute("ALTER TABLE api_login_attempts RENAME TO api_login_attempts_tmp")
+    db_conn.commit()
+    try:
+        with caplog.at_level("WARNING", logger="localmail.api.auth"):
+            auth_mod._record_login_attempt(db_conn, "alice", "1.1.1.1", "failure")
+        assert any(
+            "api_login_attempts insert failed" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        db_conn.rollback()
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE api_login_attempts_tmp RENAME TO api_login_attempts"
+            )
+        db_conn.commit()
+
+
+def test_record_login_attempt_propagates_non_recoverable_error(
+    db_conn: psycopg.Connection,
+) -> None:
+    """Narrow fail-open: errors that look like bugs must NOT be swallowed.
+
+    Adds an unexpected NOT NULL column to force a ``NotNullViolation``
+    (an ``IntegrityError`` subclass — not in the narrowed catch tuple)
+    on the insert. The previous broad ``except psycopg.Error`` would
+    have masked the bug behind a WARNING log; the narrowed catch now
+    lets it propagate to the route's 500 handler instead.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE api_login_attempts ADD COLUMN must_be_set TEXT NOT NULL"
+        )
+    db_conn.commit()
+    try:
+        with pytest.raises(psycopg.errors.NotNullViolation):
+            auth_mod._record_login_attempt(db_conn, "alice", "1.1.1.1", "failure")
+        db_conn.rollback()
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute("ALTER TABLE api_login_attempts DROP COLUMN must_be_set")
+        db_conn.commit()
 
 
 def _record_many(
@@ -197,9 +251,6 @@ def test_sweep_no_op_when_lock_contended(db_conn: psycopg.Connection, db_dsn: st
 
 
 # --- Task 8: login() integration with the DB-backed limiter ----------------
-
-from localmail.api.auth import create_user, login, reset_login_rate_limiter
-from localmail.api.errors import AuthenticationFailed
 
 
 @pytest.fixture(autouse=True)

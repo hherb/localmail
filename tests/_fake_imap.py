@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -11,8 +12,8 @@ class FakeFolder:
     delimiter: str = "/"
     flags: tuple[str, ...] = ()
     uidvalidity: int = 1
-    # Maps UID -> (raw_bytes, flags_tuple).
-    messages: dict[int, tuple[bytes, tuple[str, ...]]] = field(default_factory=dict)
+    # Maps UID -> (raw_bytes, flags_tuple, internal_date | None).
+    messages: dict[int, tuple[bytes, tuple[str, ...], datetime | None]] = field(default_factory=dict)
 
     @property
     def uidnext(self) -> int:
@@ -38,10 +39,16 @@ class FakeIMAPClient:
         self.folders[name] = f
         return f
 
-    def append(self, folder: str, raw: bytes, flags: tuple[str, ...] = ()) -> int:
+    def append(
+        self,
+        folder: str,
+        raw: bytes,
+        flags: tuple[str, ...] = (),
+        internal_date: datetime | None = None,
+    ) -> int:
         f = self.folders[folder]
         uid = f.uidnext
-        f.messages[uid] = (raw, flags)
+        f.messages[uid] = (raw, flags, internal_date)
         return uid
 
     def bump_uidvalidity(self, folder: str) -> None:
@@ -110,6 +117,9 @@ class FakeIMAPClient:
             entry = self._selected.messages.get(int(uid))
             if entry is None:
                 continue
-            raw, flags = entry
-            out[int(uid)] = {b"BODY[]": raw, b"FLAGS": flags, b"UID": int(uid)}
+            raw, flags, internal_date = entry
+            out[int(uid)] = {
+                b"BODY[]": raw, b"FLAGS": flags, b"UID": int(uid),
+                b"INTERNALDATE": internal_date,
+            }
         return out

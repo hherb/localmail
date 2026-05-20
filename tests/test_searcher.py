@@ -83,14 +83,14 @@ def test_searcher_timing_ms_populated(db_dsn, db_conn):
 
 
 def _seed_with_dates(conn, rows):
-    """Seed messages with explicit (account_name, subject, date_sent, date_received).
+    """Seed messages with explicit (account_name, subject, date_sent, internal_date).
 
     Returns the list of inserted message IDs in seed order.
     """
     ids = []
     accounts: dict[str, int] = {}
     with conn.cursor() as cur:
-        for i, (acct_name, subject, date_sent, date_received) in enumerate(rows):
+        for i, (acct_name, subject, date_sent, internal_date) in enumerate(rows):
             if acct_name not in accounts:
                 cur.execute(
                     "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
@@ -100,17 +100,19 @@ def _seed_with_dates(conn, rows):
                 accounts[acct_name] = cur.fetchone()[0]
             cur.execute(
                 "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
-                " body_text, headers, raw_bytes, size_bytes, date_sent, date_received)"
+                " body_text, headers, raw_bytes, size_bytes, date_sent, internal_date)"
                 " VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, 'r', 1, %s, %s) RETURNING id",
                 (accounts[acct_name], f"<m{i}>", bytes([i + 1]) * 32, subject, "body",
-                 date_sent, date_received),
+                 date_sent, internal_date),
             )
             ids.append(cur.fetchone()[0])
     conn.commit()
     return ids
 
 
-def test_searcher_empty_query_returns_messages_by_date_sent_desc(db_dsn, db_conn):
+def test_searcher_empty_query_returns_messages_by_coalesce_internal_date_date_sent_desc(
+    db_dsn, db_conn,
+):
     """An empty free-text query is the canonical "show me my mail" default.
 
     The hybrid pipeline degenerates badly for empty queries: BM25 arms
@@ -119,21 +121,19 @@ def test_searcher_empty_query_returns_messages_by_date_sent_desc(db_dsn, db_conn
     `rerank_pool_size` (default 20) arbitrary-looking hits. The Searcher
     must detect this and fall back to a date-ordered list.
 
-    Ordering is `date_sent DESC NULLS LAST` because `messages.date_received`
-    is populated by `DEFAULT now()` (sync.py doesn't pass IMAP INTERNALDATE
-    through), so a backfilled 2023 archive row gets a fresher
-    `date_received` than mail synced last week. The seed diverges
-    `date_sent` from `date_received` so the test fails if anyone switches
-    back to `date_received`.
+    Ordering is ``COALESCE(internal_date, date_sent) DESC NULLS LAST,
+    id DESC``: rows backfilled to a real IMAP INTERNALDATE sort by it;
+    legacy rows fall through to the email header date. The seed mixes
+    both states.
     """
     now = datetime.now(timezone.utc)
     mid_a, mid_b, mid_c = _seed_with_dates(db_conn, [
-        # date_sent oldest, date_received NEWEST: archive backfilled today.
-        ("a", "archive backfill", now - timedelta(days=365), now - timedelta(hours=1)),
-        # date_sent newest, date_received oldest.
-        ("a", "fresh email", now - timedelta(hours=1), now - timedelta(days=5)),
-        # date_sent middle.
-        ("a", "middle", now - timedelta(days=30), now - timedelta(days=2)),
+        # internal_date populated, oldest of the three.
+        ("a", "old backfilled archive", now - timedelta(days=365), now - timedelta(days=30)),
+        # internal_date NULL, fall through to date_sent — newest signal.
+        ("a", "fresh, not yet backfilled", now - timedelta(hours=1), None),
+        # internal_date populated, middle position.
+        ("a", "middle by INTERNALDATE", now - timedelta(days=10), now - timedelta(days=2)),
     ])
     cfg = SearchConfig()
     pool = open_pool(db_dsn)

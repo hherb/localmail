@@ -49,25 +49,24 @@ def changes(
             return {"new_messages": [], "next_cursor": since or "0"}
         with conn.cursor() as cur:
             if since_id is None:
-                # Initial-load order: `date_sent DESC NULLS LAST, m.id DESC`.
-                # User intent: "date the original email was received at the
-                # IMAP server, or if unavailable, date it was sent" — i.e.
-                # `COALESCE(INTERNALDATE, date_sent) DESC`. The schema's
-                # `date_received` column should hold INTERNALDATE but
-                # `sync.py:upsert_message` doesn't pass it through, so the
-                # column is `DEFAULT now()` (= sync time). Until that's
-                # fixed and existing rows backfilled, `date_sent` is the
-                # only column with meaningful per-message variance for an
-                # existing archive. The empty-query search fallback uses
-                # the same ordering so "All Mail" and a cleared search
-                # agree.
+                # Initial-load order:
+                # `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC`.
+                # `internal_date` holds the IMAP server's INTERNALDATE — when
+                # the email actually arrived at the mailbox — populated by
+                # sync.py going forward and backfillable for legacy rows via
+                # `localmail backfill-internal-date`. `date_sent` (header
+                # `Date:`) is the fallback for rows not yet backfilled. The
+                # empty-query search uses the same ordering so "All Mail" and
+                # a cleared search agree. The expression matches the
+                # `messages_recent_idx` index (migration 0018) so the planner
+                # can use it instead of sorting the whole table.
                 cur.execute(
                     """SELECT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
                               m.account_id, a.name
                          FROM messages m JOIN accounts a ON a.id = m.account_id
                         WHERE m.date_received < now() - make_interval(secs => %s)
                           AND m.account_id = ANY(%s)
-                        ORDER BY m.date_sent DESC NULLS LAST, m.id DESC
+                        ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC
                         LIMIT %s""",
                     (horizon_s, allowed, _DEFAULT_LIMIT),
                 )

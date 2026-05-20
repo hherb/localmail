@@ -20,7 +20,7 @@ from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
 from .search import create_searcher
-from .sync import retry_failed_messages, sync_account
+from .sync import backfill_internal_date, retry_failed_messages, sync_account
 
 
 def _is_loopback_bind(bind: str) -> bool:
@@ -320,6 +320,58 @@ def retry_failed(ctx: click.Context, account_name: str | None) -> None:
             account_id=acct_id,
         )
     click.echo(f"recovered: {ok}    still failing: {still}")
+
+
+@main.command("backfill-internal-date")
+@click.option("--account", "account_name", default=None,
+              help="Restrict to one account (default: all).")
+@click.option("--no-ssl", is_flag=True, default=False,
+              help="Disable TLS — for local-test IMAP servers only.")
+@click.pass_context
+def backfill_internal_date_cmd(
+    ctx: click.Context, account_name: str | None, no_ssl: bool,
+) -> None:
+    """Populate `messages.internal_date` for rows where it is NULL by
+    re-fetching INTERNALDATE from the IMAP server.
+
+    Pre-migration-0018 syncs didn't store INTERNALDATE; every row was
+    inserted with `internal_date` left implicitly NULL (or the legacy
+    `date_received` column held sync time, which migration 0018 already
+    decoupled). This pass walks every mailbox and runs a single
+    `FETCH UID INTERNALDATE` per UID — no body bytes are refetched, so
+    it's fast and bandwidth-cheap. Idempotent; safe to re-run.
+    """
+    cfg = load_config(ctx.obj["config_path"])
+    accounts = (
+        [_account_or_die(cfg, account_name)] if account_name else cfg.accounts
+    )
+    if not accounts:
+        raise click.ClickException("no accounts configured")
+    gmail_secrets = cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
+    total_scanned = 0
+    total_updated = 0
+    with psycopg.connect(cfg.database.dsn, autocommit=False) as conn:
+        for account in accounts:
+            click.echo(f"--- backfilling {account.name} ---")
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM accounts WHERE name = %s", (account.name,))
+                row = cur.fetchone()
+                if not row:
+                    click.echo(f"  {account.name}: not in DB; skipping")
+                    continue
+                account_id = int(row[0])
+            with open_connection(
+                account, ssl=not no_ssl, gmail_client_secrets=gmail_secrets,
+            ) as imap:
+                scanned, updated = backfill_internal_date(
+                    conn, imap,
+                    account_id=account_id,
+                    progress=click.echo,
+                )
+            total_scanned += scanned
+            total_updated += updated
+            click.echo(f"  {account.name}: {updated}/{scanned} updated")
+    click.echo(f"done: {total_updated} rows updated across {total_scanned} candidates")
 
 
 @main.command("run")

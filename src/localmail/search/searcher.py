@@ -273,19 +273,16 @@ class Searcher:
         parsed: ParsedQuery,
         limit: int,
     ) -> list["SearchResult"]:
-        """Empty-query fallback: SELECT messages ORDER BY date_sent DESC NULLS LAST.
+        """Empty-query fallback: SELECT messages ORDER BY
+        ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC``.
 
-        User intent: "date the original email was received at the IMAP
-        server, or if unavailable, date it was sent" — i.e.
-        ``COALESCE(INTERNALDATE, date_sent) DESC``. The schema's
-        ``date_received`` column should hold INTERNALDATE but
-        ``sync.py:upsert_message`` doesn't pass it through, so the column
-        is ``DEFAULT now()`` (= sync time). Until that's fixed and
-        existing rows backfilled, ``date_sent`` is the only column with
-        meaningful per-message variance for an existing archive — a 2023
-        archive message backfilled yesterday gets a fresher
-        ``date_received`` than mail synced last week, defeating the user
-        expectation of "newest email on top".
+        ``internal_date`` (migration 0018) holds the IMAP server's
+        INTERNALDATE — when the email actually arrived at the mailbox.
+        sync.py populates it on insert; legacy rows are populated via
+        ``localmail backfill-internal-date``. ``date_sent`` (header
+        ``Date:``) is the fallback for rows not yet backfilled. The
+        expression matches the ``messages_recent_idx`` index so the
+        planner can avoid a full table sort.
 
         Shares ``_filter_sql`` with the retrieval arms so structured
         filters (account_id, folder_id, from/to/subject substrings, date
@@ -300,7 +297,7 @@ class Searcher:
               FROM messages m
              WHERE TRUE
              {where_extra}
-             ORDER BY m.date_sent DESC NULLS LAST, m.id DESC
+             ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC
              LIMIT %s
         """
         params: list[Any] = [*where_params, limit]

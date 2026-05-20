@@ -81,57 +81,66 @@ def test_changes_with_bogus_cursor_400(db_dsn: str, api_token: str) -> None:
     assert body["type"] == "/problems/validation-failed"
 
 
-def _seed_msg_with_dates(
+def _seed_msg_full(
     conn: psycopg.Connection,
     *,
-    date_sent: datetime,
-    date_received: datetime,
+    date_sent: datetime | None,
+    internal_date: datetime | None,
     suffix: str,
+    date_received: datetime | None = None,
 ) -> int:
+    """Seed a message with explicit ordering-relevant dates.
+
+    ``date_received`` defaults to ``now()`` so the `/v1/changes` safe-horizon
+    filter doesn't mask the row when the test runs with horizon_s=0.
+    """
     aid = _ensure_account(conn)
+    when_received = date_received if date_received is not None else datetime.now(timezone.utc)
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO messages (account_id, message_id, subject, raw_bytes, raw_sha256,
-                                     size_bytes, headers, attachments, date_sent, date_received)
-               VALUES (%s, %s, 'x', 'r', %s, 1, '{}'::jsonb, '[]'::jsonb, %s, %s) RETURNING id""",
-            (aid, f"<{suffix}@x>", bytes.fromhex(suffix * 32), date_sent, date_received),
+                                     size_bytes, headers, attachments,
+                                     date_sent, internal_date, date_received)
+               VALUES (%s, %s, 'x', 'r', %s, 1, '{}'::jsonb, '[]'::jsonb, %s, %s, %s) RETURNING id""",
+            (aid, f"<{suffix}@x>", bytes.fromhex(suffix * 32),
+             date_sent, internal_date, when_received),
         )
         row = cur.fetchone(); assert row is not None
         return row[0]
 
 
-def test_changes_no_cursor_orders_by_date_sent_desc(
+def test_changes_no_cursor_orders_by_coalesce_internal_date_date_sent_desc(
     db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
 ) -> None:
-    """Initial-load `/v1/changes` must return messages by `date_sent DESC`.
+    """Initial-load `/v1/changes` orders by
+    ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC``.
 
-    `m.id` reflects local insertion order — for a sync that processes archive
-    folders after the inbox, ordering by `id DESC` surfaces decade-old
-    messages at the top. `date_received` looks more natural but is populated
-    by ``DEFAULT now()`` (sync doesn't pass IMAP INTERNALDATE through), so a
-    backfilled archive row gets a fresher `date_received` than mail that
-    actually arrived earlier. `date_sent` is the email's own header date —
-    the only column with meaningful per-message variance for an existing
-    archive.
+    The user's "received date" intent maps to the IMAP server INTERNALDATE
+    (``messages.internal_date`` after migration 0018). Rows that have been
+    backfilled to a real INTERNALDATE sort by that; legacy rows where the
+    backfill hasn't run yet fall through to ``date_sent`` (the header
+    ``Date:``) so the ordering stays meaningful even mid-rollout.
 
-    The seed deliberately diverges `date_sent` from `date_received` so the
-    test fails if anyone switches the ORDER BY back to `date_received`.
+    The seed exercises every coalesce branch:
+      * mid_a — internal_date populated, sorts by it (recent)
+      * mid_b — internal_date NULL, falls through to date_sent (recent)
+      * mid_c — both populated, sorts by internal_date (oldest of the three)
     """
     now = datetime.now(timezone.utc)
-    # mid_a: received recently, but the email's date_sent dates from years ago.
-    mid_a = _seed_msg_with_dates(
-        db_conn, date_sent=now - timedelta(days=365), date_received=now - timedelta(hours=1),
-        suffix="aa",
+    # mid_a: internal_date = most recent → at top.
+    mid_a = _seed_msg_full(
+        db_conn, date_sent=now - timedelta(days=365),
+        internal_date=now - timedelta(hours=1), suffix="aa",
     )
-    # mid_b: received older, but the email's date_sent is the most recent.
-    mid_b = _seed_msg_with_dates(
-        db_conn, date_sent=now - timedelta(hours=1), date_received=now - timedelta(days=2),
-        suffix="bb",
+    # mid_b: no internal_date; date_sent is the second-newest signal.
+    mid_b = _seed_msg_full(
+        db_conn, date_sent=now - timedelta(days=1),
+        internal_date=None, suffix="bb",
     )
-    # mid_c: middle by both date_sent and date_received.
-    mid_c = _seed_msg_with_dates(
-        db_conn, date_sent=now - timedelta(days=30), date_received=now - timedelta(days=1),
-        suffix="cc",
+    # mid_c: internal_date oldest among the three.
+    mid_c = _seed_msg_full(
+        db_conn, date_sent=now - timedelta(hours=1),
+        internal_date=now - timedelta(days=30), suffix="cc",
     )
     db_conn.commit()
     grant_alice_all_accounts()
@@ -139,7 +148,7 @@ def test_changes_no_cursor_orders_by_date_sent_desc(
     r = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200
     ids = [m["message_id"] for m in r.json()["new_messages"]]
-    assert ids == [str(mid_b), str(mid_c), str(mid_a)]
+    assert ids == [str(mid_a), str(mid_b), str(mid_c)]
 
 
 def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db_conn) -> None:

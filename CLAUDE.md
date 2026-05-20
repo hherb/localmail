@@ -42,6 +42,7 @@ uv run localmail list-failed [--account N] [--limit K]   # show messages sync sk
 uv run localmail retry-failed [--account N]    # re-attempt every failed message
 uv run localmail extract-backfill              # one-shot extraction backfill for all blobs
 uv run localmail lang-backfill                 # one-shot body_lang detection for existing rows
+uv run localmail backfill-internal-date [--account N]  # IMAP INTERNALDATE for legacy rows
 uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
 uv run localmail retry-failed-extractions      # re-attempt every failed extraction
 # search-status reports Phase 2 attachment_text/attachment_chunks counts and
@@ -96,7 +97,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0017_messages_body_lang_pending_index.sql
+migrations/         # 0001_init.sql … 0018_messages_date_received_internaldate.sql
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py)
@@ -145,6 +146,24 @@ are `NOT NULL` on `messages`. `subject`, `body_text`, `body_html`, `from_addr`,
 `to_addrs`, etc. are all nullable — real mail occasionally lacks any of them.
 The parser normalizes empty strings to NULL so `WHERE body_text IS NULL` is
 the canonical "no body" query.
+
+**Date columns** (`date_sent`, `date_received`, `internal_date`):
+- `date_sent` — email header `Date:`. Sender-supplied, may be wrong/future,
+  usually accurate. Nullable.
+- `internal_date` — IMAP server INTERNALDATE (RFC 3501), "when this email
+  arrived at the mailbox". Populated by `sync.py:upsert_message` on insert;
+  legacy rows (pre-migration-0018) are NULL until backfilled via
+  `localmail backfill-internal-date`. Nullable.
+- `date_received` — local sync timestamp, `NOT NULL`. Not a meaningful
+  "received" date; reflects "when localmail wrote this row". Used by
+  `/v1/changes` as a safe-horizon filter (`< now() - changes_safe_horizon_s`)
+  and for audit.
+
+The canonical "show me recent mail" ordering is
+`ORDER BY COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC`,
+backed by the expression index `messages_recent_idx`. Used by both the
+`/v1/changes` initial-fetch branch and the `Searcher` empty-query fallback
+(`_list_recent_messages`).
 
 Folder filtering supports `folder_allow`, `folder_deny`, and **`folder_deny_flags`**
 (by RFC 6154 IMAP special-use flag, e.g. `\Trash`, `\Junk`, `\All`). Prefer
@@ -411,7 +430,7 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0017_messages_body_lang_pending_index.sql`; next would be `0018_*.sql`.
+  Latest is `0018_messages_date_received_internaldate.sql`; next would be `0019_*.sql`.
 
 ## Testing notes
 

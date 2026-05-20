@@ -1,8 +1,9 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from localmail.config import AccountConfig
-from localmail.sync import folders_to_sync, sync_account
+from localmail.sync import backfill_internal_date, folders_to_sync, sync_account
 
 from . import _eml
 from ._fake_imap import FakeIMAPClient
@@ -85,6 +86,124 @@ def test_first_sync_imports_all_messages(db_conn, tmp_path: Path):
         uidnext, uidvalidity = cur.fetchone()
         assert uidvalidity == 1
         assert uidnext == 3  # max UID seen (2) + 1
+
+
+def test_sync_persists_imap_internaldate_to_internal_date_column(
+    db_conn, tmp_path: Path,
+) -> None:
+    """sync.py must thread IMAP INTERNALDATE into `messages.internal_date`.
+
+    Before this fix, `sync_mailbox` fetched INTERNALDATE alongside
+    BODY[]/FLAGS but discarded it — every row landed with `date_received
+    = DEFAULT now()` and no record of when the email actually arrived at
+    the IMAP server. The user-visible symptom was that "newest mail on
+    top" surfaced freshly-synced archive backfills above genuinely-recent
+    arrivals. This test pins the wiring so a future refactor can't break
+    it silently.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    sent_at_imap = datetime(2024, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
+    imap.append("INBOX", _eml.plain(), internal_date=sent_at_imap)
+
+    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT internal_date FROM messages")
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == sent_at_imap
+
+
+def test_sync_leaves_internal_date_null_when_imap_omits_it(
+    db_conn, tmp_path: Path,
+) -> None:
+    """Some IMAP servers / fetches may omit INTERNALDATE (or return a
+    non-datetime sentinel). The column must accept NULL in that case;
+    the backfill CLI can populate it later from a dedicated FETCH pass.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())  # no internal_date
+
+    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT internal_date FROM messages")
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] is None
+
+
+def test_backfill_internal_date_fills_nulls_from_imap(
+    db_conn, tmp_path: Path,
+) -> None:
+    """`backfill_internal_date` re-fetches INTERNALDATE for rows where
+    the column is NULL and writes it. The legacy archive — synced before
+    INTERNALDATE was threaded through — is the primary motivation.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    # First sync without INTERNALDATE so internal_date lands as NULL —
+    # mimics the pre-migration-0018 archive state.
+    imap.append("INBOX", _eml.plain())
+    imap.append("INBOX", _eml.utf8_subject())
+    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages WHERE internal_date IS NULL")
+        assert cur.fetchone()[0] == 2
+
+    # Now the IMAP server starts returning INTERNALDATE for those UIDs.
+    expected = {
+        1: datetime(2022, 1, 1, 10, 0, 0, tzinfo=timezone.utc),
+        2: datetime(2023, 6, 15, 14, 30, 0, tzinfo=timezone.utc),
+    }
+    inbox = imap.folders["INBOX"]
+    for uid, when in expected.items():
+        raw, flags, _ = inbox.messages[uid]
+        inbox.messages[uid] = (raw, flags, when)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts WHERE name = 'acct'")
+        account_id = cur.fetchone()[0]
+    scanned, updated = backfill_internal_date(
+        db_conn, imap, account_id=account_id,
+    )
+    assert (scanned, updated) == (2, 2)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT ml.uid, m.internal_date FROM messages m "
+            "JOIN message_labels ml ON ml.message_id = m.id ORDER BY ml.uid"
+        )
+        rows = cur.fetchall()
+    assert {uid: when for uid, when in rows} == expected
+
+
+def test_backfill_internal_date_is_idempotent_and_skips_populated_rows(
+    db_conn, tmp_path: Path,
+) -> None:
+    """Already-populated rows must not be overwritten by a re-run — the
+    column may carry a different (more authoritative) value supplied by
+    a custom path, and a backfill pass shouldn't clobber it.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    when_imap = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    imap.append("INBOX", _eml.plain(), internal_date=when_imap)
+    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    # Sanity: the regular sync already populated internal_date.
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT internal_date FROM messages")
+        assert cur.fetchone()[0] == when_imap
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts WHERE name = 'acct'")
+        account_id = cur.fetchone()[0]
+    scanned, updated = backfill_internal_date(
+        db_conn, imap, account_id=account_id,
+    )
+    assert (scanned, updated) == (0, 0)
 
 
 def test_resync_inserts_zero_new_messages(db_conn, tmp_path: Path):
@@ -228,10 +347,10 @@ def test_poison_pill_message_is_skipped_without_breaking_the_batch(
 
     real_upsert = sync_mod.upsert_message
 
-    def maybe_explode(conn, *, account_id, parsed):
+    def maybe_explode(conn, *, account_id, parsed, internal_date=None):
         if parsed.message_id == "<alt-456@example.com>":
             raise ValueError("simulated psycopg.DataError on the poison message")
-        return real_upsert(conn, account_id=account_id, parsed=parsed)
+        return real_upsert(conn, account_id=account_id, parsed=parsed, internal_date=internal_date)
 
     monkeypatch.setattr(sync_mod, "upsert_message", maybe_explode)
 
@@ -276,10 +395,10 @@ def test_retry_failed_messages_recovers_after_parser_fix(
     real_upsert = sync_mod.upsert_message
     explode = {"on": True}
 
-    def maybe_explode(conn, *, account_id, parsed):
+    def maybe_explode(conn, *, account_id, parsed, internal_date=None):
         if explode["on"]:
             raise ValueError("transient parser failure")
-        return real_upsert(conn, account_id=account_id, parsed=parsed)
+        return real_upsert(conn, account_id=account_id, parsed=parsed, internal_date=internal_date)
 
     monkeypatch.setattr(sync_mod, "upsert_message", maybe_explode)
     sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)

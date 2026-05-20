@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +8,7 @@ import psycopg
 import pytest
 
 from localmail.api.attachments import (
+    _open_blob_file_at,
     get_attachment_blob_info,
     get_attachment_filename,
     get_attachment_metadata,
@@ -244,8 +246,8 @@ def test_get_attachment_blob_info_returns_mime_size_and_path(
 ) -> None:
     """Cheap probe used before the conditional-GET 304 short-circuit (#62)
     returns ``(mime, size, path)``. Path is included so the body-carrying
-    200/206 path can pass the tuple to ``open_attachment_bytes`` as
-    ``prefetched=`` and avoid a duplicate DB roundtrip (#64)."""
+    200/206 path can hand it straight to ``_open_blob_file_at`` and avoid
+    a duplicate DB roundtrip (#64, #67)."""
     sha = "60" * 32
     aid = _seed_blob(db_conn, tmp_path, sha, b"%PDF-1.4 probe")
     db_conn.commit()
@@ -298,11 +300,13 @@ def test_get_attachment_blob_info_does_not_touch_filesystem(
 def test_get_attachment_blob_info_returns_path(
     db_conn: psycopg.Connection, tmp_path: Path,
 ) -> None:
-    """#64: the probe returns (mime, size, path) so the route can pass
-    the tuple straight to ``open_attachment_bytes`` as ``prefetched=``,
-    eliminating the duplicate SELECT on the 200/206 body-carrying
-    path. Path is `SELECT`ed alongside (mime, size) at zero extra cost
-    — same row, same primary-key lookup."""
+    """#64: the probe returns (mime, size, path) so the route can hand
+    it straight to ``_open_blob_file_at``, eliminating the duplicate
+    SELECT on the 200/206 body-carrying path (#67 replaced the prior
+    ``open_attachment_bytes(..., prefetched=)`` mechanism with a
+    distinct helper that takes no ``conn``, so the ACL bypass can't
+    happen by accident). Path is `SELECT`ed alongside (mime, size) at
+    zero extra cost — same row, same primary-key lookup."""
     sha = "70" * 32
     aid = _seed_blob(db_conn, tmp_path, sha, b"%PDF-1.4 probe")
     db_conn.commit()
@@ -314,48 +318,45 @@ def test_get_attachment_blob_info_returns_path(
     assert path == str(tmp_path / "blobs" / sha[:2] / sha[2:4] / sha)
 
 
-def test_open_attachment_bytes_with_prefetched_skips_db(
-    db_conn: psycopg.Connection, tmp_path: Path,
-) -> None:
-    """#64: when ``prefetched=(mime, size, path)`` is supplied, the
-    function must skip both the ACL EXISTS predicate and the
-    attachment_blobs SELECT — the caller asserts the row was already
-    validated by the cheap probe. We prove the skip by passing an
-    empty grant list and a sha with no DB row: without ``prefetched``
-    this would raise NotFound, but with ``prefetched`` it should open
-    the on-disk file just from the path the caller provided."""
+def test_open_blob_file_at_opens_known_path(tmp_path: Path) -> None:
+    """#64 / #67: the ACL-free file-open helper opens a known on-disk path
+    without any DB roundtrip. The probe (``get_attachment_blob_info``) is
+    the boundary; this helper just turns the cleared path into a file
+    handle. Replaces the prior ``open_attachment_bytes(..., prefetched=)``
+    kwarg, which was a footgun (no SQL-level guard against accidental
+    ACL bypass by a future caller)."""
     sha = "71" * 32
     fanout = tmp_path / "blobs" / sha[:2] / sha[2:4]
     fanout.mkdir(parents=True, exist_ok=True)
     blob_path = fanout / sha
-    payload = b"hello prefetched"
+    payload = b"hello blob"
     blob_path.write_bytes(payload)
-    db_conn.commit()
-    fp, mime, size = open_attachment_bytes(
-        db_conn, sha,
-        allowed_account_ids=[],
-        prefetched=("application/octet-stream", len(payload), str(blob_path)),
-    )
+    fp = _open_blob_file_at(str(blob_path), sha)
     try:
-        assert mime == "application/octet-stream"
-        assert size == len(payload)
         assert fp.read() == payload
     finally:
         fp.close()
 
 
-def test_open_attachment_bytes_with_prefetched_still_checks_file(
-    db_conn: psycopg.Connection, tmp_path: Path,
-) -> None:
-    """#64: ``prefetched`` only short-circuits the DB lookup — the
-    file-existence check stays so a blob deleted between probe and
-    open still surfaces as NotFound rather than a confusing
-    FileNotFoundError mid-stream."""
+def test_open_blob_file_at_missing_file_raises_not_found(tmp_path: Path) -> None:
+    """#64 / #67: the file-existence check stays in the helper so a blob
+    deleted between probe and open surfaces as NotFound rather than a
+    confusing FileNotFoundError mid-stream."""
     sha = "72" * 32
     bad_path = tmp_path / "blobs" / sha[:2] / sha[2:4] / sha
     with pytest.raises(NotFound):
-        open_attachment_bytes(
-            db_conn, sha,
-            allowed_account_ids=[],
-            prefetched=("text/plain", 0, str(bad_path)),
-        )
+        _open_blob_file_at(str(bad_path), sha)
+
+
+def test_open_attachment_bytes_has_no_prefetched_kwarg() -> None:
+    """#67 acceptance: no public-API footgun. The prior ``prefetched=``
+    kwarg let a caller skip the ACL EXISTS predicate with no SQL-level
+    guard — anyone copy-pasting from the route would have silently
+    bypassed ACL. The split into ``_open_blob_file_at`` removes the
+    kwarg entirely; safe-by-default for every caller."""
+    sig = inspect.signature(open_attachment_bytes)
+    assert "prefetched" not in sig.parameters, (
+        "open_attachment_bytes must not expose a prefetched= kwarg — "
+        "see #67. Use the ACL-cleared probe + _open_blob_file_at pair "
+        "in the route instead."
+    )

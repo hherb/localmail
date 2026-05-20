@@ -109,10 +109,10 @@ def get_attachment_blob_info(
     work and the JSONB filename scan that are wasted when
     ``If-None-Match`` is going to short-circuit to 304.
 
-    Returns ``path`` so the route can pass the full tuple straight to
-    ``open_attachment_bytes`` as ``prefetched=`` on the body-carrying
-    200/206 path, collapsing the previous probe+open duplicate ACL +
-    SELECT to a single pair (#64).
+    Returns ``path`` so the route — once the probe has cleared ACL — can
+    hand it to :func:`_open_blob_file_at` on the body-carrying 200/206
+    path, collapsing the previous probe+open duplicate ACL + SELECT to a
+    single pair (#64).
 
     Raises ``NotFound`` if the blob row is missing or the caller's ACL
     does not include any account that references the blob.
@@ -122,12 +122,35 @@ def get_attachment_blob_info(
     )
 
 
+def _open_blob_file_at(path: str, sha256_hex: str) -> BinaryIO:
+    """Open a known blob path for streaming. **No ACL check — caller is the boundary.**
+
+    Module-private helper used after an ACL-cleared probe
+    (:func:`get_attachment_blob_info`) on the body-carrying 200/206 path,
+    so the file open doesn't re-run the ACL EXISTS predicate and the
+    ``attachment_blobs`` SELECT that the probe just ran (#64).
+
+    The ``Path.exists()`` check stays so a blob deleted between probe
+    and open surfaces as ``NotFound`` rather than a mid-stream
+    ``FileNotFoundError``. Caller closes the returned file. Raises
+    ``NotFound`` if the on-disk file is missing.
+
+    Underscore-prefixed and accepts a raw ``path`` rather than ``conn``:
+    both make it obvious at every call site that this skips ACL on
+    purpose, so it can't be reached for "by accident" the way the prior
+    ``open_attachment_bytes(..., prefetched=...)`` kwarg could (#67).
+    """
+    p = Path(path)
+    if not p.exists():
+        raise NotFound(f"attachment {sha256_hex} file missing at {path}")
+    return p.open("rb")
+
+
 def open_attachment_bytes(
     conn: psycopg.Connection,
     sha256_hex: str,
     *,
     allowed_account_ids: list[int],
-    prefetched: tuple[str, int, str] | None = None,
 ) -> tuple[BinaryIO, str, int]:
     """Open the blob file for streaming. Returns ``(file, mime_type, size)``.
 
@@ -135,25 +158,15 @@ def open_attachment_bytes(
     on-disk file is missing, or the caller's ACL does not include any
     account that references the blob.
 
-    When ``prefetched=(mime, size, path)`` is supplied, the ACL EXISTS
-    predicate and the ``attachment_blobs`` SELECT are both skipped —
-    the caller asserts the row was already validated (typically by an
-    immediately-prior ``get_attachment_blob_info`` call). The
-    ``Path.exists()`` check still runs so a blob deleted between
-    probe and open surfaces as NotFound rather than a confusing
-    FileNotFoundError mid-stream. ``allowed_account_ids`` is ignored
-    on the prefetched path — the caller is the boundary.
+    Safe-by-default — always runs the ACL EXISTS predicate. The streaming
+    route's 200/206 fast path uses the probe + :func:`_open_blob_file_at`
+    pair instead, which is the only place in the codebase that skips the
+    second ACL roundtrip (#64, #67).
     """
-    if prefetched is not None:
-        mime, size, path = prefetched
-    else:
-        mime, size, path = _lookup_blob_row(
-            conn, sha256_hex, allowed_account_ids=allowed_account_ids,
-        )
-    p = Path(path)
-    if not p.exists():
-        raise NotFound(f"attachment {sha256_hex} file missing at {path}")
-    return p.open("rb"), mime, size
+    mime, size, path = _lookup_blob_row(
+        conn, sha256_hex, allowed_account_ids=allowed_account_ids,
+    )
+    return _open_blob_file_at(path, sha256_hex), mime, size
 
 
 def get_attachment_filename(

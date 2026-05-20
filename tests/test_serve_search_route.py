@@ -46,6 +46,10 @@ def _fake_searcher_returning_one_hit():
     page.results = [result]
     page.search_token = "tok-99"
     page.timing_ms = {"total": 5.0}
+    page.has_more_in_pool = False
+    page.can_grow_pool = False
+    page.candidates_per_arm = 50
+    page.page = 1
     s.search.return_value = page
     return s
 
@@ -209,3 +213,27 @@ def test_search_malformed_folder_id_in_filter_returns_400(
     body = r.json()
     assert body["type"] == "/problems/validation-failed"
     assert "folder_id" in body["detail"]
+
+
+def test_search_cursor_forwarded_to_run_search(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """Wire-level: when the client sends `cursor`, the route must forward it
+    to run_search so continue_page fires instead of search()."""
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    # Make the fake's continue_page return the same shape as .search.
+    fake.continue_page = fake.search
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "cursor": "tok-99:2"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    fake.continue_page.assert_called_once()
+    args = fake.continue_page.call_args
+    assert args.args[0] == "tok-99"
+    assert args.args[1] == 2

@@ -42,6 +42,7 @@ class SearchRequest(BaseModel):
     # date_sent) DESC NULLS LAST. The empty-query branch is already
     # date-ordered so this is a no-op there.
     sort: Literal["rank", "date"] = "rank"
+    cursor: str | None = None
 
 
 @router.post("")
@@ -65,4 +66,5 @@ def search_endpoint(
         allowed_account_ids=allowed,
         user_id=user.id,
         sort=req.sort,
+        cursor=req.cursor,
     )

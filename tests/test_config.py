@@ -204,3 +204,10 @@ login_attempt_retention_s = 3600
     assert cfg.auth.login_attempt_retention_s == 3600
     # Defaults fill in the rest.
     assert cfg.auth.login_per_user_window_s == 60
+
+
+def test_candidates_per_arm_max_default_is_800() -> None:
+    cfg = SearchConfig()
+    assert cfg.candidates_per_arm_max == 800
+    # Sanity: max must be >= initial; otherwise grow_pool can't ever fire.
+    assert cfg.candidates_per_arm_max >= cfg.candidates_per_arm

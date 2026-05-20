@@ -126,6 +126,11 @@ class SearchConfig(BaseModel):
     candidates_per_arm: int = 50
     rrf_k: int = 60
     rerank_pool_size: int = 20
+    # Cap for transparent grow_pool growth driven by the /v1/search cursor
+    # path. When the page cursor would advance past the current cached pool
+    # and `can_grow_pool=True`, the route doubles candidates_per_arm up to
+    # this ceiling; once the ceiling is hit, next_cursor flips to null.
+    candidates_per_arm_max: int = 800
     page_size_default: int = 20
     page_size_max: int = 200
     hnsw_ef_search: int = 64

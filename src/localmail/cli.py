@@ -990,15 +990,17 @@ def serve_cmd(
             "--no-tls is only valid when --bind resolves to a loopback address"
         )
 
-    from localmail.config import ServeConfig
+    from localmail.config import AuthConfig, ServeConfig
     override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
     if override:
         dsn = override
         serve_cfg = ServeConfig()
+        auth_cfg = AuthConfig()
     else:
         cfg = load_config(ctx.obj["config_path"])
         dsn = cfg.database.dsn
         serve_cfg = cfg.serve
+        auth_cfg = cfg.auth
 
     try:
         pending = pending_migrations(dsn)
@@ -1023,7 +1025,12 @@ def serve_cmd(
     if searcher is not None and searcher._reranker is not None:
         _warm_reranker_in_background(searcher._reranker)
 
-    app = create_app(db_dsn=dsn, searcher=searcher, serve_config=serve_cfg)
+    app = create_app(
+        db_dsn=dsn,
+        searcher=searcher,
+        serve_config=serve_cfg,
+        auth_config=auth_cfg,
+    )
 
     if no_tls:
         click.echo(f"serving HTTP on {bind}:{port}", err=True)

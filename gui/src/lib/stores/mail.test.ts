@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../tauri", () => mocks);
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
-import { mail, MAX_POLL_FAILURES, MAX_RECENT_MESSAGES } from "./mail.svelte";
+import { mail, MAX_POLL_FAILURES, MAX_PENDING_NEW_MESSAGES } from "./mail.svelte";
 import { POLL_INTERVAL_MS } from "../change_poller";
 import type { AccountSummary, FolderSummary, MessageDetail, MessageSummary } from "../tauri";
 
@@ -182,37 +182,40 @@ describe("mail store", () => {
   });
 });
 
-describe("mail.mergeNewMessages", () => {
-  it("prepends fresh messages and returns the count added", () => {
+describe("mail.mergePendingNewMessages_internal", () => {
+  it("pushes fresh messages into pendingNewMessages and returns the count added", () => {
     const a = msg("1", "1");
     const b = msg("2", "1");
     const c = msg("3", "1");
-    mail.mergeNewMessages([a]);
-    const added = mail.mergeNewMessages([a, b, c]);
+    mail.mergePendingNewMessages_internal([a]);
+    const added = mail.mergePendingNewMessages_internal([a, b, c]);
     expect(added).toBe(2);
-    // dedupNewMessages preserves the incoming server order; merged result
-    // is [<new in given order>, ...existing].
-    expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["2", "3", "1"]);
+    // Incoming order preserved; newer call's fresh items prepend into buffer.
+    // After first call: pending = ["1"]. After second: fresh = ["2","3"],
+    // merged = ["2","3","1"].
+    expect(mail.snapshot.pendingNewMessages.map((m) => m.message_id)).toEqual(["2", "3", "1"]);
+    // messages list is untouched.
+    expect(mail.snapshot.messages).toHaveLength(0);
   });
 
   it("returns 0 and leaves state untouched when all incoming are duplicates", () => {
-    mail.mergeNewMessages([msg("1", "1"), msg("2", "1")]);
-    const before = mail.snapshot.messages;
-    const added = mail.mergeNewMessages([msg("1", "1"), msg("2", "1")]);
+    mail.mergePendingNewMessages_internal([msg("1", "1"), msg("2", "1")]);
+    const before = mail.snapshot.pendingNewMessages;
+    const added = mail.mergePendingNewMessages_internal([msg("1", "1"), msg("2", "1")]);
     expect(added).toBe(0);
-    expect(mail.snapshot.messages).toBe(before);
+    expect(mail.snapshot.pendingNewMessages).toBe(before);
   });
 
-  it("caps retained messages at MAX_RECENT_MESSAGES so a long-running poll loop cannot leak memory", () => {
+  it("caps the buffer at MAX_PENDING_NEW_MESSAGES so a long-running poll loop cannot leak memory", () => {
     // Seed past the cap so the trim path is exercised, then verify the
     // most-recent prefix is kept and the tail is dropped. Without the cap
     // a 30s poller would accumulate state unboundedly.
-    const ids = Array.from({ length: MAX_RECENT_MESSAGES + 50 }, (_, i) => String(i));
-    mail.mergeNewMessages(ids.map((id) => msg(id, "1")));
-    expect(mail.snapshot.messages.length).toBe(MAX_RECENT_MESSAGES);
-    expect(mail.snapshot.messages[0].message_id).toBe("0");
-    expect(mail.snapshot.messages[MAX_RECENT_MESSAGES - 1].message_id).toBe(
-      String(MAX_RECENT_MESSAGES - 1),
+    const ids = Array.from({ length: MAX_PENDING_NEW_MESSAGES + 50 }, (_, i) => String(i));
+    mail.mergePendingNewMessages_internal(ids.map((id) => msg(id, "1")));
+    expect(mail.snapshot.pendingNewMessages.length).toBe(MAX_PENDING_NEW_MESSAGES);
+    expect(mail.snapshot.pendingNewMessages[0].message_id).toBe("0");
+    expect(mail.snapshot.pendingNewMessages[MAX_PENDING_NEW_MESSAGES - 1].message_id).toBe(
+      String(MAX_PENDING_NEW_MESSAGES - 1),
     );
   });
 });
@@ -227,7 +230,7 @@ describe("mail.pollOnce", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("list_recent_messages_cmd", { since: "cur-1" });
   });
 
-  it("merges fresh messages and advances the cursor", async () => {
+  it("routes fresh messages to pendingNewMessages (not messages) and advances the cursor", async () => {
     // Prime cursor via first pollOnce.
     mocks.invoke.mockResolvedValueOnce({ new_messages: [msg("1", "1")], next_cursor: "cur-1" });
     await mail.pollOnce();
@@ -236,7 +239,9 @@ describe("mail.pollOnce", () => {
       next_cursor: "cur-3",
     });
     await mail.pollOnce();
-    expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["2", "3", "1"]);
+    // messages list stays empty; polled items go to pendingNewMessages.
+    expect(mail.snapshot.messages).toHaveLength(0);
+    expect(mail.snapshot.pendingNewMessages.map((m) => m.message_id)).toEqual(["2", "3", "1"]);
     expect(mail.changeCursor).toBe("cur-3");
   });
 
@@ -259,7 +264,9 @@ describe("mail.pollOnce", () => {
     mocks.invoke.mockResolvedValue({ new_messages: [msg("9", "1")], next_cursor: "cur-9" });
     await mail.pollOnce();
     expect(mocks.invoke).toHaveBeenCalledWith("list_recent_messages_cmd", { since: null });
-    expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["9"]);
+    // Polled item goes to pendingNewMessages, not messages.
+    expect(mail.snapshot.messages).toHaveLength(0);
+    expect(mail.snapshot.pendingNewMessages.map((m) => m.message_id)).toEqual(["9"]);
     expect(mail.changeCursor).toBe("cur-9");
   });
 
@@ -497,5 +504,86 @@ describe("setSelection refetches from /v1/messages", () => {
     mail.setSelection({ kind: "account", accountId: "42" });
     await Promise.resolve(); await Promise.resolve();
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("pendingNewMessages buffer", () => {
+  beforeEach(() => {
+    mail.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("pollOnce pushes into pendingNewMessages, not messages", async () => {
+    const tauri = await import("../tauri");
+    vi.spyOn(tauri, "listMessages").mockResolvedValue({
+      messages: [], next_cursor: null,
+    });
+    await mail.loadInitialMessages();
+    const changes = await import("../api/changes");
+    vi.spyOn(changes, "getChanges").mockResolvedValue({
+      new_messages: [
+        { message_id: "10", subject: "fresh",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+      ],
+      next_cursor: "11",
+    });
+    await mail.pollOnce();
+    expect(mail.snapshot.messages).toHaveLength(0);
+    expect(mail.snapshot.pendingNewMessages).toHaveLength(1);
+  });
+
+  it("dedups against both messages and pendingNewMessages", async () => {
+    const tauri = await import("../tauri");
+    vi.spyOn(tauri, "listMessages").mockResolvedValue({
+      messages: [
+        { message_id: "5", subject: "old",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+      ],
+      next_cursor: null,
+    });
+    await mail.loadInitialMessages();
+    const changes = await import("../api/changes");
+    vi.spyOn(changes, "getChanges").mockResolvedValue({
+      new_messages: [
+        // Same as the one already in messages — must NOT appear in pending.
+        { message_id: "5", subject: "old",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+        { message_id: "10", subject: "fresh",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+      ],
+      next_cursor: "11",
+    });
+    await mail.pollOnce();
+    expect(mail.snapshot.pendingNewMessages.map((m) => m.message_id)).toEqual(["10"]);
+  });
+
+  it("mergePendingNewMessages prepends and clears", async () => {
+    const tauri = await import("../tauri");
+    vi.spyOn(tauri, "listMessages").mockResolvedValue({
+      messages: [
+        { message_id: "5", subject: "old",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+      ],
+      next_cursor: null,
+    });
+    await mail.loadInitialMessages();
+    const changes = await import("../api/changes");
+    vi.spyOn(changes, "getChanges").mockResolvedValue({
+      new_messages: [
+        { message_id: "10", subject: "fresh",
+          from: { address: null, name: null }, date: null,
+          account: { id: "1", name: "x" } },
+      ],
+      next_cursor: "11",
+    });
+    await mail.pollOnce();
+    mail.mergePendingNewMessages();
+    expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["10", "5"]);
+    expect(mail.snapshot.pendingNewMessages).toEqual([]);
   });
 });

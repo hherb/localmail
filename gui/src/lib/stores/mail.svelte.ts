@@ -26,7 +26,7 @@
  */
 import { getChanges } from "../api/changes";
 import { formatError } from "../format_error";
-import { POLL_INTERVAL_MS, dedupNewMessages, parseCursor } from "../change_poller";
+import { POLL_INTERVAL_MS, parseCursor } from "../change_poller";
 import {
   getMessage,
   listAccounts,
@@ -39,11 +39,11 @@ import {
   type Selection,
 } from "../tauri";
 
-// Hard ceiling on retained recent messages. /v1/changes prepends fresh items
-// and a long-running session would grow this unboundedly otherwise. Picked
-// to comfortably exceed any reasonable single-page render (settings.pageSize
-// caps out around 200) while keeping memory + MessageList render bounded.
-export const MAX_RECENT_MESSAGES = 1000;
+// Soft cap for the pendingNewMessages buffer. /v1/changes pushes fresh
+// items into this buffer (not directly into `messages`); the banner shows
+// `pendingNewMessages.length`. Cap prevents an unattended tab from growing
+// the buffer unboundedly while idle.
+export const MAX_PENDING_NEW_MESSAGES = 500;
 
 // Consecutive pollOnce failures tolerated before the loop stops itself. After
 // bearer-token expiry every poll fails identically; without this the UI would
@@ -62,6 +62,7 @@ export interface MailState {
   errorMessage: string | null;
   bodyMode: "html" | "plain" | "raw";
   externalImagesAllowed: boolean;
+  pendingNewMessages: MessageSummary[];
 }
 
 function initialState(): MailState {
@@ -77,6 +78,7 @@ function initialState(): MailState {
     errorMessage: null,
     bodyMode: "html",
     externalImagesAllowed: false,
+    pendingNewMessages: [],
   };
 }
 
@@ -224,21 +226,41 @@ class MailStore {
     return promise;
   }
 
-  mergeNewMessages(incoming: readonly MessageSummary[]): number {
-    const fresh = dedupNewMessages(this.#state.messages, incoming);
-    if (fresh.length > 0) {
-      const merged = [...fresh, ...this.#state.messages];
-      this.#state.messages =
-        merged.length > MAX_RECENT_MESSAGES ? merged.slice(0, MAX_RECENT_MESSAGES) : merged;
-    }
+  /**
+   * Internal: append fresh polled messages to the pending buffer.
+   * Dedups against both `messages` and `pendingNewMessages`. Returns the
+   * number of items appended to the buffer.
+   */
+  mergePendingNewMessages_internal(incoming: readonly MessageSummary[]): number {
+    const seen = new Set<string>();
+    for (const m of this.#state.messages) seen.add(m.message_id);
+    for (const m of this.#state.pendingNewMessages) seen.add(m.message_id);
+    const fresh = incoming.filter((m) => !seen.has(m.message_id));
+    if (fresh.length === 0) return 0;
+    const merged = [...fresh, ...this.#state.pendingNewMessages];
+    this.#state.pendingNewMessages =
+      merged.length > MAX_PENDING_NEW_MESSAGES
+        ? merged.slice(0, MAX_PENDING_NEW_MESSAGES)
+        : merged;
     return fresh.length;
+  }
+
+  /**
+   * Move the pending buffer into the visible list, clearing the banner.
+   */
+  mergePendingNewMessages(): void {
+    if (this.#state.pendingNewMessages.length === 0) return;
+    this.#state.messages = [
+      ...this.#state.pendingNewMessages, ...this.#state.messages,
+    ];
+    this.#state.pendingNewMessages = [];
   }
 
   async pollOnce(): Promise<void> {
     try {
       const resp = await getChanges(this.#changeCursor);
       this.#changeCursor = parseCursor(resp.next_cursor) ?? this.#changeCursor;
-      this.mergeNewMessages(resp.new_messages);
+      this.mergePendingNewMessages_internal(resp.new_messages);
       this.#pollFailureCount = 0;
     } catch (err: unknown) {
       this.#state.errorMessage = formatError(err);

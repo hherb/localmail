@@ -38,6 +38,10 @@ pub struct SearchRequest {
     pub limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// "rank" or "date". Omitted on the wire when None so the server
+    /// applies its own default ("rank") and old servers ignore the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -122,6 +126,7 @@ mod tests {
             },
             limit: 50,
             cursor: None,
+            sort: None,
         }
     }
 
@@ -157,6 +162,22 @@ mod tests {
         let body = serde_json::to_string(&r).unwrap();
         assert!(body.contains("\"account_ids\":[\"1\",\"3\"]"));
         assert!(body.contains("\"folder_ids\":[\"42\"]"));
+    }
+
+    #[test]
+    fn sort_omitted_from_wire_when_none() {
+        // Old servers that pre-date the `sort` field must continue to
+        // deserialize the body. The simplest contract is: omit on None.
+        let body = serde_json::to_string(&req()).unwrap();
+        assert!(!body.contains("\"sort\""));
+    }
+
+    #[test]
+    fn sort_serialises_as_string_when_set() {
+        let mut r = req();
+        r.sort = Some("date".into());
+        let body = serde_json::to_string(&r).unwrap();
+        assert!(body.contains("\"sort\":\"date\""));
     }
 
     #[test]

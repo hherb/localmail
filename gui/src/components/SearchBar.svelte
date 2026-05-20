@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { search } from "../lib/stores/search.svelte";
+  import { search, type SortMode } from "../lib/stores/search.svelte";
 
   let popoverOpen = $state(false);
   let popoverEl: HTMLDivElement | undefined = $state();
@@ -14,6 +14,18 @@
     if (e.key === "Enter") {
       e.preventDefault();
       void onSubmit();
+    }
+  }
+
+  // Switching sort mode only re-runs the search when one is already on
+  // screen (tookMs !== null). Otherwise the toggle just stores the user's
+  // preference for their next submit — toggling pre-search shouldn't fire
+  // a request the user didn't ask for.
+  async function onSortChange(next: SortMode): Promise<void> {
+    if (search.snapshot.sort === next) return;
+    search.setSort(next);
+    if (search.snapshot.tookMs !== null) {
+      await search.submit();
     }
   }
 
@@ -45,6 +57,30 @@
     onkeydown={onKeyDown}
     disabled={search.snapshot.loading}
   />
+  <fieldset class="sort" aria-label="Sort results by">
+    <label>
+      <input
+        type="radio"
+        name="sort"
+        value="rank"
+        checked={search.snapshot.sort === "rank"}
+        onchange={() => onSortChange("rank")}
+        disabled={search.snapshot.loading}
+      />
+      Relevance
+    </label>
+    <label>
+      <input
+        type="radio"
+        name="sort"
+        value="date"
+        checked={search.snapshot.sort === "date"}
+        onchange={() => onSortChange("date")}
+        disabled={search.snapshot.loading}
+      />
+      Date
+    </label>
+  </fieldset>
   <button type="submit" disabled={search.snapshot.loading}>Search</button>
   <button type="button" bind:this={filterBtnEl} onclick={togglePopover}>🔧 Filters</button>
 </form>
@@ -62,10 +98,20 @@
   .bar {
     display: flex; gap: 6px; padding: 6px 12px;
     background: #fafbfd; border-bottom: 1px solid #e0e3e8;
+    align-items: center;
   }
-  input {
+  input[type="search"] {
     flex: 1; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px;
   }
+  fieldset.sort {
+    display: flex; gap: 10px; align-items: center;
+    border: none; padding: 0; margin: 0;
+    font-size: 12px; color: #444;
+  }
+  fieldset.sort label {
+    display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  }
+  fieldset.sort input[type="radio"] { margin: 0; }
   button {
     padding: 4px 10px; background: #fff; border: 1px solid #ccc;
     border-radius: 4px; cursor: pointer;

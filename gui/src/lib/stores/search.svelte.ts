@@ -24,9 +24,16 @@ import { formatError } from "../format_error";
 
 const DEFAULT_LIMIT = 50;
 
+export type SortMode = "rank" | "date";
+
 export interface SearchState {
   query: string;
   filters: SearchFiltersUI;
+  // "rank" (default) orders results by hybrid-search relevance score; "date"
+  // keeps the same hybrid candidate pool but orders the page by
+  // COALESCE(internal_date, date_sent) DESC — matches the server's
+  // /v1/search `sort` parameter.
+  sort: SortMode;
   results: SearchResultRow[];
   tookMs: number | null;
   loading: boolean;
@@ -37,6 +44,7 @@ function initialState(): SearchState {
   return {
     query: "",
     filters: emptyFilters(),
+    sort: "rank",
     results: [],
     tookMs: null,
     loading: false,
@@ -56,6 +64,8 @@ class SearchStore {
   setQuery(q: string): void { this.#state.query = q; }
 
   setFilters(f: SearchFiltersUI): void { this.#state.filters = f; }
+
+  setSort(s: SortMode): void { this.#state.sort = s; }
 
   reset(): void {
     this.#state = initialState();
@@ -90,6 +100,7 @@ class SearchStore {
         filters: filtersUiToWire(this.#state.filters),
         limit: DEFAULT_LIMIT,
         cursor: null,
+        sort: this.#state.sort,
       });
       if (seq !== this.#submitSeq) return;
       this.#state.results = resp.results;

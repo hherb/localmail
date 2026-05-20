@@ -21,6 +21,11 @@ export interface SearchRequest {
   filters: SearchFiltersWire;
   limit: number;
   cursor: string | null;
+  // "rank" (default): hybrid-search relevance ordering.
+  // "date": COALESCE(internal_date, date_sent) DESC over the same pool.
+  // Omitted entirely when not set so older Tauri/Rust binaries that
+  // pre-date the field continue to deserialize the request body.
+  sort?: "rank" | "date";
 }
 
 export interface SearchAddress {

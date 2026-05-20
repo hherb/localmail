@@ -108,3 +108,79 @@ def test_malformed_cursor_raises_validation_failed(db_conn) -> None:
     with pytest.raises(ValidationFailed):
         list_messages(db_conn, allowed_account_ids=[1], limit=10,
                       cursor="not-a-cursor")
+
+
+def test_null_date_rows_paginate_after_dated_rows(db_conn) -> None:
+    aid = _ensure_account(db_conn)
+    now = datetime.now(timezone.utc)
+    dated = _seed(db_conn, account_id=aid, suffix="aa",
+                  internal_date=now - timedelta(hours=1))
+    nul_a = _seed(db_conn, account_id=aid, suffix="bb")  # both dates NULL
+    nul_b = _seed(db_conn, account_id=aid, suffix="cc")
+    db_conn.commit()
+
+    # Dated row first; NULL rows tail in id DESC (so nul_b before nul_a).
+    p1 = list_messages(db_conn, allowed_account_ids=[aid], limit=1)
+    assert [int(m["message_id"]) for m in p1["messages"]] == [dated]
+
+    p2 = list_messages(db_conn, allowed_account_ids=[aid], limit=1,
+                       cursor=p1["next_cursor"])
+    assert [int(m["message_id"]) for m in p2["messages"]] == [nul_b]
+
+    p3 = list_messages(db_conn, allowed_account_ids=[aid], limit=1,
+                       cursor=p2["next_cursor"])
+    assert [int(m["message_id"]) for m in p3["messages"]] == [nul_a]
+    assert p3["next_cursor"] is None
+
+
+def test_account_ids_filter_is_intersected_with_acl(db_conn) -> None:
+    aid1 = _ensure_account(db_conn, name="alpha")
+    aid2 = _ensure_account(db_conn, name="beta")
+    now = datetime.now(timezone.utc)
+    m1 = _seed(db_conn, account_id=aid1, suffix="aa", internal_date=now)
+    _seed(db_conn, account_id=aid2, suffix="bb", internal_date=now)
+    db_conn.commit()
+
+    # Caller asks for both accounts but is only granted aid1.
+    out = list_messages(db_conn, allowed_account_ids=[aid1],
+                        account_ids=[aid1, aid2], limit=10)
+    ids = [int(m["message_id"]) for m in out["messages"]]
+    assert ids == [m1]
+
+
+def test_account_ids_intersection_empty_short_circuits(db_conn) -> None:
+    aid_granted = _ensure_account(db_conn, name="alpha")
+    aid_other = _ensure_account(db_conn, name="beta")
+    now = datetime.now(timezone.utc)
+    _seed(db_conn, account_id=aid_granted, suffix="aa", internal_date=now)
+    _seed(db_conn, account_id=aid_other, suffix="bb", internal_date=now)
+    db_conn.commit()
+
+    out = list_messages(db_conn, allowed_account_ids=[aid_granted],
+                        account_ids=[aid_other], limit=10)
+    assert out == {"messages": [], "next_cursor": None}
+
+
+def test_folder_ids_filter_restricts_to_labelled_messages(db_conn) -> None:
+    aid = _ensure_account(db_conn)
+    now = datetime.now(timezone.utc)
+    m_in = _seed(db_conn, account_id=aid, suffix="aa", internal_date=now)
+    m_out = _seed(db_conn, account_id=aid, suffix="bb", internal_date=now)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mailboxes (account_id, name, uidvalidity) "
+            "VALUES (%s, 'INBOX', 1) RETURNING id", (aid,),
+        )
+        row = cur.fetchone(); assert row is not None
+        mb_id = int(row[0])
+        cur.execute(
+            "INSERT INTO message_labels (message_id, mailbox_id, uid) "
+            "VALUES (%s, %s, 1)", (m_in, mb_id),
+        )
+    db_conn.commit()
+
+    out = list_messages(db_conn, allowed_account_ids=[aid],
+                        folder_ids=[mb_id], limit=10)
+    ids = [int(m["message_id"]) for m in out["messages"]]
+    assert ids == [m_in]
+    assert m_out not in ids

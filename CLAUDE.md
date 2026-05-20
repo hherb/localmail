@@ -424,22 +424,26 @@ for the full design.
   new conditional-GET endpoint, follow the same probe → conditional
   → expensive-IO ordering; never put the expensive call before the
   precondition check.
-- **200/206 body path reuses the probe's row (#64)**: the route hands
-  the probe's full `(mime, size, path)` tuple straight to
-  `open_attachment_bytes` as `prefetched=`, which skips its internal
-  ACL EXISTS predicate and `attachment_blobs` SELECT entirely — the
-  caller is the boundary. End-to-end on a 200 there is exactly one
+- **200/206 body path reuses the probe's row (#64, #67)**: the route
+  uses the ACL-cleared `(mime, size, path)` tuple from
+  `get_attachment_blob_info` directly. The file open goes through the
+  module-private `_open_blob_file_at(path, sha256_hex)` helper in
+  `api/attachments.py`, which does only `Path.exists()` + `Path.open('rb')`
+  and has no `conn` parameter at all — so the ACL check cannot be
+  forgotten "by accident". End-to-end on a 200 there is exactly one
   `_caller_can_read_blob` call and one `attachment_blobs` SELECT
   (the probe's), enforced by
   [`test_200_runs_exactly_one_acl_check`](tests/test_serve_attachments_conditional.py).
-  The `Path.exists()` check still runs on the prefetched path so a
-  blob deleted between probe and open surfaces as NotFound rather
-  than a mid-stream FileNotFoundError. `get_attachment_filename`
+  `_open_blob_file_at` raises `NotFound` if the file is missing so a
+  blob deleted between probe and open surfaces cleanly rather than
+  as a mid-stream `FileNotFoundError`. `get_attachment_filename`
   remains a separate JSONB scan — same predicate shape, different
   query — and is out of scope for the #64 ACL-collapse acceptance.
   All three blob-row accessors (`get_attachment_metadata`,
-  `get_attachment_blob_info`, `open_attachment_bytes`) now share a
-  single private `_lookup_blob_row` helper (#65).
+  `get_attachment_blob_info`, `open_attachment_bytes`) share a single
+  private `_lookup_blob_row` helper (#65). `open_attachment_bytes`
+  itself is safe-by-default — it always runs the ACL EXISTS predicate
+  and has no `prefetched=` kwarg (#67 removed the prior footgun).
 - **ID typing (#33)**: every entity ID is a **string on the wire** in
   both directions — response bodies emit `str(id)` and path/query
   parameters accept digit-strings only. `localmail.api.ids.parse_int_id`

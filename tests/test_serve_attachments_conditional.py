@@ -426,12 +426,16 @@ def test_304_does_not_call_open_attachment_bytes_or_filename(
     grant_alice_all_accounts, monkeypatch,
 ) -> None:
     """#62 acceptance: the conditional-GET 304 short-circuit must NOT
-    invoke `open_attachment_bytes` (file pointer + Path.exists) or
+    invoke `_open_blob_file_at` (file pointer + Path.exists) or
     `get_attachment_filename` (JSONB scan across messages). The whole
     point of the refactor is to skip those costs when we know the
     client's cache is already current — the cheap probe in the api/
     layer is enough to evaluate the precondition. Spy on both via
-    monkeypatch and assert zero invocations on the cache-hit path."""
+    monkeypatch and assert zero invocations on the cache-hit path.
+
+    After #67 the route calls `_open_blob_file_at` directly (the prior
+    `open_attachment_bytes(..., prefetched=)` ACL-bypass kwarg is gone),
+    so the spy now lives on the new helper."""
     sha = "40" * 32
     _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
     grant_alice_all_accounts()
@@ -441,7 +445,7 @@ def test_304_does_not_call_open_attachment_bytes_or_filename(
     open_calls: list[tuple] = []
     filename_calls: list[tuple] = []
 
-    real_open = routes.open_attachment_bytes
+    real_open = routes._open_blob_file_at
     real_filename = routes.get_attachment_filename
 
     def spy_open(*args, **kwargs):
@@ -452,7 +456,7 @@ def test_304_does_not_call_open_attachment_bytes_or_filename(
         filename_calls.append((args, kwargs))
         return real_filename(*args, **kwargs)
 
-    monkeypatch.setattr(routes, "open_attachment_bytes", spy_open)
+    monkeypatch.setattr(routes, "_open_blob_file_at", spy_open)
     monkeypatch.setattr(routes, "get_attachment_filename", spy_filename)
 
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
@@ -465,7 +469,7 @@ def test_304_does_not_call_open_attachment_bytes_or_filename(
     )
     assert r.status_code == 304
     assert open_calls == [], (
-        "open_attachment_bytes was called on the 304 short-circuit; "
+        "_open_blob_file_at was called on the 304 short-circuit; "
         "#62 requires the route to skip the file open on a cache hit"
     )
     assert filename_calls == [], (
@@ -508,10 +512,10 @@ def test_200_runs_exactly_one_acl_check(
     ``_caller_can_read_blob`` EXISTS predicate end-to-end. Prior to
     #64 the route ran it twice — once in ``get_attachment_blob_info``
     (the #62 cheap probe) and again inside ``open_attachment_bytes``.
-    Passing the probe's full ``(mime, size, path)`` tuple through as
-    ``prefetched=`` skips the second call. ``get_attachment_filename``
-    has its own JSONB scan but does not go through this helper, so it
-    is intentionally not counted here."""
+    Now the route uses the probe's path with the ACL-free
+    ``_open_blob_file_at`` helper (#67), so the second call is gone.
+    ``get_attachment_filename`` has its own JSONB scan but does not go
+    through this helper, so it is intentionally not counted here."""
     sha = "50" * 32
     _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
     grant_alice_all_accounts()

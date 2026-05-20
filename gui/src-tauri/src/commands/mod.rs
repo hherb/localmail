@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod attachments;
 pub mod auth;
 pub mod auth_change_password;
+pub mod browse;
 pub mod capabilities;
 pub mod changes;
 pub mod connect;

@@ -110,6 +110,53 @@ def test_build_query_string_malformed_account_id_raises():
         build_query_string(free_text="", filters={"account_ids": ["foo"]})
 
 
+def test_wire_date_reflects_internal_date_when_set() -> None:
+    """The wire `date` field is the column the sort key actually uses —
+    ``COALESCE(internal_date, date_sent)``. Returning only the header
+    ``Date:`` value while sorting by INTERNALDATE makes the displayed
+    dates look out of order whenever the two differ (forwarded mail,
+    mailing-list delays, sender clock skew, mid-rollout backfill).
+    """
+    from datetime import datetime, timezone
+
+    from localmail.api.search import _to_api_result
+    from localmail.search.searcher import SearchResult
+
+    header_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    arrived = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    r = SearchResult(
+        message_id=1, account_id=1, rank=1, score=0.5, rrf_score=0.5,
+        subject="s", from_addr="a@b", from_name="A",
+        date_sent=header_date, internal_date=arrived,
+        snippet="", snippet_source="body",
+        attachment_filename=None, matched_chunk_id=None,
+        matched_chunk_table="message_chunks",
+    )
+    out = _to_api_result(r)
+    assert out["date"] == arrived.isoformat()
+
+
+def test_wire_date_falls_back_to_date_sent_when_internal_date_null() -> None:
+    """Legacy / un-backfilled rows still surface a date; the sort key
+    falls back to ``date_sent`` so the wire field must do the same."""
+    from datetime import datetime, timezone
+
+    from localmail.api.search import _to_api_result
+    from localmail.search.searcher import SearchResult
+
+    header_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    r = SearchResult(
+        message_id=1, account_id=1, rank=1, score=0.5, rrf_score=0.5,
+        subject="s", from_addr="a@b", from_name="A",
+        date_sent=header_date, internal_date=None,
+        snippet="", snippet_source="body",
+        attachment_filename=None, matched_chunk_id=None,
+        matched_chunk_table="message_chunks",
+    )
+    out = _to_api_result(r)
+    assert out["date"] == header_date.isoformat()
+
+
 def test_run_search_calls_searcher_and_maps_results() -> None:
     fake_searcher = MagicMock()
     fake_result = MagicMock()
@@ -136,6 +183,9 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     fake_page.can_grow_pool = False
     fake_page.candidates_per_arm = 50
     fake_page.page = 1
+    # Pool-cursor mock — explicit None keeps `_next_cursor` out of the
+    # keyset branch (MagicMock's auto-attr would be truthy).
+    fake_page.next_keyset = None
 
     fake_searcher.search.return_value = fake_page
 

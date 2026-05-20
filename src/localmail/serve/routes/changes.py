@@ -62,7 +62,7 @@ def changes(
                 # can use it instead of sorting the whole table.
                 cur.execute(
                     """SELECT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
-                              m.account_id, a.name
+                              m.internal_date, m.account_id, a.name
                          FROM messages m JOIN accounts a ON a.id = m.account_id
                         WHERE m.date_received < now() - make_interval(secs => %s)
                           AND m.account_id = ANY(%s)
@@ -73,7 +73,7 @@ def changes(
             else:
                 cur.execute(
                     """SELECT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
-                              m.account_id, a.name
+                              m.internal_date, m.account_id, a.name
                          FROM messages m JOIN accounts a ON a.id = m.account_id
                         WHERE m.id > %s
                           AND m.date_received < now() - make_interval(secs => %s)
@@ -86,13 +86,18 @@ def changes(
 
     max_id = 0
     for row in rows:
-        mid, subject, from_addr, from_name, date_sent, account_id, account_name = row
+        mid, subject, from_addr, from_name, date_sent, internal_date, account_id, account_name = row
         max_id = max(max_id, int(mid))
+        # Wire `date` is COALESCE(internal_date, date_sent) — the same
+        # expression the initial-load ORDER BY uses. Returning only
+        # `date_sent` while sorting by INTERNALDATE made the displayed
+        # dates look out of order whenever the two differ.
+        received = internal_date or date_sent
         new_messages.append({
             "message_id": str(mid),
             "subject": subject,
             "from": {"address": from_addr, "name": from_name},
-            "date": date_sent.isoformat() if date_sent else None,
+            "date": received.isoformat() if received else None,
             "account": {"id": str(account_id), "name": account_name},
         })
 

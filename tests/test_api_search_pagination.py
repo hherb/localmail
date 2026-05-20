@@ -43,6 +43,10 @@ def _page(*, results: list, token: str | None, pool_size: int,
     # candidates_per_arm is what the route inspects vs cfg.candidates_per_arm_max
     p.candidates_per_arm = 50
     p.timing_ms = {"total": 1.0}
+    # Explicit None: these mocks exercise the pool-cursor path. Leaving
+    # next_keyset as MagicMock's auto-attr would be truthy and divert
+    # `_next_cursor` down the keyset branch.
+    p.next_keyset = None
     return p
 
 

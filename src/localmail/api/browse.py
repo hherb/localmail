@@ -76,15 +76,19 @@ def list_messages(
 
     has_more = len(rows) > limit
     page_rows = rows[:limit]
+    # Wire `date` is COALESCE(internal_date, date_sent) — i.e. the sort key
+    # itself. Returning a different column than the one we sort by makes the
+    # displayed dates look out of order whenever the two differ.
     messages = [
         {
             "message_id": str(mid),
             "subject": subject,
             "from": {"address": from_addr, "name": from_name},
-            "date": date_sent.isoformat() if date_sent else None,
+            "date": (internal_date or date_sent).isoformat()
+                    if (internal_date or date_sent) else None,
             "account": {"id": str(account_id), "name": account_name},
         }
-        for (mid, subject, from_addr, from_name, date_sent, _internal_date,
+        for (mid, subject, from_addr, from_name, date_sent, internal_date,
              account_id, account_name, _sort_ts) in page_rows
     ]
     next_cursor: str | None = None

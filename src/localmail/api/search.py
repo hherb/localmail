@@ -13,8 +13,11 @@ from localmail.api.errors import SearchCursorExpired, ValidationFailed
 from localmail.api.ids import parse_int_id
 from localmail.api.search_cursor import (
     SearchCursor,
+    decode_keyset_cursor,
     decode_search_cursor,
+    encode_keyset_cursor,
     encode_search_cursor,
+    is_keyset_cursor,
 )
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
@@ -150,6 +153,16 @@ def run_search(
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
         page = searcher.search(query, page_size=limit, user_id=user_id, sort=sort)
+    elif is_keyset_cursor(cursor):
+        # Keyset cursor → lexical-date continuation. The cursor carries
+        # only (ts, id); the query + filters come from the request body
+        # (the GUI re-sends them on every loadMore). Searcher decides on
+        # the lexical path because sort=date + non-empty free_text fires
+        # the dispatch in Searcher.search.
+        keyset = decode_keyset_cursor(cursor)
+        query = build_query_string(free_text=free_text, filters=scoped_filters)
+        page = searcher.search(query, page_size=limit, user_id=user_id,
+                               sort=sort, keyset_cursor=keyset)
     else:
         parsed = decode_search_cursor(cursor)
         page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)
@@ -193,7 +206,16 @@ def _empty_grown_page(token: str, *, page_size: int) -> Any:
 
 
 def _next_cursor(page: Any, *, cfg: Any) -> str | None:
-    """Compute the cursor for the page after ``page``, or None if exhausted."""
+    """Compute the cursor for the page after ``page``, or None if exhausted.
+
+    Two cursor kinds:
+      * keyset (lexical-date) — driven by ``page.next_keyset``; None
+        means the keyset walk hit the end.
+      * pool (hybrid) — driven by ``search_token`` + page increment;
+        None when both the cached pool and ``grow_pool`` are exhausted.
+    """
+    if page.next_keyset is not None:
+        return encode_keyset_cursor(page.next_keyset)
     if page.search_token is None:
         return None
     if page.has_more_in_pool:
@@ -226,7 +248,14 @@ def _scope_filters_by_acl(
 
 
 def _to_api_result(r: SearchResult) -> dict[str, Any]:
-    """Map an internal SearchResult to the API JSON shape."""
+    """Map an internal SearchResult to the API JSON shape.
+
+    The wire ``date`` field is ``COALESCE(internal_date, date_sent)``, the
+    same expression every recent-mail / sort=date SQL path uses. Returning
+    a different column than the sort key made dates look out of order in
+    the GUI whenever the two diverged.
+    """
+    received = r.internal_date or r.date_sent
     return {
         "message_id": str(r.message_id),
         "account": {"id": str(r.account_id), "name": None},
@@ -234,7 +263,7 @@ def _to_api_result(r: SearchResult) -> dict[str, Any]:
         "subject": r.subject,
         "from": {"address": r.from_addr, "name": r.from_name},
         "to": [],
-        "date": r.date_sent.isoformat() if r.date_sent else None,
+        "date": received.isoformat() if received else None,
         "snippet_html": r.snippet,
         "has_attachments": r.attachment_filename is not None,
         "score": r.score,

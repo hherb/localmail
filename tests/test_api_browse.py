@@ -84,6 +84,36 @@ def test_cursor_round_trip_paginates_strictly_older(db_conn) -> None:
     assert page3["next_cursor"] is None
 
 
+def test_wire_date_reflects_internal_date_when_set(db_conn) -> None:
+    """The wire `date` field must match the sort key — i.e.
+    ``COALESCE(internal_date, date_sent)``. Showing only the header
+    ``Date:`` value while sorting by INTERNALDATE makes the displayed
+    dates look out of order whenever the two differ.
+    """
+    aid = _ensure_account(db_conn)
+    header_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    arrived = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    _seed(db_conn, account_id=aid, suffix="aa",
+          date_sent=header_date, internal_date=arrived)
+    db_conn.commit()
+
+    out = list_messages(db_conn, allowed_account_ids=[aid], limit=10)
+    assert datetime.fromisoformat(out["messages"][0]["date"]) == arrived
+
+
+def test_wire_date_falls_back_to_date_sent_when_internal_date_null(db_conn) -> None:
+    """Legacy/un-backfilled rows have NULL internal_date; the wire `date`
+    must fall back to ``date_sent`` so they're not displayed as null."""
+    aid = _ensure_account(db_conn)
+    header_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    _seed(db_conn, account_id=aid, suffix="bb",
+          date_sent=header_date, internal_date=None)
+    db_conn.commit()
+
+    out = list_messages(db_conn, allowed_account_ids=[aid], limit=10)
+    assert datetime.fromisoformat(out["messages"][0]["date"]) == header_date
+
+
 def test_tied_internal_date_paginates_by_id_desc(db_conn) -> None:
     aid = _ensure_account(db_conn)
     ts = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)

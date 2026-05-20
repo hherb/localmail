@@ -125,7 +125,12 @@ class SearchConfig(BaseModel):
     # --- retrieval / fusion ---
     candidates_per_arm: int = 50
     rrf_k: int = 60
-    rerank_pool_size: int = 20
+    # Default pool large enough that the first sort=rank page fills (the
+    # GUI sends limit=50) and "Load more" can serve at least one
+    # additional page from the cache without firing grow_pool. Smaller
+    # pools cause the very first "Load more" to re-run the whole
+    # retrieval pipeline and surface mostly-duplicate top hits.
+    rerank_pool_size: int = 100
     # Cap for transparent grow_pool growth driven by the /v1/search cursor
     # path. When the page cursor would advance past the current cached pool
     # and `can_grow_pool=True`, the route doubles candidates_per_arm up to
@@ -137,7 +142,11 @@ class SearchConfig(BaseModel):
     snippet_width_chars: int = 200
 
     # --- reranker ---
-    reranker_enabled: bool = True
+    # Default OFF. The cross-encoder rerank pass is O(pool size) and the
+    # search cursor's grow_pool path doubles the pool on each page advance
+    # past the cache (50 → 100 → 200 → 400 → 800). On CPU this overruns
+    # request timeouts. Flip to true on GPU hosts via config.toml.
+    reranker_enabled: bool = False
     reranker_backend: Literal["fastembed"] = "fastembed"
     reranker_model: str = "jinaai/jina-reranker-v2-base-multilingual"
     rerank_max_chars: int = 1500

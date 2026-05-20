@@ -189,7 +189,15 @@ def make_snippet(chunk_text: str, query_terms: list[str], width: int) -> str:
 
 @dataclass(frozen=True)
 class SearchResult:
-    """One ranked search hit, with the snippet that earned the rank."""
+    """One ranked search hit, with the snippet that earned the rank.
+
+    ``internal_date`` is the IMAP server's INTERNALDATE — when the email
+    actually arrived at the mailbox. The wire "date" the GUI displays is
+    ``COALESCE(internal_date, date_sent)``, matching the sort key used by
+    every recent-mail / sort=date code path. Keeping both columns on the
+    result lets callers that need the header ``Date:`` separately still
+    reach it.
+    """
     message_id: int
     account_id: int
     rank: int
@@ -199,6 +207,7 @@ class SearchResult:
     from_addr: str | None
     from_name: str | None
     date_sent: datetime | None
+    internal_date: datetime | None
     snippet: str
     snippet_source: Literal["header", "body", "attachment"]
     attachment_filename: str | None
@@ -207,8 +216,25 @@ class SearchResult:
 
 
 @dataclass(frozen=True)
+class KeysetCursor:
+    """Keyset position for the lexical-date search path.
+
+    Mirrors ``api.browse_cursor.BrowseCursor`` but lives in the search
+    layer so that ``Searcher`` does not depend on ``api/``. The api layer
+    converts between this and the wire encoding (base64 of ``ts|id``).
+    """
+    ts: datetime | None
+    id: int
+
+
+@dataclass(frozen=True)
 class SearchPage:
-    """One page of results plus pagination metadata."""
+    """One page of results plus pagination metadata.
+
+    ``next_keyset`` is set only on the lexical-date path (``sort="date"``
+    with non-empty free text). The hybrid pool path keeps
+    ``next_keyset=None`` and continues to use ``search_token`` + page.
+    """
     results: list[SearchResult]
     page: int
     page_size: int
@@ -219,6 +245,7 @@ class SearchPage:
     search_token: str | None
     query: ParsedQuery
     timing_ms: dict[str, float]
+    next_keyset: KeysetCursor | None = None
 
 
 class Searcher:
@@ -317,7 +344,8 @@ class Searcher:
         from localmail.search.arms import _filter_sql
         where_extra, where_params = _filter_sql(parsed.filters)
         sql = f"""
-            SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name, m.date_sent
+            SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
+                   m.date_sent, m.internal_date
               FROM messages m
              WHERE TRUE
              {where_extra}
@@ -329,7 +357,8 @@ class Searcher:
             cur.execute(sql, params)
             rows = cur.fetchall()
         out: list[SearchResult] = []
-        for rank, (mid, account_id, subject, from_addr, from_name, date_sent) in enumerate(rows, start=1):
+        for rank, (mid, account_id, subject, from_addr, from_name,
+                   date_sent, internal_date) in enumerate(rows, start=1):
             out.append(SearchResult(
                 message_id=mid,
                 account_id=account_id,
@@ -340,6 +369,7 @@ class Searcher:
                 from_addr=from_addr,
                 from_name=from_name,
                 date_sent=date_sent,
+                internal_date=internal_date,
                 snippet="",
                 snippet_source="header",
                 attachment_filename=None,
@@ -347,6 +377,92 @@ class Searcher:
                 matched_chunk_table="message",
             ))
         return out
+
+    def _lexical_date_search(
+        self,
+        conn: psycopg.Connection,
+        parsed: ParsedQuery,
+        page_size: int,
+        keyset: KeysetCursor | None,
+    ) -> tuple[list[SearchResult], KeysetCursor | None]:
+        """Gmail-style lexical search: every message whose FTS matches the
+        free text, ORDER BY COALESCE(internal_date, date_sent) DESC, keyset
+        paginated. Returns (results, next_keyset_or_None).
+
+        Why this path exists: with the hybrid pipeline a query like
+        "e-ticket" returns at most ``rerank_pool_size`` candidates fused
+        across the four arms, then date-sorted. Users with dozens of
+        recent e-tickets only see a handful — and grow_pool's "load more"
+        re-ranks the same top-K with overlap, so it appears to find
+        nothing new. Lexical+keyset bypasses both bounds: there is no pool
+        cap and the cursor walks the (ts, id) keyspace, so the user can
+        scroll back arbitrarily far.
+
+        Uses the same ``messages.fts_v2`` column and ``plainto_tsquery
+        ('simple', ...)`` matcher as ``arm_bm25_messages`` so recall is
+        identical for the lexical case. Structured filters
+        (account_ids, folder_ids, from/to/subject substrings, date
+        ranges, has_attachment, lang) flow through ``_filter_sql``.
+        """
+        from localmail.search.arms import _filter_sql
+
+        where_extra, where_params = _filter_sql(parsed.filters)
+        params: list[Any] = [parsed.free_text]
+        keyset_clause = ""
+        if keyset is not None:
+            if keyset.ts is None:
+                # Already in the NULLS-LAST tail: paginate by id alone.
+                keyset_clause = (
+                    " AND COALESCE(m.internal_date, m.date_sent) IS NULL"
+                    " AND m.id < %s "
+                )
+                params.append(keyset.id)
+            else:
+                keyset_clause = (
+                    " AND (COALESCE(m.internal_date, m.date_sent) < %s "
+                    "  OR (COALESCE(m.internal_date, m.date_sent) = %s AND m.id < %s) "
+                    "  OR COALESCE(m.internal_date, m.date_sent) IS NULL) "
+                )
+                params.extend([keyset.ts, keyset.ts, keyset.id])
+        params.extend(where_params)
+        # Fetch one extra row to detect "more pages remain" without a COUNT.
+        fetch_limit = page_size + 1
+        params.append(fetch_limit)
+        sql = f"""
+            SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
+                   m.date_sent, m.internal_date
+              FROM messages m
+             WHERE m.fts_v2 @@ plainto_tsquery('simple', %s)
+             {keyset_clause}
+             {where_extra}
+             ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC
+             LIMIT %s
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        has_more = len(rows) > page_size
+        page_rows = rows[:page_size]
+        results: list[SearchResult] = []
+        for rank, (mid, account_id, subject, from_addr, from_name,
+                   date_sent, internal_date) in enumerate(page_rows, start=1):
+            results.append(SearchResult(
+                message_id=mid, account_id=account_id,
+                rank=rank, score=1.0 / rank, rrf_score=0.0,
+                subject=subject, from_addr=from_addr, from_name=from_name,
+                date_sent=date_sent, internal_date=internal_date,
+                snippet="", snippet_source="header",
+                attachment_filename=None, matched_chunk_id=None,
+                matched_chunk_table="message",
+            ))
+        next_keyset: KeysetCursor | None = None
+        if has_more and page_rows:
+            last_id, _, _, _, _, last_date_sent, last_internal_date = page_rows[-1]
+            next_keyset = KeysetCursor(
+                ts=last_internal_date or last_date_sent,
+                id=int(last_id),
+            )
+        return results, next_keyset
 
     def _retrieve_pool(
         self,
@@ -516,6 +632,7 @@ class Searcher:
                 rank=i, score=float(score), rrf_score=h.rrf_score,
                 subject=m.get("subject"), from_addr=m.get("from_addr"),
                 from_name=m.get("from_name"), date_sent=m.get("date_sent"),
+                internal_date=m.get("internal_date"),
                 snippet=snip, snippet_source=source,
                 attachment_filename=attachment_filename,
                 matched_chunk_id=h.best_chunk_id,
@@ -671,6 +788,7 @@ class Searcher:
         disable_rerank: bool = False,
         user_id: int | None = None,
         sort: SortMode = "rank",
+        keyset_cursor: KeysetCursor | None = None,
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
 
@@ -697,6 +815,34 @@ class Searcher:
         t = time.monotonic()
         parsed = parse_query(query)
         timing["parse"] = (time.monotonic() - t) * 1000
+
+        # sort=date with free_text: lexical+keyset, unbounded. The hybrid
+        # path caps at ``rerank_pool_size`` candidates fused by RRF, so a
+        # user searching for "e-ticket" (with dozens of matches across
+        # years) sees only the top-K most relevant — even though they
+        # asked for chronological order. Bypass the pool entirely:
+        # ``messages.fts_v2`` (same column Arm 1 uses) gives identical
+        # lexical recall, and the keyset cursor lets them scroll back
+        # arbitrarily far.
+        if sort == "date" and parsed.free_text.strip():
+            t = time.monotonic()
+            with self._pool.connection() as conn:
+                parsed = self._resolve_account_names(conn, parsed)
+                self._maybe_warn_unpopulated_body_lang(conn, parsed)
+                results, next_keyset = self._lexical_date_search(
+                    conn, parsed, effective_page_size, keyset_cursor,
+                )
+            timing["retrieve"] = (time.monotonic() - t) * 1000
+            timing["rerank"] = 0.0
+            timing["total"] = (time.monotonic() - t0) * 1000
+            return SearchPage(
+                results=results, page=1, page_size=effective_page_size,
+                pool_size=len(results), candidates_per_arm=cpa,
+                has_more_in_pool=next_keyset is not None,
+                can_grow_pool=False,
+                search_token=None, query=parsed, timing_ms=timing,
+                next_keyset=next_keyset,
+            )
 
         # Empty-query fallback: an empty `free_text` is the canonical
         # "show me my mail" signal. The hybrid pipeline degenerates badly

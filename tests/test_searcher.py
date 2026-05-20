@@ -231,6 +231,44 @@ def test_searcher_empty_query_respects_account_filter(db_dsn, db_conn):
     assert ids == [mid_a2, mid_a1]
 
 
+def test_sort_date_with_text_is_unbounded_lexical_paginated(db_dsn, db_conn):
+    """``sort=date`` + non-empty free_text must behave like Gmail:
+    SELECT all messages matching the term, ORDER BY date DESC, paginate
+    by keyset — *not* bounded by ``rerank_pool_size``.
+
+    Why: with the hybrid path, "e-ticket" returns at most
+    ``rerank_pool_size`` (default 20) candidates fused by RRF, then
+    sorted by date. A user with dozens of recent e-tickets only sees
+    a handful (top-K by relevance), and "Load more" grow_pool re-runs
+    just return the same top-K with overlap. The user wants
+    "show me all my e-tickets, newest first" — that's a lexical
+    keyset query, not a hybrid retrieval.
+    """
+    # Seed 30 matching messages — well above rerank_pool_size=20.
+    now = datetime.now(timezone.utc)
+    rows = [("a", f"e-ticket booking #{i:02d}", None,
+             now - timedelta(hours=i)) for i in range(30)]
+    ids = _seed_with_dates(db_conn, rows)
+    # ids[0] is newest (i=0), ids[29] is oldest (i=29) — ORDER DESC by internal_date.
+    cfg = SearchConfig()
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
+                     reranker=None, rewriter=None)
+        # Walk every page until the cursor goes None.
+        all_ids: list[int] = []
+        page = s.search("e-ticket", page_size=10, sort="date")
+        all_ids.extend(r.message_id for r in page.results)
+        while page.next_keyset is not None:
+            page = s.search("e-ticket", page_size=10, sort="date",
+                            keyset_cursor=page.next_keyset)
+            all_ids.extend(r.message_id for r in page.results)
+    finally:
+        pool.close()
+    # All 30 messages must appear, newest first.
+    assert all_ids == ids
+
+
 def test_searcher_no_cache_returns_token_none(db_dsn, db_conn):
     _seed(db_conn)
     cfg = SearchConfig()

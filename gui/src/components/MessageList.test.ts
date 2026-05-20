@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   listFolders: vi.fn(),
   listRecentMessages: vi.fn(),
+  listMessages: vi.fn(),
   getMessage: vi.fn(),
 }));
 
@@ -19,6 +20,8 @@ beforeEach(() => {
   mail.reset();
   search.reset();
   vi.clearAllMocks();
+  // Default no-op so setSelection / loadInitialMessages calls don't fail.
+  mocks.listMessages.mockResolvedValue({ messages: [], next_cursor: null });
 });
 
 describe("MessageList", () => {
@@ -28,8 +31,8 @@ describe("MessageList", () => {
   });
 
   it("renders a row per loaded message under selection=all", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [
+    mocks.listMessages.mockResolvedValue({
+      messages: [
         {
           message_id: "1",
           subject: "hi anna",
@@ -45,17 +48,17 @@ describe("MessageList", () => {
           account: { id: "2", name: "work" },
         },
       ],
-      next_cursor: "2",
+      next_cursor: null,
     });
-    await mail.loadRecentMessages();
+    await mail.loadInitialMessages();
     const { getByText } = render(MessageList);
     expect(getByText("hi anna")).toBeTruthy();
     expect(getByText("second")).toBeTruthy();
   });
 
   it("narrows to one account when selection=account", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [
+    mocks.listMessages.mockResolvedValueOnce({
+      messages: [
         {
           message_id: "1",
           subject: "hi anna",
@@ -71,25 +74,43 @@ describe("MessageList", () => {
           account: { id: "2", name: "work" },
         },
       ],
-      next_cursor: "2",
+      next_cursor: null,
     });
-    await mail.loadRecentMessages();
+    await mail.loadInitialMessages();
+    // setSelection triggers a new loadInitialMessages with account filter;
+    // the default mock returns [] for that call.
+    mocks.listMessages.mockResolvedValueOnce({
+      messages: [
+        {
+          message_id: "1",
+          subject: "hi anna",
+          from: { name: "Anna", address: "anna@x" },
+          date: null,
+          account: { id: "1", name: "personal" },
+        },
+      ],
+      next_cursor: null,
+    });
     mail.setSelection({ kind: "account", accountId: "1" });
+    // Flush the async loadInitialMessages triggered by setSelection.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
     const { getByText, queryByText } = render(MessageList);
     expect(getByText("hi anna")).toBeTruthy();
     expect(queryByText("second")).toBeNull();
   });
 
   it("renders error message when store.errorMessage is set after a failed load", async () => {
-    mocks.listRecentMessages.mockRejectedValue({ kind: "Http", detail: "boom" });
-    await mail.loadRecentMessages();
+    mocks.listMessages.mockRejectedValue({ kind: "Http", detail: "boom" });
+    await mail.loadInitialMessages();
     const { getByText } = render(MessageList);
     expect(getByText(/boom/i)).toBeTruthy();
   });
 
   it("clicking a row calls openMessage with its id", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [
+    mocks.listMessages.mockResolvedValue({
+      messages: [
         {
           message_id: "42",
           subject: "click me",
@@ -98,7 +119,7 @@ describe("MessageList", () => {
           account: { id: "1", name: "p" },
         },
       ],
-      next_cursor: "42",
+      next_cursor: null,
     });
     mocks.getMessage.mockResolvedValue({
       id: "42",
@@ -114,7 +135,7 @@ describe("MessageList", () => {
       account: { id: "1", name: null, address: null },
       folders: [],
     });
-    await mail.loadRecentMessages();
+    await mail.loadInitialMessages();
     const { getByText } = render(MessageList);
     await fireEvent.click(getByText("click me"));
     expect(mocks.getMessage).toHaveBeenCalledWith("42");

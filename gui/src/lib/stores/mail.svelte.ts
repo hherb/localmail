@@ -5,18 +5,20 @@
  * State:
  *   accounts          AccountSummary[]                  loaded once after login
  *   folders           Map<accountId, FolderSummary[]>   loaded lazily on expansion
- *   messages          MessageSummary[]                  most-recent 200 (via /v1/changes)
+ *   messages          MessageSummary[]                  current page set (via /v1/messages)
  *   selection         Selection                         what the tree currently selects
  *   selectedMessage   MessageDetail | null              detail for the currently-open message
- *   loadingMessages   boolean                           true during list fetch
+ *   loadingMessages   boolean                           true during initial list fetch
+ *   loadingMore       boolean                           true during loadMoreMessages fetch
  *   loadingDetail     boolean                           true during detail fetch
  *   errorMessage      string | null                     last error surfaced from a load
  *
  * Actions:
  *   loadAccounts()                                       fetch /v1/accounts
  *   loadFoldersFor(accountId)                            fetch folders, idempotent
- *   loadRecentMessages()                                 fetch /v1/changes
- *   setSelection(sel)                                    update the left-rail selection
+ *   loadInitialMessages(opts?)                           fetch /v1/messages (first page)
+ *   loadMoreMessages()                                   fetch next page, append to messages
+ *   setSelection(sel)                                    update the left-rail selection + refetch
  *   openMessage(id)                                      fetch + store detail; no-op if same id
  *   setBodyMode(mode)                                    switch html/plain/raw; sticky
  *   setExternalImagesAllowed(v)                          allow/block external images; resets per-message
@@ -29,7 +31,7 @@ import {
   getMessage,
   listAccounts,
   listFolders,
-  listRecentMessages,
+  listMessages,
   type AccountSummary,
   type FolderSummary,
   type MessageDetail,
@@ -55,6 +57,7 @@ export interface MailState {
   selection: Selection;
   selectedMessage: MessageDetail | null;
   loadingMessages: boolean;
+  loadingMore: boolean;
   loadingDetail: boolean;
   errorMessage: string | null;
   bodyMode: "html" | "plain" | "raw";
@@ -69,6 +72,7 @@ function initialState(): MailState {
     selection: { kind: "all" },
     selectedMessage: null,
     loadingMessages: false,
+    loadingMore: false,
     loadingDetail: false,
     errorMessage: null,
     bodyMode: "html",
@@ -76,11 +80,38 @@ function initialState(): MailState {
   };
 }
 
+function selectionsEqual(a: Selection, b: Selection): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "all" && b.kind === "all") return true;
+  if (a.kind === "account" && b.kind === "account") return a.accountId === b.accountId;
+  if (a.kind === "folder" && b.kind === "folder") {
+    return a.accountId === b.accountId && a.folderId === b.folderId;
+  }
+  return false;
+}
+
+function selectionToFilterOpts(sel: Selection): {
+  accountIds: string[]; folderIds: string[];
+} {
+  if (sel.kind === "all") return { accountIds: [], folderIds: [] };
+  if (sel.kind === "account") return { accountIds: [sel.accountId], folderIds: [] };
+  return { accountIds: [sel.accountId], folderIds: [sel.folderId] };
+}
+
 class MailStore {
   #state: MailState = $state(initialState());
   #changeCursor: string | null = null;
   #pollHandle: ReturnType<typeof setInterval> | null = null;
   #pollFailureCount: number = 0;
+
+  #messagesCursor: string | null = null;
+  #messagesHasMore: boolean = false;
+  #loadMoreInFlight: Promise<void> | null = null;
+  // Filter opts the *current* page set was fetched with; loadMoreMessages
+  // re-uses them so a paginated browse stays scoped to the same selection.
+  #currentFilterOpts: { accountIds: string[]; folderIds: string[] } = {
+    accountIds: [], folderIds: [],
+  };
 
   get snapshot(): MailState {
     return this.#state;
@@ -98,9 +129,16 @@ class MailStore {
     return this.#pollFailureCount;
   }
 
+  get messagesCursor(): string | null { return this.#messagesCursor; }
+  get messagesHasMore(): boolean { return this.#messagesHasMore; }
+
   reset(): void {
     this.stopPolling();
     this.#changeCursor = null;
+    this.#messagesCursor = null;
+    this.#messagesHasMore = false;
+    this.#loadMoreInFlight = null;
+    this.#currentFilterOpts = { accountIds: [], folderIds: [] };
     this.#pollFailureCount = 0;
     this.#state = initialState();
   }
@@ -127,18 +165,63 @@ class MailStore {
     }
   }
 
-  async loadRecentMessages(): Promise<void> {
+  async loadInitialMessages(opts?: {
+    accountIds?: string[]; folderIds?: string[];
+  }): Promise<void> {
     this.#state.loadingMessages = true;
     this.#state.errorMessage = null;
+    this.#state.messages = [];
+    this.#messagesCursor = null;
+    this.#messagesHasMore = false;
+    this.#currentFilterOpts = {
+      accountIds: opts?.accountIds ?? [],
+      folderIds: opts?.folderIds ?? [],
+    };
     try {
-      const resp = await listRecentMessages();
-      this.#state.messages = resp.new_messages.slice(0, MAX_RECENT_MESSAGES);
-      this.#changeCursor = parseCursor(resp.next_cursor) ?? this.#changeCursor;
+      const resp = await listMessages({
+        account_ids: this.#currentFilterOpts.accountIds,
+        folder_ids: this.#currentFilterOpts.folderIds,
+        limit: 50,
+        cursor: null,
+      });
+      this.#state.messages = resp.messages;
+      this.#messagesCursor = resp.next_cursor;
+      this.#messagesHasMore = resp.next_cursor !== null;
     } catch (err: unknown) {
       this.#state.errorMessage = formatError(err);
     } finally {
       this.#state.loadingMessages = false;
     }
+  }
+
+  async loadMoreMessages(): Promise<void> {
+    if (!this.#messagesHasMore || this.#messagesCursor === null) return;
+    if (this.#loadMoreInFlight) {
+      // Coalesce concurrent calls onto a single in-flight request.
+      return this.#loadMoreInFlight;
+    }
+    const cursor = this.#messagesCursor;
+    this.#state.loadingMore = true;
+    const promise = (async () => {
+      try {
+        const resp = await listMessages({
+          account_ids: this.#currentFilterOpts.accountIds,
+          folder_ids: this.#currentFilterOpts.folderIds,
+          limit: 50,
+          cursor,
+        });
+        this.#state.messages = [...this.#state.messages, ...resp.messages];
+        this.#messagesCursor = resp.next_cursor;
+        this.#messagesHasMore = resp.next_cursor !== null;
+      } catch (err: unknown) {
+        this.#state.errorMessage = formatError(err);
+      } finally {
+        this.#state.loadingMore = false;
+        this.#loadMoreInFlight = null;
+      }
+    })();
+    this.#loadMoreInFlight = promise;
+    return promise;
   }
 
   mergeNewMessages(incoming: readonly MessageSummary[]): number {
@@ -182,7 +265,10 @@ class MailStore {
   }
 
   setSelection(sel: Selection): void {
+    if (selectionsEqual(this.#state.selection, sel)) return;
     this.#state.selection = sel;
+    const opts = selectionToFilterOpts(sel);
+    void this.loadInitialMessages(opts);
   }
 
   setBodyMode(mode: "html" | "plain" | "raw"): void {

@@ -91,7 +91,7 @@
     // is initiated; making MainView own the await keeps the gate honest.
     await version.check();
     if (version.snapshot.compatible === false) return;
-    await Promise.all([mail.loadAccounts(), mail.loadRecentMessages()]);
+    await Promise.all([mail.loadAccounts(), mail.loadInitialMessages()]);
     mail.startPolling();
   });
 

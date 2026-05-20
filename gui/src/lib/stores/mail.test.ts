@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   listFolders: vi.fn(),
   listRecentMessages: vi.fn(),
+  listMessages: vi.fn(),
   getMessage: vi.fn(),
   invoke: vi.fn(),
 }));
@@ -90,16 +91,17 @@ describe("mail store", () => {
     expect(mocks.listFolders).toHaveBeenCalledTimes(1);
   });
 
-  it("loads recent messages and exposes them via snapshot.messages", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [msg("1", "1"), msg("2", "2")],
-      next_cursor: "2",
+  it("loads messages and exposes them via snapshot.messages", async () => {
+    mocks.listMessages.mockResolvedValue({
+      messages: [msg("1", "1"), msg("2", "2")],
+      next_cursor: null,
     });
-    await mail.loadRecentMessages();
+    await mail.loadInitialMessages();
     expect(mail.snapshot.messages).toHaveLength(2);
   });
 
   it("setSelection updates current selection", () => {
+    mocks.listMessages.mockResolvedValue({ messages: [], next_cursor: null });
     mail.setSelection({ kind: "account", accountId: "1" });
     expect(mail.snapshot.selection).toEqual({ kind: "account", accountId: "1" });
   });
@@ -119,32 +121,32 @@ describe("mail store", () => {
   });
 
   it("loadingMessages is true during fetch, false after", async () => {
-    let resolveFn!: (v: { new_messages: MessageSummary[]; next_cursor: string | null }) => void;
-    mocks.listRecentMessages.mockReturnValue(
+    let resolveFn!: (v: { messages: MessageSummary[]; next_cursor: string | null }) => void;
+    mocks.listMessages.mockReturnValue(
       new Promise((r) => {
         resolveFn = r;
       }),
     );
-    const pending = mail.loadRecentMessages();
+    const pending = mail.loadInitialMessages();
     expect(mail.snapshot.loadingMessages).toBe(true);
-    resolveFn({ new_messages: [], next_cursor: null });
+    resolveFn({ messages: [], next_cursor: null });
     await pending;
     expect(mail.snapshot.loadingMessages).toBe(false);
   });
 
   it("accepts null next_cursor without error", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [msg("1", "1")],
+    mocks.listMessages.mockResolvedValue({
+      messages: [msg("1", "1")],
       next_cursor: null,
     });
-    await mail.loadRecentMessages();
+    await mail.loadInitialMessages();
     expect(mail.snapshot.messages).toHaveLength(1);
     expect(mail.snapshot.errorMessage).toBeNull();
   });
 
   it("captures errorMessage on load failure", async () => {
-    mocks.listRecentMessages.mockRejectedValue({ kind: "Auth", detail: "NotLoggedIn" });
-    await mail.loadRecentMessages();
+    mocks.listMessages.mockRejectedValue({ kind: "Auth", detail: "NotLoggedIn" });
+    await mail.loadInitialMessages();
     expect(mail.snapshot.errorMessage).toContain("Auth");
   });
 
@@ -156,27 +158,27 @@ describe("mail store", () => {
     expect(mail.snapshot.selection).toEqual({ kind: "all" });
   });
 
-  it("loadRecentMessages captures next_cursor for later polling", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [msg("1", "1")],
+  it("loadInitialMessages sets messagesCursor from next_cursor", async () => {
+    mocks.listMessages.mockResolvedValue({
+      messages: [msg("1", "1")],
       next_cursor: "cur-42",
     });
-    await mail.loadRecentMessages();
-    expect(mail.changeCursor).toBe("cur-42");
+    await mail.loadInitialMessages();
+    expect(mail.messagesCursor).toBe("cur-42");
   });
 
-  it("loadRecentMessages preserves prior cursor when next_cursor is null", async () => {
-    mocks.listRecentMessages.mockResolvedValueOnce({
-      new_messages: [msg("1", "1")],
+  it("loadInitialMessages clears messagesCursor when next_cursor is null", async () => {
+    mocks.listMessages.mockResolvedValueOnce({
+      messages: [msg("1", "1")],
       next_cursor: "cur-7",
     });
-    await mail.loadRecentMessages();
-    mocks.listRecentMessages.mockResolvedValueOnce({
-      new_messages: [],
+    await mail.loadInitialMessages();
+    mocks.listMessages.mockResolvedValueOnce({
+      messages: [],
       next_cursor: null,
     });
-    await mail.loadRecentMessages();
-    expect(mail.changeCursor).toBe("cur-7");
+    await mail.loadInitialMessages();
+    expect(mail.messagesCursor).toBeNull();
   });
 });
 
@@ -217,22 +219,18 @@ describe("mail.mergeNewMessages", () => {
 
 describe("mail.pollOnce", () => {
   it("invokes list_recent_messages_cmd with the current cursor", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [msg("1", "1")],
-      next_cursor: "cur-1",
-    });
-    await mail.loadRecentMessages();
+    // Prime the changeCursor via a first pollOnce call.
+    mocks.invoke.mockResolvedValueOnce({ new_messages: [msg("1", "1")], next_cursor: "cur-1" });
+    await mail.pollOnce();
     mocks.invoke.mockResolvedValue({ new_messages: [], next_cursor: "cur-1" });
     await mail.pollOnce();
     expect(mocks.invoke).toHaveBeenCalledWith("list_recent_messages_cmd", { since: "cur-1" });
   });
 
   it("merges fresh messages and advances the cursor", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [msg("1", "1")],
-      next_cursor: "cur-1",
-    });
-    await mail.loadRecentMessages();
+    // Prime cursor via first pollOnce.
+    mocks.invoke.mockResolvedValueOnce({ new_messages: [msg("1", "1")], next_cursor: "cur-1" });
+    await mail.pollOnce();
     mocks.invoke.mockResolvedValue({
       new_messages: [msg("1", "1"), msg("2", "1"), msg("3", "1")],
       next_cursor: "cur-3",
@@ -243,11 +241,9 @@ describe("mail.pollOnce", () => {
   });
 
   it("keeps the previous cursor when next_cursor is empty string", async () => {
-    mocks.listRecentMessages.mockResolvedValue({
-      new_messages: [],
-      next_cursor: "cur-stable",
-    });
-    await mail.loadRecentMessages();
+    // Prime cursor via first pollOnce.
+    mocks.invoke.mockResolvedValueOnce({ new_messages: [], next_cursor: "cur-stable" });
+    await mail.pollOnce();
     mocks.invoke.mockResolvedValue({ new_messages: [], next_cursor: "" });
     await mail.pollOnce();
     expect(mail.changeCursor).toBe("cur-stable");
@@ -259,7 +255,7 @@ describe("mail.pollOnce", () => {
     expect(mail.snapshot.errorMessage).toContain("Http");
   });
 
-  it("does not throw when called before loadRecentMessages (cursor=null)", async () => {
+  it("does not throw when called before loadInitialMessages (cursor=null)", async () => {
     mocks.invoke.mockResolvedValue({ new_messages: [msg("9", "1")], next_cursor: "cur-9" });
     await mail.pollOnce();
     expect(mocks.invoke).toHaveBeenCalledWith("list_recent_messages_cmd", { since: null });
@@ -335,5 +331,171 @@ describe("mail.startPolling / stopPolling", () => {
     expect(mail.isPolling).toBe(true);
     mail.reset();
     expect(mail.isPolling).toBe(false);
+  });
+});
+
+// --- new tests for paginated browse ---
+
+describe("loadInitialMessages", () => {
+  beforeEach(() => {
+    mail.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("populates messages from /v1/messages and sets messagesHasMore from next_cursor", async () => {
+    const tauri = await import("../tauri");
+    vi.spyOn(tauri, "listMessages").mockResolvedValue({
+      messages: [
+        { message_id: "1", subject: "a", from: { address: null, name: null },
+          date: null, account: { id: "1", name: "x" } },
+      ],
+      next_cursor: "cur-1",
+    });
+    await mail.loadInitialMessages();
+    const snap = mail.snapshot;
+    expect(snap.messages.map((m) => m.message_id)).toEqual(["1"]);
+    expect(mail.messagesCursor).toBe("cur-1");
+    expect(mail.messagesHasMore).toBe(true);
+  });
+
+  it("sets messagesHasMore=false when next_cursor is null", async () => {
+    const tauri = await import("../tauri");
+    vi.spyOn(tauri, "listMessages").mockResolvedValue({
+      messages: [], next_cursor: null,
+    });
+    await mail.loadInitialMessages();
+    expect(mail.messagesHasMore).toBe(false);
+    expect(mail.messagesCursor).toBeNull();
+  });
+});
+
+describe("loadMoreMessages", () => {
+  beforeEach(() => {
+    mail.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("appends results and advances cursor", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "listMessages")
+      .mockResolvedValueOnce({
+        messages: [
+          { message_id: "1", subject: "a", from: { address: null, name: null },
+            date: null, account: { id: "1", name: "x" } },
+        ],
+        next_cursor: "cur-1",
+      })
+      .mockResolvedValueOnce({
+        messages: [
+          { message_id: "2", subject: "b", from: { address: null, name: null },
+            date: null, account: { id: "1", name: "x" } },
+        ],
+        next_cursor: null,
+      });
+    await mail.loadInitialMessages();
+    await mail.loadMoreMessages();
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(mail.snapshot.messages.map((m) => m.message_id)).toEqual(["1", "2"]);
+    expect(mail.messagesHasMore).toBe(false);
+  });
+
+  it("is a no-op when messagesHasMore is false", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "listMessages")
+      .mockResolvedValue({ messages: [], next_cursor: null });
+    await mail.loadInitialMessages();      // sets hasMore=false
+    spy.mockClear();
+    await mail.loadMoreMessages();          // should not fire
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("two concurrent calls fire one network request", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "listMessages")
+      .mockResolvedValueOnce({
+        messages: [], next_cursor: "cur-1",
+      })
+      .mockResolvedValue({
+        messages: [{ message_id: "9", subject: "z",
+                     from: { address: null, name: null }, date: null,
+                     account: { id: "1", name: "x" } }],
+        next_cursor: null,
+      });
+    await mail.loadInitialMessages();
+    spy.mockClear();
+    spy.mockResolvedValue({
+      messages: [{ message_id: "9", subject: "z",
+                   from: { address: null, name: null }, date: null,
+                   account: { id: "1", name: "x" } }],
+      next_cursor: null,
+    });
+    await Promise.all([mail.loadMoreMessages(), mail.loadMoreMessages()]);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-uses the current filter opts on subsequent loadMore calls", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "listMessages")
+      .mockResolvedValueOnce({
+        messages: [{ message_id: "1", subject: "a",
+          from: { address: null, name: null }, date: null,
+          account: { id: "7", name: "scoped" } }],
+        next_cursor: "cur-1",
+      })
+      .mockResolvedValueOnce({
+        messages: [], next_cursor: null,
+      });
+    await mail.loadInitialMessages({ accountIds: ["7"] });
+    await mail.loadMoreMessages();
+    expect(spy).toHaveBeenLastCalledWith({
+      account_ids: ["7"], folder_ids: [], limit: 50, cursor: "cur-1",
+    });
+  });
+});
+
+describe("setSelection refetches from /v1/messages", () => {
+  beforeEach(() => {
+    mail.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("calls listMessages with the selected account's id", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "listMessages").mockResolvedValue({
+      messages: [], next_cursor: null,
+    });
+    mail.setSelection({ kind: "account", accountId: "42" });
+    // setSelection fires the load without awaiting; flush microtasks.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(spy).toHaveBeenCalledWith({
+      account_ids: ["42"], folder_ids: [], limit: 50, cursor: null,
+    });
+  });
+
+  it("calls listMessages with both account_id and folder_id when a folder is selected", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "listMessages").mockResolvedValue({
+      messages: [], next_cursor: null,
+    });
+    mail.setSelection({ kind: "folder", accountId: "42", folderId: "9" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(spy).toHaveBeenCalledWith({
+      account_ids: ["42"], folder_ids: ["9"], limit: 50, cursor: null,
+    });
+  });
+
+  it("is a no-op when the selection is unchanged", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "listMessages").mockResolvedValue({
+      messages: [], next_cursor: null,
+    });
+    mail.setSelection({ kind: "account", accountId: "42" });
+    await Promise.resolve(); await Promise.resolve();
+    spy.mockClear();
+    mail.setSelection({ kind: "account", accountId: "42" });
+    await Promise.resolve(); await Promise.resolve();
+    expect(spy).not.toHaveBeenCalled();
   });
 });

@@ -408,9 +408,9 @@ for the full design.
 - **304 short-circuit skips file-open + filename lookup (#62)**: the
   `stream_blob` route uses a cheap two-step probe before deciding to
   serve a body. First `get_attachment_blob_info` (DB-only: ACL +
-  `attachment_blobs` row → `(mime, size)`, no `Path.exists()`, no
-  JSONB filename scan). Then `if_none_match_satisfies` → if it fires,
-  return 304 and never call `open_attachment_bytes` /
+  `attachment_blobs` row → `(mime, size, path)`, no `Path.exists()`,
+  no JSONB filename scan). Then `if_none_match_satisfies` → if it
+  fires, return 304 and never call `open_attachment_bytes` /
   `get_attachment_filename`. Only the body-carrying path pays for the
   file open and the JSONB scan that picks the per-message original
   filename. **The probe runs the same ACL check as
@@ -424,6 +424,22 @@ for the full design.
   new conditional-GET endpoint, follow the same probe → conditional
   → expensive-IO ordering; never put the expensive call before the
   precondition check.
+- **200/206 body path reuses the probe's row (#64)**: the route hands
+  the probe's full `(mime, size, path)` tuple straight to
+  `open_attachment_bytes` as `prefetched=`, which skips its internal
+  ACL EXISTS predicate and `attachment_blobs` SELECT entirely — the
+  caller is the boundary. End-to-end on a 200 there is exactly one
+  `_caller_can_read_blob` call and one `attachment_blobs` SELECT
+  (the probe's), enforced by
+  [`test_200_runs_exactly_one_acl_check`](tests/test_serve_attachments_conditional.py).
+  The `Path.exists()` check still runs on the prefetched path so a
+  blob deleted between probe and open surfaces as NotFound rather
+  than a mid-stream FileNotFoundError. `get_attachment_filename`
+  remains a separate JSONB scan — same predicate shape, different
+  query — and is out of scope for the #64 ACL-collapse acceptance.
+  All three blob-row accessors (`get_attachment_metadata`,
+  `get_attachment_blob_info`, `open_attachment_bytes`) now share a
+  single private `_lookup_blob_row` helper (#65).
 - **ID typing (#33)**: every entity ID is a **string on the wire** in
   both directions — response bodies emit `str(id)` and path/query
   parameters accept digit-strings only. `localmail.api.ids.parse_int_id`

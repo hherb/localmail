@@ -56,82 +56,102 @@ def _caller_can_read_blob(
         return cur.fetchone() is not None
 
 
+def _lookup_blob_row(
+    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
+) -> tuple[str, int, str]:
+    """Parse sha + ACL check + SELECT ``(mime_type, size_bytes, path)``.
+
+    Single source of truth for every blob-row accessor. Path is selected
+    alongside mime/size at zero extra cost — same row, same PK lookup —
+    so callers that don't need it (metadata, probe) simply discard it,
+    while ``open_attachment_bytes`` can reuse the helper instead of
+    re-running ACL + SELECT.
+
+    Raises ``NotFound`` if the row is missing or the caller's ACL does
+    not include any account that references the blob.
+    """
+    sha_bytes = _parse_sha256_hex(sha256_hex)
+    if not _caller_can_read_blob(conn, sha256_hex, allowed_account_ids):
+        raise NotFound(f"attachment {sha256_hex} not found")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT mime_type, size_bytes, path FROM attachment_blobs "
+            "WHERE sha256 = %s",
+            (sha_bytes,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise NotFound(f"attachment {sha256_hex} not found")
+    return row[0], int(row[1]), row[2]
+
+
 def get_attachment_metadata(
     conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
 ) -> dict[str, object]:
     """Return {sha256, mime_type, size_bytes} for a blob. Raises NotFound."""
-    sha_bytes = _parse_sha256_hex(sha256_hex)
-    if not _caller_can_read_blob(conn, sha256_hex, allowed_account_ids):
-        raise NotFound(f"attachment {sha256_hex} not found")
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT mime_type, size_bytes FROM attachment_blobs WHERE sha256 = %s",
-            (sha_bytes,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        raise NotFound(f"attachment {sha256_hex} not found")
-    return {
-        "sha256": sha256_hex,
-        "mime_type": row[0],
-        "size_bytes": int(row[1]),
-    }
+    mime, size, _path = _lookup_blob_row(
+        conn, sha256_hex, allowed_account_ids=allowed_account_ids,
+    )
+    return {"sha256": sha256_hex, "mime_type": mime, "size_bytes": size}
 
 
 def get_attachment_blob_info(
     conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
-) -> tuple[str, int]:
-    """Return ``(mime_type, size_bytes)`` for a blob — DB-only, no file open.
+) -> tuple[str, int, str]:
+    """Return ``(mime_type, size_bytes, path)`` for a blob — DB-only, no file open.
 
     Lightweight probe used by the streaming route before evaluating the
-    conditional-GET preconditions (#62). It enforces the same ACL check
-    as ``open_attachment_bytes`` so a 404 still wins over a 304 for
-    callers who cannot read the blob, but it deliberately skips the
-    ``Path.exists()`` / file-open work and the JSONB filename scan that
-    are wasted when ``If-None-Match`` is going to short-circuit to 304.
+    conditional-GET preconditions (#62). Enforces the same ACL check as
+    ``open_attachment_bytes`` so a 404 still wins over a 304 for callers
+    who cannot read the blob, but skips the ``Path.exists()`` / file-open
+    work and the JSONB filename scan that are wasted when
+    ``If-None-Match`` is going to short-circuit to 304.
+
+    Returns ``path`` so the route can pass the full tuple straight to
+    ``open_attachment_bytes`` as ``prefetched=`` on the body-carrying
+    200/206 path, collapsing the previous probe+open duplicate ACL +
+    SELECT to a single pair (#64).
 
     Raises ``NotFound`` if the blob row is missing or the caller's ACL
     does not include any account that references the blob.
     """
-    sha_bytes = _parse_sha256_hex(sha256_hex)
-    if not _caller_can_read_blob(conn, sha256_hex, allowed_account_ids):
-        raise NotFound(f"attachment {sha256_hex} not found")
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT mime_type, size_bytes FROM attachment_blobs WHERE sha256 = %s",
-            (sha_bytes,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        raise NotFound(f"attachment {sha256_hex} not found")
-    return row[0], int(row[1])
+    return _lookup_blob_row(
+        conn, sha256_hex, allowed_account_ids=allowed_account_ids,
+    )
 
 
 def open_attachment_bytes(
-    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
+    conn: psycopg.Connection,
+    sha256_hex: str,
+    *,
+    allowed_account_ids: list[int],
+    prefetched: tuple[str, int, str] | None = None,
 ) -> tuple[BinaryIO, str, int]:
-    """Open the blob file for streaming. Returns (file, mime_type, size).
+    """Open the blob file for streaming. Returns ``(file, mime_type, size)``.
 
     Caller closes the file. Raises NotFound if the DB row is missing, the
     on-disk file is missing, or the caller's ACL does not include any
     account that references the blob.
+
+    When ``prefetched=(mime, size, path)`` is supplied, the ACL EXISTS
+    predicate and the ``attachment_blobs`` SELECT are both skipped —
+    the caller asserts the row was already validated (typically by an
+    immediately-prior ``get_attachment_blob_info`` call). The
+    ``Path.exists()`` check still runs so a blob deleted between
+    probe and open surfaces as NotFound rather than a confusing
+    FileNotFoundError mid-stream. ``allowed_account_ids`` is ignored
+    on the prefetched path — the caller is the boundary.
     """
-    sha_bytes = _parse_sha256_hex(sha256_hex)
-    if not _caller_can_read_blob(conn, sha256_hex, allowed_account_ids):
-        raise NotFound(f"attachment {sha256_hex} not found")
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT mime_type, size_bytes, path FROM attachment_blobs WHERE sha256 = %s",
-            (sha_bytes,),
+    if prefetched is not None:
+        mime, size, path = prefetched
+    else:
+        mime, size, path = _lookup_blob_row(
+            conn, sha256_hex, allowed_account_ids=allowed_account_ids,
         )
-        row = cur.fetchone()
-    if row is None:
-        raise NotFound(f"attachment {sha256_hex} not found")
-    mime, size, path = row
     p = Path(path)
     if not p.exists():
         raise NotFound(f"attachment {sha256_hex} file missing at {path}")
-    return p.open("rb"), mime, int(size)
+    return p.open("rb"), mime, size
 
 
 def get_attachment_filename(

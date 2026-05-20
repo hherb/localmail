@@ -239,17 +239,22 @@ def test_get_attachment_filename_prefers_first_carrying_message(
     assert get_attachment_filename(db_conn, sha, allowed_account_ids=[aid]) == "x.pdf"
 
 
-def test_get_attachment_blob_info_returns_mime_and_size(
+def test_get_attachment_blob_info_returns_mime_size_and_path(
     db_conn: psycopg.Connection, tmp_path: Path,
 ) -> None:
     """Cheap probe used before the conditional-GET 304 short-circuit (#62)
-    must return the same `(mime, size)` an open call would surface."""
+    returns ``(mime, size, path)``. Path is included so the body-carrying
+    200/206 path can pass the tuple to ``open_attachment_bytes`` as
+    ``prefetched=`` and avoid a duplicate DB roundtrip (#64)."""
     sha = "60" * 32
     aid = _seed_blob(db_conn, tmp_path, sha, b"%PDF-1.4 probe")
     db_conn.commit()
-    mime, size = get_attachment_blob_info(db_conn, sha, allowed_account_ids=[aid])
+    mime, size, path = get_attachment_blob_info(
+        db_conn, sha, allowed_account_ids=[aid],
+    )
     assert mime == "application/pdf"
     assert size == len(b"%PDF-1.4 probe")
+    assert path == str(tmp_path / "blobs" / sha[:2] / sha[2:4] / sha)
 
 
 def test_get_attachment_blob_info_not_found(db_conn: psycopg.Connection) -> None:
@@ -283,6 +288,74 @@ def test_get_attachment_blob_info_does_not_touch_filesystem(
     db_conn.commit()
     blob_path = tmp_path / "blobs" / sha[:2] / sha[2:4] / sha
     blob_path.unlink()
-    mime, size = get_attachment_blob_info(db_conn, sha, allowed_account_ids=[aid])
+    mime, size, _path = get_attachment_blob_info(
+        db_conn, sha, allowed_account_ids=[aid],
+    )
     assert mime == "application/pdf"
     assert size == len(b"%PDF-1.4 probe")
+
+
+def test_get_attachment_blob_info_returns_path(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """#64: the probe returns (mime, size, path) so the route can pass
+    the tuple straight to ``open_attachment_bytes`` as ``prefetched=``,
+    eliminating the duplicate SELECT on the 200/206 body-carrying
+    path. Path is `SELECT`ed alongside (mime, size) at zero extra cost
+    — same row, same primary-key lookup."""
+    sha = "70" * 32
+    aid = _seed_blob(db_conn, tmp_path, sha, b"%PDF-1.4 probe")
+    db_conn.commit()
+    mime, size, path = get_attachment_blob_info(
+        db_conn, sha, allowed_account_ids=[aid],
+    )
+    assert mime == "application/pdf"
+    assert size == len(b"%PDF-1.4 probe")
+    assert path == str(tmp_path / "blobs" / sha[:2] / sha[2:4] / sha)
+
+
+def test_open_attachment_bytes_with_prefetched_skips_db(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """#64: when ``prefetched=(mime, size, path)`` is supplied, the
+    function must skip both the ACL EXISTS predicate and the
+    attachment_blobs SELECT — the caller asserts the row was already
+    validated by the cheap probe. We prove the skip by passing an
+    empty grant list and a sha with no DB row: without ``prefetched``
+    this would raise NotFound, but with ``prefetched`` it should open
+    the on-disk file just from the path the caller provided."""
+    sha = "71" * 32
+    fanout = tmp_path / "blobs" / sha[:2] / sha[2:4]
+    fanout.mkdir(parents=True, exist_ok=True)
+    blob_path = fanout / sha
+    payload = b"hello prefetched"
+    blob_path.write_bytes(payload)
+    db_conn.commit()
+    fp, mime, size = open_attachment_bytes(
+        db_conn, sha,
+        allowed_account_ids=[],
+        prefetched=("application/octet-stream", len(payload), str(blob_path)),
+    )
+    try:
+        assert mime == "application/octet-stream"
+        assert size == len(payload)
+        assert fp.read() == payload
+    finally:
+        fp.close()
+
+
+def test_open_attachment_bytes_with_prefetched_still_checks_file(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """#64: ``prefetched`` only short-circuits the DB lookup — the
+    file-existence check stays so a blob deleted between probe and
+    open still surfaces as NotFound rather than a confusing
+    FileNotFoundError mid-stream."""
+    sha = "72" * 32
+    bad_path = tmp_path / "blobs" / sha[:2] / sha[2:4] / sha
+    with pytest.raises(NotFound):
+        open_attachment_bytes(
+            db_conn, sha,
+            allowed_account_ids=[],
+            prefetched=("text/plain", 0, str(bad_path)),
+        )

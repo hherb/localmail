@@ -97,7 +97,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0018_messages_date_received_internaldate.sql
+migrations/         # 0001_init.sql … 0019_api_login_attempts.sql
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py)
@@ -330,6 +330,23 @@ for the full design.
   boundary applies `WHERE account_id = ANY(%s)` on every read. Routes
   resolve the list once per request via `localmail.api.acl.allowed_account_ids`.
   See [docs/superpowers/specs/2026-05-18-per-user-account-acl-design.md](docs/superpowers/specs/2026-05-18-per-user-account-acl-design.md).
+- **Login rate-limiting (Postgres-backed, #7)**: migration
+  `0019_api_login_attempts.sql` adds an append-only audit table read by
+  three sliding-window caps — global, per-IP, per-user. Every login
+  attempt (success + failure) is one INSERT; the check is a single SELECT
+  with three `FILTER (...)` aggregates. Caps + windows + retention live
+  in `LocalmailConfig.auth` so there are no module-level magic numbers in
+  `api/auth.py`. The in-memory dicts that preceded this design were
+  per-process and lost the security promise the moment `uvicorn
+  --workers N` came into scope; the DB-backed table keeps the limits
+  consistent across workers and across `serve` restarts. Cleanup is
+  best-effort, gated by a Postgres advisory lock
+  (`_SWEEP_ADVISORY_LOCK_KEY`) so concurrent workers don't pile up
+  DELETEs. **Proxy gotcha**: `request.client.host` is the socket peer,
+  not the X-Forwarded-For client. Behind a reverse proxy every login
+  appears to come from `127.0.0.1` and the per-IP cap is effectively
+  global — bump `login_global_max` accordingly or wait for the planned
+  `auth.trust_proxy_headers` config knob.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.
@@ -469,7 +486,7 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0018_messages_date_received_internaldate.sql`; next would be `0019_*.sql`.
+  Latest is `0019_api_login_attempts.sql`; next would be `0020_*.sql`.
 
 ## Testing notes
 

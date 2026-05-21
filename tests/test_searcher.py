@@ -231,6 +231,88 @@ def test_searcher_empty_query_respects_account_filter(db_dsn, db_conn):
     assert ids == [mid_a2, mid_a1]
 
 
+def test_sort_date_with_text_is_unbounded_lexical_paginated(db_dsn, db_conn):
+    """``sort=date`` + non-empty free_text must behave like Gmail:
+    SELECT all messages matching the term, ORDER BY date DESC, paginate
+    by keyset — *not* bounded by ``rerank_pool_size``.
+
+    Why: with the hybrid path, "e-ticket" returns at most
+    ``rerank_pool_size`` (default 20) candidates fused by RRF, then
+    sorted by date. A user with dozens of recent e-tickets only sees
+    a handful (top-K by relevance), and "Load more" grow_pool re-runs
+    just return the same top-K with overlap. The user wants
+    "show me all my e-tickets, newest first" — that's a lexical
+    keyset query, not a hybrid retrieval.
+    """
+    # Seed 30 matching messages — well above rerank_pool_size=20.
+    now = datetime.now(timezone.utc)
+    rows = [("a", f"e-ticket booking #{i:02d}", None,
+             now - timedelta(hours=i)) for i in range(30)]
+    ids = _seed_with_dates(db_conn, rows)
+    # ids[0] is newest (i=0), ids[29] is oldest (i=29) — ORDER DESC by internal_date.
+    cfg = SearchConfig()
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
+                     reranker=None, rewriter=None)
+        # Walk every page until the cursor goes None.
+        all_ids: list[int] = []
+        page = s.search("e-ticket", page_size=10, sort="date")
+        all_ids.extend(r.message_id for r in page.results)
+        while page.next_keyset is not None:
+            page = s.search("e-ticket", page_size=10, sort="date",
+                            keyset_cursor=page.next_keyset)
+            all_ids.extend(r.message_id for r in page.results)
+    finally:
+        pool.close()
+    # All 30 messages must appear, newest first.
+    assert all_ids == ids
+
+
+def test_sort_date_lexical_paginates_across_dated_then_null_tail(db_dsn, db_conn):
+    """Lexical-date path must cleanly walk dated rows first, then the
+    NULLS-LAST tail of un-backfilled rows, with no duplicates across the
+    boundary.
+
+    Why: the keyset WHERE clause includes
+    ``OR COALESCE(internal_date, date_sent) IS NULL`` so the planner can
+    transition from "still in dated portion" to "in NULLS tail" mid-walk
+    without a separate query. The risk is double-emitting NULL rows on the
+    transition page; ORDER BY ... DESC NULLS LAST + LIMIT keeps them out
+    until dated is exhausted, but only an end-to-end walk proves it.
+    """
+    now = datetime.now(timezone.utc)
+    rows: list[tuple[str, str, object, object]] = []
+    # 5 dated rows (matching), newest → oldest.
+    for i in range(5):
+        rows.append(("a", f"invoice batch #{i:02d}", None, now - timedelta(hours=i)))
+    # 3 NULL-date rows (matching), both date columns NULL.
+    for i in range(3):
+        rows.append(("a", f"invoice undated #{i:02d}", None, None))
+    seeded = _seed_with_dates(db_conn, rows)
+    dated_ids = seeded[:5]
+    null_ids = seeded[5:]
+    cfg = SearchConfig()
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
+                     reranker=None, rewriter=None)
+        all_ids: list[int] = []
+        page = s.search("invoice", page_size=2, sort="date")
+        all_ids.extend(r.message_id for r in page.results)
+        while page.next_keyset is not None:
+            page = s.search("invoice", page_size=2, sort="date",
+                            keyset_cursor=page.next_keyset)
+            all_ids.extend(r.message_id for r in page.results)
+    finally:
+        pool.close()
+    # Dated rows newest-first, then NULL rows in id DESC (NULLS-LAST tail).
+    expected = dated_ids + list(reversed(null_ids))
+    assert all_ids == expected
+    # No row appears twice — the dated→NULL boundary is the risky transition.
+    assert len(all_ids) == len(set(all_ids))
+
+
 def test_searcher_no_cache_returns_token_none(db_dsn, db_conn):
     _seed(db_conn)
     cfg = SearchConfig()

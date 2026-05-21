@@ -21,6 +21,7 @@ import {
 } from "../api/search";
 import { runSearch } from "../tauri";
 import { formatError } from "../format_error";
+import { isSearchCursorExpired } from "../search_cursor_expired";
 
 const DEFAULT_LIMIT = 50;
 
@@ -35,8 +36,11 @@ export interface SearchState {
   // /v1/search `sort` parameter.
   sort: SortMode;
   results: SearchResultRow[];
+  cursor: string | null;
+  hasMore: boolean;
   tookMs: number | null;
   loading: boolean;
+  loadingMore: boolean;
   errorMessage: string | null;
 }
 
@@ -46,8 +50,11 @@ function initialState(): SearchState {
     filters: emptyFilters(),
     sort: "rank",
     results: [],
+    cursor: null,
+    hasMore: false,
     tookMs: null,
     loading: false,
+    loadingMore: false,
     errorMessage: null,
   };
 }
@@ -105,6 +112,8 @@ class SearchStore {
       if (seq !== this.#submitSeq) return;
       this.#state.results = resp.results;
       this.#state.tookMs = resp.took_ms;
+      this.#state.cursor = resp.next_cursor;
+      this.#state.hasMore = resp.next_cursor !== null;
     } catch (err: unknown) {
       if (seq !== this.#submitSeq) return;
       // Clear stale results so the UI does not show prior query's matches
@@ -112,9 +121,65 @@ class SearchStore {
       // off so MessageList reverts to its non-search rendering path.
       this.#state.results = [];
       this.#state.tookMs = null;
+      this.#state.cursor = null;
+      this.#state.hasMore = false;
       this.#state.errorMessage = formatError(err);
     } finally {
       if (seq === this.#submitSeq) this.#state.loading = false;
+    }
+  }
+
+  async loadMore(): Promise<void> {
+    if (!this.#state.hasMore || this.#state.cursor === null) return;
+    if (this.#state.loadingMore) return;
+    const seq = this.#submitSeq;
+    const cursor = this.#state.cursor;
+    const priorCount = this.#state.results.length;
+    this.#state.loadingMore = true;
+    try {
+      let resp;
+      try {
+        resp = await runSearch({
+          query: this.#state.query,
+          filters: filtersUiToWire(this.#state.filters),
+          limit: DEFAULT_LIMIT,
+          cursor,
+          sort: this.#state.sort,
+        });
+      } catch (err: unknown) {
+        if (!isSearchCursorExpired(err)) throw err;
+        // Transparent recovery: re-submit without cursor, drop the rows
+        // the user already has, append the remainder.
+        const fresh = await runSearch({
+          query: this.#state.query,
+          filters: filtersUiToWire(this.#state.filters),
+          limit: DEFAULT_LIMIT,
+          cursor: null,
+          sort: this.#state.sort,
+        });
+        if (seq !== this.#submitSeq) return;
+        if (fresh.results.length <= priorCount) {
+          // New pool is smaller — full reset.
+          this.#state.results = fresh.results;
+        } else {
+          this.#state.results = [
+            ...this.#state.results,
+            ...fresh.results.slice(priorCount),
+          ];
+        }
+        this.#state.cursor = fresh.next_cursor;
+        this.#state.hasMore = fresh.next_cursor !== null;
+        return;
+      }
+      if (seq !== this.#submitSeq) return;
+      this.#state.results = [...this.#state.results, ...resp.results];
+      this.#state.cursor = resp.next_cursor;
+      this.#state.hasMore = resp.next_cursor !== null;
+    } catch (err: unknown) {
+      if (seq !== this.#submitSeq) return;
+      this.#state.errorMessage = formatError(err);
+    } finally {
+      this.#state.loadingMore = false;
     }
   }
 }

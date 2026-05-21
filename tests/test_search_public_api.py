@@ -46,7 +46,14 @@ def test_create_searcher_degrades_when_reranker_init_fails(db_dsn, caplog, monke
 
     monkeypatch.setattr("localmail.search.reranker.FastEmbedReranker", _boom)
 
-    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}, "accounts": []})
+    # Default is `reranker_enabled=False` (so CPU-bound rerank doesn't blow
+    # past request timeouts via the pagination grow_pool path). This test
+    # exercises the opt-in "operator enabled rerank but model load failed"
+    # graceful-degrade path, so flip the flag back on.
+    cfg = LocalmailConfig.model_validate({
+        "database": {"dsn": db_dsn}, "accounts": [],
+        "search": {"reranker_enabled": True},
+    })
     with caplog.at_level(logging.WARNING, logger="localmail.search"):
         searcher = create_searcher(cfg=cfg, embeddings=_StubEmbedder())
     try:

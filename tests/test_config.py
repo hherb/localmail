@@ -95,7 +95,10 @@ def test_search_config_has_sane_defaults():
     assert cfg.embedding_dim == 768
     assert cfg.candidates_per_arm == 50
     assert cfg.rrf_k == 60
-    assert cfg.rerank_pool_size == 20
+    # Pool must be >= the GUI's default page (50) so the first sort=rank
+    # page isn't half-empty and so "Load more" can serve at least one
+    # follow-up page from the cache before grow_pool kicks in.
+    assert cfg.rerank_pool_size == 100
     assert cfg.page_size_default == 20
     assert cfg.page_size_max == 200
     assert cfg.snippet_width_chars == 200
@@ -204,3 +207,24 @@ login_attempt_retention_s = 3600
     assert cfg.auth.login_attempt_retention_s == 3600
     # Defaults fill in the rest.
     assert cfg.auth.login_per_user_window_s == 60
+
+
+def test_candidates_per_arm_max_default_is_800() -> None:
+    cfg = SearchConfig()
+    assert cfg.candidates_per_arm_max == 800
+    # Sanity: max must be >= initial; otherwise grow_pool can't ever fire.
+    assert cfg.candidates_per_arm_max >= cfg.candidates_per_arm
+
+
+def test_reranker_disabled_by_default() -> None:
+    """Default ships with the cross-encoder reranker OFF.
+
+    Why: the CPU-bound rerank pass scales linearly with pool size, and the
+    pagination cursor doubles ``candidates_per_arm`` on every page advance
+    past the cached pool (50 → 100 → 200 → 400 → 800). At the cap, an
+    800-candidate cross-encoder pass on CPU easily exceeds the Tauri/HTTP
+    request timeout, so the safe default is RRF-only. Operators on GPU
+    hosts can flip ``reranker_enabled = true`` in config.toml.
+    """
+    cfg = SearchConfig()
+    assert cfg.reranker_enabled is False

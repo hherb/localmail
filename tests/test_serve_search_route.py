@@ -46,6 +46,13 @@ def _fake_searcher_returning_one_hit():
     page.results = [result]
     page.search_token = "tok-99"
     page.timing_ms = {"total": 5.0}
+    page.has_more_in_pool = False
+    page.can_grow_pool = False
+    page.candidates_per_arm = 50
+    page.page = 1
+    # Pool-cursor mock — explicit None keeps `_next_cursor` out of the
+    # keyset branch (MagicMock's auto-attr would be truthy).
+    page.next_keyset = None
     s.search.return_value = page
     return s
 
@@ -120,6 +127,75 @@ def test_search_sort_invalid_value_is_rejected(
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 422
+
+
+def test_sort_date_with_text_paginates_keyset_unbounded(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """End-to-end: sort=date + non-empty query walks every match via the
+    wire ``next_cursor`` (no pool cap, no grow_pool dance).
+
+    Uses a real Searcher against the live test DB — the lexical-date
+    path is a SQL query, no embeddings/rerank needed.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from localmail.config import SearchConfig
+    from localmail.db import open_pool
+    from localmail.search.searcher import Searcher
+
+    # Seed 30 matching messages on a single account, grant the api_user.
+    now = datetime.now(timezone.utc)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method) "
+            "VALUES ('a','x@y.test','imap.x','password') RETURNING id"
+        )
+        aid = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO user_accounts (user_id, account_id) VALUES (%s, %s)",
+            (api_user.id, int(aid)),
+        )
+        ids: list[int] = []
+        for i in range(30):
+            cur.execute(
+                "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+                " body_text, headers, raw_bytes, size_bytes, internal_date)"
+                " VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, 'r', 1, %s) RETURNING id",
+                (aid, f"<m{i}@x>", bytes([i + 1]) * 32,
+                 f"e-ticket booking #{i:02d}", "body",
+                 now - timedelta(hours=i)),
+            )
+            ids.append(int(cur.fetchone()[0]))
+    db_conn.commit()
+
+    pool = open_pool(db_dsn)
+    try:
+        searcher = Searcher(
+            pool=pool, cfg=SearchConfig(),
+            embeddings=None, reranker=None, rewriter=None,
+        )
+        app = create_app(db_dsn=db_dsn, searcher=searcher)
+        c = TestClient(app)
+        seen: list[str] = []
+        body = c.post(
+            "/v1/search",
+            json={"query": "e-ticket", "filters": {}, "limit": 10, "sort": "date"},
+            headers={"Authorization": f"Bearer {api_token}"},
+        ).json()
+        seen.extend(r["message_id"] for r in body["results"])
+        while body["next_cursor"] is not None:
+            body = c.post(
+                "/v1/search",
+                json={"query": "e-ticket", "filters": {}, "limit": 10,
+                      "sort": "date", "cursor": body["next_cursor"]},
+                headers={"Authorization": f"Bearer {api_token}"},
+            ).json()
+            seen.extend(r["message_id"] for r in body["results"])
+    finally:
+        pool.close()
+    # All 30 messages must surface, newest first.
+    assert seen == [str(i) for i in ids]
 
 
 def test_search_validation_failure(db_dsn: str, api_token: str, db_conn, api_user) -> None:
@@ -209,3 +285,27 @@ def test_search_malformed_folder_id_in_filter_returns_400(
     body = r.json()
     assert body["type"] == "/problems/validation-failed"
     assert "folder_id" in body["detail"]
+
+
+def test_search_cursor_forwarded_to_run_search(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """Wire-level: when the client sends `cursor`, the route must forward it
+    to run_search so continue_page fires instead of search()."""
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    # Make the fake's continue_page return the same shape as .search.
+    fake.continue_page = fake.search
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "cursor": "tok-99:2"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    fake.continue_page.assert_called_once()
+    args = fake.continue_page.call_args
+    assert args.args[0] == "tok-99"
+    assert args.args[1] == 2

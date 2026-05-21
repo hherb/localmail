@@ -258,6 +258,39 @@ login_cleanup_interval_s = 300     # 5m
 > per-IP cap is not effective until `auth.trust_proxy_headers` lands
 > (see issue tracker) — bump `login_global_max` to compensate.
 
+### Browse & search pagination
+
+`GET /v1/messages` returns one keyset-paginated page of messages in
+`COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC` order
+(the same ordering the search subsystem and `/v1/changes` use). The
+response carries `next_cursor`; pass it back as `?cursor=…` to walk
+the archive. The cursor is opaque (URL-safe base64) — do not parse it
+client-side.
+
+`GET /v1/search` supports two cursor flavours, transparently:
+
+- **Pool cursor** (`"<token>:<page>"`) — paged result from the
+  hybrid retrieval pool. When the page advances past the cached pool
+  and `can_grow_pool=true`, the route doubles `candidates_per_arm` up
+  to `candidates_per_arm_max` (default 800), then flips
+  `next_cursor` to `null`.
+- **Keyset cursor** (`"K|<base64>"`) — used for `sort=date` +
+  non-empty query, backed by a lexical FTS scan over
+  `COALESCE(internal_date, date_sent)`. Unbounded scroll; no pool
+  cap. Same recall as the lexical retrieval arm.
+
+If a paged cursor's underlying pool was evicted from the in-memory
+cache (TTL expiry, LRU eviction, or `serve` restart) the route
+returns HTTP 409 with `type: /problems/search-cursor-expired`. The
+GUI handles this transparently by re-issuing the original query
+without a cursor and skipping past rows it already holds.
+
+Wire `date` on every paginated response (`/v1/messages`, `/v1/search`,
+`/v1/changes`) is `COALESCE(internal_date, date_sent)` — the same key
+the SQL sorts by — so the displayed ordering always matches the field.
+Legacy archives can backfill IMAP `INTERNALDATE` via
+`localmail backfill-internal-date` once after upgrade.
+
 ## GUI client
 
 A Tauri 2 + Svelte 5 desktop client lives in [gui/](gui/). It talks to a
@@ -384,7 +417,16 @@ defaults are calibrated for hundreds of thousands of messages on a
 modern laptop. The most likely knobs to touch:
 
 - `candidates_per_arm` (default 50) — increase for hard queries
-- `rerank_pool_size` (default 50) — match `candidates_per_arm`
+- `candidates_per_arm_max` (default 800) — ceiling for transparent
+  `grow_pool` growth on the `/v1/search` cursor path; once hit,
+  `next_cursor` flips to null
+- `rerank_pool_size` (default 100) — sized so the first `sort=rank` page
+  fills the GUI's `limit=50` and one follow-up serves from cache before
+  `grow_pool` fires
+- `reranker_enabled` (default **false**) — the CPU-bound cross-encoder
+  rerank pass overruns request timeouts when the cursor's `grow_pool`
+  doubles the pool repeatedly (50 → 100 → 200 → 400 → 800). Flip to
+  `true` on GPU hosts via `config.toml`
 - `chunk_size_tokens` (default 512) — smaller for short messages
 - `body_lang_enabled` (default true) — set false to skip language detection
 - `body_lang_min_confidence` (default 0.65) — lower to label more messages

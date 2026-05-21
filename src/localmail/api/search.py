@@ -9,8 +9,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from localmail.api.errors import ValidationFailed
+from localmail.api.errors import SearchCursorExpired, ValidationFailed
 from localmail.api.ids import parse_int_id
+from localmail.api.search_cursor import (
+    SearchCursor,
+    decode_keyset_cursor,
+    decode_search_cursor,
+    encode_keyset_cursor,
+    encode_search_cursor,
+    is_keyset_cursor,
+)
+from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
 
 
@@ -118,33 +127,104 @@ def run_search(
     allowed_account_ids: list[int],
     user_id: int,
     sort: Literal["rank", "date"] = "rank",
+    cursor: str | None = None,
 ) -> dict[str, Any]:
-    """Run a search and return the API-shaped response, scoped to ``allowed_account_ids``.
+    """Run a search (or continue an existing one) and return the API-shaped response.
 
-    The intersection of caller-supplied ``filters['account_ids']`` and the
-    ACL is computed before calling the underlying Searcher; an empty
-    intersection short-circuits to an empty result set without running any
-    arm queries.
+    ``cursor`` is the opaque ``next_cursor`` returned by a previous call.
+    When present, ``searcher.continue_page`` serves the next page from the
+    cached rerank pool with zero re-retrieval. If the page index advances
+    past the cached pool's end (``PageOutOfPoolError``) and the pool can
+    still be grown, the route transparently calls
+    ``searcher.grow_pool(token, candidates_per_arm * 2)`` and returns its
+    page 1. If the cache has been evicted (``CacheMissError``) — TTL, LRU,
+    or cross-user replay — the route raises ``SearchCursorExpired`` (HTTP
+    409) so the GUI can run its transparent re-search recovery.
 
-    ``sort`` controls page ordering: ``"rank"`` (default) by rerank score,
-    ``"date"`` by ``COALESCE(internal_date, date_sent) DESC`` over the same
-    hybrid candidate pool.
-
-    v1 does not paginate — ``next_cursor`` is always ``None`` (per the design
-    doc's "null when done" semantics). Paging will land via a follow-up that
-    wires ``Searcher.continue_page`` and reintroduces a cursor input field.
+    ``next_cursor`` in the response is ``None`` once the rerank pool is
+    exhausted *and* further growth would exceed
+    ``searcher._cfg.candidates_per_arm_max``.
     """
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:
         return {"results": [], "next_cursor": None, "total_estimate": 0, "took_ms": 0.0}
-    query = build_query_string(free_text=free_text, filters=scoped_filters)
-    page: SearchPage = searcher.search(query, page_size=limit, user_id=user_id, sort=sort)
+
+    cfg = searcher._cfg  # noqa: SLF001  — route needs the grow-pool cap
+    if cursor is None:
+        query = build_query_string(free_text=free_text, filters=scoped_filters)
+        page = searcher.search(query, page_size=limit, user_id=user_id, sort=sort)
+    elif is_keyset_cursor(cursor):
+        # Keyset cursor → lexical-date continuation. The cursor carries
+        # only (ts, id); the query + filters come from the request body
+        # (the GUI re-sends them on every loadMore). Searcher decides on
+        # the lexical path because sort=date + non-empty free_text fires
+        # the dispatch in Searcher.search.
+        keyset = decode_keyset_cursor(cursor)
+        query = build_query_string(free_text=free_text, filters=scoped_filters)
+        page = searcher.search(query, page_size=limit, user_id=user_id,
+                               sort=sort, keyset_cursor=keyset)
+    else:
+        parsed = decode_search_cursor(cursor)
+        page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)
+
+    next_cursor = _next_cursor(page, cfg=cfg)
     return {
         "results": [_to_api_result(r) for r in page.results],
-        "next_cursor": None,
+        "next_cursor": next_cursor,
         "total_estimate": None,
         "took_ms": page.timing_ms.get("total", 0.0),
     }
+
+
+def _continue_or_grow(
+    searcher: Searcher, parsed: SearchCursor, *, user_id: int, cfg: Any,
+) -> Any:
+    try:
+        return searcher.continue_page(parsed.token, parsed.page, user_id=user_id)
+    except CacheMissError as exc:
+        raise SearchCursorExpired(f"cursor {parsed.token!r} not found") from exc
+    except PageOutOfPoolError:
+        try:
+            entry = searcher._cache.get(parsed.token)  # noqa: SLF001
+        except CacheMissError as exc:
+            raise SearchCursorExpired(f"cursor {parsed.token!r} not found") from exc
+        current_cpa = int(entry.get("candidates_per_arm", cfg.candidates_per_arm))
+        if current_cpa >= cfg.candidates_per_arm_max:
+            return _empty_grown_page(parsed.token, page_size=entry.get("page_size", 50))
+        new_cpa = min(current_cpa * 2, cfg.candidates_per_arm_max)
+        return searcher.grow_pool(parsed.token, new_cpa, user_id=user_id)
+
+
+def _empty_grown_page(token: str, *, page_size: int) -> Any:
+    """Synthetic 'pool exhausted at cap' page so callers see next_cursor=null."""
+    from localmail.search.query import parse_query
+    return SearchPage(
+        results=[], page=1, page_size=page_size, pool_size=0,
+        candidates_per_arm=0, has_more_in_pool=False, can_grow_pool=False,
+        search_token=token, query=parse_query(""), timing_ms={"total": 0.0},
+    )
+
+
+def _next_cursor(page: Any, *, cfg: Any) -> str | None:
+    """Compute the cursor for the page after ``page``, or None if exhausted.
+
+    Two cursor kinds:
+      * keyset (lexical-date) — driven by ``page.next_keyset``; None
+        means the keyset walk hit the end.
+      * pool (hybrid) — driven by ``search_token`` + page increment;
+        None when both the cached pool and ``grow_pool`` are exhausted.
+    """
+    if page.next_keyset is not None:
+        return encode_keyset_cursor(page.next_keyset)
+    if page.search_token is None:
+        return None
+    if page.has_more_in_pool:
+        return encode_search_cursor(SearchCursor(token=page.search_token,
+                                                 page=page.page + 1))
+    if page.can_grow_pool and page.candidates_per_arm < cfg.candidates_per_arm_max:
+        return encode_search_cursor(SearchCursor(token=page.search_token,
+                                                 page=page.page + 1))
+    return None
 
 
 def _scope_filters_by_acl(
@@ -168,7 +248,14 @@ def _scope_filters_by_acl(
 
 
 def _to_api_result(r: SearchResult) -> dict[str, Any]:
-    """Map an internal SearchResult to the API JSON shape."""
+    """Map an internal SearchResult to the API JSON shape.
+
+    The wire ``date`` field is ``COALESCE(internal_date, date_sent)``, the
+    same expression every recent-mail / sort=date SQL path uses. Returning
+    a different column than the sort key made dates look out of order in
+    the GUI whenever the two diverged.
+    """
+    received = r.internal_date or r.date_sent
     return {
         "message_id": str(r.message_id),
         "account": {"id": str(r.account_id), "name": None},
@@ -176,7 +263,7 @@ def _to_api_result(r: SearchResult) -> dict[str, Any]:
         "subject": r.subject,
         "from": {"address": r.from_addr, "name": r.from_name},
         "to": [],
-        "date": r.date_sent.isoformat() if r.date_sent else None,
+        "date": received.isoformat() if received else None,
         "snippet_html": r.snippet,
         "has_attachments": r.attachment_filename is not None,
         "score": r.score,

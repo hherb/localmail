@@ -37,6 +37,11 @@ export type {
   SearchResultRow,
 } from "./api/search";
 export { emptyFilters, filtersUiToWire } from "./api/search";
+export type {
+  ListMessagesRequest,
+  ListMessagesResponse,
+} from "./api/browse";
+export { listMessages } from "./api/browse";
 
 export interface Greeting {
   message: string;

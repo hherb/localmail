@@ -161,9 +161,22 @@ the canonical "no body" query.
 
 The canonical "show me recent mail" ordering is
 `ORDER BY COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC`,
-backed by the expression index `messages_recent_idx`. Used by both the
-`/v1/changes` initial-fetch branch and the `Searcher` empty-query fallback
-(`_list_recent_messages`).
+backed by the expression index `messages_recent_idx`. Used by the
+`/v1/changes` initial-fetch branch, the `Searcher` empty-query fallback
+(`_list_recent_messages`), the new keyset browse path
+(`api.list_messages` → `/v1/messages`), and the `sort=date` lexical
+keyset path (`Searcher._lexical_date_search`).
+
+**The wire `date` field MUST match this sort key.** Every paginated
+list endpoint (`/v1/messages`, `/v1/search`, `/v1/changes`) emits
+`date = COALESCE(internal_date, date_sent)` — never raw `date_sent`.
+Emitting `date_sent` while the SQL sorts by COALESCE makes the
+displayed order look broken on any row whose two dates disagree
+(forwarded mail, mailing lists, sender clock skew, mid-rollout
+backfill). Tests in `test_serve_browse_route.py`,
+`test_serve_search_route.py`, `test_serve_changes_route.py`
+enforce this invariant — keep them green when touching wire
+serialisation.
 
 Folder filtering supports `folder_allow`, `folder_deny`, and **`folder_deny_flags`**
 (by RFC 6154 IMAP special-use flag, e.g. `\Trash`, `\Junk`, `\All`). Prefer
@@ -472,6 +485,42 @@ for the full design.
   adding a new ID-bearing endpoint or MCP tool, declare the parameter
   as `str` and call `parse_int_id(...)`; never accept `int` directly
   from the wire, and never bypass the helper.
+- **Browse & search pagination (PR #70)**:
+  - `GET /v1/messages` is the canonical keyset browse endpoint, ordered
+    `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC` with
+    an opaque `next_cursor` (URL-safe base64; `localmail.api.browse_cursor`).
+    The GUI's initial mail-list load goes here, not `/v1/changes`.
+  - `GET /v1/search` returns one of **two cursor flavours**, distinguished
+    by prefix on the wire:
+      - `"<token>:<page>"` — pool cursor for `sort=rank` (and for
+        `sort=date` with an empty query). Driven by `Searcher.continue_page`
+        / `Searcher.grow_pool`. The route doubles `candidates_per_arm` up to
+        `search.candidates_per_arm_max` (default 800) when the page would
+        advance past the cached pool; once the ceiling is hit `next_cursor`
+        flips to `null`.
+      - `"K|<base64>"` — keyset cursor for `sort=date` with a non-empty
+        query, served by `Searcher._lexical_date_search`. Same FTS column
+        as retrieval Arm 1 (`fts_v2 @@ plainto_tsquery('simple', q)`), so
+        recall is identical to the lexical case. No pool cap; unbounded
+        scroll. Route dispatches on the `K|` prefix.
+  - **Page-cache miss surfaces as HTTP 409 `/problems/search-cursor-expired`,
+    never a 500.** TTL eviction, LRU eviction, and cross-user replay all
+    take this path. The GUI re-runs the query without a cursor on 409 and
+    appends past rows it already holds — keep this transparent recovery
+    working when touching `serve/routes/search.py` or `api/search.py`.
+  - **`reranker_enabled` defaults to `False`.** The cross-encoder is
+    O(pool size) and the cursor's `grow_pool` doubles the pool on each
+    miss (50 → 100 → … → 800). On CPU that overruns request timeouts.
+    Operators on GPU opt back in via `[search] reranker_enabled = true`
+    in `config.toml`. Don't quietly flip this default; the rerank fanout
+    cost compounds with the pagination work.
+  - **Known follow-ups (filed)**: #71 (Searcher accessor refactor — the
+    `_lexical_date_search` helper duplicates ACL plumbing already shared
+    by other arms), #72 (`EXPLAIN ANALYZE` under the per-user ACL
+    filter on `messages_recent_idx`). `grow_pool` on the `sort=rank`
+    path can still surface duplicates when the cache is exhausted past
+    pool 100 — covered by `sort=date` for the "show me everything"
+    intent.
 
 ## Conventions
 

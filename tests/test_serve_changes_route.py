@@ -151,6 +151,42 @@ def test_changes_no_cursor_orders_by_coalesce_internal_date_date_sent_desc(
     assert ids == [str(mid_a), str(mid_b), str(mid_c)]
 
 
+def test_changes_wire_date_reflects_internal_date_when_set(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    """The wire `date` field must match the sort key — i.e.
+    ``COALESCE(internal_date, date_sent)``. Returning only the header
+    ``Date:`` while sorting by INTERNALDATE makes the displayed dates
+    look out of order whenever the two differ (forwarded mail, mailing
+    lists, sender clock skew, mid-rollout backfill).
+    """
+    header_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    arrived = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    _seed_msg_full(db_conn, date_sent=header_date,
+                   internal_date=arrived, suffix="aa")
+    db_conn.commit()
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG))
+    r = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
+    body = r.json()
+    assert datetime.fromisoformat(body["new_messages"][0]["date"]) == arrived
+
+
+def test_changes_wire_date_falls_back_to_date_sent_when_internal_date_null(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    """Legacy / un-backfilled rows must still surface a non-null date."""
+    header_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    _seed_msg_full(db_conn, date_sent=header_date,
+                   internal_date=None, suffix="bb")
+    db_conn.commit()
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG))
+    r = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
+    body = r.json()
+    assert datetime.fromisoformat(body["new_messages"][0]["date"]) == header_date
+
+
 def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db_conn) -> None:
     """Polling clients should see an empty `new_messages` and the same
     `next_cursor` they sent in, when no rows have been inserted between calls.

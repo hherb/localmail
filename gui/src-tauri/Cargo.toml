@@ -29,6 +29,7 @@ base64 = "0.22"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 sha2 = "0.10"
 url = "2"
+urlencoding = "2"
 
 # secret-service v4 requires the consumer to explicitly pick a runtime feature.
 # keyring's `linux-native-async-persistent` feature pulls it in as a transitive

@@ -36,6 +36,10 @@ const tauriMocks = vi.hoisted(() => ({
     new_messages: [],
     next_cursor: null,
   })),
+  listMessages: vi.fn(async () => ({
+    messages: [],
+    next_cursor: null,
+  })),
   getMessage: vi.fn(),
   runSearch: vi.fn(async () => ({
     results: [],
@@ -166,7 +170,7 @@ describe("MainView", () => {
 
     expect(version.snapshot.compatible).toBe(false);
     expect(tauriMocks.listAccounts).not.toHaveBeenCalled();
-    expect(tauriMocks.listRecentMessages).not.toHaveBeenCalled();
+    expect(tauriMocks.listMessages).not.toHaveBeenCalled();
     expect(mail.isPolling).toBe(false);
   });
 
@@ -185,7 +189,7 @@ describe("MainView", () => {
 
     expect(version.snapshot.compatible).toBe(true);
     expect(tauriMocks.listAccounts).toHaveBeenCalled();
-    expect(tauriMocks.listRecentMessages).toHaveBeenCalled();
+    expect(tauriMocks.listMessages).toHaveBeenCalled();
     expect(mail.isPolling).toBe(true);
   });
 });

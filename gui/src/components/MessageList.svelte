@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import MessageListRow from "./MessageListRow.svelte";
   import { mail } from "../lib/stores/mail.svelte";
   import { search } from "../lib/stores/search.svelte";
@@ -44,12 +45,63 @@
         }),
   );
 
+  let hasMore = $derived(
+    searchActive ? search.snapshot.hasMore : mail.messagesHasMore,
+  );
+
+  let loadingMore = $derived(
+    searchActive ? search.snapshot.loadingMore : mail.snapshot.loadingMore,
+  );
+
+  let pendingCount = $derived(mail.snapshot.pendingNewMessages.length);
+
+  async function loadMore(): Promise<void> {
+    if (searchActive) {
+      await search.loadMore();
+    } else {
+      await mail.loadMoreMessages();
+    }
+  }
+
+  function mergePending(): void {
+    mail.mergePendingNewMessages();
+  }
+
   async function openMessage(id: string): Promise<void> {
     await mail.openMessage(id);
   }
+
+  // IntersectionObserver-driven auto-load on near-bottom scroll.
+  let sentinel: HTMLDivElement | undefined = $state();
+  let observer: IntersectionObserver | undefined;
+
+  onMount(() => {
+    if (sentinel && typeof IntersectionObserver !== "undefined") {
+      observer = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            if (e.isIntersecting && hasMore && !loadingMore) {
+              void loadMore();
+            }
+          }
+        },
+        { rootMargin: "200px 0px" },
+      );
+      observer.observe(sentinel);
+    }
+  });
+
+  onDestroy(() => {
+    observer?.disconnect();
+  });
 </script>
 
 <section class="list">
+  {#if pendingCount > 0 && !searchActive}
+    <button class="banner" onclick={mergePending}>
+      {pendingCount === 1 ? "1 new message" : `${pendingCount} new messages`} — click to show
+    </button>
+  {/if}
   {#if searchActive}
     <div class="caption">
       Search took {Math.round(search.snapshot.tookMs ?? 0)} ms — {search.snapshot.results.length} result(s)
@@ -80,6 +132,16 @@
         onSelect={() => openMessage(r.id)}
       />
     {/each}
+    <div bind:this={sentinel}></div>
+    <div class="more">
+      {#if loadingMore}
+        <span class="hint">Loading more…</span>
+      {:else if hasMore}
+        <button onclick={loadMore}>Load more</button>
+      {:else}
+        <span class="hint">End of list</span>
+      {/if}
+    </div>
   {/if}
 </section>
 
@@ -98,19 +160,32 @@
   }
   .caption {
     padding: 4px 12px;
-    font-size: 11px;
     color: #666;
-    background: #fafbfd;
-    border-bottom: 1px solid #eee;
+    font-size: 12px;
   }
   .error {
-    margin: 12px;
+    padding: 12px;
+    color: #b00;
+    font-size: 13px;
+  }
+  .banner {
+    display: block;
+    width: 100%;
+    border: none;
+    background: #e8f0fe;
+    color: #1a73e8;
     padding: 8px 12px;
-    background: #fdecec;
-    border: 1px solid #f5c6c6;
-    border-radius: 4px;
-    color: #a02020;
-    font-size: 12px;
-    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 13px;
+    cursor: pointer;
+    text-align: center;
+  }
+  .more {
+    padding: 12px;
+    text-align: center;
+  }
+  .more button {
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
   }
 </style>

@@ -1,16 +1,52 @@
 """Message detail + raw RFC822 routes."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, List
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
 from localmail.api.acl import allowed_account_ids
+from localmail.api.browse import list_messages
+from localmail.api.browse_cursor import decode_browse_cursor
 from localmail.api.ids import parse_int_id
 from localmail.api.messages import get_message, get_message_raw
 from localmail.serve.middleware import get_authenticated_user
 
 router = APIRouter()
+
+
+@router.get("")
+def browse(
+    request: Request,
+    account_id: List[str] = Query(default_factory=list),
+    folder_id: List[str] = Query(default_factory=list),
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = Query(default=None),
+    user=Depends(get_authenticated_user),
+) -> dict[str, Any]:
+    """Keyset-paginated browse of messages, newest first.
+
+    `account_id` / `folder_id` are repeatable query parameters and intersect
+    with the caller's ACL grants at the service-layer SQL boundary.
+    """
+    # Validate cursor eagerly so a malformed token always yields 400,
+    # even when the caller has no ACL grants (list_messages short-circuits
+    # before reaching decode_browse_cursor when allowed_account_ids is empty).
+    if cursor is not None:
+        decode_browse_cursor(cursor)
+    parsed_account_ids = [parse_int_id(v, field="account_id") for v in account_id]
+    parsed_folder_ids = [parse_int_id(v, field="folder_id") for v in folder_id]
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        allowed = allowed_account_ids(conn, user.id)
+        return list_messages(
+            conn,
+            allowed_account_ids=allowed,
+            account_ids=parsed_account_ids or None,
+            folder_ids=parsed_folder_ids or None,
+            limit=limit,
+            cursor=cursor,
+        )
 
 
 @router.get("/{message_id}")

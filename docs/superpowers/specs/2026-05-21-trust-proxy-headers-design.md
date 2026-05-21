@@ -398,8 +398,9 @@ trusted_proxies = ["127.0.0.0/8"]
 # Reverse proxy on a separate host in a private LAN:
 # trusted_proxies = ["10.0.0.0/8", "127.0.0.0/8"]
 
-# Behind Cloudflare (list all current Cloudflare ranges):
-# trusted_proxies = ["173.245.48.0/20", "103.21.244.0/22", ...]
+# For a CDN/edge proxy (Cloudflare, Fastly, etc.) fetch the
+# operator's current published IP ranges — they change over time.
+# Cloudflare: https://www.cloudflare.com/ips/
 
 # Hard cap on how many entries we'll walk before giving up. Defaults
 # to 3 (client → CDN → ALB → app). Bump if your chain is longer.

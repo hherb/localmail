@@ -34,7 +34,9 @@ login_cleanup_interval_s = 300     # 5m
 # in trusted_proxies, to find the originating client. See README.
 # trusted_proxies = ["127.0.0.0/8"]                 # same-host proxy
 # trusted_proxies = ["10.0.0.0/8", "127.0.0.0/8"]   # private-LAN proxy
-# trusted_proxies = ["173.245.48.0/20", "103.21.244.0/22"]  # Cloudflare ranges
+# For a CDN/edge proxy (Cloudflare, Fastly, etc.) fetch the operator's
+# current published IP ranges (e.g. https://www.cloudflare.com/ips/) —
+# they change over time, don't hard-code stale CIDRs here.
 # trusted_proxies_max_hops = 3
 
 # Only required when at least one account uses auth_method = "oauth2".

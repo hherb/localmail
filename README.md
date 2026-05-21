@@ -279,8 +279,9 @@ trusted_proxies = ["127.0.0.0/8"]
 # Reverse proxy on a separate host in a private LAN:
 # trusted_proxies = ["10.0.0.0/8", "127.0.0.0/8"]
 
-# Behind Cloudflare (list every current Cloudflare range):
-# trusted_proxies = ["173.245.48.0/20", "103.21.244.0/22"]
+# For a CDN/edge proxy (Cloudflare, Fastly, etc.) fetch the operator's
+# current published IP ranges (e.g. https://www.cloudflare.com/ips/);
+# they change over time, don't hard-code stale CIDRs from this README.
 
 # Hard cap on entries we walk before giving up. Defaults to 3
 # (client → CDN → ALB → app). Bump if your chain is longer.
@@ -294,6 +295,15 @@ CIDR values fail loud at config load.
 rewrites `request.client.host` to the XFF-derived value before the
 FastAPI handler runs, which defeats the admission check and lets any
 direct client spoof the per-IP cap.
+
+**Make sure your proxy actually sets `X-Forwarded-For`.** When the
+socket peer is trusted but no XFF header is present (or it's empty),
+the resolver falls back to the proxy's own IP — every client behind
+that misconfigured proxy then lands in a single per-IP rate-limit
+bucket. This is a proxy-config bug, not a localmail bug, but the
+symptom (legitimate users tripping the per-IP cap) looks the same.
+nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`.
+Caddy and Traefik set it by default.
 
 ### Browse & search pagination
 

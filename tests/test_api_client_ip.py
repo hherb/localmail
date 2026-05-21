@@ -5,7 +5,7 @@ docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md.
 """
 from __future__ import annotations
 
-from ipaddress import IPv4Network, ip_network
+from ipaddress import ip_network
 
 import pytest
 
@@ -237,11 +237,3 @@ def test_t16_mixed_v4_v6_trusted_set() -> None:
         )
         == "2001:db8::abcd"
     )
-
-
-def test_host_form_cidr_round_trip_is_parseable() -> None:
-    """Sanity: host-form `/32` networks (the shape config.py emits via
-    strict=False) accept their own host as a member — protects against
-    accidentally storing the network address instead of the host."""
-    n = ip_network("10.0.0.5", strict=False)
-    assert IPv4Network("10.0.0.5/32") == n

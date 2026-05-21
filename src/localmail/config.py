@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 import tomllib
+from ipaddress import IPv4Network, IPv6Network, ip_network
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
+
+TrustedProxies = tuple[IPv4Network | IPv6Network, ...]
 
 
 class DatabaseConfig(BaseModel):
@@ -66,6 +69,48 @@ class AuthConfig(BaseModel):
     # Per-worker cadence for the sweep. Gated by a PG advisory lock so
     # concurrent workers don't pile up DELETEs.
     login_cleanup_interval_s: int = 300
+
+    # Reverse-proxy support for the login rate limiter. Empty (default) =
+    # historic behaviour: client_ip is the socket peer (request.client.host).
+    # When non-empty, an X-Forwarded-For header is peeled right-to-left,
+    # skipping entries in trusted_proxies, to find the originating client.
+    # The same list governs both:
+    #   (a) admission: is the immediate socket peer a trusted proxy?
+    #   (b) peeling:   which XFF entries are proxies vs the client?
+    # See docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md
+    trusted_proxies: list[str] = Field(default_factory=list)
+
+    # Hard cap on XFF entries we walk before giving up — bounds CPU on an
+    # attacker-supplied giant XFF header and bounds the chain depth we
+    # claim to support. Three is enough for client → CDN → ALB → app.
+    trusted_proxies_max_hops: int = Field(default=3, ge=1, le=10)
+
+    _trusted_proxies_parsed: TrustedProxies = PrivateAttr(default=())
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _validate_trusted_proxies(cls, v: list[str]) -> list[str]:
+        # Parse-and-discard: fail LOUD at config-load on a bad CIDR.
+        # The real parse runs once in model_post_init and is read by
+        # trusted_proxies_parsed.
+        for s in v:
+            ip_network(s, strict=False)
+        return v
+
+    def model_post_init(self, __context: object) -> None:
+        # PrivateAttr assignment via object.__setattr__ works regardless
+        # of any future model_config = ConfigDict(frozen=...) change.
+        object.__setattr__(
+            self,
+            "_trusted_proxies_parsed",
+            tuple(
+                ip_network(s, strict=False) for s in self.trusted_proxies
+            ),
+        )
+
+    @property
+    def trusted_proxies_parsed(self) -> TrustedProxies:
+        return self._trusted_proxies_parsed
 
 
 class GmailOAuthConfig(BaseModel):

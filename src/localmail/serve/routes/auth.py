@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel
 
 from localmail.api import auth as auth_svc
+from localmail.api.client_ip import resolve_client_ip
 from localmail.serve.middleware import get_authenticated_user
 
 router = APIRouter()
@@ -33,8 +34,13 @@ class ChangePasswordRequest(BaseModel):
 @router.post("/login", response_model=TokenResponse)
 def login(req: LoginRequest, request: Request) -> TokenResponse:
     pool = request.app.state.pool
-    client_ip = request.client.host if request.client else None
     cfg = request.app.state.auth_config
+    client_ip = resolve_client_ip(
+        socket_peer=request.client.host if request.client else None,
+        xff_header=request.headers.get("X-Forwarded-For"),
+        trusted_proxies=cfg.trusted_proxies_parsed,
+        max_hops=cfg.trusted_proxies_max_hops,
+    )
     with pool.connection() as conn:
         token, expires_at = auth_svc.login(
             conn, req.username, req.password, client_ip=client_ip, cfg=cfg

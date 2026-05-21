@@ -254,9 +254,56 @@ login_cleanup_interval_s = 300     # 5m
 
 > The three login-rate-limit caps (global / per-IP / per-user) are
 > Postgres-backed, so they survive `localmail serve` restarts and apply
-> consistently across `uvicorn --workers N`. Behind a reverse proxy the
-> per-IP cap is not effective until `auth.trust_proxy_headers` lands
-> (see issue tracker) — bump `login_global_max` to compensate.
+> consistently across `uvicorn --workers N`. Behind a reverse proxy,
+> configure `auth.trusted_proxies` (see below) so the per-IP cap reads
+> the real client from `X-Forwarded-For` instead of the proxy's IP.
+
+### Behind a reverse proxy
+
+The login rate limiter has separate global, per-IP, and per-user caps.
+Behind a reverse proxy, `request.client.host` is the proxy's address —
+not the real client — so every login appears to come from the proxy
+and the per-IP cap collapses into a copy of the global cap.
+
+Configure `auth.trusted_proxies` (a list of CIDRs) to recover the real
+client IP from `X-Forwarded-For`. The list governs both admission ("is
+this socket peer a trusted proxy?") and peeling ("which XFF entries
+are proxies vs the client?"). Right-to-left peel of XFF — identical
+to nginx's `set_real_ip_from` / Caddy's `trusted_proxies` semantics.
+
+```toml
+[auth]
+# Same-host nginx/Caddy/Traefik fronting localmail serve on 127.0.0.1:
+trusted_proxies = ["127.0.0.0/8"]
+
+# Reverse proxy on a separate host in a private LAN:
+# trusted_proxies = ["10.0.0.0/8", "127.0.0.0/8"]
+
+# For a CDN/edge proxy (Cloudflare, Fastly, etc.) fetch the operator's
+# current published IP ranges (e.g. https://www.cloudflare.com/ips/);
+# they change over time, don't hard-code stale CIDRs from this README.
+
+# Hard cap on entries we walk before giving up. Defaults to 3
+# (client → CDN → ALB → app). Bump if your chain is longer.
+# trusted_proxies_max_hops = 3
+```
+
+Default is `[]` — unchanged behaviour; the socket peer is used. Bad
+CIDR values fail loud at config load.
+
+**Do not combine this with `uvicorn --forwarded-allow-ips`.** That flag
+rewrites `request.client.host` to the XFF-derived value before the
+FastAPI handler runs, which defeats the admission check and lets any
+direct client spoof the per-IP cap.
+
+**Make sure your proxy actually sets `X-Forwarded-For`.** When the
+socket peer is trusted but no XFF header is present (or it's empty),
+the resolver falls back to the proxy's own IP — every client behind
+that misconfigured proxy then lands in a single per-IP rate-limit
+bucket. This is a proxy-config bug, not a localmail bug, but the
+symptom (legitimate users tripping the per-IP cap) looks the same.
+nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`.
+Caddy and Traefik set it by default.
 
 ### Browse & search pagination
 

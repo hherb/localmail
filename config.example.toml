@@ -29,6 +29,16 @@ login_global_window_s = 60
 login_attempt_retention_s = 86400  # 24h
 login_cleanup_interval_s = 300     # 5m
 
+# Reverse-proxy support. Empty (default) = use the socket peer.
+# When set, X-Forwarded-For is peeled right-to-left, skipping entries
+# in trusted_proxies, to find the originating client. See README.
+# trusted_proxies = ["127.0.0.0/8"]                 # same-host proxy
+# trusted_proxies = ["10.0.0.0/8", "127.0.0.0/8"]   # private-LAN proxy
+# For a CDN/edge proxy (Cloudflare, Fastly, etc.) fetch the operator's
+# current published IP ranges (e.g. https://www.cloudflare.com/ips/) —
+# they change over time, don't hard-code stale CIDRs here.
+# trusted_proxies_max_hops = 3
+
 # Only required when at least one account uses auth_method = "oauth2".
 # See README.md for how to obtain this file from Google Cloud Console.
 [gmail_oauth]

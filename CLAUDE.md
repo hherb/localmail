@@ -355,11 +355,15 @@ for the full design.
   consistent across workers and across `serve` restarts. Cleanup is
   best-effort, gated by a Postgres advisory lock
   (`_SWEEP_ADVISORY_LOCK_KEY`) so concurrent workers don't pile up
-  DELETEs. **Proxy gotcha**: `request.client.host` is the socket peer,
-  not the X-Forwarded-For client. Behind a reverse proxy every login
-  appears to come from `127.0.0.1` and the per-IP cap is effectively
-  global — bump `login_global_max` accordingly or wait for the planned
-  `auth.trust_proxy_headers` config knob.
+  DELETEs. **Reverse-proxy support**: `auth.trusted_proxies` (CIDR list)
+  + `auth.trusted_proxies_max_hops` enable right-to-left peeling of
+  `X-Forwarded-For` for the per-IP cap. Empty default = unchanged
+  behaviour (the socket peer is used). The same CIDR list governs both
+  admission (is the immediate peer a trusted proxy?) and peeling
+  (which XFF entries to skip). Design + threat model in
+  [docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md](docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md).
+  Do NOT also set `uvicorn --forwarded-allow-ips`; it rewrites
+  `request.client.host` before our admission check and collapses it.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.

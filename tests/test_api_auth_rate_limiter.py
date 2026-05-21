@@ -330,3 +330,61 @@ def test_reset_login_rate_limiter_truncates(db_conn: psycopg.Connection) -> None
     reset_login_rate_limiter(db_conn)
     db_conn.commit()
     assert _count(db_conn, "SELECT count(*) FROM api_login_attempts") == 0
+
+
+def test_per_ip_cap_uses_xff_when_trusted(db_dsn: str, api_user) -> None:
+    """Behind a trusted proxy, the per-IP cap reads X-Forwarded-For.
+
+    Drives 5 failures from 5 distinct public IPs — none trips the per-IP
+    cap because each IP only fails once. Then drives 3 failures from one
+    shared IP under the cap; the 4th from the same IP must trip 429.
+    """
+    from fastapi.testclient import TestClient
+
+    from localmail.config import AuthConfig
+    from localmail.serve.app import create_app
+
+    cfg = AuthConfig(
+        trusted_proxies=["127.0.0.0/8"],
+        login_per_ip_max=3,
+        login_per_ip_window_s=60,
+        # Set the other caps high so they don't trip first.
+        login_per_user_max=100,
+        login_global_max=100,
+    )
+    app = create_app(db_dsn=db_dsn, searcher=None, auth_config=cfg)
+    # TestClient default socket peer is ("testclient", 50000); override so
+    # the resolver sees 127.0.0.1 as a trusted proxy.
+    c = TestClient(app, client=("127.0.0.1", 50000))
+
+    for i in range(5):
+        r = c.post(
+            "/v1/auth/login",
+            json={"username": api_user.username, "password": "wrong"},
+            headers={"X-Forwarded-For": f"203.0.113.{i + 1}"},
+        )
+        assert r.status_code == 401, (
+            f"distinct-IP failure {i} unexpectedly returned {r.status_code}"
+        )
+
+    # 3 failures from a single shared XFF (under cap of 3).
+    for i in range(3):
+        r = c.post(
+            "/v1/auth/login",
+            json={"username": api_user.username, "password": "wrong"},
+            headers={"X-Forwarded-For": "198.51.100.42"},
+        )
+        assert r.status_code == 401, (
+            f"shared-IP failure {i + 1} unexpectedly returned {r.status_code}"
+        )
+
+    # 4th from the same shared XFF — trip per-IP cap.
+    r = c.post(
+        "/v1/auth/login",
+        json={"username": api_user.username, "password": "wrong"},
+        headers={"X-Forwarded-For": "198.51.100.42"},
+    )
+    assert r.status_code == 429, (
+        f"expected 429 on 4th same-IP failure, got {r.status_code}"
+    )
+    assert r.json()["cap"] == "ip", r.json()

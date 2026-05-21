@@ -228,3 +228,43 @@ def test_reranker_disabled_by_default() -> None:
     """
     cfg = SearchConfig()
     assert cfg.reranker_enabled is False
+
+
+def test_auth_trusted_proxies_default_empty() -> None:
+    """Default empty list preserves current behaviour exactly."""
+    cfg = AuthConfig()
+    assert cfg.trusted_proxies == []
+    assert cfg.trusted_proxies_parsed == ()
+    assert cfg.trusted_proxies_max_hops == 3
+
+
+def test_auth_trusted_proxies_host_form_becomes_single_host_network() -> None:
+    """strict=False means a bare IP becomes a /32 (or /128 for v6)."""
+    from ipaddress import IPv4Network
+    cfg = AuthConfig(trusted_proxies=["10.0.0.5"])
+    assert IPv4Network("10.0.0.5/32") in cfg.trusted_proxies_parsed
+
+
+def test_auth_trusted_proxies_cidr_form_parses() -> None:
+    """Explicit CIDR is parsed as-is."""
+    from ipaddress import IPv4Network
+    cfg = AuthConfig(trusted_proxies=["127.0.0.0/8"])
+    assert IPv4Network("127.0.0.0/8") in cfg.trusted_proxies_parsed
+
+
+def test_auth_trusted_proxies_bad_cidr_raises() -> None:
+    """Unparseable CIDR fails LOUD at config load."""
+    with pytest.raises(ValidationError):
+        AuthConfig(trusted_proxies=["not-a-cidr"])
+
+
+def test_auth_trusted_proxies_max_hops_zero_raises() -> None:
+    """max_hops=0 is a footgun (silently disables peel) — reject."""
+    with pytest.raises(ValidationError):
+        AuthConfig(trusted_proxies_max_hops=0)
+
+
+def test_auth_trusted_proxies_max_hops_too_high_raises() -> None:
+    """max_hops > 10 has no realistic use — reject as sanity bound."""
+    with pytest.raises(ValidationError):
+        AuthConfig(trusted_proxies_max_hops=11)

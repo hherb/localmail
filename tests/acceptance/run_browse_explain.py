@@ -309,19 +309,31 @@ def classify_plan(explain_text: str) -> PlanSummary:
 
 
 def _scan_actual_rows(lines: list[str]) -> int:
-    """Pull the top-node ``actual rows=…`` count from an EXPLAIN output.
+    """Pull the top-node ``rows=…`` count from an ``EXPLAIN ANALYZE``
+    line's ``(actual time=... rows=N loops=M)`` group.
 
-    Postgres ≥17 emits ``actual rows=51.00`` (fractional, loop-averaged);
-    older versions emit an integer. Accept both.
+    Postgres ≥18 emits ``rows=N.NN`` (loop-averaged, fractional);
+    Postgres ≤17 emits ``rows=N`` (integer). Same lexeme position in
+    both, so split on ``rows=`` *after* the ``actual time=`` anchor
+    to avoid picking up the planner-estimate ``rows=N`` that sits
+    earlier in the same line inside the ``cost=…`` group.
+
+    The pre-#79 version searched for the literal ``"actual rows="``
+    substring — which Postgres has never emitted — and therefore
+    always returned 0.
     """
     for ln in lines:
-        if "actual rows=" in ln:
-            try:
-                tail = ln.split("actual rows=", 1)[1]
-                token = tail.split(" ", 1)[0]
-                return int(float(token))
-            except (IndexError, ValueError):
-                continue
+        anchor = ln.find("actual time=")
+        if anchor == -1:
+            continue
+        tail = ln[anchor:]
+        if "rows=" not in tail:
+            continue
+        token = tail.split("rows=", 1)[1].split(" ", 1)[0]
+        try:
+            return int(float(token))
+        except ValueError:
+            continue
     return 0
 
 
@@ -603,7 +615,7 @@ class FolderMailboxes:
 
 
 def _build_probes(
-    conn: psycopg.Connection, account_ids: list[int], page_size: int,
+    cfg: SeedConfig, account_ids: list[int], page_size: int,
     *, folders: FolderMailboxes | None = None,
 ) -> list[ProbeSpec]:
     """Build the probe matrix.
@@ -614,6 +626,10 @@ def _build_probes(
     account), broad (50% of one account), broad mid-keyset, and a
     broad-across-accounts probe that crosses the ACL=all width with
     one broad mailbox per account.
+
+    The mid-keyset cursor is derived from ``cfg`` rather than queried
+    from the live ``messages`` table — see :func:`_mid_cursor_from_seed`
+    and issue #79.
     """
     if not account_ids:
         return []
@@ -622,7 +638,7 @@ def _build_probes(
     half = account_ids[: max(1, len(account_ids) // 2)]
     everything = list(account_ids)
 
-    cursor_pos = _pick_mid_cursor(conn)
+    cursor_pos = _mid_cursor_from_seed(cfg)
     out: list[ProbeSpec] = []
     for label, acl in [
         ("ACL=1 heavy", heavy),
@@ -682,21 +698,24 @@ def _build_folder_filter_probes(
     ]
 
 
-def _pick_mid_cursor(conn: psycopg.Connection) -> tuple[datetime, int]:
-    """Pick a (ts, id) tuple at roughly the 50th percentile in the
-    sort order so the mid-keyset probe lands deep in the relation."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT COALESCE(internal_date, date_sent), id"
-            "  FROM messages"
-            " WHERE COALESCE(internal_date, date_sent) IS NOT NULL"
-            " ORDER BY COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC"
-            " OFFSET (SELECT COUNT(*)/2 FROM messages)"
-            " LIMIT 1"
-        )
-        row = cur.fetchone()
-        assert row is not None
-        return (row[0], int(row[1]))
+def _mid_cursor_from_seed(cfg: SeedConfig) -> tuple[datetime, int]:
+    """Derive a mid-keyset cursor directly from the seed config (#79).
+
+    The synthetic seed places ``COALESCE(internal_date, date_sent)``
+    uniformly across ``[_EPOCH_ANCHOR, _EPOCH_ANCHOR + date_span_days]``
+    (modulo the ~1% NULL tail), so the 50th-percentile date is
+    ``_EPOCH_ANCHOR + date_span_days/2`` days. The ``id`` is the
+    secondary tie-breaker only — any value inside the dense BIGSERIAL
+    range works; we pick ``total_rows // 2`` so the cursor stays near
+    the middle of the relation.
+
+    Replaces the previous OFFSET-based picker that scanned half the
+    table per call. The harness's wall-clock is unchanged at the
+    default 100k rows and substantially faster at 5M+.
+    """
+    mid_ts = _EPOCH_ANCHOR + timedelta(days=cfg.date_span_days / 2)
+    mid_id = cfg.total_rows // 2
+    return (mid_ts, mid_id)
 
 
 _VALID_PREDICATE_FORMS = ("current", "pre75")
@@ -924,7 +943,7 @@ def main() -> int:
         if args.folder_filter:
             folders = _seed_folder_filter_mailboxes(conn, account_ids)
         probes = _build_probes(
-            conn, account_ids, args.page_size, folders=folders,
+            cfg, account_ids, args.page_size, folders=folders,
         )
         if not probes:
             print("no probes generated (no accounts?)", file=sys.stderr)

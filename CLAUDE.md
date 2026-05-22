@@ -100,7 +100,8 @@ src/localmail/
 migrations/         # 0001_init.sql … 0019_api_login_attempts.sql
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
-                    # run_attachment_eval.py, run_rrf_k_sweep.py)
+                    # run_attachment_eval.py, run_rrf_k_sweep.py,
+                    # run_browse_explain.py)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
   _eml.py           # MIME fixture builders (no .eml files on disk)
   _fake_imap.py     # in-memory IMAP fake with IDLE support
@@ -166,6 +167,36 @@ backed by the expression index `messages_recent_idx`. Used by the
 (`_list_recent_messages`), the new keyset browse path
 (`api.list_messages` → `/v1/messages`), and the `sort=date` lexical
 keyset path (`Searcher._lexical_date_search`).
+
+**Planner choice under the per-user ACL filter (#72, resolved)**:
+`messages_recent_idx` does *not* include `account_id`, but the
+planner uses it anyway as a date-ordered walk and applies the
+`account_id = ANY(...)` predicate as a per-tuple filter. The
+acceptance harness in [tests/acceptance/run_browse_explain.py](tests/acceptance/run_browse_explain.py)
+proves this across 200,000-row synthetic archives in balanced /
+skewed / tail multi-account distributions: every probe picks
+`Index Scan using messages_recent_idx`, never a bitmap heap scan
+or full sort. No covering index keyed on `account_id` is needed
+(or warranted — it would duplicate the existing
+`messages_acct_date_idx` without solving anything the LIMIT
+short-circuit doesn't already solve). The index-eligibility
+regression is pinned by `tests/test_api_browse_plan.py` —
+specifically that the COALESCE expression, the `DESC NULLS LAST`,
+and the secondary `id DESC` are all load-bearing for the plan,
+and that the index alone can serve the query when competing
+indexes are temporarily hidden.
+
+**Mid-keyset perf bug (#75, separate follow-up)**: when paginating
+deep into the keyset (non-NULL cursor.ts), the cursor predicate
+in `api/browse.py:_build_where` includes `OR COALESCE IS NULL`
+to admit NULL-tail rows. This disjunction prevents Postgres from
+composing an index range bound on the COALESCE expression, so the
+index walks from the top of the index downward, filtering every
+tuple above the cursor. The harness measured ~100k `Rows Removed
+by Filter` for a mid-keyset 51-row LIMIT on a 200k-row archive
+(buffer hits jump from <2k to ~500k). The fix is to split the
+cursor into a dated-portion path (range-seekable) and a NULL-tail
+transition path; tracked in #75.
 
 **The wire `date` field MUST match this sort key.** Every paginated
 list endpoint (`/v1/messages`, `/v1/search`, `/v1/changes`) emits

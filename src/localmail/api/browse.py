@@ -144,7 +144,7 @@ def _fetch_rows(
     cursor: BrowseCursor | None,
     limit: int,
     null_tail_only: bool = False,
-) -> list[Any]:
+) -> list[tuple[Any, ...]]:
     """Execute one row-fetching query and return the raw rows.
 
     ``null_tail_only`` is the top-up path: used by ``list_messages`` after
@@ -193,9 +193,12 @@ def _build_where(
         clauses.append("ml.mailbox_id = ANY(%s)")
         params.append(folder_ids)
     if null_tail_only:
-        assert cursor is None, (
-            "null_tail_only is only used by the top-up step; cursor must be None"
-        )
+        if cursor is not None:
+            # ValueError (not assert) so the invariant holds under `python -O`.
+            raise ValueError(
+                "null_tail_only is only used by the top-up step; "
+                "cursor must be None"
+            )
         clauses.append("COALESCE(m.internal_date, m.date_sent) IS NULL")
     elif cursor is not None:
         if cursor.ts is None:

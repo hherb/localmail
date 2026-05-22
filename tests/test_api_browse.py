@@ -1,5 +1,6 @@
 """Tests for localmail.api.browse.list_messages."""
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import psycopg
 import pytest
@@ -409,3 +410,171 @@ def test_build_where_folder_clause_added_for_all_modes() -> None:
         assert "ml.mailbox_id = ANY(%s)" in where, (
             f"folder clause missing for cursor={cur!r} null_tail_only={null_only}"
         )
+
+
+def test_build_where_null_tail_only_with_cursor_raises_value_error() -> None:
+    """``null_tail_only=True`` is the top-up branch and is only ever called
+    with ``cursor=None``. Passing a cursor is a programming error and must
+    raise ``ValueError`` (not a silent ``assert`` that vanishes under
+    ``python -O``)."""
+    ts = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="null_tail_only"):
+        _build_where(
+            account_ids=[1], folder_ids=None,
+            cursor=BrowseCursor(ts=ts, id=1), null_tail_only=True,
+        )
+
+
+# ---- Query-count contract for the NULL-tail top-up (#75 follow-up) ------
+
+# The top-up branch in ``list_messages`` must fire exactly once on the
+# dated→NULL transition and stay quiet on the common case (cursor inside
+# dated portion, full page). End-to-end behavioural tests above pin the
+# *results*; these tests pin the *cost* so a refactor that hoisted the
+# top-up outside the conditional would double the query count silently.
+
+class _CountingCursor:
+    """Wraps a real psycopg cursor and increments a shared counter on each
+    ``execute()``. Forwards everything else."""
+
+    def __init__(self, inner: Any, counter: list[int]) -> None:
+        self._inner = inner
+        self._counter = counter
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        self._counter[0] += 1
+        return self._inner.execute(*args, **kwargs)
+
+    def __enter__(self) -> "_CountingCursor":
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._inner.__exit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _CountingConn:
+    """Wraps a real psycopg connection and exposes ``execute_count`` via the
+    shared counter. ``cursor()`` returns a _CountingCursor."""
+
+    def __init__(self, inner: psycopg.Connection) -> None:
+        self._inner = inner
+        self.execute_count: list[int] = [0]
+
+    def cursor(self, *args: Any, **kwargs: Any) -> _CountingCursor:
+        return _CountingCursor(self._inner.cursor(*args, **kwargs),
+                               self.execute_count)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def test_list_messages_runs_one_query_when_dated_page_is_full(db_conn) -> None:
+    """Common case: cursor inside dated portion with more dated rows past
+    it than the page can hold. The top-up branch must NOT fire — exactly
+    one row-fetching query per call. Regression guard against a future
+    refactor that runs the top-up unconditionally."""
+    aid = _ensure_account(db_conn)
+    now = datetime.now(timezone.utc)
+    ids = [
+        _seed(db_conn, account_id=aid, suffix=f"d{i:01x}",
+              internal_date=now - timedelta(hours=i))
+        for i in range(5)
+    ]
+    _seed(db_conn, account_id=aid, suffix="e0")  # NULL row (must stay untouched)
+    db_conn.commit()
+
+    p1 = list_messages(db_conn, allowed_account_ids=[aid], limit=2)
+    assert [int(m["message_id"]) for m in p1["messages"]] == [ids[0], ids[1]]
+
+    counting = _CountingConn(db_conn)
+    p2 = list_messages(counting, allowed_account_ids=[aid], limit=2,  # type: ignore[arg-type]
+                       cursor=p1["next_cursor"])
+    assert [int(m["message_id"]) for m in p2["messages"]] == [ids[2], ids[3]]
+    assert counting.execute_count[0] == 1, (
+        f"top-up branch fired unnecessarily: "
+        f"expected 1 query, got {counting.execute_count[0]}"
+    )
+
+
+def test_list_messages_runs_two_queries_on_dated_to_null_transition(
+    db_conn,
+) -> None:
+    """Boundary case: dated portion runs short past the cursor. The top-up
+    branch must fire exactly once to fill the page from the NULL-tail —
+    so the total is exactly two row-fetching queries."""
+    aid = _ensure_account(db_conn)
+    now = datetime.now(timezone.utc)
+    d0 = _seed(db_conn, account_id=aid, suffix="aa",
+               internal_date=now - timedelta(hours=1))
+    d1 = _seed(db_conn, account_id=aid, suffix="bb",
+               internal_date=now - timedelta(hours=2))
+    d2 = _seed(db_conn, account_id=aid, suffix="cc",
+               internal_date=now - timedelta(hours=3))
+    n0 = _seed(db_conn, account_id=aid, suffix="dd")
+    n1 = _seed(db_conn, account_id=aid, suffix="ee")
+    db_conn.commit()
+
+    p1 = list_messages(db_conn, allowed_account_ids=[aid], limit=2)
+    assert [int(m["message_id"]) for m in p1["messages"]] == [d0, d1]
+
+    counting = _CountingConn(db_conn)
+    p2 = list_messages(counting, allowed_account_ids=[aid], limit=3,  # type: ignore[arg-type]
+                       cursor=p1["next_cursor"])
+    assert [int(m["message_id"]) for m in p2["messages"]] == [d2, n1, n0]
+    assert counting.execute_count[0] == 2, (
+        f"expected 2 queries (dated + NULL-tail top-up), "
+        f"got {counting.execute_count[0]}"
+    )
+
+
+def test_list_messages_runs_one_query_for_initial_page(db_conn) -> None:
+    """Initial page (cursor=None): the unrestricted query streams dated
+    rows first and NULL rows in the NULLS-LAST tail via LIMIT. The top-up
+    branch must NOT fire — `cursor is None` short-circuits it. Pinning
+    this prevents a future refactor from making the top-up unconditional
+    on the assumption that "we always want to fill the page"."""
+    aid = _ensure_account(db_conn)
+    _seed(db_conn, account_id=aid, suffix="aa",
+          internal_date=datetime.now(timezone.utc))
+    _seed(db_conn, account_id=aid, suffix="bb")  # NULL row
+    db_conn.commit()
+
+    counting = _CountingConn(db_conn)
+    out = list_messages(counting, allowed_account_ids=[aid], limit=10)  # type: ignore[arg-type]
+    assert len(out["messages"]) == 2
+    assert counting.execute_count[0] == 1, (
+        f"expected 1 query on initial page, got {counting.execute_count[0]}"
+    )
+
+
+def test_list_messages_runs_one_query_for_null_tail_cursor(db_conn) -> None:
+    """When the cursor is already in the NULL-tail (``cursor.ts is None``),
+    the predicate is ``IS NULL AND id < %s`` and there is nothing "below"
+    the NULL-tail to top up from. The top-up branch must NOT fire."""
+    aid = _ensure_account(db_conn)
+    # Hex-only suffixes; _seed uses bytes.fromhex(suffix * 32).
+    nulls = [
+        _seed(db_conn, account_id=aid, suffix=f"a{i:01x}")
+        for i in range(4)
+    ]
+    db_conn.commit()
+
+    p1 = list_messages(db_conn, allowed_account_ids=[aid], limit=2)
+    assert decode_browse_cursor(p1["next_cursor"]).ts is None
+
+    counting = _CountingConn(db_conn)
+    p2 = list_messages(counting, allowed_account_ids=[aid], limit=10,  # type: ignore[arg-type]
+                       cursor=p1["next_cursor"])
+    # Two NULL rows remain past the cursor (the first page consumed
+    # nulls[3], nulls[2]).
+    assert sorted(int(m["message_id"]) for m in p2["messages"]) == sorted(
+        [nulls[0], nulls[1]]
+    )
+    assert counting.execute_count[0] == 1, (
+        f"top-up fired on a NULL-tail cursor: "
+        f"got {counting.execute_count[0]} queries"
+    )

@@ -159,6 +159,24 @@ def _seed_for_plan_test(db_conn: psycopg.Connection) -> list[int]:
     return account_ids
 
 
+def _has_full_sort_node(plan: str) -> bool:
+    """Return True iff the EXPLAIN text contains a non-incremental Sort node.
+
+    A full ``Sort`` on top of an index scan means the planner is
+    materialising the intermediate and re-sorting, defeating the
+    LIMIT short-circuit. ``Incremental Sort`` is the cheap DISTINCT
+    tie-breaker on an already-sorted stream — not a regression.
+    Matches the line-based heuristic the acceptance harness uses
+    (see ``tests/acceptance/run_browse_explain.py::classify_plan``).
+    """
+    for raw in plan.splitlines():
+        ln = raw.strip()
+        if (ln.startswith("->  Sort") or ln.startswith("Sort  ")) \
+                and "Incremental Sort" not in ln:
+            return True
+    return False
+
+
 def _explain_messages_recent_idx_only(
     conn: psycopg.Connection, account_ids: list[int], page_size: int,
 ) -> str:
@@ -228,10 +246,7 @@ def test_messages_recent_idx_is_eligible_for_list_messages_query(
         db_conn, [account_ids[0]], _PAGE_SIZE,
     )
     assert "messages_recent_idx" in plan, plan
-    # No full sort node — a full ``Sort`` (not "Incremental Sort") on
-    # top of the index would mean the planner is materialising the
-    # intermediate and re-sorting, defeating the index's purpose.
-    assert "Sort  " not in plan or "Incremental Sort" in plan, plan
+    assert not _has_full_sort_node(plan), plan
 
 
 def test_messages_recent_idx_is_eligible_for_half_account_coverage(
@@ -246,6 +261,7 @@ def test_messages_recent_idx_is_eligible_for_half_account_coverage(
     plan = _explain_messages_recent_idx_only(db_conn, half, _PAGE_SIZE)
     assert "messages_recent_idx" in plan, plan
     assert "Bitmap Heap Scan" not in plan, plan
+    assert not _has_full_sort_node(plan), plan
 
 
 def test_messages_recent_idx_is_eligible_for_all_accounts(
@@ -258,6 +274,7 @@ def test_messages_recent_idx_is_eligible_for_all_accounts(
     )
     assert "messages_recent_idx" in plan, plan
     assert "Bitmap Heap Scan" not in plan, plan
+    assert not _has_full_sort_node(plan), plan
 
 
 def test_plan_probe_savepoint_restores_dropped_indexes(
@@ -280,9 +297,9 @@ def test_plan_probe_savepoint_restores_dropped_indexes(
         )
         row = cur.fetchone()
     assert row is not None
-    # 9 expected indexes per the 0019 schema: pkey, acct_date, acct_msgid_uniq,
-    # acct_rawsha_uniq, attachments_gin, body_lang, body_lang_pending,
-    # fts_v2, headers_gin, recent. That's 10.
+    # 10 expected indexes per the 0019 schema: pkey, acct_date,
+    # acct_msgid_uniq, acct_rawsha_uniq, attachments_gin, body_lang,
+    # body_lang_pending, fts_v2, headers_gin, recent.
     assert row[0] >= 10, (
         f"expected at least 10 indexes on messages after SAVEPOINT "
         f"rollback, found {row[0]} — rollback is broken"

@@ -104,19 +104,15 @@ def test_pool_exhausted_with_grow_pool_available_triggers_grow_pool() -> None:
     the route calls grow_pool(token, candidates_per_arm*2) and returns the
     resulting page."""
     from localmail.search.page_cache import PageOutOfPoolError
+    from localmail.search.searcher import PoolMetadata
     s = MagicMock()
     # The cached pool currently has cpa=50; advancing the cursor past it.
     s.continue_page.side_effect = PageOutOfPoolError("past pool")
-    # Set up the searcher's _cache.get to return an entry with current cpa
-    cache_entry = {
-        "candidates_per_arm": 50,
-        "page_size": 2,
-        "rerank_pool_size": 20,
-    }
-    s._cache.get.return_value = cache_entry
-    # The fake's _cfg needs candidates_per_arm and candidates_per_arm_max.
-    s._cfg.candidates_per_arm = 50
-    s._cfg.candidates_per_arm_max = 800
+    s.get_pool_metadata.return_value = PoolMetadata(
+        candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
+    )
+    s.config.candidates_per_arm = 50
+    s.config.candidates_per_arm_max = 800
     # grow_pool returns a freshly enlarged pool's page 1.
     grown_page = _page(
         results=[_result(3)], token="tok-2", pool_size=20,
@@ -133,6 +129,8 @@ def test_pool_exhausted_with_grow_pool_available_triggers_grow_pool() -> None:
     assert args[0] == "tok-1"
     new_cpa = args[1] if len(args) > 1 else kwargs.get("candidates_per_arm")
     assert new_cpa > 50
+    # Accessor is called with the user_id so the pool's ownership is enforced.
+    s.get_pool_metadata.assert_called_once_with("tok-1", user_id=99)
     assert out["next_cursor"] == "tok-2:2"
 
 
@@ -143,15 +141,14 @@ def test_pool_at_cap_returns_null_cursor_without_calling_grow_pool() -> None:
     so the GUI stops asking for more pages.
     """
     from localmail.search.page_cache import PageOutOfPoolError
+    from localmail.search.searcher import PoolMetadata
     s = MagicMock()
     s.continue_page.side_effect = PageOutOfPoolError("past pool")
-    s._cache.get.return_value = {
-        "candidates_per_arm": 800,
-        "page_size": 2,
-        "rerank_pool_size": 100,
-    }
-    s._cfg.candidates_per_arm = 50
-    s._cfg.candidates_per_arm_max = 800
+    s.get_pool_metadata.return_value = PoolMetadata(
+        candidates_per_arm=800, page_size=2, rerank_pool_size=100, pool_size=100,
+    )
+    s.config.candidates_per_arm = 50
+    s.config.candidates_per_arm_max = 800
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=99))
     out = run_search(searcher=s, free_text="hello", filters={},
                      limit=2, allowed_account_ids=[1], user_id=99,
@@ -159,6 +156,26 @@ def test_pool_at_cap_returns_null_cursor_without_calling_grow_pool() -> None:
     s.grow_pool.assert_not_called()
     assert out["results"] == []
     assert out["next_cursor"] is None
+
+
+def test_pool_exhausted_but_cache_evicted_raises_cursor_expired() -> None:
+    """Race: continue_page raises PageOutOfPoolError, but by the time the
+    route asks for pool metadata the entry has been evicted (TTL / LRU /
+    user_id mismatch). The route must surface SearchCursorExpired (409),
+    not 500 — the GUI's transparent re-search recovery expects 409.
+    """
+    from localmail.search.page_cache import PageOutOfPoolError
+    s = MagicMock()
+    s.continue_page.side_effect = PageOutOfPoolError("past pool")
+    s.get_pool_metadata.return_value = None  # evicted between calls
+    s.config.candidates_per_arm = 50
+    s.config.candidates_per_arm_max = 800
+    cursor = encode_search_cursor(SearchCursor(token="tok-1", page=5))
+    with pytest.raises(SearchCursorExpired):
+        run_search(searcher=s, free_text="hello", filters={},
+                   limit=2, allowed_account_ids=[1], user_id=99,
+                   cursor=cursor)
+    s.grow_pool.assert_not_called()
 
 
 def test_keyset_cursor_dispatches_to_search_with_keyset_cursor() -> None:

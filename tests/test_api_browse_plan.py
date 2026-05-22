@@ -98,10 +98,11 @@ _EPOCH = datetime(2024, 1, 1, tzinfo=timezone.utc)
 _DATE_SPAN_DAYS = 365
 
 # Fractions of per-account rows labelled into the two test mailboxes
-# used by the folder-filter eligibility tests (#78). Mirrors the
-# acceptance harness shape — a narrow label (~10%) and a broad one
-# (~50%). At fixture scale (50 rows/account) that's 5 and 25 rows.
-_NARROW_FOLDER_FRACTION = 0.10
+# used by the folder-filter eligibility tests (#78). Identical to the
+# acceptance harness's ``_FOLDER_FRACTIONS`` so a reader cross-referencing
+# the harness sees the same selectivities. At fixture scale (50 rows /
+# account) that's 3 and 25 rows after the ceil().
+_NARROW_FOLDER_FRACTION = 0.05
 _BROAD_FOLDER_FRACTION = 0.50
 
 # The exact SQL emitted by ``list_messages`` for the initial-load path
@@ -484,15 +485,13 @@ def _seed_mailbox_for_plan_test(
 
 def _label_fraction_of_account(
     conn: psycopg.Connection, account_id: int, mailbox_id: int, fraction: float,
-) -> int:
+) -> None:
     """Label ``fraction`` of ``account_id``'s messages into ``mailbox_id``.
 
     Picks messages in id order so the labelled subset is stable across
     runs and overlaps deterministically between the narrow and broad
     mailbox selections (which is the realistic Gmail shape — Inbox
     overlaps Sent overlaps the label that triggered them).
-
-    Returns the number of rows inserted.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -507,9 +506,7 @@ def _label_fraction_of_account(
             "    WHERE rn <= ceil(total * %s)",
             (account_id, mailbox_id, fraction),
         )
-        rowcount = cur.rowcount
     conn.commit()
-    return rowcount
 
 
 def _explain_folder_filter_recent_idx_only(

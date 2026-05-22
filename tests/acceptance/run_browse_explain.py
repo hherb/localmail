@@ -549,7 +549,8 @@ def _seed_folder_filter_mailboxes(
                     " VALUES (%s, %s, 1) RETURNING id",
                     (aid, name),
                 )
-                row = cur.fetchone(); assert row is not None
+                row = cur.fetchone()
+                assert row is not None
                 mb_id = int(row[0])
                 cur.execute(
                     "WITH ranked AS ("
@@ -563,7 +564,8 @@ def _seed_folder_filter_mailboxes(
                     "    WHERE rn <= ceil(total * %s)",
                     (aid, mb_id, fraction),
                 )
-                (selective if name == "selective" else broad).append(mb_id)
+                target = selective if name == "selective" else broad
+                target.append(mb_id)
     conn.commit()
     with conn.cursor() as cur:
         cur.execute("ANALYZE mailboxes")

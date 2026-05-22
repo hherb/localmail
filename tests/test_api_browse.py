@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from localmail.api.browse import _build_where, list_messages
+from localmail.api.browse import build_where, list_messages
 from localmail.api.browse_cursor import BrowseCursor, decode_browse_cursor
 from localmail.api.errors import ValidationFailed
 
@@ -307,7 +307,11 @@ def test_folder_ids_filter_restricts_to_labelled_messages(db_conn) -> None:
     assert m_out not in ids
 
 
-# ---- Pure-function tests for _build_where (#75 regression) ---------------
+# ---- Pure-function tests for build_where (#75 regression) ---------------
+# ``build_where`` is the canonical WHERE-clause emitter used by
+# ``list_messages`` and (since #77) re-imported by the plan-eligibility
+# tests + the EXPLAIN harness — these unit tests pin its shape so a
+# refactor cannot silently re-introduce the OR disjunct (#75).
 
 # These tests pin the WHERE-clause shape so a future refactor cannot
 # silently re-introduce the ``OR COALESCE IS NULL`` disjunct that
@@ -316,19 +320,19 @@ def test_folder_ids_filter_restricts_to_labelled_messages(db_conn) -> None:
 # via the top-up branch in ``list_messages``, not by widening the
 # dated cursor predicate.
 
-def test_build_where_initial_page_has_no_date_predicate() -> None:
+def testbuild_where_initial_page_has_no_date_predicate() -> None:
     """Cursor=None: the WHERE clause is just the ACL filter so the
     initial-page query can stream the entire ``messages_recent_idx``
     walk (dated rows first, NULLs in the NULLS-LAST tail) via LIMIT.
     """
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=[1, 2], folder_ids=None, cursor=None,
     )
     assert where == "m.account_id = ANY(%s)"
     assert params == [[1, 2]]
 
 
-def test_build_where_dated_cursor_uses_row_comparison_not_or_disjunction() -> None:
+def testbuild_where_dated_cursor_uses_row_comparison_not_or_disjunction() -> None:
     """Regression for #75: the dated-cursor predicate must use SQL
     row comparison (``ROW(expr, id) < ROW(%s, %s)``), not an
     ``expr < X OR (expr = X AND id < Y)`` disjunction.
@@ -342,7 +346,7 @@ def test_build_where_dated_cursor_uses_row_comparison_not_or_disjunction() -> No
     50k-row archive.
     """
     ts = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=[1], folder_ids=None,
         cursor=BrowseCursor(ts=ts, id=42),
     )
@@ -363,11 +367,11 @@ def test_build_where_dated_cursor_uses_row_comparison_not_or_disjunction() -> No
     assert params == [[1], ts, 42]
 
 
-def test_build_where_null_tail_cursor_uses_id_keyset() -> None:
+def testbuild_where_null_tail_cursor_uses_id_keyset() -> None:
     """Cursor with ``ts=None`` (already in NULL-tail) uses the
     ``IS NULL AND id < cursor.id`` predicate so subsequent NULL-tail
     pages step strictly by id."""
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=[1], folder_ids=None,
         cursor=BrowseCursor(ts=None, id=99),
     )
@@ -376,13 +380,13 @@ def test_build_where_null_tail_cursor_uses_id_keyset() -> None:
     assert params == [[1], 99]
 
 
-def test_build_where_null_tail_topup_has_no_id_predicate() -> None:
+def testbuild_where_null_tail_topup_has_no_id_predicate() -> None:
     """The top-up step (``null_tail_only=True``, cursor=None) selects
     the head of the NULL-tail — i.e. all NULL rows ordered by id DESC,
     no id lower bound. Used by ``list_messages`` after the dated path
     is exhausted past a dated cursor.
     """
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=[1, 2], folder_ids=None,
         cursor=None, null_tail_only=True,
     )
@@ -391,7 +395,7 @@ def test_build_where_null_tail_topup_has_no_id_predicate() -> None:
     assert params == [[1, 2]]
 
 
-def test_build_where_folder_clause_added_for_all_modes() -> None:
+def testbuild_where_folder_clause_added_for_all_modes() -> None:
     """``folder_ids`` adds the ``message_labels`` clause regardless of
     cursor mode — verified explicitly so a refactor doesn't drop it
     for the new NULL-tail top-up branch."""
@@ -403,7 +407,7 @@ def test_build_where_folder_clause_added_for_all_modes() -> None:
         (None, True),
     ]
     for cur, null_only in modes:
-        where, _ = _build_where(
+        where, _ = build_where(
             account_ids=[1], folder_ids=[7],
             cursor=cur, null_tail_only=null_only,
         )
@@ -412,14 +416,14 @@ def test_build_where_folder_clause_added_for_all_modes() -> None:
         )
 
 
-def test_build_where_null_tail_only_with_cursor_raises_value_error() -> None:
+def testbuild_where_null_tail_only_with_cursor_raises_value_error() -> None:
     """``null_tail_only=True`` is the top-up branch and is only ever called
     with ``cursor=None``. Passing a cursor is a programming error and must
     raise ``ValueError`` (not a silent ``assert`` that vanishes under
     ``python -O``)."""
     ts = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
     with pytest.raises(ValueError, match="null_tail_only"):
-        _build_where(
+        build_where(
             account_ids=[1], folder_ids=None,
             cursor=BrowseCursor(ts=ts, id=1), null_tail_only=True,
         )

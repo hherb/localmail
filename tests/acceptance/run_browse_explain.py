@@ -56,6 +56,10 @@ from typing import Any
 
 import psycopg
 
+from localmail.api.browse import (
+    BROWSE_ROW_SQL_TEMPLATE, build_where, compose_browse_sql,
+)
+from localmail.api.browse_cursor import BrowseCursor
 from localmail.db import apply_migrations
 
 
@@ -110,21 +114,26 @@ _COPY_BATCH = 5000
 
 
 # ---- The exact query under test -----------------------------------------
-
-# This is the SQL ``list_messages`` emits, minus the ``message_labels``
-# join (we never pass ``folder_ids`` from the GUI's initial-load path).
-# We keep the DISTINCT for plan parity even though without the join it
-# is a no-op — the planner still has to consider it.
-_INITIAL_PAGE_SQL = """
-SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
-                m.internal_date, m.account_id, a.name,
-                COALESCE(m.internal_date, m.date_sent) AS sort_ts
-  FROM messages m
-  JOIN accounts a ON a.id = m.account_id
- WHERE m.account_id = ANY(%s)
- ORDER BY sort_ts DESC NULLS LAST, m.id DESC
- LIMIT %s
-"""
+#
+# The ``current`` variants below compose the production
+# ``BROWSE_ROW_SQL_TEMPLATE`` (in ``localmail.api.browse``) via
+# ``compose_browse_sql`` + ``build_where``. There is no duplicate SQL
+# inline here — any refactor of the SELECT / FROM / ORDER BY or of the
+# WHERE-clause emitter automatically lands in this harness (#77).
+#
+# Initial-load path: no ``folder_ids`` from the GUI today; the JOIN to
+# ``message_labels`` is therefore skipped. DISTINCT remains for plan
+# parity even though it is a no-op without the JOIN (the planner still
+# has to consider it).
+_INITIAL_PAGE_SQL = compose_browse_sql(
+    folder_filter=False,
+    where=build_where(
+        # Placeholder account_ids — only the WHERE-clause TEXT matters
+        # for composing the SQL string; actual values are bound per
+        # probe via ``params`` in ``_run_explain``.
+        account_ids=[0], folder_ids=None, cursor=None,
+    )[0],
+)
 
 # Post-#75: the dated-cursor predicate uses SQL row comparison so
 # Postgres composes it as a single Index Cond on the
@@ -133,46 +142,42 @@ SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
 # are reached via a separate top-up query in
 # ``api/browse.py:list_messages``, not by widening this clause.
 #
-# The equivalent OR-form disjunction (``expr < X OR (expr = X AND
-# id < Y)``) degrades to a post-walk ``Filter:`` at production scale
-# (Postgres refuses to decompose a mixed-column OR into an index
-# range bound when an Index Scan alternative is on the table).
-# Kept as the ``pre75`` baseline below for before/after measurement.
-#
 # Parameter binding takes two cursor values (ts, id) — not three —
 # unlike the OR form. Update ``--predicate-form`` plumbing if a new
 # variant is added.
-_MID_KEYSET_SQL = """
-SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
-                m.internal_date, m.account_id, a.name,
-                COALESCE(m.internal_date, m.date_sent) AS sort_ts
-  FROM messages m
-  JOIN accounts a ON a.id = m.account_id
- WHERE m.account_id = ANY(%s)
-   AND ROW(COALESCE(m.internal_date, m.date_sent), m.id) < ROW(%s, %s)
- ORDER BY sort_ts DESC NULLS LAST, m.id DESC
- LIMIT %s
-"""
+_MID_KEYSET_SQL = compose_browse_sql(
+    folder_filter=False,
+    where=build_where(
+        account_ids=[0], folder_ids=None,
+        cursor=BrowseCursor(
+            # Placeholder cursor values for the same reason as above.
+            ts=datetime(2024, 1, 1, tzinfo=timezone.utc), id=0,
+        ),
+    )[0],
+)
 
 # Pre-#75 baseline kept for ad-hoc before/after comparison. Selected
-# via ``--predicate-form pre75``. Both the ``OR COALESCE IS NULL``
-# disjunct AND the OR-form keyset are present here — the disjunct was
-# the original bug, and switching to ROW comparison was what actually
-# composed the predicate as an Index Cond. ``Rows Removed by Filter``
-# at mid-keyset is ~total/2 on this form.
-_MID_KEYSET_SQL_PRE75 = """
-SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
-                m.internal_date, m.account_id, a.name,
-                COALESCE(m.internal_date, m.date_sent) AS sort_ts
-  FROM messages m
-  JOIN accounts a ON a.id = m.account_id
- WHERE m.account_id = ANY(%s)
-   AND (COALESCE(m.internal_date, m.date_sent) < %s
-        OR (COALESCE(m.internal_date, m.date_sent) = %s AND m.id < %s)
-        OR COALESCE(m.internal_date, m.date_sent) IS NULL)
- ORDER BY sort_ts DESC NULLS LAST, m.id DESC
- LIMIT %s
-"""
+# via ``--predicate-form pre75``. This is intentionally NOT composed
+# from the production primitives — the whole point is to reproduce
+# the BUGGY shape so the operator can measure the perf delta on
+# demand. Both the ``OR COALESCE IS NULL`` disjunct AND the OR-form
+# keyset are present here — the disjunct was the original bug, and
+# switching to ROW comparison was what actually composed the
+# predicate as an Index Cond. ``Rows Removed by Filter`` at
+# mid-keyset is ~total/2 on this form.
+#
+# The SELECT / FROM / ORDER BY shape DOES reuse
+# ``BROWSE_ROW_SQL_TEMPLATE`` so the before/after comparison is
+# strictly apples-to-apples — only the WHERE clause differs.
+_PRE75_BUGGY_WHERE = (
+    "m.account_id = ANY(%s)"
+    " AND (COALESCE(m.internal_date, m.date_sent) < %s"
+    "      OR (COALESCE(m.internal_date, m.date_sent) = %s AND m.id < %s)"
+    "      OR COALESCE(m.internal_date, m.date_sent) IS NULL)"
+)
+_MID_KEYSET_SQL_PRE75 = BROWSE_ROW_SQL_TEMPLATE.format(
+    join="", where=_PRE75_BUGGY_WHERE,
+)
 
 
 # ---- Plan classifier ----------------------------------------------------

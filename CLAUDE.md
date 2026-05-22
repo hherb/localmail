@@ -219,6 +219,25 @@ acl_fraction`), not by table size. Tracked by
 rewrite the predicate as the OR-form even though it's
 semantically equivalent — the planner does not optimize it.
 
+**Canonical browse SQL emitter (#77)**: `BROWSE_ROW_SQL_TEMPLATE`,
+`compose_browse_sql(folder_filter=…, where=…)`, and
+`build_where(account_ids=…, folder_ids=…, cursor=…,
+null_tail_only=…)` in
+[src/localmail/api/browse.py](src/localmail/api/browse.py) are
+the only authoritative SQL emitter for the browse path. Both
+the unit-scale eligibility tests
+(`tests/test_api_browse_plan.py`) and the EXPLAIN harness
+(`tests/acceptance/run_browse_explain.py`) compose the
+production SQL via these primitives — there is no duplicate
+inline SQL to drift against. Any refactor of the SELECT /
+FROM / ORDER BY shape or of the WHERE-clause emitter
+automatically lands in the tests + harness. The `pre75`
+predicate variant in the harness is the one deliberate
+exception: it reuses `BROWSE_ROW_SQL_TEMPLATE` for the
+SELECT / FROM / ORDER BY shape but substitutes a local
+buggy `_PRE75_BUGGY_WHERE` so the operator can reproduce
+the pre-fix planner choice.
+
 **The wire `date` field MUST match this sort key.** Every paginated
 list endpoint (`/v1/messages`, `/v1/search`, `/v1/changes`) emits
 `date = COALESCE(internal_date, date_sent)` — never raw `date_sent`.

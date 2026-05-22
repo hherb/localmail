@@ -16,6 +16,13 @@ disjunct. That form prevents Postgres from composing an index range bound,
 forcing the planner to walk every row above the cursor on every mid-keyset
 page. NULL-tail rows are reached via a second top-up query when the dated
 path is exhausted — see ``list_messages``.
+
+#77: ``BROWSE_ROW_SQL_TEMPLATE``, ``compose_browse_sql``, and ``build_where``
+are public so the eligibility tests in ``tests/test_api_browse_plan.py`` and
+the EXPLAIN harness in ``tests/acceptance/run_browse_explain.py`` can compose
+the production SQL shape directly. Any refactor of the SELECT / FROM /
+ORDER BY shape goes through this module — there is no duplicate inline SQL
+elsewhere to drift against.
 """
 from __future__ import annotations
 
@@ -28,7 +35,22 @@ from localmail.api.browse_cursor import (
 )
 
 
-_BROWSE_ROW_SQL = """
+# Public so the eligibility tests in ``tests/test_api_browse_plan.py`` and
+# the EXPLAIN harness in ``tests/acceptance/run_browse_explain.py`` can
+# compose the same SQL the production path emits, instead of duplicating
+# it inline (#77). The format placeholders are intentional:
+#
+#   ``{join}``  — empty string, or a single ``message_labels`` JOIN line
+#                 with a trailing space (folder-filter mode).
+#   ``{where}`` — the WHERE-clause body returned by ``build_where``.
+#
+# Any consumer that wants the actual SQL string for a given query shape
+# should call ``compose_browse_sql(folder_filter=..., where=...)`` rather
+# than ``.format()``-ing this constant directly. Keep the COALESCE
+# expression and the ``sort_ts`` alias in sync with the index definition
+# in migration ``0018``; the LIMIT short-circuit through
+# ``messages_recent_idx`` depends on both matching exactly.
+BROWSE_ROW_SQL_TEMPLATE = """
     SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
                     m.internal_date, m.account_id, a.name,
                     COALESCE(m.internal_date, m.date_sent) AS sort_ts
@@ -39,6 +61,22 @@ _BROWSE_ROW_SQL = """
      ORDER BY sort_ts DESC NULLS LAST, m.id DESC
      LIMIT %s
 """
+
+
+_FOLDER_JOIN_SQL = "JOIN message_labels ml ON ml.message_id = m.id "
+
+
+def compose_browse_sql(*, folder_filter: bool, where: str) -> str:
+    """Compose the final browse SELECT string for a given WHERE clause.
+
+    ``folder_filter`` toggles the ``message_labels`` JOIN required when
+    the caller filters by ``folder_ids``; ``where`` is the WHERE-clause
+    body, typically what ``build_where`` returned.
+    """
+    return BROWSE_ROW_SQL_TEMPLATE.format(
+        join=_FOLDER_JOIN_SQL if folder_filter else "",
+        where=where,
+    )
 
 
 def list_messages(
@@ -151,20 +189,19 @@ def _fetch_rows(
     a dated cursor exhausts the dated portion, to fill the remaining slots
     of the same response from the NULL-tail.
     """
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=account_ids,
         folder_ids=folder_ids,
         cursor=cursor,
         null_tail_only=null_tail_only,
     )
-    join = "JOIN message_labels ml ON ml.message_id = m.id " if folder_ids else ""
-    sql = _BROWSE_ROW_SQL.format(join=join, where=where)
+    sql = compose_browse_sql(folder_filter=bool(folder_ids), where=where)
     with conn.cursor() as cur:
         cur.execute(sql, params + [limit])
         return list(cur.fetchall())
 
 
-def _build_where(
+def build_where(
     *,
     account_ids: list[int],
     folder_ids: list[int] | None,

@@ -29,6 +29,11 @@ Optional flags:
 
 * ``--distribution {balanced,skewed,tail}`` (default ``skewed``)
 * ``--page-size N`` (default 50, matches the GUI's default page size)
+* ``--predicate-form {current,pre75}`` — choose the mid-keyset cursor
+  predicate. ``current`` (default) is what ``api/browse.py:list_messages``
+  emits after #75. ``pre75`` is the buggy form with the
+  ``OR COALESCE IS NULL`` disjunct, kept here so the operator can
+  reproduce the before/after difference on demand.
 * ``--keep-data`` — leave the seeded rows in place (useful for ad-hoc
   ``psql`` follow-up)
 * ``--json`` — emit machine-readable summary instead of the table
@@ -121,7 +126,41 @@ SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
  LIMIT %s
 """
 
+# Post-#75: the dated-cursor predicate uses SQL row comparison so
+# Postgres composes it as a single Index Cond on the
+# ``messages_recent_idx`` expression — a range-bounded scan that
+# starts AT the cursor and only emits matching rows. NULL-tail rows
+# are reached via a separate top-up query in
+# ``api/browse.py:list_messages``, not by widening this clause.
+#
+# The equivalent OR-form disjunction (``expr < X OR (expr = X AND
+# id < Y)``) degrades to a post-walk ``Filter:`` at production scale
+# (Postgres refuses to decompose a mixed-column OR into an index
+# range bound when an Index Scan alternative is on the table).
+# Kept as the ``pre75`` baseline below for before/after measurement.
+#
+# Parameter binding takes two cursor values (ts, id) — not three —
+# unlike the OR form. Update ``--predicate-form`` plumbing if a new
+# variant is added.
 _MID_KEYSET_SQL = """
+SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
+                m.internal_date, m.account_id, a.name,
+                COALESCE(m.internal_date, m.date_sent) AS sort_ts
+  FROM messages m
+  JOIN accounts a ON a.id = m.account_id
+ WHERE m.account_id = ANY(%s)
+   AND ROW(COALESCE(m.internal_date, m.date_sent), m.id) < ROW(%s, %s)
+ ORDER BY sort_ts DESC NULLS LAST, m.id DESC
+ LIMIT %s
+"""
+
+# Pre-#75 baseline kept for ad-hoc before/after comparison. Selected
+# via ``--predicate-form pre75``. Both the ``OR COALESCE IS NULL``
+# disjunct AND the OR-form keyset are present here — the disjunct was
+# the original bug, and switching to ROW comparison was what actually
+# composed the predicate as an Index Cond. ``Rows Removed by Filter``
+# at mid-keyset is ~total/2 on this form.
+_MID_KEYSET_SQL_PRE75 = """
 SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
                 m.internal_date, m.account_id, a.name,
                 COALESCE(m.internal_date, m.date_sent) AS sort_ts
@@ -489,17 +528,41 @@ def _pick_mid_cursor(conn: psycopg.Connection) -> tuple[datetime, int]:
         return (row[0], int(row[1]))
 
 
+_PREDICATE_FORMS: dict[str, str] = {
+    "current": _MID_KEYSET_SQL,
+    "pre75": _MID_KEYSET_SQL_PRE75,
+}
+
+
 def _run_explain(
     conn: psycopg.Connection, probe: ProbeSpec, page_size: int,
+    *, predicate_form: str = "current",
 ) -> PlanSummary:
-    """Run EXPLAIN (ANALYZE, BUFFERS, VERBOSE) and classify the plan."""
+    """Run EXPLAIN (ANALYZE, BUFFERS, VERBOSE) and classify the plan.
+
+    ``predicate_form`` selects the mid-keyset SQL:
+    ``"current"`` — post-#75, no OR-IS-NULL disjunct (default).
+    ``"pre75"`` — the buggy form, kept for ad-hoc before/after comparison.
+    """
     if probe.cursor is None:
         sql = _INITIAL_PAGE_SQL
         params: list[Any] = [probe.account_ids, page_size + 1]
     else:
         ts, mid = probe.cursor
-        sql = _MID_KEYSET_SQL
-        params = [probe.account_ids, ts, ts, mid, page_size + 1]
+        try:
+            sql = _PREDICATE_FORMS[predicate_form]
+        except KeyError as exc:
+            raise ValueError(
+                f"unknown predicate_form: {predicate_form!r}; "
+                f"choose from {sorted(_PREDICATE_FORMS)}"
+            ) from exc
+        # ``current`` uses ROW comparison (2 cursor params); ``pre75``
+        # uses the OR-form (3 cursor params). Keep the parameter
+        # arity in sync with each SQL string.
+        if predicate_form == "current":
+            params = [probe.account_ids, ts, mid, page_size + 1]
+        else:
+            params = [probe.account_ids, ts, ts, mid, page_size + 1]
     explain_sql = "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT TEXT) " + sql
     with conn.cursor() as cur:
         cur.execute(explain_sql, params)
@@ -569,6 +632,14 @@ def main() -> int:
         "--distribution", choices=sorted(_DISTRIBUTIONS), default="skewed",
     )
     parser.add_argument("--page-size", type=int, default=_DEFAULT_PAGE_SIZE)
+    parser.add_argument(
+        "--predicate-form", choices=sorted(_PREDICATE_FORMS), default="current",
+        help=(
+            "Mid-keyset cursor predicate to probe. 'current' (default) is "
+            "the post-#75 range-seekable form; 'pre75' is the buggy form "
+            "with OR COALESCE IS NULL, kept for before/after measurement."
+        ),
+    )
     parser.add_argument("--keep-data", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
@@ -601,7 +672,10 @@ def main() -> int:
 
         summaries: list[PlanSummary] = []
         for probe in probes:
-            summ = _run_explain(conn, probe, args.page_size)
+            summ = _run_explain(
+                conn, probe, args.page_size,
+                predicate_form=args.predicate_form,
+            )
             summaries.append(summ)
 
         if args.json:
@@ -611,6 +685,7 @@ def main() -> int:
                     "accounts": args.accounts,
                     "distribution": args.distribution,
                     "page_size": args.page_size,
+                    "predicate_form": args.predicate_form,
                 },
                 "probes": [
                     {

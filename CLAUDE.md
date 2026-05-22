@@ -186,17 +186,38 @@ and the secondary `id DESC` are all load-bearing for the plan,
 and that the index alone can serve the query when competing
 indexes are temporarily hidden.
 
-**Mid-keyset perf bug (#75, separate follow-up)**: when paginating
-deep into the keyset (non-NULL cursor.ts), the cursor predicate
-in `api/browse.py:_build_where` includes `OR COALESCE IS NULL`
-to admit NULL-tail rows. This disjunction prevents Postgres from
-composing an index range bound on the COALESCE expression, so the
-index walks from the top of the index downward, filtering every
-tuple above the cursor. The harness measured ~100k `Rows Removed
-by Filter` for a mid-keyset 51-row LIMIT on a 200k-row archive
-(buffer hits jump from <2k to ~500k). The fix is to split the
-cursor into a dated-portion path (range-seekable) and a NULL-tail
-transition path; tracked in #75.
+**Mid-keyset perf (#75, resolved)**: deep-keyset pagination
+(`cursor.ts` not None) used to walk ~`total_rows / 2` tuples per
+51-row page because the cursor predicate (`expr < X OR (expr = X
+AND id < Y) OR COALESCE IS NULL`) was treated as a post-walk
+`Filter:` rather than an `Index Cond:`. Two interacting causes:
+the `OR COALESCE IS NULL` disjunct admitted NULL-tail rows but
+prevented any range bound; even after removing it, the OR-form
+keyset (`expr < X OR (expr = X AND id < Y)`) still degraded to
+a Filter at production scale (Postgres refuses to decompose a
+mixed-column OR into an index range bound when an Index Scan
+alternative is on the table).
+
+The shipped fix uses SQL **row comparison** —
+`ROW(COALESCE(internal_date, date_sent), m.id) < ROW(%s, %s)` —
+which Postgres composes as a single `Index Cond` on
+`messages_recent_idx`. The scan starts AT the cursor and only
+emits matching rows. NULL-tail rows are reached via a separate
+"top-up" query in `list_messages` when the dated portion runs
+short of `limit + 1`; the response cursor transitions to the
+NULL-tail flavour (`ts=None`) naturally via `page_rows[-1]`.
+
+200k-row, ACL=1 heavy, skewed distribution, mid-keyset 51-row
+LIMIT: **100,014 → 13 rows removed by filter; 28.3ms → 0.072ms
+execution; ~500k → 424 buffer hits**. The residual filter rows
+are bounded by the per-tuple ACL cost (~`page_size /
+acl_fraction`), not by table size. Tracked by
+`tests/test_api_browse_plan.py::test_dated_cursor_predicate_composes_index_range_bound`
+(unit-scale eligibility) and
+`tests/acceptance/run_browse_explain.py` (operational
+`--predicate-form {current,pre75}` before/after). Do NOT
+rewrite the predicate as the OR-form even though it's
+semantically equivalent — the planner does not optimize it.
 
 **The wire `date` field MUST match this sort key.** Every paginated
 list endpoint (`/v1/messages`, `/v1/search`, `/v1/changes`) emits

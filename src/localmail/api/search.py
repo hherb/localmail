@@ -19,6 +19,7 @@ from localmail.api.search_cursor import (
     encode_search_cursor,
     is_keyset_cursor,
 )
+from localmail.config import SearchConfig
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
 
@@ -143,13 +144,13 @@ def run_search(
 
     ``next_cursor`` in the response is ``None`` once the rerank pool is
     exhausted *and* further growth would exceed
-    ``searcher._cfg.candidates_per_arm_max``.
+    ``searcher.config.candidates_per_arm_max``.
     """
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:
         return {"results": [], "next_cursor": None, "total_estimate": 0, "took_ms": 0.0}
 
-    cfg = searcher._cfg  # noqa: SLF001  — route needs the grow-pool cap
+    cfg = searcher.config
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
         page = searcher.search(query, page_size=limit, user_id=user_id, sort=sort)
@@ -177,21 +178,19 @@ def run_search(
 
 
 def _continue_or_grow(
-    searcher: Searcher, parsed: SearchCursor, *, user_id: int, cfg: Any,
+    searcher: Searcher, parsed: SearchCursor, *, user_id: int, cfg: SearchConfig,
 ) -> Any:
     try:
         return searcher.continue_page(parsed.token, parsed.page, user_id=user_id)
     except CacheMissError as exc:
         raise SearchCursorExpired(f"cursor {parsed.token!r} not found") from exc
     except PageOutOfPoolError:
-        try:
-            entry = searcher._cache.get(parsed.token)  # noqa: SLF001
-        except CacheMissError as exc:
-            raise SearchCursorExpired(f"cursor {parsed.token!r} not found") from exc
-        current_cpa = int(entry.get("candidates_per_arm", cfg.candidates_per_arm))
-        if current_cpa >= cfg.candidates_per_arm_max:
-            return _empty_grown_page(parsed.token, page_size=entry.get("page_size", 50))
-        new_cpa = min(current_cpa * 2, cfg.candidates_per_arm_max)
+        meta = searcher.get_pool_metadata(parsed.token, user_id=user_id)
+        if meta is None:
+            raise SearchCursorExpired(f"cursor {parsed.token!r} not found")
+        if meta.candidates_per_arm >= cfg.candidates_per_arm_max:
+            return _empty_grown_page(parsed.token, page_size=meta.page_size)
+        new_cpa = min(meta.candidates_per_arm * 2, cfg.candidates_per_arm_max)
         return searcher.grow_pool(parsed.token, new_cpa, user_id=user_id)
 
 
@@ -205,7 +204,7 @@ def _empty_grown_page(token: str, *, page_size: int) -> Any:
     )
 
 
-def _next_cursor(page: Any, *, cfg: Any) -> str | None:
+def _next_cursor(page: Any, *, cfg: SearchConfig) -> str | None:
     """Compute the cursor for the page after ``page``, or None if exhausted.
 
     Two cursor kinds:

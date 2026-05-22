@@ -248,6 +248,20 @@ class SearchPage:
     next_keyset: KeysetCursor | None = None
 
 
+@dataclass(frozen=True)
+class PoolMetadata:
+    """Public-shape introspection of a cached rerank pool.
+
+    Returned by :meth:`Searcher.get_pool_metadata` so callers can decide
+    whether to grow the pool further without reaching into the cache's
+    entry-dict shape. Stable across future cache refactors.
+    """
+    candidates_per_arm: int
+    page_size: int
+    rerank_pool_size: int
+    pool_size: int
+
+
 class Searcher:
     """Orchestrates the hybrid search pipeline.
 
@@ -273,6 +287,47 @@ class Searcher:
         self._rewriter = rewriter
         self._cache = PageCache(maxsize=cfg.page_cache_size, ttl_s=cfg.page_cache_ttl_s)
         self._lang_warning_emitted = False
+
+    @property
+    def config(self) -> SearchConfig:
+        """Read-only view of the search configuration this Searcher was built with.
+
+        Lets the api/ layer make grow-pool cap decisions without reaching
+        into ``self._cfg``. The returned object is the same instance held
+        internally; do not mutate it (``SearchConfig`` is a pydantic model
+        and treats writes as ad-hoc, not as a reconfiguration signal).
+        """
+        return self._cfg
+
+    def get_pool_metadata(
+        self, search_token: str, *, user_id: int | None = None,
+    ) -> PoolMetadata | None:
+        """Inspect the cached pool for ``search_token`` without consuming it.
+
+        Returns a :class:`PoolMetadata` snapshot on hit; returns ``None``
+        on cache miss, TTL expiry, or when ``user_id`` does not match the
+        pool's owner (same scoping rule as :meth:`continue_page` /
+        :meth:`grow_pool`). ``user_id=None`` bypasses the owner check.
+
+        The api/ layer calls this from its grow-pool transparent recovery
+        path when ``continue_page`` raises ``PageOutOfPoolError``: it needs
+        the current ``candidates_per_arm`` to decide whether to double the
+        pool (and the cached ``page_size`` for the "at cap" sentinel page).
+        Keeping this on Searcher means the cache's entry-dict shape can
+        evolve without breaking that recovery path (issue #71).
+        """
+        try:
+            entry = self._cache.get(search_token)
+        except CacheMissError:
+            return None
+        if user_id is not None and entry.get("user_id") != user_id:
+            return None
+        return PoolMetadata(
+            candidates_per_arm=int(entry["candidates_per_arm"]),
+            page_size=int(entry["page_size"]),
+            rerank_pool_size=int(entry["rerank_pool_size"]),
+            pool_size=len(entry["hydrated"]),
+        )
 
     def _maybe_warn_unpopulated_body_lang(
         self, conn: psycopg.Connection, parsed: ParsedQuery,

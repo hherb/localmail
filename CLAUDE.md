@@ -518,13 +518,17 @@ for the full design.
     Operators on GPU opt back in via `[search] reranker_enabled = true`
     in `config.toml`. Don't quietly flip this default; the rerank fanout
     cost compounds with the pagination work.
-  - **Known follow-ups (filed)**: #71 (Searcher accessor refactor — the
-    `_lexical_date_search` helper duplicates ACL plumbing already shared
-    by other arms), #72 (`EXPLAIN ANALYZE` under the per-user ACL
-    filter on `messages_recent_idx`). `grow_pool` on the `sort=rank`
-    path can still surface duplicates when the cache is exhausted past
-    pool 100 — covered by `sort=date` for the "show me everything"
-    intent.
+  - **Known follow-ups (filed)**: #72 (`EXPLAIN ANALYZE` under the
+    per-user ACL filter on `messages_recent_idx`). `grow_pool` on the
+    `sort=rank` path can still surface duplicates when the cache is
+    exhausted past pool 100 — covered by `sort=date` for the "show me
+    everything" intent.
+  - **Searcher public boundaries (#71)**: the api/ layer (and any
+    future MCP layer) uses `searcher.get_pool_metadata(token, *,
+    user_id)` and `searcher.config` — never reach into
+    `searcher._cache` or `searcher._cfg`. The accessor's `user_id`
+    scoping mirrors `continue_page` / `grow_pool` exactly. Tests in
+    `tests/test_searcher_pool_metadata.py` enforce.
 
 ## Conventions
 

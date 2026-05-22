@@ -238,6 +238,38 @@ SELECT / FROM / ORDER BY shape but substitutes a local
 buggy `_PRE75_BUGGY_WHERE` so the operator can reproduce
 the pre-fix planner choice.
 
+**Folder-filter planner choice (#78, resolved)**: the
+`folder_ids` branch of `list_messages` adds
+`JOIN message_labels ml ON ml.message_id = m.id` and
+`ml.mailbox_id = ANY(%s)`. The planner's choice for the
+*messages* side of the JOIN is selectivity-dependent — at
+narrow selectivities (~5% labelled) it can correctly start
+from `message_labels` (bitmap-on-mailbox + nested loop into
+`messages`); at broad selectivities (~50%) it prefers the
+date-ordered `messages_recent_idx` walk. At production scale
+(200k rows, 5 accounts, skewed), every folder-filter probe
+picks `Index Scan using messages_recent_idx` — selective
+folder (1.3ms exec, 25.8k buf hits) and broad folder (0.2ms
+exec) included. The acceptance harness exercises this via
+`run_browse_explain.py --folder-filter`, which seeds two
+mailboxes per account (`selective` ~5%, `broad` ~50%) and
+appends four folder-filter probes to the matrix:
+ACL=1+selective, ACL=1+broad, ACL=1+broad mid-keyset,
+ACL=all+broad-across-accounts. The verdict splits folderless
+from folder-filter results — a covering index recommendation
+is folderless-only (folder-filter option 2 at small scale is
+the right planner choice for narrow selectivities, not a
+problem to fix). The SQL-shape eligibility regression is
+pinned by `tests/test_api_browse_plan.py` —
+`test_messages_recent_idx_is_eligible_for_{narrow,broad,multi}_folder_filter`
+prove that with every competing `messages` index hidden,
+`Index Scan using messages_recent_idx` still serves the
+messages side under the JOIN. Note: the `DISTINCT` clause
+adds an unavoidable post-join Sort+Unique pass over every
+projected column when the folder filter is present; this is
+inherent to the JOIN+DISTINCT shape, not an index-eligibility
+regression.
+
 **The wire `date` field MUST match this sort key.** Every paginated
 list endpoint (`/v1/messages`, `/v1/search`, `/v1/changes`) emits
 `date = COALESCE(internal_date, date_sent)` — never raw `date_sent`.

@@ -34,6 +34,10 @@ Optional flags:
   emits after #75. ``pre75`` is the buggy form with the
   ``OR COALESCE IS NULL`` disjunct, kept here so the operator can
   reproduce the before/after difference on demand.
+* ``--folder-filter`` — also seed ``message_labels`` rows and add
+  folder-filter probes (selective ~5% + broad ~50% mailbox per
+  account). Answers #78: what plan family does Postgres pick when
+  ``folder_ids`` is non-empty?
 * ``--keep-data`` — leave the seeded rows in place (useful for ad-hoc
   ``psql`` follow-up)
 * ``--json`` — emit machine-readable summary instead of the table
@@ -96,6 +100,18 @@ _DISTRIBUTIONS: dict[str, list[float]] = {
 # LIMIT depends only on the chosen access path).
 _DEFAULT_PAGE_SIZE = 50
 
+# Fractions of per-account rows labelled into the two folder-filter
+# probe mailboxes (#78). ``selective`` mirrors a label-like folder
+# (Receipts, Newsletters); ``broad`` mirrors Inbox/Sent under Gmail's
+# "every message gets multiple labels" model. Labelled rows are
+# picked in id order so the broad mailbox is a strict superset of
+# the selective one — the same shape the live mailbox tree settles
+# into once Gmail's auto-labels run.
+_FOLDER_FRACTIONS: dict[str, float] = {
+    "selective": 0.05,
+    "broad":     0.50,
+}
+
 # Truncate scope mirrors the other acceptance harnesses — this is the
 # union of all data tables this script could touch, ordered so CASCADE
 # isn't strictly necessary but is kept for safety.
@@ -133,19 +149,22 @@ _COPY_BATCH = 5000
 
 def _initial_page_sql_and_params(
     account_ids: list[int], page_size: int,
+    *, folder_ids: list[int] | None = None,
 ) -> tuple[str, list[Any]]:
     """Compose the initial-page probe SQL + params from production primitives.
 
     Returns ``(sql, params)`` ready for ``cur.execute``; the caller
     prepends ``EXPLAIN …`` to the SQL. ``page_size + 1`` is appended
     as the LIMIT value here so the bound-param shape is owned in one
-    place.
+    place. ``folder_ids`` toggles the ``message_labels`` JOIN — when
+    non-empty, ``build_where`` adds the folder predicate and
+    ``compose_browse_sql`` injects the JOIN line (#78).
     """
     where, params = build_where(
-        account_ids=account_ids, folder_ids=None, cursor=None,
+        account_ids=account_ids, folder_ids=folder_ids, cursor=None,
     )
     return (
-        compose_browse_sql(folder_filter=False, where=where),
+        compose_browse_sql(folder_filter=bool(folder_ids), where=where),
         params + [page_size + 1],
     )
 
@@ -162,20 +181,22 @@ def _initial_page_sql_and_params(
 # just delegates.
 def _mid_keyset_sql_and_params(
     account_ids: list[int], ts: datetime, mid: int, page_size: int,
+    *, folder_ids: list[int] | None = None,
 ) -> tuple[str, list[Any]]:
     """Compose the mid-keyset probe SQL + params from production primitives.
 
     Returns ``(sql, params)`` ready for ``cur.execute``; the caller
     prepends ``EXPLAIN …`` to the SQL. ``page_size + 1`` is appended
     as the LIMIT value here so the bound-param shape is owned in one
-    place.
+    place. ``folder_ids`` toggles the ``message_labels`` JOIN — see
+    ``_initial_page_sql_and_params`` (#78).
     """
     where, params = build_where(
-        account_ids=account_ids, folder_ids=None,
+        account_ids=account_ids, folder_ids=folder_ids,
         cursor=BrowseCursor(ts=ts, id=mid),
     )
     return (
-        compose_browse_sql(folder_filter=False, where=where),
+        compose_browse_sql(folder_filter=bool(folder_ids), where=where),
         params + [page_size + 1],
     )
 
@@ -501,24 +522,98 @@ def _synth_sha256(row_idx: int) -> bytes:
     return raw
 
 
+def _seed_folder_filter_mailboxes(
+    conn: psycopg.Connection, account_ids: list[int],
+) -> FolderMailboxes:
+    """Create one ``selective`` and one ``broad`` mailbox per account
+    and label the requested fraction of each account's messages into
+    each (#78).
+
+    The labelling SQL picks rows in id order so the ``broad`` mailbox
+    is a strict superset of the ``selective`` one for the same
+    account — mirrors the realistic Gmail shape where Inbox and Sent
+    both label the same threads. UIDs are minted via ``row_number()``
+    so the ``(mailbox_id, uid)`` unique constraint is satisfied
+    without per-message round-trips.
+    """
+    print(f"  seeding folder-filter mailboxes + labels for "
+          f"{len(account_ids)} account(s)…", flush=True)
+    selective: list[int] = []
+    broad: list[int] = []
+    t0 = time.monotonic()
+    with conn.cursor() as cur:
+        for aid in account_ids:
+            for name, fraction in _FOLDER_FRACTIONS.items():
+                cur.execute(
+                    "INSERT INTO mailboxes (account_id, name, uidvalidity)"
+                    " VALUES (%s, %s, 1) RETURNING id",
+                    (aid, name),
+                )
+                row = cur.fetchone()
+                assert row is not None
+                mb_id = int(row[0])
+                cur.execute(
+                    "WITH ranked AS ("
+                    "  SELECT id,"
+                    "         row_number() OVER (ORDER BY id) AS rn,"
+                    "         count(*) OVER () AS total"
+                    "    FROM messages WHERE account_id = %s"
+                    ")"
+                    " INSERT INTO message_labels (message_id, mailbox_id, uid)"
+                    "   SELECT id, %s, rn FROM ranked"
+                    "    WHERE rn <= ceil(total * %s)",
+                    (aid, mb_id, fraction),
+                )
+                target = selective if name == "selective" else broad
+                target.append(mb_id)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("ANALYZE mailboxes")
+        cur.execute("ANALYZE message_labels")
+    conn.commit()
+    print(f"  seeded folder-filter rows in {time.monotonic() - t0:.1f}s",
+          flush=True)
+    return FolderMailboxes(selective=selective, broad=broad)
+
+
 # ---- The probes ---------------------------------------------------------
 
 @dataclass(frozen=True)
 class ProbeSpec:
-    """One ACL × keyset position combination."""
+    """One ACL × keyset position combination.
+
+    ``folder_ids`` is the optional folder-filter dimension added for #78.
+    ``None`` means the GUI's initial-load path (no ``message_labels``
+    JOIN); a non-empty list switches the SQL composition to the
+    ``folder_filter=True`` branch of ``compose_browse_sql``.
+    """
 
     name: str
     account_ids: list[int]
     cursor: tuple[datetime, int] | None  # None → initial page
+    folder_ids: list[int] | None = None  # None → no folder filter
+
+
+@dataclass(frozen=True)
+class FolderMailboxes:
+    """Per-account mailbox ids for the two folder-filter probe shapes."""
+
+    selective: list[int]  # one mailbox id per account, in account_ids order
+    broad: list[int]      # one mailbox id per account, in account_ids order
 
 
 def _build_probes(
     conn: psycopg.Connection, account_ids: list[int], page_size: int,
+    *, folders: FolderMailboxes | None = None,
 ) -> list[ProbeSpec]:
     """Build the probe matrix.
 
     Picks four ACL widths (heavy, light, half, all) crossed with two
-    keyset positions (initial, mid).
+    keyset positions (initial, mid). When ``folders`` is supplied,
+    appends four folder-filter probes — selective (5% of one
+    account), broad (50% of one account), broad mid-keyset, and a
+    broad-across-accounts probe that crosses the ACL=all width with
+    one broad mailbox per account.
     """
     if not account_ids:
         return []
@@ -537,7 +632,54 @@ def _build_probes(
     ]:
         out.append(ProbeSpec(f"{label} | initial", acl, None))
         out.append(ProbeSpec(f"{label} | mid",     acl, cursor_pos))
+
+    if folders is not None:
+        out.extend(_build_folder_filter_probes(account_ids, cursor_pos, folders))
     return out
+
+
+def _build_folder_filter_probes(
+    account_ids: list[int],
+    cursor_pos: tuple[datetime, int],
+    folders: FolderMailboxes,
+) -> list[ProbeSpec]:
+    """Folder-filter probes added when ``--folder-filter`` is set (#78).
+
+    Four probes:
+    1. ``ACL=1 heavy | initial | folder=selective`` — narrow folder
+       (~5%) on the heavy account; small post-JOIN result set.
+    2. ``ACL=1 heavy | initial | folder=broad`` — broad folder (~50%)
+       on the heavy account; large post-JOIN result set.
+    3. ``ACL=1 heavy | mid | folder=broad`` — same broad folder with
+       the deep-keyset cursor; mirrors the mid-keyset probe from the
+       folderless matrix.
+    4. ``ACL=all | initial | folder=broad-across-accounts`` — one
+       broad mailbox per account, exercises the ``ml.mailbox_id =
+       ANY(%s)`` predicate against a multi-element list.
+    """
+    heavy = [account_ids[0]]
+    everything = list(account_ids)
+    selective_heavy = [folders.selective[0]]
+    broad_heavy = [folders.broad[0]]
+    broad_all = list(folders.broad)
+    return [
+        ProbeSpec(
+            "ACL=1 heavy | initial | folder=selective",
+            heavy, None, folder_ids=selective_heavy,
+        ),
+        ProbeSpec(
+            "ACL=1 heavy | initial | folder=broad",
+            heavy, None, folder_ids=broad_heavy,
+        ),
+        ProbeSpec(
+            "ACL=1 heavy | mid | folder=broad",
+            heavy, cursor_pos, folder_ids=broad_heavy,
+        ),
+        ProbeSpec(
+            "ACL=all | initial | folder=broad-across-accounts",
+            everything, None, folder_ids=broad_all,
+        ),
+    ]
 
 
 def _pick_mid_cursor(conn: psycopg.Connection) -> tuple[datetime, int]:
@@ -577,19 +719,27 @@ def _run_explain(
         )
     if probe.cursor is None:
         sql, params = _initial_page_sql_and_params(
-            probe.account_ids, page_size,
+            probe.account_ids, page_size, folder_ids=probe.folder_ids,
         )
     else:
         ts, mid = probe.cursor
         if predicate_form == "current":
             sql, params = _mid_keyset_sql_and_params(
                 probe.account_ids, ts, mid, page_size,
+                folder_ids=probe.folder_ids,
             )
         else:
             # The ``pre75`` baseline uses the OR-form (3 cursor params)
             # and is intentionally hand-bound — the whole point is to
             # reproduce the BUGGY shape, not compose it from the
-            # production primitives.
+            # production primitives. ``pre75`` does not exercise the
+            # folder-filter dimension; the bug it reproduces is
+            # orthogonal.
+            if probe.folder_ids:
+                raise ValueError(
+                    "predicate_form='pre75' is not combined with "
+                    "folder filtering — the pre-#75 bug is orthogonal"
+                )
             sql = _MID_KEYSET_SQL_PRE75
             params = [probe.account_ids, ts, ts, mid, page_size + 1]
     explain_sql = "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT TEXT) " + sql
@@ -631,24 +781,90 @@ def _render_table(
     return "\n".join(lines)
 
 
-def _verdict(summaries: list[PlanSummary]) -> str:
-    """One-line verdict: option 1 universally, option 2 leakage, etc."""
-    families = {s.plan_family for s in summaries}
+def _verdict(
+    probes: list[ProbeSpec], summaries: list[PlanSummary],
+) -> str:
+    """Multi-line verdict, split by folder-filter dimension.
+
+    Folderless probes drive the covering-index recommendation
+    (#72 question): if any folderless probe falls to option 2, a
+    covering index on ``(account_id, COALESCE(...), id DESC)``
+    would be worth shipping.
+
+    Folder-filter probes (#78) are reported informationally — the
+    planner's choice is selectivity-dependent (narrow folder may
+    correctly start from ``message_labels``; broad folder benefits
+    from the date-ordered walk), so a single "option N fires"
+    summary is meaningful but not actionable on its own.
+    """
+    folderless = [
+        (p, s) for p, s in zip(probes, summaries) if p.folder_ids is None
+    ]
+    folder_filter = [
+        (p, s) for p, s in zip(probes, summaries) if p.folder_ids is not None
+    ]
+    lines: list[str] = []
+    lines.append(_verdict_for_folderless(folderless))
+    if folder_filter:
+        lines.append(_verdict_for_folder_filter(folder_filter))
+    return "\n".join(lines)
+
+
+def _verdict_for_folderless(
+    pairs: list[tuple[ProbeSpec, PlanSummary]],
+) -> str:
+    """Verdict for the folderless probe matrix — covering-index recommendation."""
+    if not pairs:
+        return "VERDICT (folderless): no probes."
+    families = {s.plan_family for _, s in pairs}
     if all("option 1" in f for f in families):
         return (
-            "VERDICT: every probe used the messages_recent_idx index "
-            "walk (option 1). No covering index needed at this dataset "
-            "shape."
+            "VERDICT (folderless): every probe used the "
+            "messages_recent_idx index walk (option 1). No covering "
+            "index needed at this dataset shape."
         )
     if any("option 2" in f for f in families):
         bad = [f for f in families if "option 2" in f]
         return (
-            f"VERDICT: option 2 fires on at least one probe — observed: "
-            f"{', '.join(sorted(bad))}. A covering index keyed on "
-            f"(account_id, COALESCE(internal_date, date_sent) DESC NULLS LAST, "
+            f"VERDICT (folderless): option 2 fires on at least one "
+            f"folderless probe — observed: {', '.join(sorted(bad))}. "
+            f"A covering index keyed on (account_id, "
+            f"COALESCE(internal_date, date_sent) DESC NULLS LAST, "
             f"id DESC) should be considered."
         )
-    return f"VERDICT: mixed plan families: {sorted(families)} — inspect raw output."
+    return (
+        f"VERDICT (folderless): mixed plan families: "
+        f"{sorted(families)} — inspect raw output."
+    )
+
+
+def _verdict_for_folder_filter(
+    pairs: list[tuple[ProbeSpec, PlanSummary]],
+) -> str:
+    """Verdict for the folder-filter probe matrix — informational only.
+
+    The planner's choice depends on the join selectivity: a narrow
+    folder (~5%) may correctly start from ``message_labels`` and look
+    up matching messages by PK, while a broad folder (~50%) typically
+    benefits from the date-ordered index walk. Neither family is
+    "wrong" without a measured regression — so we report the
+    distribution and leave the call to the operator.
+    """
+    if not pairs:
+        return "VERDICT (folder-filter): no probes."
+    by_family: dict[str, int] = {}
+    for _, s in pairs:
+        by_family[s.plan_family] = by_family.get(s.plan_family, 0) + 1
+    summary = ", ".join(
+        f"{count}x {family}"
+        for family, count in sorted(by_family.items())
+    )
+    return (
+        f"VERDICT (folder-filter): {len(pairs)} probe(s) — {summary}. "
+        f"Option 2 here is selectivity-driven (planner correctly picks "
+        f"label-driven access for narrow folders); inspect per-probe "
+        f"plan if a specific selectivity surprises you."
+    )
 
 
 # ---- Entrypoint ---------------------------------------------------------
@@ -667,6 +883,16 @@ def main() -> int:
             "Mid-keyset cursor predicate to probe. 'current' (default) is "
             "the post-#75 range-seekable form; 'pre75' is the buggy form "
             "with OR COALESCE IS NULL, kept for before/after measurement."
+        ),
+    )
+    parser.add_argument(
+        "--folder-filter", action="store_true",
+        help=(
+            "Seed message_labels rows and add folder-filter probes. "
+            "Each account gets a 'selective' mailbox (~5%% of its messages) "
+            "and a 'broad' mailbox (~50%%). Four extra probes are appended: "
+            "selective+heavy, broad+heavy, broad+heavy mid-keyset, and "
+            "broad-across-accounts (#78)."
         ),
     )
     parser.add_argument("--keep-data", action="store_true")
@@ -694,7 +920,12 @@ def main() -> int:
         )
         account_ids = _seed_accounts(conn, args.accounts)
         _seed_messages(conn, account_ids, cfg)
-        probes = _build_probes(conn, account_ids, args.page_size)
+        folders: FolderMailboxes | None = None
+        if args.folder_filter:
+            folders = _seed_folder_filter_mailboxes(conn, account_ids)
+        probes = _build_probes(
+            conn, account_ids, args.page_size, folders=folders,
+        )
         if not probes:
             print("no probes generated (no accounts?)", file=sys.stderr)
             return 1
@@ -715,12 +946,15 @@ def main() -> int:
                     "distribution": args.distribution,
                     "page_size": args.page_size,
                     "predicate_form": args.predicate_form,
+                    "folder_filter": args.folder_filter,
                 },
                 "probes": [
                     {
                         "name": p.name,
                         "acl_size": len(p.account_ids),
                         "keyset": p.cursor is not None,
+                        "folder_filter": p.folder_ids is not None,
+                        "folder_count": len(p.folder_ids) if p.folder_ids else 0,
                         "plan_family": s.plan_family,
                         "actual_rows": s.actual_rows,
                         "rows_removed_by_filter": s.rows_removed_by_filter,
@@ -731,11 +965,11 @@ def main() -> int:
                     }
                     for p, s in zip(probes, summaries)
                 ],
-                "verdict": _verdict(summaries),
+                "verdict": _verdict(probes, summaries),
             }, indent=2))
         else:
             print("\n" + _render_table(probes, summaries))
-            print("\n" + _verdict(summaries))
+            print("\n" + _verdict(probes, summaries))
             print("\nRaw EXPLAIN output per probe written to stderr below "
                   "for debugging:", file=sys.stderr)
             for probe, summ in zip(probes, summaries):

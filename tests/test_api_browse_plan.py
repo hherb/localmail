@@ -97,6 +97,14 @@ _PAGE_SIZE = 50
 _EPOCH = datetime(2024, 1, 1, tzinfo=timezone.utc)
 _DATE_SPAN_DAYS = 365
 
+# Fractions of per-account rows labelled into the two test mailboxes
+# used by the folder-filter eligibility tests (#78). Identical to the
+# acceptance harness's ``_FOLDER_FRACTIONS`` so a reader cross-referencing
+# the harness sees the same selectivities. At fixture scale (50 rows /
+# account) that's 3 and 25 rows after the ceil().
+_NARROW_FOLDER_FRACTION = 0.05
+_BROAD_FOLDER_FRACTION = 0.50
+
 # The exact SQL emitted by ``list_messages`` for the initial-load path
 # (no ``folder_ids`` filter), composed from the production primitives
 # in ``localmail.api.browse``. Drift is impossible by construction —
@@ -115,6 +123,23 @@ def _list_messages_sql_for_initial_page(
         account_ids=account_ids, folder_ids=None, cursor=None,
     )
     return compose_browse_sql(folder_filter=False, where=where), params
+
+
+def _list_messages_sql_for_folder_filter(
+    account_ids: list[int], folder_ids: list[int],
+) -> tuple[str, list]:
+    """Return ``(sql, params)`` for the folder-filter EXPLAIN probe.
+
+    Composes the production SQL via ``compose_browse_sql(folder_filter=True)``
+    + ``build_where(folder_ids=...)`` so the JOIN clause and the WHERE-clause
+    emitter are both the production ones. Used by the #78 eligibility tests
+    to assert that ``messages_recent_idx`` remains usable for the messages
+    side of the JOIN with all competing indexes hidden.
+    """
+    where, params = build_where(
+        account_ids=account_ids, folder_ids=folder_ids, cursor=None,
+    )
+    return compose_browse_sql(folder_filter=True, where=where), params
 
 def _seed_account(conn: psycopg.Connection, name: str) -> int:
     """Insert one account, return its id."""
@@ -410,6 +435,219 @@ def test_dated_cursor_predicate_composes_index_range_bound(
         f"cursor predicate degraded to a post-walk Filter (#75 regression):"
         f"\n{plan}"
     )
+
+
+# ---- #78: folder-filter branch eligibility ------------------------------
+# When ``folder_ids`` is passed, ``list_messages`` emits
+# ``... JOIN message_labels ml ON ml.message_id = m.id WHERE ...
+#       AND ml.mailbox_id = ANY(%s)``. The planner's choice for the
+# *messages* side of that JOIN could legitimately diverge from the
+# folder-less path — at small selectivities it can scan ``message_labels``
+# first and do a nested loop into ``messages`` by PK, ignoring
+# ``messages_recent_idx`` entirely. That is fine *at scale*, but the
+# unit test below pins the orthogonal "is the index still ELIGIBLE
+# for the messages side?" question: with every competing ``messages``
+# index hidden + ``enable_seqscan = off``, the planner is forced to
+# choose ``messages_recent_idx`` if it wants the messages side at all.
+# A schema change that broke the index's match against the ORDER BY
+# shape would fail loud here even though the operational harness at
+# scale might keep working (because the operational plan would just
+# use the alternative).
+#
+# A note on the inevitable ``Sort`` node above the JOIN: the production
+# SQL uses ``SELECT DISTINCT m.id, m.subject, ...`` because the JOIN
+# against ``message_labels`` can multiply rows when ``folder_ids`` admits
+# more than one mailbox (a message labelled in multiple folders appears
+# once per matching label). The DISTINCT operator pulls a Sort+Unique
+# pass over every projected column. That sort is *post-join* and is
+# unrelated to the ORDER BY shape — it's an inherent cost of the
+# JOIN+DISTINCT design, NOT a sign that ``messages_recent_idx`` failed
+# to satisfy the date ordering. The eligibility assertions therefore
+# don't forbid Sort nodes for the folder-filter case; they pin the
+# narrower claim that ``Index Scan using messages_recent_idx on
+# messages`` is what drives the messages access path.
+
+
+def _seed_mailbox_for_plan_test(
+    conn: psycopg.Connection, account_id: int, name: str,
+) -> int:
+    """Insert one mailbox for ``account_id``, return its id."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mailboxes (account_id, name, uidvalidity)"
+            " VALUES (%s, %s, 1) RETURNING id",
+            (account_id, name),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+def _label_fraction_of_account(
+    conn: psycopg.Connection, account_id: int, mailbox_id: int, fraction: float,
+) -> None:
+    """Label ``fraction`` of ``account_id``'s messages into ``mailbox_id``.
+
+    Picks messages in id order so the labelled subset is stable across
+    runs and overlaps deterministically between the narrow and broad
+    mailbox selections (which is the realistic Gmail shape — Inbox
+    overlaps Sent overlaps the label that triggered them).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "WITH ranked AS ("
+            "  SELECT id,"
+            "         row_number() OVER (ORDER BY id) AS rn,"
+            "         count(*) OVER () AS total"
+            "    FROM messages WHERE account_id = %s"
+            ")"
+            " INSERT INTO message_labels (message_id, mailbox_id, uid)"
+            "   SELECT id, %s, rn FROM ranked"
+            "    WHERE rn <= ceil(total * %s)",
+            (account_id, mailbox_id, fraction),
+        )
+    conn.commit()
+
+
+def _explain_folder_filter_recent_idx_only(
+    conn: psycopg.Connection,
+    account_ids: list[int],
+    folder_ids: list[int],
+    page_size: int,
+) -> str:
+    """Run EXPLAIN with every competing ``messages`` index hidden, plus
+    the folder JOIN. Same SAVEPOINT scaffolding as the folderless probe;
+    the only difference is the SQL composition uses
+    ``compose_browse_sql(folder_filter=True)`` and ``build_where`` is
+    given a non-empty ``folder_ids``.
+
+    Note that we do NOT hide the ``message_labels`` indexes. The
+    eligibility claim is about the *messages* side of the JOIN — that
+    the date-ordered expression index still matches the ORDER BY shape
+    when the JOIN is in scope. The labels side's plan can use whichever
+    of its own indexes makes sense.
+    """
+    competing = [
+        "messages_acct_date_idx",
+        "messages_acct_msgid_uniq",
+        "messages_acct_rawsha_uniq",
+        "messages_attachments_gin",
+        "messages_body_lang_idx",
+        "messages_body_lang_pending_idx",
+        "messages_fts_v2_idx",
+        "messages_headers_gin",
+    ]
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT plan_probe_folder_filter")
+        try:
+            cur.execute(
+                "ALTER TABLE messages DROP CONSTRAINT messages_pkey CASCADE"
+            )
+            for idx_name in competing:
+                cur.execute(f"DROP INDEX IF EXISTS {idx_name}")
+            cur.execute("ANALYZE messages")
+            cur.execute("ANALYZE accounts")
+            cur.execute("ANALYZE message_labels")
+            cur.execute("SET LOCAL enable_seqscan = off")
+            sql, where_params = _list_messages_sql_for_folder_filter(
+                account_ids, folder_ids,
+            )
+            cur.execute(
+                "EXPLAIN (FORMAT TEXT) " + sql,
+                where_params + [page_size + 1],
+            )
+            plan = "\n".join(r[0] for r in cur.fetchall())
+        finally:
+            cur.execute("ROLLBACK TO SAVEPOINT plan_probe_folder_filter")
+    return plan
+
+
+def test_messages_recent_idx_is_eligible_for_narrow_folder_filter(
+    db_conn: psycopg.Connection,
+) -> None:
+    """The folder-filter SQL shape adds a JOIN against ``message_labels``
+    and a second WHERE clause (``ml.mailbox_id = ANY(...)``). With every
+    competing ``messages`` index hidden, ``messages_recent_idx`` must
+    still be eligible for the messages side of the JOIN — i.e. the
+    index's expression and ordering still match the query's ORDER BY
+    (``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC``).
+
+    A narrow folder (~10% of the account's rows) is the case where
+    the *operational* plan is most likely to bypass the date-ordered
+    index and start from ``message_labels`` instead — but the
+    *eligibility* question is unchanged. This test pins the regression
+    signature: if the index ever stops matching the ORDER BY shape
+    under the JOIN (e.g. a future migration renames a column), EXPLAIN
+    would either error or fall back to seqscan (forbidden), and the
+    test fails loud. Operational plan preference at scale is covered
+    by ``tests/acceptance/run_browse_explain.py --folder-filter``.
+    """
+    account_ids = _seed_for_plan_test(db_conn)
+    mailbox_id = _seed_mailbox_for_plan_test(
+        db_conn, account_ids[0], "narrow",
+    )
+    _label_fraction_of_account(
+        db_conn, account_ids[0], mailbox_id, _NARROW_FOLDER_FRACTION,
+    )
+    plan = _explain_folder_filter_recent_idx_only(
+        db_conn, [account_ids[0]], [mailbox_id], _PAGE_SIZE,
+    )
+    assert "Index Scan using messages_recent_idx on messages" in plan, plan
+    assert "Bitmap Heap Scan on messages" not in plan, plan
+
+
+def test_messages_recent_idx_is_eligible_for_broad_folder_filter(
+    db_conn: psycopg.Connection,
+) -> None:
+    """A broad folder (~50% of the account's rows) is the case where
+    the operational plan is most likely to *prefer* the date-ordered
+    index walk (it pays for itself when the JOIN admits a large
+    fraction of rows). The eligibility check still applies — pin the
+    SQL shape compatibility with ``messages_recent_idx`` so a future
+    schema regression fails loud.
+
+    The broad mailbox here is a superset of the narrow mailbox by
+    construction (the labelling helper picks rows in id order), so
+    both probes share the same shape question even though the join
+    selectivity differs by 5x.
+    """
+    account_ids = _seed_for_plan_test(db_conn)
+    mailbox_id = _seed_mailbox_for_plan_test(
+        db_conn, account_ids[0], "broad",
+    )
+    _label_fraction_of_account(
+        db_conn, account_ids[0], mailbox_id, _BROAD_FOLDER_FRACTION,
+    )
+    plan = _explain_folder_filter_recent_idx_only(
+        db_conn, [account_ids[0]], [mailbox_id], _PAGE_SIZE,
+    )
+    assert "Index Scan using messages_recent_idx on messages" in plan, plan
+    assert "Bitmap Heap Scan on messages" not in plan, plan
+
+
+def test_messages_recent_idx_is_eligible_for_multi_folder_filter(
+    db_conn: psycopg.Connection,
+) -> None:
+    """``folder_ids`` can carry more than one mailbox (the wire shape
+    accepts a list). One mailbox per account — same broad selectivity
+    — exercises the ``ml.mailbox_id = ANY(%s)`` predicate against a
+    multi-element list while the ACL spans every account. Pins
+    eligibility for the multi-account, multi-folder case used by GUI
+    "show me everything in these folders" filters.
+    """
+    account_ids = _seed_for_plan_test(db_conn)
+    folder_ids: list[int] = []
+    for i, aid in enumerate(account_ids):
+        mb_id = _seed_mailbox_for_plan_test(db_conn, aid, f"broad-{i}")
+        _label_fraction_of_account(
+            db_conn, aid, mb_id, _BROAD_FOLDER_FRACTION,
+        )
+        folder_ids.append(mb_id)
+    plan = _explain_folder_filter_recent_idx_only(
+        db_conn, account_ids, folder_ids, _PAGE_SIZE,
+    )
+    assert "Index Scan using messages_recent_idx on messages" in plan, plan
+    assert "Bitmap Heap Scan on messages" not in plan, plan
 
 
 def test_plan_probe_savepoint_restores_dropped_indexes(

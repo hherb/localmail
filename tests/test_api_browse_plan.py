@@ -277,6 +277,129 @@ def test_messages_recent_idx_is_eligible_for_all_accounts(
     assert not _has_full_sort_node(plan), plan
 
 
+# ---- #75: dated cursor predicate composes an index range bound ---------
+
+# The exact mid-keyset SQL ``list_messages`` emits after the #75 fix —
+# SQL row comparison so Postgres composes the cursor as an Index Cond
+# on ``messages_recent_idx`` (range-bounded scan starting AT the
+# cursor). NULL-tail rows are reached via the top-up branch in
+# ``list_messages``, not by widening this predicate. Kept inline so
+# a planner regression fails this test directly rather than only the
+# harness.
+_MID_KEYSET_SQL = """
+SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
+                m.internal_date, m.account_id, a.name,
+                COALESCE(m.internal_date, m.date_sent) AS sort_ts
+  FROM messages m
+  JOIN accounts a ON a.id = m.account_id
+ WHERE m.account_id = ANY(%s)
+   AND ROW(COALESCE(m.internal_date, m.date_sent), m.id) < ROW(%s, %s)
+ ORDER BY sort_ts DESC NULLS LAST, m.id DESC
+ LIMIT %s
+"""
+
+
+def _explain_mid_keyset_recent_idx_only(
+    conn: psycopg.Connection, account_ids: list[int],
+    ts: datetime, message_id: int, page_size: int,
+) -> str:
+    """Run EXPLAIN with every other ``messages`` index hidden and a
+    dated cursor predicate. Same SAVEPOINT scaffolding as the
+    initial-page eligibility test — we want to isolate the planner's
+    use of ``messages_recent_idx`` from the PK shortcut and the
+    per-account index."""
+    competing = [
+        "messages_acct_date_idx",
+        "messages_acct_msgid_uniq",
+        "messages_acct_rawsha_uniq",
+        "messages_attachments_gin",
+        "messages_body_lang_idx",
+        "messages_body_lang_pending_idx",
+        "messages_fts_v2_idx",
+        "messages_headers_gin",
+    ]
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT plan_probe_mid_keyset")
+        try:
+            cur.execute(
+                "ALTER TABLE messages DROP CONSTRAINT messages_pkey CASCADE"
+            )
+            for idx_name in competing:
+                cur.execute(f"DROP INDEX IF EXISTS {idx_name}")
+            cur.execute("ANALYZE messages")
+            cur.execute("ANALYZE accounts")
+            cur.execute("SET LOCAL enable_seqscan = off")
+            cur.execute(
+                "EXPLAIN (FORMAT TEXT) " + _MID_KEYSET_SQL,
+                [account_ids, ts, message_id, page_size + 1],
+            )
+            plan = "\n".join(r[0] for r in cur.fetchall())
+        finally:
+            cur.execute("ROLLBACK TO SAVEPOINT plan_probe_mid_keyset")
+    return plan
+
+
+def test_dated_cursor_predicate_composes_index_range_bound(
+    db_conn: psycopg.Connection,
+) -> None:
+    """Issue #75 regression: with the ``OR COALESCE IS NULL`` disjunct
+    removed, Postgres must compose the dated-cursor predicate as an
+    ``Index Cond`` on the ``messages_recent_idx`` expression — *not*
+    as a post-walk ``Filter``. The line-level assertion is
+
+      ``Index Cond: (COALESCE(...) < $N)``
+
+    appearing in the EXPLAIN output. If the predicate is downgraded
+    to a filter, the planner walks every row above the cursor on
+    every mid-keyset page and the test fails loudly.
+    """
+    account_ids = _seed_for_plan_test(db_conn)
+    # Pick a cursor near the middle of the date span. The sort key
+    # values match what ``list_messages`` would mint from the prior
+    # page's last row.
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(internal_date, date_sent), id"
+            "  FROM messages"
+            " WHERE account_id = %s"
+            "   AND COALESCE(internal_date, date_sent) IS NOT NULL"
+            " ORDER BY COALESCE(internal_date, date_sent) DESC NULLS LAST,"
+            " id DESC"
+            " OFFSET (SELECT COUNT(*)/2 FROM messages WHERE account_id = %s)"
+            " LIMIT 1",
+            (account_ids[0], account_ids[0]),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        cursor_ts, cursor_id = row[0], int(row[1])
+    plan = _explain_mid_keyset_recent_idx_only(
+        db_conn, [account_ids[0]], cursor_ts, cursor_id, _PAGE_SIZE,
+    )
+    assert "messages_recent_idx" in plan, plan
+    assert "Index Cond" in plan, (
+        "dated cursor predicate must be composed as an Index Cond, "
+        f"not a Filter. Plan:\n{plan}"
+    )
+    # The cursor predicate must drive the index bound (the index is on
+    # COALESCE), so the Index Cond line must reference COALESCE.
+    cond_lines = [ln for ln in plan.splitlines() if "Index Cond" in ln]
+    assert any("COALESCE" in ln for ln in cond_lines), (
+        f"Index Cond does not reference COALESCE — predicate is not "
+        f"range-seekable. Plan:\n{plan}"
+    )
+    # ``Rows Removed by Filter`` must not include the cursor predicate.
+    # The bug surfaced when ``COALESCE < X`` was a post-walk Filter; with
+    # the fix it composes as an Index Cond (streaming Index Scan or
+    # BitmapOr + Sort — either is fine, both are O(matching rows)). A
+    # ``Filter:`` line that mentions COALESCE is the exact regression
+    # signature.
+    filter_lines = [ln for ln in plan.splitlines() if "Filter:" in ln]
+    assert not any("COALESCE" in ln for ln in filter_lines), (
+        f"cursor predicate degraded to a post-walk Filter (#75 regression):"
+        f"\n{plan}"
+    )
+
+
 def test_plan_probe_savepoint_restores_dropped_indexes(
     db_conn: psycopg.Connection,
 ) -> None:

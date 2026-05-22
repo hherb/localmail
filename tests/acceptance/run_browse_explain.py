@@ -115,25 +115,40 @@ _COPY_BATCH = 5000
 
 # ---- The exact query under test -----------------------------------------
 #
-# The ``current`` variants below compose the production
-# ``BROWSE_ROW_SQL_TEMPLATE`` (in ``localmail.api.browse``) via
-# ``compose_browse_sql`` + ``build_where``. There is no duplicate SQL
-# inline here — any refactor of the SELECT / FROM / ORDER BY or of the
-# WHERE-clause emitter automatically lands in this harness (#77).
+# The ``current`` variants are composed at probe time in
+# ``_initial_page_sql_and_params`` / ``_mid_keyset_sql_and_params`` from
+# the production ``BROWSE_ROW_SQL_TEMPLATE`` (in
+# ``localmail.api.browse``) via ``compose_browse_sql`` + ``build_where``
+# — using the REAL account_ids and cursor values, not placeholders. So
+# the param-shape contract between the SQL string and the bound params
+# is owned by ``build_where`` itself; this harness never duplicates it.
+# Any refactor of the SELECT / FROM / ORDER BY or of the WHERE-clause
+# emitter automatically lands here (#77).
 #
 # Initial-load path: no ``folder_ids`` from the GUI today; the JOIN to
 # ``message_labels`` is therefore skipped. DISTINCT remains for plan
 # parity even though it is a no-op without the JOIN (the planner still
 # has to consider it).
-_INITIAL_PAGE_SQL = compose_browse_sql(
-    folder_filter=False,
-    where=build_where(
-        # Placeholder account_ids — only the WHERE-clause TEXT matters
-        # for composing the SQL string; actual values are bound per
-        # probe via ``params`` in ``_run_explain``.
-        account_ids=[0], folder_ids=None, cursor=None,
-    )[0],
-)
+
+
+def _initial_page_sql_and_params(
+    account_ids: list[int], page_size: int,
+) -> tuple[str, list[Any]]:
+    """Compose the initial-page probe SQL + params from production primitives.
+
+    Returns ``(sql, params)`` ready for ``cur.execute``; the caller
+    prepends ``EXPLAIN …`` to the SQL. ``page_size + 1`` is appended
+    as the LIMIT value here so the bound-param shape is owned in one
+    place.
+    """
+    where, params = build_where(
+        account_ids=account_ids, folder_ids=None, cursor=None,
+    )
+    return (
+        compose_browse_sql(folder_filter=False, where=where),
+        params + [page_size + 1],
+    )
+
 
 # Post-#75: the dated-cursor predicate uses SQL row comparison so
 # Postgres composes it as a single Index Cond on the
@@ -143,18 +158,27 @@ _INITIAL_PAGE_SQL = compose_browse_sql(
 # ``api/browse.py:list_messages``, not by widening this clause.
 #
 # Parameter binding takes two cursor values (ts, id) — not three —
-# unlike the OR form. Update ``--predicate-form`` plumbing if a new
-# variant is added.
-_MID_KEYSET_SQL = compose_browse_sql(
-    folder_filter=False,
-    where=build_where(
-        account_ids=[0], folder_ids=None,
-        cursor=BrowseCursor(
-            # Placeholder cursor values for the same reason as above.
-            ts=datetime(2024, 1, 1, tzinfo=timezone.utc), id=0,
-        ),
-    )[0],
-)
+# unlike the OR form. ``build_where`` owns the contract; this helper
+# just delegates.
+def _mid_keyset_sql_and_params(
+    account_ids: list[int], ts: datetime, mid: int, page_size: int,
+) -> tuple[str, list[Any]]:
+    """Compose the mid-keyset probe SQL + params from production primitives.
+
+    Returns ``(sql, params)`` ready for ``cur.execute``; the caller
+    prepends ``EXPLAIN …`` to the SQL. ``page_size + 1`` is appended
+    as the LIMIT value here so the bound-param shape is owned in one
+    place.
+    """
+    where, params = build_where(
+        account_ids=account_ids, folder_ids=None,
+        cursor=BrowseCursor(ts=ts, id=mid),
+    )
+    return (
+        compose_browse_sql(folder_filter=False, where=where),
+        params + [page_size + 1],
+    )
+
 
 # Pre-#75 baseline kept for ad-hoc before/after comparison. Selected
 # via ``--predicate-form pre75``. This is intentionally NOT composed
@@ -533,10 +557,7 @@ def _pick_mid_cursor(conn: psycopg.Connection) -> tuple[datetime, int]:
         return (row[0], int(row[1]))
 
 
-_PREDICATE_FORMS: dict[str, str] = {
-    "current": _MID_KEYSET_SQL,
-    "pre75": _MID_KEYSET_SQL_PRE75,
-}
+_VALID_PREDICATE_FORMS = ("current", "pre75")
 
 
 def _run_explain(
@@ -549,24 +570,27 @@ def _run_explain(
     ``"current"`` — post-#75, no OR-IS-NULL disjunct (default).
     ``"pre75"`` — the buggy form, kept for ad-hoc before/after comparison.
     """
+    if predicate_form not in _VALID_PREDICATE_FORMS:
+        raise ValueError(
+            f"unknown predicate_form: {predicate_form!r}; "
+            f"choose from {_VALID_PREDICATE_FORMS}"
+        )
     if probe.cursor is None:
-        sql = _INITIAL_PAGE_SQL
-        params: list[Any] = [probe.account_ids, page_size + 1]
+        sql, params = _initial_page_sql_and_params(
+            probe.account_ids, page_size,
+        )
     else:
         ts, mid = probe.cursor
-        try:
-            sql = _PREDICATE_FORMS[predicate_form]
-        except KeyError as exc:
-            raise ValueError(
-                f"unknown predicate_form: {predicate_form!r}; "
-                f"choose from {sorted(_PREDICATE_FORMS)}"
-            ) from exc
-        # ``current`` uses ROW comparison (2 cursor params); ``pre75``
-        # uses the OR-form (3 cursor params). Keep the parameter
-        # arity in sync with each SQL string.
         if predicate_form == "current":
-            params = [probe.account_ids, ts, mid, page_size + 1]
+            sql, params = _mid_keyset_sql_and_params(
+                probe.account_ids, ts, mid, page_size,
+            )
         else:
+            # The ``pre75`` baseline uses the OR-form (3 cursor params)
+            # and is intentionally hand-bound — the whole point is to
+            # reproduce the BUGGY shape, not compose it from the
+            # production primitives.
+            sql = _MID_KEYSET_SQL_PRE75
             params = [probe.account_ids, ts, ts, mid, page_size + 1]
     explain_sql = "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT TEXT) " + sql
     with conn.cursor() as cur:
@@ -638,7 +662,7 @@ def main() -> int:
     )
     parser.add_argument("--page-size", type=int, default=_DEFAULT_PAGE_SIZE)
     parser.add_argument(
-        "--predicate-form", choices=sorted(_PREDICATE_FORMS), default="current",
+        "--predicate-form", choices=sorted(_VALID_PREDICATE_FORMS), default="current",
         help=(
             "Mid-keyset cursor predicate to probe. 'current' (default) is "
             "the post-#75 range-seekable form; 'pre75' is the buggy form "

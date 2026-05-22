@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from localmail.api.browse import build_where, list_messages
+from localmail.api.browse import build_where, compose_browse_sql, list_messages
 from localmail.api.browse_cursor import BrowseCursor, decode_browse_cursor
 from localmail.api.errors import ValidationFailed
 
@@ -320,7 +320,7 @@ def test_folder_ids_filter_restricts_to_labelled_messages(db_conn) -> None:
 # via the top-up branch in ``list_messages``, not by widening the
 # dated cursor predicate.
 
-def testbuild_where_initial_page_has_no_date_predicate() -> None:
+def test_build_where_initial_page_has_no_date_predicate() -> None:
     """Cursor=None: the WHERE clause is just the ACL filter so the
     initial-page query can stream the entire ``messages_recent_idx``
     walk (dated rows first, NULLs in the NULLS-LAST tail) via LIMIT.
@@ -332,7 +332,7 @@ def testbuild_where_initial_page_has_no_date_predicate() -> None:
     assert params == [[1, 2]]
 
 
-def testbuild_where_dated_cursor_uses_row_comparison_not_or_disjunction() -> None:
+def test_build_where_dated_cursor_uses_row_comparison_not_or_disjunction() -> None:
     """Regression for #75: the dated-cursor predicate must use SQL
     row comparison (``ROW(expr, id) < ROW(%s, %s)``), not an
     ``expr < X OR (expr = X AND id < Y)`` disjunction.
@@ -367,7 +367,7 @@ def testbuild_where_dated_cursor_uses_row_comparison_not_or_disjunction() -> Non
     assert params == [[1], ts, 42]
 
 
-def testbuild_where_null_tail_cursor_uses_id_keyset() -> None:
+def test_build_where_null_tail_cursor_uses_id_keyset() -> None:
     """Cursor with ``ts=None`` (already in NULL-tail) uses the
     ``IS NULL AND id < cursor.id`` predicate so subsequent NULL-tail
     pages step strictly by id."""
@@ -380,7 +380,7 @@ def testbuild_where_null_tail_cursor_uses_id_keyset() -> None:
     assert params == [[1], 99]
 
 
-def testbuild_where_null_tail_topup_has_no_id_predicate() -> None:
+def test_build_where_null_tail_topup_has_no_id_predicate() -> None:
     """The top-up step (``null_tail_only=True``, cursor=None) selects
     the head of the NULL-tail — i.e. all NULL rows ordered by id DESC,
     no id lower bound. Used by ``list_messages`` after the dated path
@@ -395,7 +395,7 @@ def testbuild_where_null_tail_topup_has_no_id_predicate() -> None:
     assert params == [[1, 2]]
 
 
-def testbuild_where_folder_clause_added_for_all_modes() -> None:
+def test_build_where_folder_clause_added_for_all_modes() -> None:
     """``folder_ids`` adds the ``message_labels`` clause regardless of
     cursor mode — verified explicitly so a refactor doesn't drop it
     for the new NULL-tail top-up branch."""
@@ -416,7 +416,7 @@ def testbuild_where_folder_clause_added_for_all_modes() -> None:
         )
 
 
-def testbuild_where_null_tail_only_with_cursor_raises_value_error() -> None:
+def test_build_where_null_tail_only_with_cursor_raises_value_error() -> None:
     """``null_tail_only=True`` is the top-up branch and is only ever called
     with ``cursor=None``. Passing a cursor is a programming error and must
     raise ``ValueError`` (not a silent ``assert`` that vanishes under
@@ -427,6 +427,26 @@ def testbuild_where_null_tail_only_with_cursor_raises_value_error() -> None:
             account_ids=[1], folder_ids=None,
             cursor=BrowseCursor(ts=ts, id=1), null_tail_only=True,
         )
+
+
+# ---- compose_browse_sql JOIN clause (#77) -------------------------------
+
+def test_compose_browse_sql_folder_filter_true_inserts_message_labels_join() -> None:
+    """``folder_filter=True`` must inject the ``message_labels`` JOIN —
+    pinned in one place so a rename of the join table or a refactor of
+    the JOIN clause lands here even if no other test exercises it.
+    """
+    sql = compose_browse_sql(folder_filter=True, where="m.account_id = ANY(%s)")
+    assert "JOIN message_labels ml ON ml.message_id = m.id" in sql
+
+
+def test_compose_browse_sql_folder_filter_false_omits_message_labels_join() -> None:
+    """``folder_filter=False`` (the GUI's initial-load path) must NOT
+    inject the JOIN — pinned so a defensive "always JOIN" refactor
+    can't silently re-introduce the row multiplication that DISTINCT
+    would have to clean up."""
+    sql = compose_browse_sql(folder_filter=False, where="m.account_id = ANY(%s)")
+    assert "message_labels" not in sql
 
 
 # ---- Query-count contract for the NULL-tail top-up (#75 follow-up) ------

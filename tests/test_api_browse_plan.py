@@ -40,6 +40,9 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
+from localmail.api.browse import build_where, compose_browse_sql
+from localmail.api.browse_cursor import BrowseCursor
+
 
 # ---- Index-definition assertion -----------------------------------------
 
@@ -94,20 +97,24 @@ _PAGE_SIZE = 50
 _EPOCH = datetime(2024, 1, 1, tzinfo=timezone.utc)
 _DATE_SPAN_DAYS = 365
 
-# The exact SQL emitted by ``list_messages`` when called without a
-# ``folder_ids`` filter — the GUI's initial-load path. Kept inline so
-# this test breaks loudly if ``list_messages`` is refactored to emit a
-# different SQL shape.
-_LIST_MESSAGES_SQL = """
-SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
-                m.internal_date, m.account_id, a.name,
-                COALESCE(m.internal_date, m.date_sent) AS sort_ts
-  FROM messages m
-  JOIN accounts a ON a.id = m.account_id
- WHERE m.account_id = ANY(%s)
- ORDER BY sort_ts DESC NULLS LAST, m.id DESC
- LIMIT %s
-"""
+# The exact SQL emitted by ``list_messages`` for the initial-load path
+# (no ``folder_ids`` filter), composed from the production primitives
+# in ``localmail.api.browse``. Drift is impossible by construction —
+# any refactor of the SELECT / FROM / ORDER BY shape, or of the
+# WHERE-clause emitter, lands here automatically (#77).
+def _list_messages_sql_for_initial_page(
+    account_ids: list[int],
+) -> tuple[str, list]:
+    """Return ``(sql, params)`` for the initial-page EXPLAIN probe.
+
+    Composes the production ``BROWSE_ROW_SQL_TEMPLATE`` via the public
+    ``compose_browse_sql`` helper, using the production ``build_where``
+    for the ACL clause. The caller appends the page-size LIMIT param.
+    """
+    where, params = build_where(
+        account_ids=account_ids, folder_ids=None, cursor=None,
+    )
+    return compose_browse_sql(folder_filter=False, where=where), params
 
 def _seed_account(conn: psycopg.Connection, name: str) -> int:
     """Insert one account, return its id."""
@@ -218,9 +225,10 @@ def _explain_messages_recent_idx_only(
             cur.execute("ANALYZE messages")
             cur.execute("ANALYZE accounts")
             cur.execute("SET LOCAL enable_seqscan = off")
+            sql, where_params = _list_messages_sql_for_initial_page(account_ids)
             cur.execute(
-                "EXPLAIN (FORMAT TEXT) " + _LIST_MESSAGES_SQL,
-                [account_ids, page_size + 1],
+                "EXPLAIN (FORMAT TEXT) " + sql,
+                where_params + [page_size + 1],
             )
             plan = "\n".join(r[0] for r in cur.fetchall())
         finally:
@@ -279,24 +287,25 @@ def test_messages_recent_idx_is_eligible_for_all_accounts(
 
 # ---- #75: dated cursor predicate composes an index range bound ---------
 
-# The exact mid-keyset SQL ``list_messages`` emits after the #75 fix —
-# SQL row comparison so Postgres composes the cursor as an Index Cond
-# on ``messages_recent_idx`` (range-bounded scan starting AT the
-# cursor). NULL-tail rows are reached via the top-up branch in
-# ``list_messages``, not by widening this predicate. Kept inline so
-# a planner regression fails this test directly rather than only the
-# harness.
-_MID_KEYSET_SQL = """
-SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
-                m.internal_date, m.account_id, a.name,
-                COALESCE(m.internal_date, m.date_sent) AS sort_ts
-  FROM messages m
-  JOIN accounts a ON a.id = m.account_id
- WHERE m.account_id = ANY(%s)
-   AND ROW(COALESCE(m.internal_date, m.date_sent), m.id) < ROW(%s, %s)
- ORDER BY sort_ts DESC NULLS LAST, m.id DESC
- LIMIT %s
-"""
+# The exact mid-keyset SQL ``list_messages`` emits after the #75 fix.
+# Composed from the production primitives so any rewrite of the dated
+# cursor predicate (e.g. re-introducing the OR disjunction Postgres
+# refuses to compose as an Index Cond) lands here automatically (#77).
+def _list_messages_sql_for_mid_keyset(
+    account_ids: list[int], ts: datetime, message_id: int,
+) -> tuple[str, list]:
+    """Return ``(sql, params)`` for the mid-keyset EXPLAIN probe.
+
+    Uses the production ``build_where`` with a dated cursor so the
+    actual cursor predicate Postgres sees is whatever
+    ``localmail.api.browse`` emits today. The caller appends the
+    page-size LIMIT param.
+    """
+    where, params = build_where(
+        account_ids=account_ids, folder_ids=None,
+        cursor=BrowseCursor(ts=ts, id=message_id),
+    )
+    return compose_browse_sql(folder_filter=False, where=where), params
 
 
 def _explain_mid_keyset_recent_idx_only(
@@ -329,9 +338,12 @@ def _explain_mid_keyset_recent_idx_only(
             cur.execute("ANALYZE messages")
             cur.execute("ANALYZE accounts")
             cur.execute("SET LOCAL enable_seqscan = off")
+            sql, where_params = _list_messages_sql_for_mid_keyset(
+                account_ids, ts, message_id,
+            )
             cur.execute(
-                "EXPLAIN (FORMAT TEXT) " + _MID_KEYSET_SQL,
-                [account_ids, ts, message_id, page_size + 1],
+                "EXPLAIN (FORMAT TEXT) " + sql,
+                where_params + [page_size + 1],
             )
             plan = "\n".join(r[0] for r in cur.fetchall())
         finally:

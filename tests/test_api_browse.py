@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from localmail.api.browse import _build_where, list_messages
+from localmail.api.browse import build_where, compose_browse_sql, list_messages
 from localmail.api.browse_cursor import BrowseCursor, decode_browse_cursor
 from localmail.api.errors import ValidationFailed
 
@@ -307,7 +307,11 @@ def test_folder_ids_filter_restricts_to_labelled_messages(db_conn) -> None:
     assert m_out not in ids
 
 
-# ---- Pure-function tests for _build_where (#75 regression) ---------------
+# ---- Pure-function tests for build_where (#75 regression) ---------------
+# ``build_where`` is the canonical WHERE-clause emitter used by
+# ``list_messages`` and (since #77) re-imported by the plan-eligibility
+# tests + the EXPLAIN harness — these unit tests pin its shape so a
+# refactor cannot silently re-introduce the OR disjunct (#75).
 
 # These tests pin the WHERE-clause shape so a future refactor cannot
 # silently re-introduce the ``OR COALESCE IS NULL`` disjunct that
@@ -321,7 +325,7 @@ def test_build_where_initial_page_has_no_date_predicate() -> None:
     initial-page query can stream the entire ``messages_recent_idx``
     walk (dated rows first, NULLs in the NULLS-LAST tail) via LIMIT.
     """
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=[1, 2], folder_ids=None, cursor=None,
     )
     assert where == "m.account_id = ANY(%s)"
@@ -342,7 +346,7 @@ def test_build_where_dated_cursor_uses_row_comparison_not_or_disjunction() -> No
     50k-row archive.
     """
     ts = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=[1], folder_ids=None,
         cursor=BrowseCursor(ts=ts, id=42),
     )
@@ -367,7 +371,7 @@ def test_build_where_null_tail_cursor_uses_id_keyset() -> None:
     """Cursor with ``ts=None`` (already in NULL-tail) uses the
     ``IS NULL AND id < cursor.id`` predicate so subsequent NULL-tail
     pages step strictly by id."""
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=[1], folder_ids=None,
         cursor=BrowseCursor(ts=None, id=99),
     )
@@ -382,7 +386,7 @@ def test_build_where_null_tail_topup_has_no_id_predicate() -> None:
     no id lower bound. Used by ``list_messages`` after the dated path
     is exhausted past a dated cursor.
     """
-    where, params = _build_where(
+    where, params = build_where(
         account_ids=[1, 2], folder_ids=None,
         cursor=None, null_tail_only=True,
     )
@@ -403,7 +407,7 @@ def test_build_where_folder_clause_added_for_all_modes() -> None:
         (None, True),
     ]
     for cur, null_only in modes:
-        where, _ = _build_where(
+        where, _ = build_where(
             account_ids=[1], folder_ids=[7],
             cursor=cur, null_tail_only=null_only,
         )
@@ -419,10 +423,30 @@ def test_build_where_null_tail_only_with_cursor_raises_value_error() -> None:
     ``python -O``)."""
     ts = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
     with pytest.raises(ValueError, match="null_tail_only"):
-        _build_where(
+        build_where(
             account_ids=[1], folder_ids=None,
             cursor=BrowseCursor(ts=ts, id=1), null_tail_only=True,
         )
+
+
+# ---- compose_browse_sql JOIN clause (#77) -------------------------------
+
+def test_compose_browse_sql_folder_filter_true_inserts_message_labels_join() -> None:
+    """``folder_filter=True`` must inject the ``message_labels`` JOIN —
+    pinned in one place so a rename of the join table or a refactor of
+    the JOIN clause lands here even if no other test exercises it.
+    """
+    sql = compose_browse_sql(folder_filter=True, where="m.account_id = ANY(%s)")
+    assert "JOIN message_labels ml ON ml.message_id = m.id" in sql
+
+
+def test_compose_browse_sql_folder_filter_false_omits_message_labels_join() -> None:
+    """``folder_filter=False`` (the GUI's initial-load path) must NOT
+    inject the JOIN — pinned so a defensive "always JOIN" refactor
+    can't silently re-introduce the row multiplication that DISTINCT
+    would have to clean up."""
+    sql = compose_browse_sql(folder_filter=False, where="m.account_id = ANY(%s)")
+    assert "message_labels" not in sql
 
 
 # ---- Query-count contract for the NULL-tail top-up (#75 follow-up) ------

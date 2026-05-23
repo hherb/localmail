@@ -191,5 +191,3 @@ def test_seed_config_defaults_match_module_constants() -> None:
     intentional change forces a test update."""
     cfg = SeedConfig(total_rows=1, num_accounts=1, distribution="balanced")
     assert cfg.date_span_days == _DATE_SPAN_DAYS
-
-

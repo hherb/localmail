@@ -60,7 +60,7 @@ def get_message(
      attachments, headers, date_sent,
      account_name, account_address) = row
 
-    cid_to_sha = _build_cid_map(attachments or [], headers or {})
+    cid_to_sha = _build_cid_map(attachments or [])
     sanitized_html = sanitize_html(body_html or "", cid_to_sha=cid_to_sha) if body_html else None
 
     msg: dict[str, Any] = {
@@ -110,14 +110,14 @@ def _address(addr: str | None, name: str | None) -> dict[str, str | None]:
     return {"address": addr, "name": name}
 
 
-def _build_cid_map(attachments: list[dict[str, Any]], headers: dict[str, Any]) -> dict[str, str]:
+def _build_cid_map(attachments: list[dict[str, Any]]) -> dict[str, str]:
     """Build a Content-ID to sha256 map for cid: rewriting.
 
-    Reads the ``content_id`` field from each attachment JSONB row. The current
-    parser/write_attachments path does not yet persist ``content_id`` — tracked
-    in a separate issue — so this map is empty in practice today and inline
-    images get ``src=""`` after sanitisation. The wiring is correct so the
-    rewrite begins working as soon as the parser side lands.
+    Reads the ``content_id`` field from each attachment JSONB row and returns
+    a ``{cid_token: sha256_hex}`` map the HTML sanitiser uses to rewrite
+    ``<img src="cid:…">`` references to ``/v1/attachments/<sha256>``. The
+    parser strips angle brackets when populating ``content_id``; the
+    ``strip("<>")`` here is defence-in-depth against legacy rows.
     """
     out: dict[str, str] = {}
     for att in attachments:

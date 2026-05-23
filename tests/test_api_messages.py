@@ -132,7 +132,7 @@ def test_build_cid_map_emits_cid_to_sha_for_inline_attachments() -> None:
         {"filename": "inline.png", "sha256": sha_inline, "content_id": "inline-pixel@example"},
         {"filename": "report.pdf", "sha256": sha_regular},
     ]
-    assert _build_cid_map(attachments, {}) == {"inline-pixel@example": sha_inline}
+    assert _build_cid_map(attachments) == {"inline-pixel@example": sha_inline}
 
 
 def test_build_cid_map_strips_residual_angle_brackets() -> None:
@@ -140,7 +140,7 @@ def test_build_cid_map_strips_residual_angle_brackets() -> None:
     against legacy rows that might carry the bracketed form."""
     sha = "ef" * 32
     attachments = [{"sha256": sha, "content_id": "<legacy@example>"}]
-    assert _build_cid_map(attachments, {}) == {"legacy@example": sha}
+    assert _build_cid_map(attachments) == {"legacy@example": sha}
 
 
 def test_get_message_rewrites_cid_img_src_to_attachment_url(
@@ -165,6 +165,6 @@ def test_get_message_rewrites_cid_img_src_to_attachment_url(
 
     msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
     assert msg["body_html"] is not None
-    assert f"/v1/attachments/{sha_hex}" in msg["body_html"]
+    assert f'src="/v1/attachments/{sha_hex}"' in msg["body_html"]
     assert "cid:" not in msg["body_html"]
     assert 'src=""' not in msg["body_html"]

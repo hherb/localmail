@@ -23,6 +23,16 @@ the EXPLAIN harness in ``tests/acceptance/run_browse_explain.py`` can compose
 the production SQL shape directly. Any refactor of the SELECT / FROM /
 ORDER BY shape goes through this module — there is no duplicate inline SQL
 elsewhere to drift against.
+
+#85: folder filtering uses an ``EXISTS (SELECT 1 FROM message_labels …)``
+semi-join, not a ``JOIN message_labels`` + ``SELECT DISTINCT`` shape.
+Benchmark on 200k rows × broad folder showed the EXISTS variant uses ~45-50%
+fewer buffer hits per page (no row multiplication = no Unique/Sort tax) and
+replaces a 3-node ``Nested Loop + Incremental Sort + Unique`` chain with a
+single ``Nested Loop Semi Join``. The semi-join also short-circuits the
+labels lookup as soon as a matching row is found per outer message, so the
+index searches on ``message_labels_pkey`` scale with returned-row count
+rather than with all-matched-label count.
 """
 from __future__ import annotations
 
@@ -38,45 +48,40 @@ from localmail.api.browse_cursor import (
 # Public so the eligibility tests in ``tests/test_api_browse_plan.py`` and
 # the EXPLAIN harness in ``tests/acceptance/run_browse_explain.py`` can
 # compose the same SQL the production path emits, instead of duplicating
-# it inline (#77). The format placeholders are intentional:
-#
-#   ``{join}``  — empty string, or a single ``message_labels`` JOIN line
-#                 with a trailing space (folder-filter mode).
-#   ``{where}`` — the WHERE-clause body returned by ``build_where``.
+# it inline (#77). The single format placeholder is ``{where}`` — the
+# WHERE-clause body returned by ``build_where``.
 #
 # Any consumer that wants the actual SQL string for a given query shape
-# should call ``compose_browse_sql(folder_filter=..., where=...)`` rather
-# than ``.format()``-ing this constant directly. Keep the COALESCE
-# expression and the ``sort_ts`` alias in sync with the index definition
-# in migration ``0018``; the LIMIT short-circuit through
-# ``messages_recent_idx`` depends on both matching exactly.
+# should call ``compose_browse_sql(where=...)`` rather than ``.format()``-ing
+# this constant directly. Keep the COALESCE expression and the ``sort_ts``
+# alias in sync with the index definition in migration ``0018``; the LIMIT
+# short-circuit through ``messages_recent_idx`` depends on both matching
+# exactly.
+#
+# No DISTINCT and no ``message_labels`` JOIN: folder filtering moves into
+# a ``WHERE EXISTS (SELECT 1 FROM message_labels …)`` clause emitted by
+# ``build_where``. EXISTS guarantees no row multiplication, so DISTINCT is
+# unnecessary on either branch (#85).
 BROWSE_ROW_SQL_TEMPLATE = """
-    SELECT DISTINCT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
-                    m.internal_date, m.account_id, a.name,
-                    COALESCE(m.internal_date, m.date_sent) AS sort_ts
+    SELECT m.id, m.subject, m.from_addr, m.from_name, m.date_sent,
+           m.internal_date, m.account_id, a.name,
+           COALESCE(m.internal_date, m.date_sent) AS sort_ts
       FROM messages m
       JOIN accounts a ON a.id = m.account_id
-      {join}
      WHERE {where}
      ORDER BY sort_ts DESC NULLS LAST, m.id DESC
      LIMIT %s
 """
 
 
-_FOLDER_JOIN_SQL = "JOIN message_labels ml ON ml.message_id = m.id "
-
-
-def compose_browse_sql(*, folder_filter: bool, where: str) -> str:
+def compose_browse_sql(*, where: str) -> str:
     """Compose the final browse SELECT string for a given WHERE clause.
 
-    ``folder_filter`` toggles the ``message_labels`` JOIN required when
-    the caller filters by ``folder_ids``; ``where`` is the WHERE-clause
-    body, typically what ``build_where`` returned.
+    ``where`` is the WHERE-clause body, typically what ``build_where``
+    returned. Folder filtering is expressed inside ``where`` as an
+    ``EXISTS`` subquery — there is no JOIN-shape switch any more (#85).
     """
-    return BROWSE_ROW_SQL_TEMPLATE.format(
-        join=_FOLDER_JOIN_SQL if folder_filter else "",
-        where=where,
-    )
+    return BROWSE_ROW_SQL_TEMPLATE.format(where=where)
 
 
 def list_messages(
@@ -195,7 +200,7 @@ def _fetch_rows(
         cursor=cursor,
         null_tail_only=null_tail_only,
     )
-    sql = compose_browse_sql(folder_filter=bool(folder_ids), where=where)
+    sql = compose_browse_sql(where=where)
     with conn.cursor() as cur:
         cur.execute(sql, params + [limit])
         return list(cur.fetchall())
@@ -227,7 +232,16 @@ def build_where(
     clauses = ["m.account_id = ANY(%s)"]
     params: list[Any] = [account_ids]
     if folder_ids:
-        clauses.append("ml.mailbox_id = ANY(%s)")
+        # EXISTS semi-join — no row multiplication, no DISTINCT needed (#85).
+        # Postgres turns this into a Nested Loop Semi Join that short-circuits
+        # the labels scan on the first matching row per outer message; the
+        # DISTINCT+JOIN shape it replaces had a 3-node Sort+Unique chain
+        # above the same Nested Loop, sorting on every projected column.
+        clauses.append(
+            "EXISTS (SELECT 1 FROM message_labels ml"
+            " WHERE ml.message_id = m.id"
+            " AND ml.mailbox_id = ANY(%s))"
+        )
         params.append(folder_ids)
     if null_tail_only:
         if cursor is not None:

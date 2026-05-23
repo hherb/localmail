@@ -429,24 +429,39 @@ def test_build_where_null_tail_only_with_cursor_raises_value_error() -> None:
         )
 
 
-# ---- compose_browse_sql JOIN clause (#77) -------------------------------
+# ---- compose_browse_sql / build_where shape (#77, #85) ------------------
 
-def test_compose_browse_sql_folder_filter_true_inserts_message_labels_join() -> None:
-    """``folder_filter=True`` must inject the ``message_labels`` JOIN —
-    pinned in one place so a rename of the join table or a refactor of
-    the JOIN clause lands here even if no other test exercises it.
+def test_compose_browse_sql_never_emits_message_labels_join() -> None:
+    """Folder filtering moved into a ``WHERE EXISTS`` subquery emitted by
+    ``build_where`` (#85); ``compose_browse_sql`` no longer has a JOIN-shape
+    switch. A defensive "always JOIN" refactor here would re-introduce the
+    row multiplication that the now-removed DISTINCT had to clean up.
     """
-    sql = compose_browse_sql(folder_filter=True, where="m.account_id = ANY(%s)")
-    assert "JOIN message_labels ml ON ml.message_id = m.id" in sql
+    sql = compose_browse_sql(where="m.account_id = ANY(%s)")
+    assert "JOIN message_labels" not in sql, sql
 
 
-def test_compose_browse_sql_folder_filter_false_omits_message_labels_join() -> None:
-    """``folder_filter=False`` (the GUI's initial-load path) must NOT
-    inject the JOIN — pinned so a defensive "always JOIN" refactor
-    can't silently re-introduce the row multiplication that DISTINCT
-    would have to clean up."""
-    sql = compose_browse_sql(folder_filter=False, where="m.account_id = ANY(%s)")
-    assert "message_labels" not in sql
+def test_compose_browse_sql_never_emits_select_distinct() -> None:
+    """The EXISTS semi-join in ``build_where`` guarantees no row
+    multiplication, so the SELECT must not be DISTINCT — DISTINCT
+    forces a post-join Sort+Unique over every projected column even
+    though the input is already unique (#85)."""
+    sql = compose_browse_sql(where="m.account_id = ANY(%s)")
+    assert "SELECT DISTINCT" not in sql, sql
+
+
+def test_build_where_emits_exists_subquery_for_folder_filter() -> None:
+    """``build_where(folder_ids=...)`` must wrap the labels lookup in an
+    ``EXISTS (SELECT 1 FROM message_labels …)`` subquery — not a JOIN
+    predicate (#85). The semi-join short-circuits per outer message and
+    the planner composes it as a Nested Loop Semi Join."""
+    where, params = build_where(
+        account_ids=[1], folder_ids=[10, 20], cursor=None,
+    )
+    assert "EXISTS (SELECT 1 FROM message_labels ml" in where, where
+    assert "ml.message_id = m.id" in where, where
+    assert "ml.mailbox_id = ANY(%s)" in where, where
+    assert params == [[1], [10, 20]]
 
 
 # ---- Query-count contract for the NULL-tail top-up (#75 follow-up) ------

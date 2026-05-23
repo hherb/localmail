@@ -1,11 +1,16 @@
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import psycopg
 import pytest
 
 from localmail.api.errors import NotFound
-from localmail.api.messages import get_message, get_message_raw
+from localmail.api.messages import _build_cid_map, get_message, get_message_raw
+from localmail.attachments import write_attachments
+from localmail.parser import parse_message
+
+from . import _eml
 
 
 def _seed_msg(conn: psycopg.Connection, **overrides) -> int:
@@ -113,3 +118,53 @@ def test_get_message_raw_returns_bytes(db_conn: psycopg.Connection) -> None:
 def test_get_message_raw_not_found_raises(db_conn: psycopg.Connection) -> None:
     with pytest.raises(NotFound):
         get_message_raw(db_conn, 999999, allowed_account_ids=_ANY_ACCOUNT)
+
+
+def test_build_cid_map_emits_cid_to_sha_for_inline_attachments() -> None:
+    """Pins the JSONB-row → cid-map contract that the sanitizer depends on.
+
+    Inline rows carry `content_id`; regular rows omit it. The map must
+    include only the inline entries and key them on the bare cid token
+    (no angle brackets)."""
+    sha_inline = "ab" * 32
+    sha_regular = "cd" * 32
+    attachments = [
+        {"filename": "inline.png", "sha256": sha_inline, "content_id": "inline-pixel@example"},
+        {"filename": "report.pdf", "sha256": sha_regular},
+    ]
+    assert _build_cid_map(attachments, {}) == {"inline-pixel@example": sha_inline}
+
+
+def test_build_cid_map_strips_residual_angle_brackets() -> None:
+    """Parser already strips brackets, but the rewrite path is defense-in-depth
+    against legacy rows that might carry the bracketed form."""
+    sha = "ef" * 32
+    attachments = [{"sha256": sha, "content_id": "<legacy@example>"}]
+    assert _build_cid_map(attachments, {}) == {"legacy@example": sha}
+
+
+def test_get_message_rewrites_cid_img_src_to_attachment_url(
+    db_conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """End-to-end: parse a multipart/related message with an inline image,
+    write attachments via the production path, fetch via get_message, and
+    assert the sanitized HTML carries `/v1/attachments/<sha>` — not `cid:`,
+    not `src=""`. This is the user-visible promise of #10/#12."""
+    parsed = parse_message(_eml.html_with_inline_image())
+    jsonb_rows = write_attachments(db_conn, parsed, root=tmp_path)
+    assert len(jsonb_rows) == 1
+    sha_hex = jsonb_rows[0]["sha256"]
+
+    mid = _seed_msg(
+        db_conn,
+        message_id="<inline-1@example.com>",
+        body_html=parsed.body_html,
+        attachments=jsonb_rows,
+    )
+    db_conn.commit()
+
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    assert msg["body_html"] is not None
+    assert f"/v1/attachments/{sha_hex}" in msg["body_html"]
+    assert "cid:" not in msg["body_html"]
+    assert 'src=""' not in msg["body_html"]

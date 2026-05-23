@@ -122,7 +122,7 @@ def _list_messages_sql_for_initial_page(
     where, params = build_where(
         account_ids=account_ids, folder_ids=None, cursor=None,
     )
-    return compose_browse_sql(folder_filter=False, where=where), params
+    return compose_browse_sql(where=where), params
 
 
 def _list_messages_sql_for_folder_filter(
@@ -130,16 +130,17 @@ def _list_messages_sql_for_folder_filter(
 ) -> tuple[str, list]:
     """Return ``(sql, params)`` for the folder-filter EXPLAIN probe.
 
-    Composes the production SQL via ``compose_browse_sql(folder_filter=True)``
-    + ``build_where(folder_ids=...)`` so the JOIN clause and the WHERE-clause
-    emitter are both the production ones. Used by the #78 eligibility tests
-    to assert that ``messages_recent_idx`` remains usable for the messages
-    side of the JOIN with all competing indexes hidden.
+    Composes the production SQL via ``compose_browse_sql`` +
+    ``build_where(folder_ids=...)`` — post-#85, the folder predicate is an
+    ``EXISTS (SELECT 1 FROM message_labels …)`` semi-join inside the WHERE
+    clause, not a JOIN in the FROM clause. Used by the #78 / #85 eligibility
+    tests to assert that ``messages_recent_idx`` remains usable for the
+    messages side of the semi-join with all competing indexes hidden.
     """
     where, params = build_where(
         account_ids=account_ids, folder_ids=folder_ids, cursor=None,
     )
-    return compose_browse_sql(folder_filter=True, where=where), params
+    return compose_browse_sql(where=where), params
 
 def _seed_account(conn: psycopg.Connection, name: str) -> int:
     """Insert one account, return its id."""
@@ -330,7 +331,7 @@ def _list_messages_sql_for_mid_keyset(
         account_ids=account_ids, folder_ids=None,
         cursor=BrowseCursor(ts=ts, id=message_id),
     )
-    return compose_browse_sql(folder_filter=False, where=where), params
+    return compose_browse_sql(where=where), params
 
 
 def _explain_mid_keyset_recent_idx_only(
@@ -437,15 +438,16 @@ def test_dated_cursor_predicate_composes_index_range_bound(
     )
 
 
-# ---- #78: folder-filter branch eligibility ------------------------------
+# ---- #78 / #85: folder-filter branch eligibility ------------------------
 # When ``folder_ids`` is passed, ``list_messages`` emits
-# ``... JOIN message_labels ml ON ml.message_id = m.id WHERE ...
-#       AND ml.mailbox_id = ANY(%s)``. The planner's choice for the
-# *messages* side of that JOIN could legitimately diverge from the
-# folder-less path — at small selectivities it can scan ``message_labels``
-# first and do a nested loop into ``messages`` by PK, ignoring
-# ``messages_recent_idx`` entirely. That is fine *at scale*, but the
-# unit test below pins the orthogonal "is the index still ELIGIBLE
+# ``... WHERE m.account_id = ANY(%s) AND EXISTS (SELECT 1 FROM
+#       message_labels ml WHERE ml.message_id = m.id AND
+#       ml.mailbox_id = ANY(%s))``. The planner's choice for the
+# *messages* side of that semi-join could legitimately diverge from
+# the folder-less path — at small selectivities it can scan
+# ``message_labels`` first and do a nested loop into ``messages`` by PK,
+# ignoring ``messages_recent_idx`` entirely. That is fine *at scale*, but
+# the unit test below pins the orthogonal "is the index still ELIGIBLE
 # for the messages side?" question: with every competing ``messages``
 # index hidden + ``enable_seqscan = off``, the planner is forced to
 # choose ``messages_recent_idx`` if it wants the messages side at all.
@@ -454,18 +456,20 @@ def test_dated_cursor_predicate_composes_index_range_bound(
 # scale might keep working (because the operational plan would just
 # use the alternative).
 #
-# A note on the inevitable ``Sort`` node above the JOIN: the production
-# SQL uses ``SELECT DISTINCT m.id, m.subject, ...`` because the JOIN
-# against ``message_labels`` can multiply rows when ``folder_ids`` admits
-# more than one mailbox (a message labelled in multiple folders appears
-# once per matching label). The DISTINCT operator pulls a Sort+Unique
-# pass over every projected column. That sort is *post-join* and is
-# unrelated to the ORDER BY shape — it's an inherent cost of the
-# JOIN+DISTINCT design, NOT a sign that ``messages_recent_idx`` failed
-# to satisfy the date ordering. The eligibility assertions therefore
-# don't forbid Sort nodes for the folder-filter case; they pin the
-# narrower claim that ``Index Scan using messages_recent_idx on
-# messages`` is what drives the messages access path.
+# #85 retired the previous ``JOIN message_labels`` + ``SELECT DISTINCT``
+# shape. EXISTS guarantees no row multiplication, so DISTINCT (and the
+# Sort+Unique chain it forced over every projected column) is gone.
+#
+# These eligibility tests still don't forbid Sort nodes for the
+# folder-filter case: at fixture scale (50 rows/account × 3 accounts)
+# the planner correctly INVERTS the semi-join — starts from
+# ``message_labels`` (HashAggregate-dedup'd), looks up matching messages
+# by PK via ``messages_recent_idx``, then Sorts to restore the ORDER BY.
+# The Sort there is for ordering, not deduplication. The
+# DISTINCT-regression signature (``Unique`` node + Sort over every
+# projected column) only surfaces at scales where the planner picks the
+# date-ordered walk — covered by the acceptance harness, not by these
+# unit-scale tests.
 
 
 def _seed_mailbox_for_plan_test(
@@ -515,17 +519,17 @@ def _explain_folder_filter_recent_idx_only(
     folder_ids: list[int],
     page_size: int,
 ) -> str:
-    """Run EXPLAIN with every competing ``messages`` index hidden, plus
-    the folder JOIN. Same SAVEPOINT scaffolding as the folderless probe;
-    the only difference is the SQL composition uses
-    ``compose_browse_sql(folder_filter=True)`` and ``build_where`` is
-    given a non-empty ``folder_ids``.
+    """Run EXPLAIN with every competing ``messages`` index hidden, plus the
+    folder-filter semi-join (#85). Same SAVEPOINT scaffolding as the
+    folderless probe; the only difference is that ``build_where`` is given
+    a non-empty ``folder_ids``, which emits the ``EXISTS (SELECT 1 FROM
+    message_labels …)`` clause.
 
     Note that we do NOT hide the ``message_labels`` indexes. The
-    eligibility claim is about the *messages* side of the JOIN — that
-    the date-ordered expression index still matches the ORDER BY shape
-    when the JOIN is in scope. The labels side's plan can use whichever
-    of its own indexes makes sense.
+    eligibility claim is about the *messages* side of the semi-join —
+    that the date-ordered expression index still matches the ORDER BY
+    shape when the semi-join is in scope. The labels side's plan can
+    use whichever of its own indexes makes sense.
     """
     competing = [
         "messages_acct_date_idx",
@@ -565,11 +569,11 @@ def _explain_folder_filter_recent_idx_only(
 def test_messages_recent_idx_is_eligible_for_narrow_folder_filter(
     db_conn: psycopg.Connection,
 ) -> None:
-    """The folder-filter SQL shape adds a JOIN against ``message_labels``
-    and a second WHERE clause (``ml.mailbox_id = ANY(...)``). With every
-    competing ``messages`` index hidden, ``messages_recent_idx`` must
-    still be eligible for the messages side of the JOIN — i.e. the
-    index's expression and ordering still match the query's ORDER BY
+    """The folder-filter SQL shape adds an ``EXISTS (SELECT 1 FROM
+    message_labels …)`` semi-join (#85). With every competing ``messages``
+    index hidden, ``messages_recent_idx`` must still be eligible for the
+    messages side of the semi-join — i.e. the index's expression and
+    ordering still match the query's ORDER BY
     (``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC``).
 
     A narrow folder (~10% of the account's rows) is the case where
@@ -577,10 +581,10 @@ def test_messages_recent_idx_is_eligible_for_narrow_folder_filter(
     index and start from ``message_labels`` instead — but the
     *eligibility* question is unchanged. This test pins the regression
     signature: if the index ever stops matching the ORDER BY shape
-    under the JOIN (e.g. a future migration renames a column), EXPLAIN
-    would either error or fall back to seqscan (forbidden), and the
-    test fails loud. Operational plan preference at scale is covered
-    by ``tests/acceptance/run_browse_explain.py --folder-filter``.
+    under the semi-join (e.g. a future migration renames a column),
+    EXPLAIN would either error or fall back to seqscan (forbidden), and
+    the test fails loud. Operational plan preference at scale is
+    covered by ``tests/acceptance/run_browse_explain.py --folder-filter``.
     """
     account_ids = _seed_for_plan_test(db_conn)
     mailbox_id = _seed_mailbox_for_plan_test(
@@ -601,15 +605,15 @@ def test_messages_recent_idx_is_eligible_for_broad_folder_filter(
 ) -> None:
     """A broad folder (~50% of the account's rows) is the case where
     the operational plan is most likely to *prefer* the date-ordered
-    index walk (it pays for itself when the JOIN admits a large
+    index walk (it pays for itself when the semi-join admits a large
     fraction of rows). The eligibility check still applies — pin the
     SQL shape compatibility with ``messages_recent_idx`` so a future
     schema regression fails loud.
 
     The broad mailbox here is a superset of the narrow mailbox by
     construction (the labelling helper picks rows in id order), so
-    both probes share the same shape question even though the join
-    selectivity differs by 5x.
+    both probes share the same shape question even though the
+    semi-join selectivity differs by 5x.
     """
     account_ids = _seed_for_plan_test(db_conn)
     mailbox_id = _seed_mailbox_for_plan_test(
@@ -630,10 +634,10 @@ def test_messages_recent_idx_is_eligible_for_multi_folder_filter(
 ) -> None:
     """``folder_ids`` can carry more than one mailbox (the wire shape
     accepts a list). One mailbox per account — same broad selectivity
-    — exercises the ``ml.mailbox_id = ANY(%s)`` predicate against a
-    multi-element list while the ACL spans every account. Pins
-    eligibility for the multi-account, multi-folder case used by GUI
-    "show me everything in these folders" filters.
+    — exercises the ``ml.mailbox_id = ANY(%s)`` predicate inside the
+    EXISTS subquery against a multi-element list while the ACL spans
+    every account. Pins eligibility for the multi-account, multi-folder
+    case used by GUI "show me everything in these folders" filters.
     """
     account_ids = _seed_for_plan_test(db_conn)
     folder_ids: list[int] = []

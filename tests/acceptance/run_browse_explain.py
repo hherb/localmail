@@ -37,7 +37,11 @@ Optional flags:
 * ``--folder-filter`` — also seed ``message_labels`` rows and add
   folder-filter probes (selective ~5% + broad ~50% mailbox per
   account). Answers #78: what plan family does Postgres pick when
-  ``folder_ids`` is non-empty?
+  ``folder_ids`` is non-empty? Post-#85 the production folder-filter
+  predicate is ``WHERE EXISTS (SELECT 1 FROM message_labels …)``
+  (a semi-join, not a JOIN+DISTINCT). The harness composes via
+  production primitives, so any future production refactor lands
+  here automatically.
 * ``--keep-data`` — leave the seeded rows in place (useful for ad-hoc
   ``psql`` follow-up)
 * ``--json`` — emit machine-readable summary instead of the table
@@ -156,15 +160,14 @@ def _initial_page_sql_and_params(
     Returns ``(sql, params)`` ready for ``cur.execute``; the caller
     prepends ``EXPLAIN …`` to the SQL. ``page_size + 1`` is appended
     as the LIMIT value here so the bound-param shape is owned in one
-    place. ``folder_ids`` toggles the ``message_labels`` JOIN — when
-    non-empty, ``build_where`` adds the folder predicate and
-    ``compose_browse_sql`` injects the JOIN line (#78).
+    place. ``folder_ids`` activates the EXISTS folder-filter predicate
+    inside ``build_where`` (#85).
     """
     where, params = build_where(
         account_ids=account_ids, folder_ids=folder_ids, cursor=None,
     )
     return (
-        compose_browse_sql(folder_filter=bool(folder_ids), where=where),
+        compose_browse_sql(where=where),
         params + [page_size + 1],
     )
 
@@ -188,15 +191,15 @@ def _mid_keyset_sql_and_params(
     Returns ``(sql, params)`` ready for ``cur.execute``; the caller
     prepends ``EXPLAIN …`` to the SQL. ``page_size + 1`` is appended
     as the LIMIT value here so the bound-param shape is owned in one
-    place. ``folder_ids`` toggles the ``message_labels`` JOIN — see
-    ``_initial_page_sql_and_params`` (#78).
+    place. ``folder_ids`` activates the EXISTS folder-filter predicate
+    inside ``build_where`` (#85).
     """
     where, params = build_where(
         account_ids=account_ids, folder_ids=folder_ids,
         cursor=BrowseCursor(ts=ts, id=mid),
     )
     return (
-        compose_browse_sql(folder_filter=bool(folder_ids), where=where),
+        compose_browse_sql(where=where),
         params + [page_size + 1],
     )
 
@@ -221,7 +224,7 @@ _PRE75_BUGGY_WHERE = (
     "      OR COALESCE(m.internal_date, m.date_sent) IS NULL)"
 )
 _MID_KEYSET_SQL_PRE75 = BROWSE_ROW_SQL_TEMPLATE.format(
-    join="", where=_PRE75_BUGGY_WHERE,
+    where=_PRE75_BUGGY_WHERE,
 )
 
 
@@ -730,6 +733,10 @@ def _run_explain(
     ``predicate_form`` selects the mid-keyset SQL:
     ``"current"`` — post-#75, no OR-IS-NULL disjunct (default).
     ``"pre75"`` — the buggy form, kept for ad-hoc before/after comparison.
+
+    Folder-filter probes use the production EXISTS semi-join shape (#85);
+    no comparison flag is exposed because the harness composes via
+    production primitives, so a future refactor lands here automatically.
     """
     if predicate_form not in _VALID_PREDICATE_FORMS:
         raise ValueError(

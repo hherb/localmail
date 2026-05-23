@@ -1,3 +1,4 @@
+from ipaddress import IPv4Network
 from pathlib import Path
 
 import pytest
@@ -240,14 +241,12 @@ def test_auth_trusted_proxies_default_empty() -> None:
 
 def test_auth_trusted_proxies_host_form_becomes_single_host_network() -> None:
     """strict=False means a bare IP becomes a /32 (or /128 for v6)."""
-    from ipaddress import IPv4Network
     cfg = AuthConfig(trusted_proxies=["10.0.0.5"])
     assert IPv4Network("10.0.0.5/32") in cfg.trusted_proxies_parsed
 
 
 def test_auth_trusted_proxies_cidr_form_parses() -> None:
     """Explicit CIDR is parsed as-is."""
-    from ipaddress import IPv4Network
     cfg = AuthConfig(trusted_proxies=["127.0.0.0/8"])
     assert IPv4Network("127.0.0.0/8") in cfg.trusted_proxies_parsed
 
@@ -268,3 +267,28 @@ def test_auth_trusted_proxies_max_hops_too_high_raises() -> None:
     """max_hops > 10 has no realistic use — reject as sanity bound."""
     with pytest.raises(ValidationError):
         AuthConfig(trusted_proxies_max_hops=11)
+
+
+def test_auth_trusted_proxies_toml_round_trip(tmp_path: Path) -> None:
+    """TOML-loaded `auth.trusted_proxies` parses through to the network tuple
+    via `load_config(...)`, matching the AuthConfig(...) direct-construct path.
+
+    Guards against an arrays-of-strings parse regression in the TOML loader
+    and against future reshuffling of validator order in AuthConfig.
+    """
+    p = write(
+        tmp_path / "c.toml",
+        """
+        [database]
+        dsn = "postgresql:///localmail"
+
+        [auth]
+        trusted_proxies = ["10.0.0.0/8", "192.168.1.5"]
+        trusted_proxies_max_hops = 5
+        """,
+    )
+    cfg = load_config(p)
+    assert cfg.auth.trusted_proxies == ["10.0.0.0/8", "192.168.1.5"]
+    assert cfg.auth.trusted_proxies_max_hops == 5
+    assert IPv4Network("10.0.0.0/8") in cfg.auth.trusted_proxies_parsed
+    assert IPv4Network("192.168.1.5/32") in cfg.auth.trusted_proxies_parsed

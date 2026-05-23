@@ -10,6 +10,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
+# Imported (not redefined) so client_ip.py is the single source of truth for
+# the TrustedProxies alias. client_ip.py must remain free of any
+# localmail.config import — adding one would close a cycle through this line.
+# (Other localmail.api.* modules import from localmail.config freely; only
+# client_ip.py is constrained, because this is the one config→api edge.)
 from localmail.api.client_ip import TrustedProxies
 
 

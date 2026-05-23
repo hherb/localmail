@@ -67,11 +67,17 @@ Single commit. No production behaviour change.
   (`resolve_client_ip`) which *consumes* the type.
 - `client_ip.py` has zero localmail-internal imports — it's the
   lowest module in the dependency graph that needs the alias.
-- `config.py` already imports from `localmail.api` is not a new
-  pattern in this project's layering — config is the schema, the
-  api/ layer is the consumer; in this case the consumer happens
-  to own the natural type definition because the type is
-  fundamentally about IP networks, not about config schema.
+- `config.py` importing from `localmail.api.client_ip` is the only
+  config→api edge in the codebase. It's acceptable because
+  `client_ip.py` is pure (zero localmail-internal imports) — config
+  is the schema, the api/ layer is normally the consumer, but here
+  the consumer happens to own the natural type definition because
+  the type is fundamentally about IP networks. **Invariant**:
+  `client_ip.py` must remain free of any `localmail.config`
+  import — adding one would close a cycle through that line.
+  Other api modules (`api/auth.py`, `api/search.py`) already
+  import from `localmail.config` and that's fine; only
+  `client_ip.py` is constrained.
 - Future MCP / non-FastAPI consumers of `resolve_client_ip` get
   the alias automatically without going through `config.py`.
 

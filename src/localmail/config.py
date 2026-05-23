@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import os
 import tomllib
-from ipaddress import IPv4Network, IPv6Network, ip_network
+from ipaddress import ip_network
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
-TrustedProxies = tuple[IPv4Network | IPv6Network, ...]
+from localmail.api.client_ip import TrustedProxies
 
 
 class DatabaseConfig(BaseModel):
@@ -98,14 +98,8 @@ class AuthConfig(BaseModel):
         return v
 
     def model_post_init(self, __context: object) -> None:
-        # PrivateAttr assignment via object.__setattr__ works regardless
-        # of any future model_config = ConfigDict(frozen=...) change.
-        object.__setattr__(
-            self,
-            "_trusted_proxies_parsed",
-            tuple(
-                ip_network(s, strict=False) for s in self.trusted_proxies
-            ),
+        self._trusted_proxies_parsed = tuple(
+            ip_network(s, strict=False) for s in self.trusted_proxies
         )
 
     @property

@@ -155,7 +155,12 @@ describe("SettingsServer", () => {
   });
 
   it("on transient (non-401) error keeps both fields so the user does not have to retype", async () => {
-    changePasswordMock.mockRejectedValueOnce({ kind: "Io", detail: "timeout" });
+    // change_password returns AuthError; after issue #22 there is no Io
+    // variant — a transient error surfaces as a nested HttpError chain.
+    changePasswordMock.mockRejectedValueOnce({
+      kind: "Http",
+      detail: { kind: "Network", detail: "timeout" },
+    });
     const { container } = render(SettingsServer);
     const oldInput = container.querySelector('[data-testid="old-password"]') as HTMLInputElement;
     const newInput = container.querySelector('[data-testid="new-password"]') as HTMLInputElement;

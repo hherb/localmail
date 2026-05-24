@@ -28,8 +28,6 @@ pub enum AuthError {
     Http(#[from] HttpError),
     #[error("keyring error: {0}")]
     Keyring(String),
-    #[error("io error: {0}")]
-    Io(String),
 }
 
 #[derive(Debug, Serialize)]

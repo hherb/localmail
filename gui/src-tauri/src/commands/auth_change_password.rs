@@ -43,7 +43,7 @@ async fn post_change_password(
     // Use the shared helper so 401 (wrong old password — UX-critical) and
     // 500 surface as distinct HttpError::HttpStatus { status, body } variants
     // that the Svelte side can branch on, rather than flattening into one
-    // opaque AuthError::Io string.
+    // opaque string.
     Ok(http_post_json_no_resp(client, &endpoint, &body, Some(token)).await?)
 }
 

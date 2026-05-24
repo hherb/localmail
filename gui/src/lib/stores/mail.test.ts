@@ -13,7 +13,7 @@ vi.mock("../tauri", () => mocks);
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
 import { mail, MAX_POLL_FAILURES, MAX_PENDING_NEW_MESSAGES } from "./mail.svelte";
-import { POLL_INTERVAL_MS } from "../change_poller";
+import { POLL_INTERVAL_MS } from "../change_helpers";
 import type { AccountSummary, FolderSummary, MessageDetail, MessageSummary } from "../tauri";
 
 const acct = (id: string, name: string): AccountSummary => ({

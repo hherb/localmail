@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dedupNewMessages, parseCursor, POLL_INTERVAL_MS } from "./change_poller";
+import { dedupNewMessages, parseCursor, POLL_INTERVAL_MS } from "./change_helpers";
 import type { MessageSummary } from "./api/changes";
 
 function ms(id: string): MessageSummary {

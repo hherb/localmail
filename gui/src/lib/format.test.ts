@@ -45,10 +45,14 @@ describe("formatRelativeDate", () => {
   });
 
   it("returns time only for same day", () => {
-    const out = formatRelativeDate(
-      "2026-05-17T09:30:00Z",
-      new Date("2026-05-17T15:00:00Z"),
-    );
+    // formatRelativeDate compares calendar days in LOCAL time (the user's
+    // wall clock — correct for a desktop client). Constructing with the
+    // `Date(y, m, d, h, m)` ctor pins both arguments to the same local day
+    // in any timezone, so the assertion holds regardless of where the
+    // test runs (UTC, AEST, etc.).
+    const now = new Date(2026, 4, 17, 15, 0);
+    const earlier = new Date(2026, 4, 17, 9, 30);
+    const out = formatRelativeDate(earlier.toISOString(), now);
     // Time format is locale-dependent; just assert it contains a digit and a colon.
     expect(out).toMatch(/\d+:\d+/);
   });

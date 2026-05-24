@@ -26,7 +26,7 @@
  */
 import { getChanges } from "../api/changes";
 import { formatError } from "../format_error";
-import { POLL_INTERVAL_MS, parseCursor } from "../change_poller";
+import { POLL_INTERVAL_MS, parseCursor } from "../change_helpers";
 import {
   getMessage,
   listAccounts,

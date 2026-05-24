@@ -45,10 +45,11 @@ describe("formatRelativeDate", () => {
   });
 
   it("returns time only for same day", () => {
-    const out = formatRelativeDate(
-      "2026-05-17T09:30:00Z",
-      new Date("2026-05-17T15:00:00Z"),
-    );
+    // sameDay compares LOCAL calendar fields; constructing with
+    // `Date(y, m, d, h, m)` pins both args to the same local day in any TZ.
+    const now = new Date(2026, 4, 17, 15, 0);
+    const earlier = new Date(2026, 4, 17, 9, 30);
+    const out = formatRelativeDate(earlier.toISOString(), now);
     // Time format is locale-dependent; just assert it contains a digit and a colon.
     expect(out).toMatch(/\d+:\d+/);
   });

@@ -45,11 +45,8 @@ describe("formatRelativeDate", () => {
   });
 
   it("returns time only for same day", () => {
-    // formatRelativeDate compares calendar days in LOCAL time (the user's
-    // wall clock — correct for a desktop client). Constructing with the
-    // `Date(y, m, d, h, m)` ctor pins both arguments to the same local day
-    // in any timezone, so the assertion holds regardless of where the
-    // test runs (UTC, AEST, etc.).
+    // sameDay compares LOCAL calendar fields; constructing with
+    // `Date(y, m, d, h, m)` pins both args to the same local day in any TZ.
     const now = new Date(2026, 4, 17, 15, 0);
     const earlier = new Date(2026, 4, 17, 9, 30);
     const out = formatRelativeDate(earlier.toISOString(), now);

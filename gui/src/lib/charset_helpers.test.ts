@@ -134,7 +134,7 @@ describe("decodeWithLabel", () => {
 
   it("falls back to utf-8 when the label is not a known encoding", () => {
     const input = new TextEncoder().encode("hello");
-    expect(decodeWithLabel(input, "not-a-real-encoding")).toBe("hello");
+    expectDecodedEquals(decodeWithLabel(input, "not-a-real-encoding"), "hello");
   });
 
   it("does not throw on invalid byte sequences (uses replacement, not fatal)", () => {

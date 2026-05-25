@@ -31,11 +31,16 @@ jobs:
       - run: npm test
 
   tauri-rust:
-    name: cargo test + clippy
-    runs-on: ubuntu-latest
+    name: cargo test + clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux system deps for Tauri
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -55,6 +60,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: gui/src-tauri
+          key: ${{ matrix.os }}
       - name: cargo test
         working-directory: gui/src-tauri
         run: cargo test --locked

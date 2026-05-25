@@ -18,6 +18,22 @@ function latin1Bytes(codepoints: number[]): Uint8Array {
   return Uint8Array.from(codepoints);
 }
 
+// Render a string as `"<glyph>" (U+XXXX U+YYYY …)` so an assertion failure
+// between two visually-ambiguous strings (e.g. "€" vs U+0080's control-glyph
+// "" which some terminals render identically as "^@" or nothing) prints
+// the actual codepoints in brackets next to the glyph form.
+function annotateCodepoints(s: string): string {
+  const hexParts = [...s].map((c) => `U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`);
+  return `"${s}" (${hexParts.join(" ")})`;
+}
+
+function expectDecodedEquals(actual: string, expected: string): void {
+  if (actual === expected) return;
+  throw new Error(
+    `Decoded string mismatch:\n  expected: ${annotateCodepoints(expected)}\n  received: ${annotateCodepoints(actual)}`,
+  );
+}
+
 describe("parseCharsetFromHeaders", () => {
   it("returns null when there is no header/body separator", () => {
     expect(parseCharsetFromHeaders(bytes("Content-Type: text/plain"))).toBeNull();
@@ -102,22 +118,23 @@ describe("parseCharsetFromHeaders", () => {
 describe("decodeWithLabel", () => {
   it("decodes valid UTF-8 bytes with the utf-8 label", () => {
     const input = new TextEncoder().encode("café");
-    expect(decodeWithLabel(input, "utf-8")).toBe("café");
+    expectDecodedEquals(decodeWithLabel(input, "utf-8"), "café");
   });
 
   it("decodes latin-1 bytes with the iso-8859-1 label", () => {
-    expect(decodeWithLabel(latin1Bytes([0x63, 0x61, 0x66, 0xe9]), "iso-8859-1")).toBe(
+    expectDecodedEquals(
+      decodeWithLabel(latin1Bytes([0x63, 0x61, 0x66, 0xe9]), "iso-8859-1"),
       "café",
     );
   });
 
   it("decodes windows-1252 specific bytes", () => {
-    expect(decodeWithLabel(latin1Bytes([0x80]), "windows-1252")).toBe("€");
+    expectDecodedEquals(decodeWithLabel(latin1Bytes([0x80]), "windows-1252"), "€");
   });
 
   it("falls back to utf-8 when the label is not a known encoding", () => {
     const input = new TextEncoder().encode("hello");
-    expect(decodeWithLabel(input, "not-a-real-encoding")).toBe("hello");
+    expectDecodedEquals(decodeWithLabel(input, "not-a-real-encoding"), "hello");
   });
 
   it("does not throw on invalid byte sequences (uses replacement, not fatal)", () => {

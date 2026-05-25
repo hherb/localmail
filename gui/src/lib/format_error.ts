@@ -3,7 +3,11 @@
  *
  * The Rust side serialises tagged enums like HttpError as
  * `{ kind: "<variant>", detail: <inner> }`. Outer wrappers (AuthError,
- * SearchError, ...) nest more of the same shape, so we walk recursively.
+ * AttachmentError, RawMessageError, SearchError, ...) nest more of the
+ * same shape, so we walk recursively. AttachmentError / RawMessageError
+ * compose AuthError via `#[from]`, surfacing as
+ * `{kind: "Auth", detail: {kind: "NotConnected"}}` (etc.) on the wire —
+ * the recursive walk handles it without a special case.
  *
  * Special case for HttpError::HttpStatus { status, body }: when the body
  * is an RFC 7807 problem document (application/problem+json), surface

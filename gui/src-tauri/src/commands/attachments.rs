@@ -33,6 +33,15 @@ const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 /// transport / disk I/O). Auth pre-checks still compose via the `#[from]`
 /// `Auth` variant; pinned-client setup failures (URL parse, TLS init) bubble
 /// via the `#[from]` `Setup` variant.
+///
+/// Note on `Setup` vs `Auth(Http)`: both can transit an [`HttpError`] at the
+/// leaf, but the routing is unambiguous because Rust's `From` is not
+/// transitive — `?` on `Result<_, HttpError>` resolves to `Setup` via the
+/// direct `From<HttpError> for AttachmentError`, while `?` on
+/// `Result<_, AuthError>` resolves to `Auth`. Semantically: `Setup` is for
+/// pinned-client construction (`build_pinned_client`), `Auth(Http)` is for
+/// HTTP errors that surfaced inside an auth-domain operation
+/// (e.g. token refresh).
 #[derive(Debug, Error, Serialize)]
 #[serde(tag = "kind", content = "detail")]
 pub enum AttachmentError {
@@ -380,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_pre_check_wraps_via_from_authentication() {
+    fn auth_pre_check_wraps_via_from_auth_error() {
         // The wire shape for an auth pre-check failure must remain a nested
         // {kind: "Auth", detail: {kind: "NotConnected"}} chain so the
         // existing formatError() walker handles it without change.

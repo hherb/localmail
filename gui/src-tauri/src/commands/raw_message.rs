@@ -23,6 +23,11 @@ use crate::storage::keyring::KeyringStore;
 const MAX_RAW_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Errors raised by the raw-message download command.
+///
+/// See [`super::attachments::AttachmentError`] for the rationale on `Setup`
+/// vs `Auth(Http)` — the same routing applies here: `?` on
+/// `Result<_, HttpError>` resolves to `Setup` (pinned-client construction),
+/// `?` on `Result<_, AuthError>` resolves to `Auth` (auth pre-checks).
 #[derive(Debug, Error, Serialize)]
 #[serde(tag = "kind", content = "detail")]
 pub enum RawMessageError {
@@ -158,6 +163,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&http).unwrap(),
             serde_json::json!({"kind": "Http", "detail": 404}),
+        );
+
+        let network = RawMessageError::Network("connection refused".into());
+        assert_eq!(
+            serde_json::to_value(&network).unwrap(),
+            serde_json::json!({"kind": "Network", "detail": "connection refused"}),
+        );
+
+        let read = RawMessageError::Read("stream closed".into());
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            serde_json::json!({"kind": "Read", "detail": "stream closed"}),
+        );
+
+        let setup: RawMessageError = HttpError::BadUrl("https://".into()).into();
+        assert_eq!(
+            serde_json::to_value(&setup).unwrap(),
+            serde_json::json!({"kind": "Setup", "detail": {"kind": "BadUrl", "detail": "https://"}}),
         );
 
         let wrapped: RawMessageError = AuthError::NotConnected.into();

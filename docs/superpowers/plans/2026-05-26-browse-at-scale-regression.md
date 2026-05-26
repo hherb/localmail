@@ -1203,10 +1203,40 @@ LOCALMAIL_TEST_DSN="postgresql://localmail:local%40%40mail@localhost:5532/localm
   PYTHONPATH=src:. \
   uv run python tests/acceptance/run_browse_explain.py \
   --total-rows 5000 --accounts 3 --folder-filter --json \
-  > /tmp/baseline_after_refactor.json
+  > /tmp/baseline_after_refactor_raw.txt
 ```
 
-Expected: JSON output written. No errors.
+Expected: file written. No errors.
+
+Then extract just the JSON object (the harness intermixes progress
+`print()` lines with the JSON payload):
+
+```bash
+python3 -c "
+import json
+with open('/tmp/baseline_after_refactor_raw.txt') as f:
+    text = f.read()
+start = text.find('{\n')
+depth = 0
+end = -1
+for i in range(start, len(text)):
+    if text[i] == '{':
+        depth += 1
+    elif text[i] == '}':
+        depth -= 1
+        if depth == 0:
+            end = i + 1
+            break
+data = json.loads(text[start:end])
+with open('/tmp/baseline_after_refactor.json', 'w') as f:
+    json.dump(data, f, indent=2)
+print('saved', len(data['probes']), 'probes')
+"
+```
+
+The pre-refactor baseline at `/tmp/baseline_before_refactor.json` was
+already extracted via the same script during Task 0 — both files now
+contain pure JSON.
 
 - [ ] **Step 5: Diff against the pre-refactor baseline**
 

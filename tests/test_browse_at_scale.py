@@ -54,6 +54,10 @@ from tests.acceptance.browse_explain_lib import (
 
 DEFAULT_REGRESSION_ROWS = 50_000
 
+# Three accounts: enough that the ACL filter is non-trivial without
+# inflating the broad-folder Cartesian product. Changing this without
+# re-calibrating DEFAULT_REGRESSION_ROWS will silently shift the
+# calibration gate threshold.
 _NUM_ACCOUNTS = 3
 _MIN_REGRESSION_ROWS = 1000
 
@@ -93,10 +97,18 @@ def test_broad_folder_filter_does_not_regress_to_distinct_plan_family(
     class (DISTINCT re-introduced; EXISTS swapped for IN (SELECT ...);
     any change that forces the planner to dedup on the messages side).
     """
+    # caplog is acquired only to surface the diagnostic log line below
+    # under ``pytest -v --log-cli-level=INFO``. The records themselves
+    # are not asserted on — observability, not coverage.
     caplog.set_level(logging.INFO, logger=__name__)
     log = logging.getLogger(__name__)
 
     n_rows = _resolved_row_count()
+    # ``balanced`` gives each account an equal slice of total rows, which
+    # in turn gives the broad mailbox (50% per account) the largest
+    # uniform messages-side semi-join — the planner's strongest signal
+    # to prefer the date-ordered walk, where the DISTINCT regression
+    # class would surface. ``skewed`` / ``tail`` distort that signal.
     cfg = SeedConfig(
         total_rows=n_rows,
         num_accounts=_NUM_ACCOUNTS,

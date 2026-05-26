@@ -44,8 +44,21 @@ jobs:
           --health-retries 10
     env:
       LOCALMAIL_TEST_DSN: postgresql://localmail:local%40%40mail@localhost:5432/localmail_test
+      # Several pre-existing CLI tests (test_cli_extract, test_cli_lang_backfill,
+      # test_cli_embed_backfill, test_cli_search) monkeypatch localmail.cli._dsn
+      # but still let main() call load_config(default_config_path()), which
+      # raises FileNotFoundError on a clean CI runner. Point LOCALMAIL_CONFIG
+      # at a stub written in the next step so those tests can resolve a
+      # valid config without depending on $HOME/.config/localmail.
+      LOCALMAIL_CONFIG: ${{ github.workspace }}/.ci-config.toml
     steps:
       - uses: actions/checkout@v6
+      - name: Write stub localmail config for CLI tests
+        run: |
+          cat > "$LOCALMAIL_CONFIG" <<'TOML'
+          [database]
+          dsn = "postgresql://localmail:local%40%40mail@localhost:5432/localmail_test"
+          TOML
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:

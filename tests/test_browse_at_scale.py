@@ -52,7 +52,18 @@ from tests.acceptance.browse_explain_lib import (
 )
 
 
-DEFAULT_REGRESSION_ROWS = 50_000
+# Calibrated scale at which the planner reliably picks the date-ordered
+# walk for the broad-folder probe (50% labelled, 3 accounts, balanced
+# distribution). Below this scale the planner inverts the semi-join —
+# legitimate, but the #87 regression class can't surface, so the
+# calibration gate fails. Operators with a slow CI runner can lower
+# this via LOCALMAIL_REGRESSION_ROWS at the cost of the calibration
+# gate possibly failing on PG planner cost-model drift.
+#
+# Calibration: smallest stable N (5/5 consecutive PASSes) = 4500;
+# applied 1.5× headroom multiplier rounded up to the nearest 1000.
+# Measured 2026-05-26 against PostgreSQL 18.1 on macOS aarch64.
+DEFAULT_REGRESSION_ROWS = 7_000
 
 # Three accounts: enough that the ACL filter is non-trivial without
 # inflating the broad-folder Cartesian product. Changing this without

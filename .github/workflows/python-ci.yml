@@ -50,6 +50,8 @@ jobs:
       # raises FileNotFoundError on a clean CI runner. Point LOCALMAIL_CONFIG
       # at a stub written in the next step so those tests can resolve a
       # valid config without depending on $HOME/.config/localmail.
+      # Tracked by #100 — once those tests inject load_config themselves,
+      # this env + the stub-writing step can be removed.
       LOCALMAIL_CONFIG: ${{ github.workspace }}/.ci-config.toml
     steps:
       - uses: actions/checkout@v6

@@ -114,6 +114,24 @@ def api_token(db_conn, api_user):
 
 
 @pytest.fixture
+def cli_config(monkeypatch, tmp_path, db_dsn):
+    """Make `localmail.config.load_config()` resolvable without `$HOME/.config/localmail`.
+
+    Writes a stub `config.toml` (only the mandatory `[database].dsn` key) to
+    `tmp_path` and points `LOCALMAIL_CONFIG` at it for the test's lifetime.
+    Tests that exercise CLI subcommands whose handlers call `load_config()`
+    must depend on this fixture so they pass on a clean CI runner — see
+    GitHub issue #100. Tests that additionally need to override the DSN
+    used for actual SQL still monkeypatch `localmail.cli._dsn`; this
+    fixture only ensures the config file *parses*.
+    """
+    stub = tmp_path / "config.toml"
+    stub.write_text(f'[database]\ndsn = "{db_dsn}"\n')
+    monkeypatch.setenv("LOCALMAIL_CONFIG", str(stub))
+    return stub
+
+
+@pytest.fixture
 def grant_alice_all_accounts(db_conn, api_user):
     """Returns a callable that grants `api_user` access to every account
     currently seeded in the DB.

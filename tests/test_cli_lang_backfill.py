@@ -31,7 +31,9 @@ def _seed_messages(conn, bodies: list[str | None]) -> list[int]:
     return ids
 
 
-def test_cli_lang_backfill_populates_body_lang(monkeypatch, db_dsn, db_conn) -> None:
+def test_cli_lang_backfill_populates_body_lang(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
     ids = _seed_messages(db_conn, ["alpha body", "beta body", "gamma body"])
     detector = FixedDetector({"alpha body": "en", "beta body": "de", "gamma body": "es"})
 
@@ -54,7 +56,9 @@ def test_cli_lang_backfill_populates_body_lang(monkeypatch, db_dsn, db_conn) -> 
     assert seen[ids[2]] == "es"
 
 
-def test_cli_lang_backfill_no_op_when_disabled(monkeypatch, db_dsn, db_conn) -> None:
+def test_cli_lang_backfill_no_op_when_disabled(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
     """`body_lang_enabled=False` → exits cleanly without touching rows."""
     ids = _seed_messages(db_conn, ["anything"])
 
@@ -73,7 +77,9 @@ def test_cli_lang_backfill_no_op_when_disabled(monkeypatch, db_dsn, db_conn) -> 
         assert cur.fetchone()[0] is None
 
 
-def test_cli_search_status_reports_body_lang_counts(monkeypatch, db_dsn, db_conn) -> None:
+def test_cli_search_status_reports_body_lang_counts(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
     ids = _seed_messages(db_conn, ["one body", "two body"])
     with db_conn.cursor() as cur:
         cur.execute("UPDATE messages SET body_lang = 'en' WHERE id = %s", (ids[0],))

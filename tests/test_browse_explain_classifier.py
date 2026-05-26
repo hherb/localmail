@@ -11,7 +11,7 @@ shared library.
 """
 from __future__ import annotations
 
-from tests.acceptance.run_browse_explain import classify_plan
+from tests.acceptance.browse_explain_lib import classify_plan
 
 
 def test_has_unique_node_is_true_when_unique_appears() -> None:

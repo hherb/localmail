@@ -62,8 +62,6 @@ TRUNCATE_SQL = (
     " RESTART IDENTITY CASCADE"
 )
 
-COPY_BATCH = 5000
-
 VALID_PREDICATE_FORMS = ("current", "pre75")
 
 
@@ -167,6 +165,7 @@ def classify_plan(explain_text: str) -> PlanSummary:
     else:
         plan_family = "other"
 
+    shared_hit, shared_read = _scan_buffers(lines)
     return PlanSummary(
         plan_family=plan_family,
         used_recent_idx=used_recent_idx,
@@ -178,8 +177,8 @@ def classify_plan(explain_text: str) -> PlanSummary:
         actual_rows=_scan_actual_rows(lines),
         execution_ms=_scan_timing(lines, "Execution Time:"),
         planning_ms=_scan_timing(lines, "Planning Time:"),
-        shared_hit_blocks=_scan_buffers(lines)[0],
-        shared_read_blocks=_scan_buffers(lines)[1],
+        shared_hit_blocks=shared_hit,
+        shared_read_blocks=shared_read,
         raw=explain_text,
     )
 

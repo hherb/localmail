@@ -906,7 +906,9 @@ Now make the CLI a thin consumer. The behavioural contract: identical JSON outpu
 
 - [ ] **Step 1: Switch the classifier unit test to import from the library**
 
-Edit `tests/test_browse_explain_classifier.py`. Change all three `from run_browse_explain import classify_plan` lines to `from browse_explain_lib import classify_plan`. The `sys.path` shim at the top stays the same.
+Edit `tests/test_browse_explain_classifier.py`. Change the single module-level `from tests.acceptance.run_browse_explain import classify_plan` to `from tests.acceptance.browse_explain_lib import classify_plan`.
+
+(Post-Task-1 review note: `tests/acceptance/__init__.py` exists, so the canonical pattern is `from tests.acceptance.X import ...` — no `sys.path` shim. The Task-1 fix commit `673958e` already removed the shim from this file. Don't reintroduce one.)
 
 - [ ] **Step 2: Run the classifier unit tests against the library**
 
@@ -954,17 +956,10 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
-
-# tests/acceptance is not a package; add its directory to sys.path so
-# the library module can be imported when this script is run directly.
-_HERE = Path(__file__).parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
 
 import psycopg
 
-from browse_explain_lib import (
+from tests.acceptance.browse_explain_lib import (
     DEFAULT_PAGE_SIZE,
     DISTRIBUTIONS,
     FolderMailboxes,
@@ -1327,19 +1322,11 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from pathlib import Path
 
 import psycopg
 import pytest
 
-# tests/acceptance is not a package; add it to sys.path so we can
-# import the shared library.
-_ACCEPTANCE_DIR = Path(__file__).parent / "acceptance"
-if str(_ACCEPTANCE_DIR) not in sys.path:
-    sys.path.insert(0, str(_ACCEPTANCE_DIR))
-
-from browse_explain_lib import (  # noqa: E402
+from tests.acceptance.browse_explain_lib import (
     DEFAULT_PAGE_SIZE,
     ProbeSpec,
     SeedConfig,

@@ -239,6 +239,7 @@ class PlanSummary:
     used_account_idx: bool
     has_full_sort: bool
     has_incremental_sort: bool
+    has_unique_node: bool
     rows_removed_by_filter: int
     actual_rows: int
     execution_ms: float
@@ -276,6 +277,10 @@ def classify_plan(explain_text: str) -> PlanSummary:
         and "Incremental Sort" not in ln
         for ln in lines
     )
+    has_unique_node = any(
+        ln.strip().startswith("Unique") or ln.strip().startswith("->  Unique")
+        for ln in lines
+    )
     has_bitmap = any("Bitmap" in ln for ln in lines)
     has_seq_scan = any("Seq Scan on" in ln and "messages" in ln for ln in lines)
 
@@ -301,6 +306,7 @@ def classify_plan(explain_text: str) -> PlanSummary:
         used_account_idx=used_account_idx,
         has_full_sort=has_full_sort,
         has_incremental_sort=has_incremental_sort,
+        has_unique_node=has_unique_node,
         rows_removed_by_filter=rows_removed,
         actual_rows=actual_rows,
         execution_ms=execution_ms,

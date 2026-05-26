@@ -39,7 +39,6 @@ import logging
 import os
 
 import psycopg
-import pytest
 
 from tests.acceptance.browse_explain_lib import (
     DEFAULT_PAGE_SIZE,
@@ -93,7 +92,7 @@ def _resolved_row_count() -> int:
 
 
 def test_broad_folder_filter_does_not_regress_to_distinct_plan_family(
-    db_conn: psycopg.Connection, caplog: pytest.LogCaptureFixture,
+    db_conn: psycopg.Connection,
 ) -> None:
     """The broad-folder probe must not produce a ``Unique`` node or a
     full-projection ``Sort`` over the messages projection at scale.
@@ -108,10 +107,6 @@ def test_broad_folder_filter_does_not_regress_to_distinct_plan_family(
     class (DISTINCT re-introduced; EXISTS swapped for IN (SELECT ...);
     any change that forces the planner to dedup on the messages side).
     """
-    # caplog is acquired only to surface the diagnostic log line below
-    # under ``pytest -v --log-cli-level=INFO``. The records themselves
-    # are not asserted on — observability, not coverage.
-    caplog.set_level(logging.INFO, logger=__name__)
     log = logging.getLogger(__name__)
 
     n_rows = _resolved_row_count()

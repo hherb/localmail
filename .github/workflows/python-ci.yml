@@ -23,6 +23,7 @@ jobs:
   pytest:
     name: pytest (PG ${{ matrix.postgres }}, Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

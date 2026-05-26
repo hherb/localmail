@@ -1,0 +1,74 @@
+name: python-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'migrations/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/python-ci.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'migrations/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/python-ci.yml'
+
+jobs:
+  pytest:
+    name: pytest (PG ${{ matrix.postgres }}, Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["pg18"]
+        python: ["3.12"]
+    services:
+      postgres:
+        image: pgvector/pgvector:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: localmail
+          POSTGRES_PASSWORD: 'local@@mail'
+          POSTGRES_DB: localmail_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LOCALMAIL_TEST_DSN: postgresql://localmail:local%40%40mail@localhost:5432/localmail_test
+      # Several pre-existing CLI tests (test_cli_extract, test_cli_lang_backfill,
+      # test_cli_embed_backfill, test_cli_search) monkeypatch localmail.cli._dsn
+      # but still let main() call load_config(default_config_path()), which
+      # raises FileNotFoundError on a clean CI runner. Point LOCALMAIL_CONFIG
+      # at a stub written in the next step so those tests can resolve a
+      # valid config without depending on $HOME/.config/localmail.
+      # Tracked by #100 — once those tests inject load_config themselves,
+      # this env + the stub-writing step can be removed.
+      LOCALMAIL_CONFIG: ${{ github.workspace }}/.ci-config.toml
+    steps:
+      - uses: actions/checkout@v6
+      - name: Write stub localmail config for CLI tests
+        run: |
+          cat > "$LOCALMAIL_CONFIG" <<'TOML'
+          [database]
+          dsn = "postgresql://localmail:local%40%40mail@localhost:5432/localmail_test"
+          TOML
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Pin Python via uv
+        run: uv python install ${{ matrix.python }}
+      - name: Sync dependencies
+        run: uv sync --frozen
+      - name: Run pytest
+        run: uv run pytest -q

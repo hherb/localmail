@@ -3,7 +3,7 @@
 The harness itself is a script that needs a live Postgres; these tests
 exercise its decoupled helpers in isolation:
 
-* ``_mid_cursor_from_seed`` — derives the mid-keyset cursor from the
+* ``mid_cursor_from_seed`` — derives the mid-keyset cursor from the
   ``SeedConfig`` alone, no DB query (replaces the linear
   ``OFFSET COUNT(*)/2`` scan that issue #79 flagged).
 * ``_scan_actual_rows`` — parses the top-node row count from
@@ -17,16 +17,16 @@ from __future__ import annotations
 
 from datetime import timedelta, timezone
 
-from tests.acceptance.run_browse_explain import (
-    _DATE_SPAN_DAYS,
-    _EPOCH_ANCHOR,
+from tests.acceptance.browse_explain_lib import (
+    DATE_SPAN_DAYS,
+    EPOCH_ANCHOR,
     SeedConfig,
-    _mid_cursor_from_seed,
     _scan_actual_rows,
+    mid_cursor_from_seed,
 )
 
 
-# ---- _mid_cursor_from_seed ---------------------------------------------
+# ---- mid_cursor_from_seed ---------------------------------------------
 
 
 def test_mid_cursor_uses_anchor_plus_half_span() -> None:
@@ -37,8 +37,8 @@ def test_mid_cursor_uses_anchor_plus_half_span() -> None:
     direct replacement for the OFFSET-based scan that #79 retires.
     """
     cfg = SeedConfig(total_rows=100_000, num_accounts=5, distribution="skewed")
-    ts, _ = _mid_cursor_from_seed(cfg)
-    expected_ts = _EPOCH_ANCHOR + timedelta(days=cfg.date_span_days / 2)
+    ts, _ = mid_cursor_from_seed(cfg)
+    expected_ts = EPOCH_ANCHOR + timedelta(days=cfg.date_span_days / 2)
     assert ts == expected_ts
 
 
@@ -51,7 +51,7 @@ def test_mid_cursor_id_is_half_of_total_rows() -> None:
     middle of the relation just like the OFFSET scan did.
     """
     cfg = SeedConfig(total_rows=100_000, num_accounts=5, distribution="skewed")
-    _, mid_id = _mid_cursor_from_seed(cfg)
+    _, mid_id = mid_cursor_from_seed(cfg)
     assert mid_id == cfg.total_rows // 2
 
 
@@ -65,8 +65,8 @@ def test_mid_cursor_respects_custom_date_span_days() -> None:
         total_rows=10_000, num_accounts=2, distribution="balanced",
         date_span_days=200,
     )
-    ts, _ = _mid_cursor_from_seed(cfg)
-    assert ts == _EPOCH_ANCHOR + timedelta(days=100.0)
+    ts, _ = mid_cursor_from_seed(cfg)
+    assert ts == EPOCH_ANCHOR + timedelta(days=100.0)
 
 
 def test_mid_cursor_returns_timezone_aware_datetime() -> None:
@@ -74,7 +74,7 @@ def test_mid_cursor_returns_timezone_aware_datetime() -> None:
     the ``timestamptz`` columns the harness queries. Naive datetimes
     would silently become ``UTC+local`` on the wire."""
     cfg = SeedConfig(total_rows=1_000, num_accounts=1, distribution="balanced")
-    ts, _ = _mid_cursor_from_seed(cfg)
+    ts, _ = mid_cursor_from_seed(cfg)
     assert ts.tzinfo is not None
     assert ts.utcoffset() == timezone.utc.utcoffset(ts)
 
@@ -86,8 +86,8 @@ def test_mid_cursor_is_pure_no_database_needed() -> None:
     no ``conn`` argument is accepted (a regression would either reject
     the call or hit the network)."""
     cfg = SeedConfig(total_rows=1_000, num_accounts=1, distribution="balanced")
-    first = _mid_cursor_from_seed(cfg)
-    second = _mid_cursor_from_seed(cfg)
+    first = mid_cursor_from_seed(cfg)
+    second = mid_cursor_from_seed(cfg)
     assert first == second
 
 
@@ -97,10 +97,10 @@ def test_mid_cursor_scales_with_total_rows() -> None:
     Issue #79's complaint is precisely that the OFFSET-based picker
     scaled linearly with ``--total-rows``. The pure derivation must
     not — date is anchor-derived, id is a simple integer halving."""
-    a = _mid_cursor_from_seed(
+    a = mid_cursor_from_seed(
         SeedConfig(total_rows=10_000, num_accounts=1, distribution="balanced")
     )
-    b = _mid_cursor_from_seed(
+    b = mid_cursor_from_seed(
         SeedConfig(total_rows=5_000_000, num_accounts=1, distribution="balanced")
     )
     assert a[0] == b[0]
@@ -190,4 +190,4 @@ def test_seed_config_defaults_match_module_constants() -> None:
     in NEXT_SESSION.md / CLAUDE.md become stale. Pin them here so any
     intentional change forces a test update."""
     cfg = SeedConfig(total_rows=1, num_accounts=1, distribution="balanced")
-    assert cfg.date_span_days == _DATE_SPAN_DAYS
+    assert cfg.date_span_days == DATE_SPAN_DAYS

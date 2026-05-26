@@ -356,7 +356,7 @@ npm run tauri build        # produces a platform-specific release bundle
 
 ```bash
 uv sync
-uv run pytest                # full suite (~400 tests); skipped if no Postgres
+uv run pytest                # full suite (~800 tests); skipped if no Postgres
 uv run localmail --help
 ```
 
@@ -364,6 +364,13 @@ uv run localmail --help
 at `LOCALMAIL_TEST_DSN` (defaults to
 `postgresql://localmail:local%40%40mail@localhost:5532/localmail_test` — a
 separate database from the live archive, so tests can't clobber real data).
+
+CI: `.github/workflows/python-ci.yml` runs the full pytest suite on every
+push to `main` and every PR touching `src/`, `tests/`, `migrations/`,
+`pyproject.toml`, `uv.lock`, or the workflow itself. The runner uses a
+`pgvector/pgvector:pg18` service container so migration 0004's
+`CREATE EXTENSION vector` clause works without extra setup. The Tauri/Svelte
+GUI is covered by a separate `.github/workflows/gui-ci.yml`.
 
 ## Search
 

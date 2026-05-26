@@ -10,7 +10,9 @@ from click.testing import CliRunner
 from localmail.cli import main
 
 
-def test_cli_extract_backfill_drains_queue(monkeypatch, db_dsn, db_conn, tmp_path) -> None:
+def test_cli_extract_backfill_drains_queue(
+    monkeypatch, db_dsn, db_conn, tmp_path, cli_config
+) -> None:
     """extract-backfill should drain attachment_text for eligible blobs."""
     sha = hashlib.sha256(b"cli extract content").digest()
     sub = sha.hex()
@@ -41,7 +43,9 @@ def test_cli_extract_backfill_drains_queue(monkeypatch, db_dsn, db_conn, tmp_pat
         assert row[0] == 1
 
 
-def test_cli_search_status_reports_attachment_counts(monkeypatch, db_dsn, db_conn) -> None:
+def test_cli_search_status_reports_attachment_counts(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
     """search-status --format json must include Phase 2 attachment fields."""
     monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
     runner = CliRunner()

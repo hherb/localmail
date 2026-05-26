@@ -22,7 +22,7 @@ def test_cli_search_help_shows_filter_flags():
         assert flag in out, f"missing flag {flag} in help"
 
 
-def test_cli_search_json_output_is_valid_search_page(monkeypatch, db_dsn, db_conn):
+def test_cli_search_json_output_is_valid_search_page(monkeypatch, db_dsn, db_conn, cli_config):
     """End-to-end: seed mail, run search, parse JSON output."""
     with db_conn.cursor() as cur:
         cur.execute("INSERT INTO accounts (name,email_address,imap_host,auth_method)"

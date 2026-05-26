@@ -278,7 +278,7 @@ def classify_plan(explain_text: str) -> PlanSummary:
         for ln in lines
     )
     has_unique_node = any(
-        ln.strip().startswith("Unique") or ln.strip().startswith("->  Unique")
+        ln.strip().startswith("Unique  ") or ln.strip().startswith("->  Unique  ")
         for ln in lines
     )
     has_bitmap = any("Bitmap" in ln for ln in lines)

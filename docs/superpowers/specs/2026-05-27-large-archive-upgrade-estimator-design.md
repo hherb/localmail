@@ -220,7 +220,7 @@ the implicit one psycopg opens around the SELECTs.
 
 | Trigger | Behaviour |
 |---|---|
-| DB unreachable | `psycopg.OperationalError` bubbles up. CLI prints `error: cannot connect to database at <dsn>: <reason>`, exits 2. |
+| DB unreachable | `psycopg.OperationalError` bubbles up. CLI prints `Error: <reason>` on stderr via `click.ClickException` and exits **1** (Click idiom, matches every other `localmail` subcommand). The JSON output channel is the structured one for scripts; the exit code is intentionally not differentiated from other CLI errors. |
 | `messages` table doesn't exist | Estimator catches `UndefinedTable`, returns `status="not_applicable"` with row `"messages table not present — run `localmail init-db` first"`. Exit 0. |
 | `schema_migrations` doesn't exist | Treated as "everything pending". No exception escapes. |
 | Empty `messages` table on pending 0006 | Projections all 0 bytes / 0 seconds. Row says `"messages table empty — migration will be cheap"`. Exit 0. |
@@ -276,7 +276,7 @@ Integration tests using `cli_config` (the fixture from PR #101) +
    `current_bytes`, `projected_bytes`, `projected_duration_s`,
    `warnings`.
 3. `test_cli_estimate_upgrade_db_unreachable` — DSN at unreachable
-   host, exits 2 with connection error on stderr.
+   host, exits **1** (Click idiom) with connection error on stderr.
 
 ### Test ordering
 

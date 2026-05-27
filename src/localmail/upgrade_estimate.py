@@ -64,6 +64,11 @@ ESTIMATORS: dict[str, EstimatorFn] = {}
 
 _MIB = 1024 * 1024  # named constant; no magic-number hidden in arithmetic
 
+_INDEX_NAMES_0006 = (
+    "messages_fts_v2_idx",
+    "message_chunks_fts_idx",
+)
+
 
 def _table_exists(conn: psycopg.Connection, relname: str) -> bool:
     """Cheap catalog lookup. to_regclass() returns NULL (not exception)
@@ -73,6 +78,25 @@ def _table_exists(conn: psycopg.Connection, relname: str) -> bool:
         row = cur.fetchone()
         assert row is not None
         return row[0] is not None
+
+
+def _safe_relation_size(conn: psycopg.Connection, relname: str) -> int | None:
+    """Return pg_total_relation_size(relname) in bytes, or None if missing.
+
+    Uses to_regclass() so a missing relation surfaces as NULL rather
+    than throwing UndefinedTable. Reads only — no lock beyond
+    AccessShareLock on pg_class.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_total_relation_size(to_regclass(%s))",
+            (relname,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        if row[0] is None:
+            return None
+        return int(row[0])
 
 
 def estimate_0006(
@@ -187,8 +211,32 @@ def _estimate_0006_applied(
     conn: psycopg.Connection,
     cfg: UpgradeEstimateConfig,
 ) -> EstimateResult:
-    """Stub — implemented in Task 4."""
-    raise NotImplementedError("_estimate_0006_applied lands in Task 4")
+    """Report actual sizes for migration 0006's two GIN indexes.
+
+    If a named index is missing (operator manually dropped it), a
+    warning is appended and that index's size key is omitted from
+    ``current_bytes``. The call never raises for missing-index.
+    """
+    current_bytes: dict[str, int] = {}
+    warnings: list[str] = []
+
+    for idx_name in _INDEX_NAMES_0006:
+        size = _safe_relation_size(conn, idx_name)
+        if size is None:
+            warnings.append(
+                f"index {idx_name} missing despite migration applied"
+            )
+            continue
+        current_bytes[idx_name] = size
+
+    return EstimateResult(
+        revision="0006_search_indexes",
+        status="applied",
+        current_bytes=current_bytes,
+        projected_bytes={},
+        projected_duration_s=0.0,
+        warnings=warnings,
+    )
 
 
 ESTIMATORS["0006_search_indexes"] = estimate_0006

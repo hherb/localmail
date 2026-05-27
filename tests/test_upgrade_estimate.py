@@ -197,3 +197,24 @@ def test_estimate_0006_not_applicable_when_messages_missing(db_conn):
     assert any("messages table not present" in w for w in result.warnings), (
         f"expected friendly missing-table warning in {result.warnings!r}"
     )
+
+
+def test_estimate_0006_applied_reports_actual_sizes(db_conn):
+    """With 0006 in the fixture state, applied=True reads pg_total_relation_size."""
+    account_id = _seed_account(db_conn)
+    _seed_messages_with_known_text(
+        db_conn, account_id=account_id, count=20, body_len=500
+    )
+    cfg = UpgradeEstimateConfig()
+
+    result = estimate_0006(db_conn, cfg, applied=True)
+
+    assert result.status == "applied"
+    assert result.projected_bytes == {}
+    assert result.projected_duration_s == 0.0
+    # Both GIN indexes exist post-fixture and report a non-zero size.
+    assert result.current_bytes["messages_fts_v2_idx"] > 0
+    assert result.current_bytes["message_chunks_fts_idx"] >= 0
+    # message_chunks_fts_idx is on an empty table here, so its
+    # pg_total_relation_size will be small but should still be returned.
+    assert "message_chunks_fts_idx" in result.current_bytes

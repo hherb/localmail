@@ -795,7 +795,12 @@ def estimate_upgrade(fmt: str) -> None:
                 fn(conn, cfg, rev in applied)
                 for rev, fn in ESTIMATORS.items()
             ]
-    except Exception as exc:
+    except psycopg.Error as exc:
+        # Only DB-level errors are user-facing here (unreachable host,
+        # auth failure, missing schema_migrations on a never-init'd DB
+        # — though that last case is masked by _applied_revisions
+        # returning empty). Programming bugs still raise with their
+        # original traceback.
         raise click.ClickException(str(exc)) from exc
 
     if fmt == "json":

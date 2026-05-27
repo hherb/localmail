@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from psycopg.types.json import Jsonb
 
@@ -73,7 +75,7 @@ def test_estimate_result_is_immutable_dataclass():
         projected_duration_s=1.5,
         warnings=[],
     )
-    with pytest.raises((AttributeError, Exception)):  # frozen dataclass raises FrozenInstanceError
+    with pytest.raises(dataclasses.FrozenInstanceError):
         r.revision = "other"  # type: ignore[misc]
 
 
@@ -135,11 +137,11 @@ def test_estimate_0006_pending_with_seeded_rows(db_conn):
     result = estimate_0006(db_conn, cfg, applied=False)
 
     assert result.status == "pending"
-    # avg(length(subject) + length(body_text) + length(body_html))
+    # avg(octet_length(subject) + octet_length(body_text) + octet_length(body_html))
     # body_html is NULL -> coalesce('') -> 0
-    # subject_len = body_len // 10 = 20 (per helper)
-    avg_text_len_expected = body_len + (body_len // 10)
-    projected_fts_v2_expected = rows * avg_text_len_expected * cfg.fts_v2_blowup_factor
+    # subject_len = body_len // 10 = 20 (per helper); ASCII so length == octet_length
+    avg_text_bytes_expected = body_len + (body_len // 10)
+    projected_fts_v2_expected = rows * avg_text_bytes_expected * cfg.fts_v2_blowup_factor
     # ±10% absorbs avg() returning a Decimal with rounding.
     assert result.projected_bytes["fts_v2"] == pytest.approx(
         projected_fts_v2_expected, rel=0.1
@@ -150,6 +152,12 @@ def test_estimate_0006_pending_with_seeded_rows(db_conn):
     )
     # Duration is non-zero and positive.
     assert result.projected_duration_s > 0.0
+    # Chunks-GIN cannot be sized before chunks exist; pin the warning
+    # string so a future rewrite doesn't silently break the operator
+    # contract documented in the runbook.
+    assert any(
+        "chunks GIN size cannot be projected" in w for w in result.warnings
+    ), f"expected chunks-GIN warning in {result.warnings!r}"
 
 
 def test_estimate_0006_pending_duration_uses_config_rates(db_conn):

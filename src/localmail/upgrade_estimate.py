@@ -129,7 +129,7 @@ def estimate_0006(
             warnings=["messages table not present — run `localmail init-db` first"],
         )
     if applied:
-        return _estimate_0006_applied(conn, cfg)
+        return _estimate_0006_applied(conn)
     return _estimate_0006_pending(conn, cfg)
 
 
@@ -160,21 +160,25 @@ def _estimate_0006_pending(
         assert row is not None
         current_table_bytes = int(row[0])
 
+        # octet_length() returns UTF-8 byte count, not character count —
+        # the projection is in bytes, so this matters for CJK / emoji /
+        # any non-ASCII content where the byte count is 2-4x the
+        # character count.
         cur.execute(
             """
             SELECT avg(
-                length(coalesce(subject, ''))
-                + length(coalesce(body_text, ''))
-                + length(coalesce(body_html, ''))
+                octet_length(coalesce(subject, ''))
+                + octet_length(coalesce(body_text, ''))
+                + octet_length(coalesce(body_html, ''))
             )
             FROM messages
             """
         )
         row = cur.fetchone()
         assert row is not None
-        avg_text_len = float(row[0] or 0.0)
+        avg_text_bytes = float(row[0] or 0.0)
 
-    projected_fts_v2 = int(rows * avg_text_len * cfg.fts_v2_blowup_factor)
+    projected_fts_v2 = int(rows * avg_text_bytes * cfg.fts_v2_blowup_factor)
     projected_gin_messages = int(projected_fts_v2 * cfg.gin_size_factor)
     # chunks GIN is independent of the messages fts column — we have no
     # signal here for sizing it accurately because message_chunks is
@@ -207,11 +211,11 @@ def _estimate_0006_pending(
     )
 
 
-def _estimate_0006_applied(
-    conn: psycopg.Connection,
-    cfg: UpgradeEstimateConfig,
-) -> EstimateResult:
+def _estimate_0006_applied(conn: psycopg.Connection) -> EstimateResult:
     """Report actual sizes for migration 0006's two GIN indexes.
+
+    Takes no ``cfg`` — the applied branch reports observed sizes only,
+    no projection math.
 
     If a named index is missing (operator manually dropped it), a
     warning is appended and that index's size key is omitted from

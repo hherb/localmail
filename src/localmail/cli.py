@@ -792,7 +792,7 @@ def estimate_upgrade(fmt: str) -> None:
             applied = _applied_revisions(conn)
             cfg = load_config().upgrade
             results = [
-                fn(conn, cfg, applied=(rev in applied))
+                fn(conn, cfg, rev in applied)
                 for rev, fn in ESTIMATORS.items()
             ]
     except Exception as exc:

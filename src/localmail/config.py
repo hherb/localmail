@@ -298,6 +298,39 @@ class SearchConfig(BaseModel):
     log_queries: bool = False
 
 
+class UpgradeEstimateConfig(BaseModel):
+    """Throughput rates used by `localmail estimate-upgrade` to project
+    lock-holding duration for lock-heavy migrations against a populated
+    `messages` table. See docs/operations/upgrade-runbook.md.
+
+    All four constants are tunable per-installation: an operator on slow
+    storage (HDD, low-memory) should halve the throughput rates; an
+    operator on NVMe with abundant RAM may double them. The runbook
+    documents a calibration procedure for operators who care about
+    accuracy.
+    """
+
+    # tsvector stores tokens + positions, so the stored column is larger
+    # than the raw concatenated text it indexes. 1.5x is the rule of
+    # thumb for English / Western European text; languages with longer
+    # average tokens (German compounds, Finnish) trend toward 1.7x.
+    fts_v2_blowup_factor: float = 1.5
+
+    # Typical GIN-on-tsvector ratio: the index is ~40% of the column it
+    # covers. Varies with token uniqueness (higher for diverse vocab).
+    gin_size_factor: float = 0.4
+
+    # SSD baseline for `ALTER TABLE ... ADD COLUMN ... GENERATED ALWAYS
+    # AS ... STORED` — Postgres rewrites the whole table heap. HDD is
+    # ~10x slower; NVMe is ~2x faster.
+    table_rewrite_mb_per_sec: float = 80.0
+
+    # SSD baseline for `CREATE INDEX ... USING GIN`. GIN builds are
+    # CPU-bound (token enumeration) more than I/O-bound; the rate is
+    # less hardware-sensitive than table_rewrite_mb_per_sec.
+    gin_build_mb_per_sec: float = 30.0
+
+
 class Config(BaseModel):
     database: DatabaseConfig
     attachments: AttachmentsConfig = AttachmentsConfig()
@@ -307,6 +340,7 @@ class Config(BaseModel):
     gmail_oauth: GmailOAuthConfig | None = None
     accounts: list[AccountConfig] = Field(default_factory=list)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    upgrade: UpgradeEstimateConfig = Field(default_factory=UpgradeEstimateConfig)
 
 
 # Alias for plans/future code that reference LocalmailConfig

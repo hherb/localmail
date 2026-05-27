@@ -72,3 +72,15 @@ client_secrets_file = "~/.config/localmail/gmail_client_secret.json"
 # timeouts on CPU. Flip to true if you have a GPU and want re-ranked
 # results on sort=rank queries.
 # reranker_enabled = true
+
+# --- upgrade preflight --------------------------------------------------------
+
+# Throughput rates used by `localmail estimate-upgrade` to project how long
+# lock-heavy migrations (e.g. 0006) will hold against a populated `messages`
+# table. Defaults assume SSD + modern Postgres. Halve for HDD / low-memory
+# hosts; double for NVMe + lots of RAM. See docs/operations/upgrade-runbook.md.
+# [upgrade]
+# fts_v2_blowup_factor      = 1.5    # tsvector size vs. raw text
+# gin_size_factor           = 0.4    # GIN index size vs. covered column
+# table_rewrite_mb_per_sec  = 80.0   # ADD COLUMN GENERATED STORED throughput
+# gin_build_mb_per_sec      = 30.0   # CREATE INDEX GIN throughput

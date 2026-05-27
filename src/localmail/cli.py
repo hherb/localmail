@@ -21,6 +21,7 @@ from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
 from .search import create_searcher
 from .sync import backfill_internal_date, retry_failed_messages, sync_account
+from .upgrade_estimate import ESTIMATORS, EstimateResult
 
 
 def _is_loopback_bind(bind: str) -> bool:
@@ -716,6 +717,96 @@ def search_status(fmt):
     else:
         for k, v in payload.items():
             click.echo(f"{k:24s} {v}")
+
+
+def _applied_revisions(conn: psycopg.Connection) -> set[str]:
+    """Return revisions from schema_migrations as a set.
+
+    Returns the empty set if schema_migrations doesn't exist yet
+    (treats everything as pending — same convention as
+    db.pending_migrations).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_name = 'schema_migrations'"
+        )
+        if cur.fetchone() is None:
+            return set()
+        cur.execute("SELECT revision FROM schema_migrations")
+        return {row[0] for row in cur.fetchall()}
+
+
+def _format_estimate_text(results: list[EstimateResult]) -> str:
+    """Render EstimateResult list as a human-readable table."""
+    lines = []
+    for r in results:
+        lines.append(f"revision: {r.revision}")
+        lines.append(f"  status: {r.status}")
+        if r.current_bytes:
+            for k, v in r.current_bytes.items():
+                lines.append(f"  {k}: {v:>15,} bytes ({v / (1024*1024):.1f} MiB)")
+        if r.projected_bytes:
+            for k, v in r.projected_bytes.items():
+                lines.append(f"  {k} (projected): {v:>15,} bytes ({v / (1024*1024):.1f} MiB)")
+        if r.projected_duration_s > 0:
+            mins, secs = divmod(int(r.projected_duration_s), 60)
+            lines.append(f"  projected lock duration: ~{mins}m {secs}s")
+        for w in r.warnings:
+            lines.append(f"  WARNING: {w}")
+        lines.append("")  # blank line between revisions
+    return "\n".join(lines).rstrip()
+
+
+def _estimate_to_json(r: EstimateResult) -> dict:
+    """Project an EstimateResult to a JSON-serialisable dict."""
+    return {
+        "revision": r.revision,
+        "status": r.status,
+        "current_bytes": r.current_bytes,
+        "projected_bytes": r.projected_bytes,
+        "projected_duration_s": r.projected_duration_s,
+        "warnings": r.warnings,
+    }
+
+
+@main.command("estimate-upgrade")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format. text (default) is human-readable; json emits a list.",
+)
+def estimate_upgrade(fmt: str) -> None:
+    """Pre-flight estimator for lock-heavy schema migrations.
+
+    Reports projected (or actual) size + duration for migrations that
+    hold long locks against a populated `messages` table. Read-only;
+    safe to run against a live archive. See
+    docs/operations/upgrade-runbook.md for the full procedure.
+    """
+    dsn = _dsn()
+    try:
+        with psycopg.connect(dsn) as conn:
+            applied = _applied_revisions(conn)
+            cfg = load_config().upgrade
+            results = [
+                fn(conn, cfg, rev in applied)
+                for rev, fn in ESTIMATORS.items()
+            ]
+    except psycopg.Error as exc:
+        # Only DB-level errors are user-facing here (unreachable host,
+        # auth failure, missing schema_migrations on a never-init'd DB
+        # — though that last case is masked by _applied_revisions
+        # returning empty). Programming bugs still raise with their
+        # original traceback.
+        raise click.ClickException(str(exc)) from exc
+
+    if fmt == "json":
+        click.echo(_json.dumps([_estimate_to_json(r) for r in results]))
+    else:
+        click.echo(_format_estimate_text(results))
 
 
 @main.command("list-failed-embeddings")

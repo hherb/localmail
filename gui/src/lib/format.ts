@@ -4,7 +4,7 @@
  * No DOM, no Tauri invokes, no $state. Test as pure functions only.
  */
 
-import type { MessageAddress, MessageSummary, Selection } from "./tauri";
+import type { MessageAddress } from "./tauri";
 
 const FALLBACK_SENDER = "(unknown sender)";
 const ELLIPSIS = "…";
@@ -64,23 +64,4 @@ function sameDay(a: Date, b: Date): boolean {
     a.getMonth() === b.getMonth() &&
     a.getDate() === b.getDate()
   );
-}
-
-/**
- * True if `msg` should be visible under the current selection.
- *
- * `folder` selection narrows by account only (folder narrowing is server-side
- * and deferred to Sub-plan 4 — the loaded `/v1/changes` response does not
- * tell us which folder each message belongs to). Treating "folder"
- * functionally like "account" keeps the UI honest while we wait.
- */
-export function selectionMatches(sel: Selection, msg: MessageSummary): boolean {
-  switch (sel.kind) {
-    case "all":
-      return true;
-    case "account":
-      return msg.account.id === sel.accountId;
-    case "folder":
-      return msg.account.id === sel.accountId;
-  }
 }

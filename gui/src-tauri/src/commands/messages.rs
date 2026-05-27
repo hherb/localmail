@@ -1,8 +1,9 @@
 //! GET /v1/messages/{id} — full message detail.
 //!
-//! Sub-plan 3 consumes `body_text`, key headers, `from`/`to`, `date`, and the
-//! account/folder breadcrumb. `body_html` and `attachments` deserialize for
-//! future use (Sub-plan 4) but are not surfaced in the current UI.
+//! Returns the full RFC822-derived view of a single message: `body_text`,
+//! sanitized `body_html`, `attachments`, key headers, `from`/`to`/`cc`/`bcc`,
+//! `date`, and the account/folder breadcrumb. All fields are now consumed by
+//! the GUI (HTML reading pane + attachments strip).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

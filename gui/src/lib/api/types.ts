@@ -100,13 +100,16 @@ export interface MessageDetail {
 }
 
 /**
- * What the user has selected in the left rail. Drives which subset of the
- * loaded message list the middle pane shows.
+ * What the user has selected in the left rail. A change drives a
+ * server-side refetch via `mail.setSelection` → `loadInitialMessages`,
+ * which calls `/v1/messages` with the matching `account_ids` /
+ * `folder_ids` filter — so the loaded message set is already narrowed
+ * by the time the middle pane renders.
  *
- * - `all`     — "All Mail" pinned entry. Shows everything in the loaded set.
- * - `account` — narrow to one account (filters loaded messages by account.id).
- * - `folder`  — narrow to one folder of one account. Folder filtering is
- *               client-side until Sub-plan 4 wires server-side folder_ids.
+ * - `all`     — "All Mail" pinned entry. No filter.
+ * - `account` — narrow to one account (`account_ids=[accountId]`).
+ * - `folder`  — narrow to one folder of one account
+ *               (`account_ids=[accountId]` + `folder_ids=[folderId]`).
  */
 export type Selection =
   | { kind: "all" }

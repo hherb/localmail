@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  addressLabel,
-  formatRelativeDate,
-  selectionMatches,
-  truncate,
-} from "./format";
-import type { MessageAddress, MessageSummary, Selection } from "./tauri";
+import { addressLabel, formatRelativeDate, truncate } from "./format";
+import type { MessageAddress } from "./tauri";
 
 describe("addressLabel", () => {
   it("prefers name over address", () => {
@@ -73,39 +68,3 @@ describe("formatRelativeDate", () => {
   });
 });
 
-describe("selectionMatches", () => {
-  const mkMsg = (accountId: string): MessageSummary => ({
-    message_id: "1",
-    subject: "x",
-    from: { name: null, address: null },
-    date: null,
-    account: { id: accountId, name: null },
-  });
-
-  it('"all" matches every message', () => {
-    const sel: Selection = { kind: "all" };
-    expect(selectionMatches(sel, mkMsg("1"))).toBe(true);
-    expect(selectionMatches(sel, mkMsg("2"))).toBe(true);
-  });
-
-  it('"account" matches messages of that account', () => {
-    const sel: Selection = { kind: "account", accountId: "1" };
-    expect(selectionMatches(sel, mkMsg("1"))).toBe(true);
-    expect(selectionMatches(sel, mkMsg("2"))).toBe(false);
-  });
-
-  it('"folder" filters by account (folder narrowing is server-side, deferred)', () => {
-    const sel: Selection = { kind: "folder", accountId: "1", folderId: "5" };
-    expect(selectionMatches(sel, mkMsg("1"))).toBe(true);
-    expect(selectionMatches(sel, mkMsg("2"))).toBe(false);
-  });
-
-  it('"folder" ignores folderId — varying it does not change the match', () => {
-    // Documents the deferred behavior: message summaries carry no folder, so
-    // changing the selected folderId can never change a per-message decision.
-    const a: Selection = { kind: "folder", accountId: "1", folderId: "5" };
-    const b: Selection = { kind: "folder", accountId: "1", folderId: "999" };
-    const m = mkMsg("1");
-    expect(selectionMatches(a, m)).toBe(selectionMatches(b, m));
-  });
-});

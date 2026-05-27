@@ -133,6 +133,56 @@ def estimate_0006(
     return _estimate_0006_pending(conn, cfg)
 
 
+_CHUNKS_GIN_EMPTY_WARNING = (
+    "message_chunks GIN size cannot be projected before chunks exist; "
+    "rerun after the embed worker has populated chunks for an accurate "
+    "estimate."
+)
+
+
+def _project_chunks_gin_bytes(
+    conn: psycopg.Connection,
+    cfg: UpgradeEstimateConfig,
+    warnings: list[str],
+) -> int:
+    """Project bytes-on-disk for ``message_chunks_fts_idx`` post-migration.
+
+    Returns 0 and appends ``_CHUNKS_GIN_EMPTY_WARNING`` to ``warnings`` if
+    ``message_chunks`` is empty or missing — same honest-zero contract as
+    the original implementation, just scoped to one helper so the
+    pending-branch math stays readable.
+
+    Mirrors the messages-GIN formula:
+        rows × avg(octet_length(text)) × fts_v2_blowup × gin_size
+
+    ``octet_length`` is intentional (matches the messages-side projection
+    so non-ASCII chunks don't underestimate the disk footprint).
+    """
+    if not _table_exists(conn, "message_chunks"):
+        warnings.append(_CHUNKS_GIN_EMPTY_WARNING)
+        return 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), avg(octet_length(text)) FROM message_chunks"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        chunks_count = int(row[0])
+        avg_chunk_text_bytes = float(row[1] or 0.0)
+
+    if chunks_count == 0:
+        warnings.append(_CHUNKS_GIN_EMPTY_WARNING)
+        return 0
+
+    return int(
+        chunks_count
+        * avg_chunk_text_bytes
+        * cfg.fts_v2_blowup_factor
+        * cfg.gin_size_factor
+    )
+
+
 def _estimate_0006_pending(
     conn: psycopg.Connection,
     cfg: UpgradeEstimateConfig,
@@ -180,21 +230,22 @@ def _estimate_0006_pending(
 
     projected_fts_v2 = int(rows * avg_text_bytes * cfg.fts_v2_blowup_factor)
     projected_gin_messages = int(projected_fts_v2 * cfg.gin_size_factor)
-    # chunks GIN is independent of the messages fts column — we have no
-    # signal here for sizing it accurately because message_chunks is
-    # populated by the embed worker, not by the migration itself. Project
-    # as zero with a warning so the output stays honest.
-    projected_gin_chunks = 0
-    warnings.append(
-        "message_chunks GIN size cannot be projected before chunks exist; "
-        "rerun after the embed worker has populated chunks for an accurate "
-        "estimate."
-    )
+
+    # chunks GIN: project from message_chunks when populated (the embed
+    # worker may have run between 0004 and 0006), else fall back to 0
+    # with a warning so the output stays honest. Mirrors the messages
+    # GIN formula: text bytes × blowup × gin_size.
+    projected_gin_chunks = _project_chunks_gin_bytes(conn, cfg, warnings)
 
     rewrite_duration = (
         current_table_bytes + projected_fts_v2
     ) / (cfg.table_rewrite_mb_per_sec * _MIB)
-    gin_duration = projected_gin_messages / (cfg.gin_build_mb_per_sec * _MIB)
+    # Both GIN builds contribute to the lock window; sum them so an
+    # operator with a populated message_chunks table doesn't undersize
+    # their maintenance window.
+    gin_duration = (
+        projected_gin_messages + projected_gin_chunks
+    ) / (cfg.gin_build_mb_per_sec * _MIB)
     projected_duration_s = rewrite_duration + gin_duration
 
     return EstimateResult(

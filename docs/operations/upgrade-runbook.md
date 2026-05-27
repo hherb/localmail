@@ -64,10 +64,15 @@ How to read each line:
   + body_html` text length per row.
 - **`gin_messages (projected)`** — additional storage for the GIN
   index over `fts_v2`. Typically 40% of the column size.
-- **`gin_chunks (projected): 0 bytes`** — `message_chunks` is empty
-  until the embed worker runs. The estimator can't size this index
-  pre-fact. Re-run the estimator after the embed worker has been
-  running for a bit if you want an accurate post-0006 picture.
+- **`gin_chunks (projected)`** — additional storage for the GIN
+  index over `message_chunks.fts`. On a fresh archive
+  `message_chunks` is empty (no embed worker has run yet) so the
+  estimator reports `0 bytes` and surfaces a warning that the
+  number is a lower bound. On an archive where the embed worker
+  has already populated `message_chunks` — which happens when
+  0004 is applied but 0006 is still pending, or on a re-estimate
+  after a partial run — the projection sums the chunks-GIN with
+  the messages-GIN and the warning is suppressed.
 - **`projected lock duration`** — sum of the table-rewrite duration
   (driven by `table_rewrite_mb_per_sec` in config) and the
   GIN-build duration (driven by `gin_build_mb_per_sec`). These are
@@ -92,8 +97,11 @@ Pick one of these based on your tolerance for write downtime:
 
 1. Run `localmail estimate-upgrade` to get a duration estimate.
 2. Schedule a maintenance window of `2 × estimated_duration` (the 2×
-   absorbs ETA error and gives you room to investigate if something
-   goes wrong).
+   absorbs ETA error from the throughput-rate defaults and gives
+   you room to investigate if something goes wrong; if the
+   estimator output included the chunks-GIN cannot-be-projected
+   warning, the projection is a lower bound and the safety margin
+   is consumed accordingly).
 3. Stop the daemon, any cron jobs, and any external writers.
 4. `pg_dump` the database (always — see "Disk-space planning" below
    for the size impact).

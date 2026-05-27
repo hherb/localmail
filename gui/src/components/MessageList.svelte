@@ -35,6 +35,10 @@
         })),
   );
 
+  // Account-level client-side filter for the brief window between
+  // `setSelection` and the refetched `/v1/messages` response landing —
+  // narrowing here keeps stale rows from the previous selection hidden.
+  // Folder narrowing is server-side only (`folder_ids` on the refetch).
   let visible = $derived(
     searchActive
       ? rows

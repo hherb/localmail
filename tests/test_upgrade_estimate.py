@@ -171,3 +171,29 @@ def test_estimate_0006_pending_duration_uses_config_rates(db_conn):
     # delta is bounded below by (rewrite_fast_term - rewrite_slow_term).
     # Sanity check: slow duration is at least 10x fast.
     assert r_slow.projected_duration_s >= 10 * r_fast.projected_duration_s
+
+
+def test_estimate_0006_not_applicable_when_messages_missing(db_conn):
+    """If messages table doesn't exist, return not_applicable with a
+    friendly warning. Uses a savepoint + rollback so we don't break
+    the schema for subsequent tests in the same session."""
+    cfg = UpgradeEstimateConfig()
+    with db_conn.cursor() as cur:
+        cur.execute("SAVEPOINT before_drop_messages")
+        # CASCADE drops dependent FKs (message_labels.message_id, etc).
+        # All restored by the ROLLBACK TO SAVEPOINT below — DDL in
+        # PostgreSQL is transactional.
+        cur.execute("DROP TABLE messages CASCADE")
+        try:
+            result = estimate_0006(db_conn, cfg, applied=False)
+        finally:
+            cur.execute("ROLLBACK TO SAVEPOINT before_drop_messages")
+
+    assert result.revision == "0006_search_indexes"
+    assert result.status == "not_applicable"
+    assert result.current_bytes == {}
+    assert result.projected_bytes == {}
+    assert result.projected_duration_s == 0.0
+    assert any("messages table not present" in w for w in result.warnings), (
+        f"expected friendly missing-table warning in {result.warnings!r}"
+    )

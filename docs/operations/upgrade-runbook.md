@@ -72,7 +72,10 @@ How to read each line:
   has already populated `message_chunks` — which happens when
   0004 is applied but 0006 is still pending, or on a re-estimate
   after a partial run — the projection sums the chunks-GIN with
-  the messages-GIN and the warning is suppressed.
+  the messages-GIN and the warning is suppressed. The populated
+  branch issues a single `count(*) + avg(octet_length(text))`
+  scan of `message_chunks`; on archives with tens of millions of
+  chunks expect the estimator itself to take a few seconds.
 - **`projected lock duration`** — sum of the table-rewrite duration
   (driven by `table_rewrite_mb_per_sec` in config) and the
   GIN-build duration (driven by `gin_build_mb_per_sec`). These are

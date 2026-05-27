@@ -312,17 +312,15 @@ def test_estimate_0006_pending_with_populated_chunks_projects_chunks_gin(db_conn
 
     assert result.status == "pending"
     assert result.projected_bytes["gin_chunks"] > 0
-    # text is ASCII so octet_length == len(text). Same blowup + gin_size
-    # factors as the messages GIN.
-    expected_gin_chunks = (
+    # text is ASCII so octet_length == len(text); applying the same int()
+    # truncation as the helper makes the expected value exact.
+    expected_gin_chunks = int(
         chunks_count
         * chunk_text_len
         * cfg.fts_v2_blowup_factor
         * cfg.gin_size_factor
     )
-    assert result.projected_bytes["gin_chunks"] == pytest.approx(
-        expected_gin_chunks, rel=0.1
-    )
+    assert result.projected_bytes["gin_chunks"] == expected_gin_chunks
     # The "cannot be projected" warning must NOT appear when chunks exist.
     assert not any(
         "chunks GIN size cannot be projected" in w for w in result.warnings

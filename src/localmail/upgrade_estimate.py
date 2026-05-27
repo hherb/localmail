@@ -145,18 +145,12 @@ def _project_chunks_gin_bytes(
     cfg: UpgradeEstimateConfig,
     warnings: list[str],
 ) -> int:
-    """Project bytes-on-disk for ``message_chunks_fts_idx`` post-migration.
+    """Project bytes-on-disk for ``message_chunks_fts_idx``; 0 + warning if
+    table missing or empty.
 
-    Returns 0 and appends ``_CHUNKS_GIN_EMPTY_WARNING`` to ``warnings`` if
-    ``message_chunks`` is empty or missing — same honest-zero contract as
-    the original implementation, just scoped to one helper so the
-    pending-branch math stays readable.
-
-    Mirrors the messages-GIN formula:
-        rows × avg(octet_length(text)) × fts_v2_blowup × gin_size
-
-    ``octet_length`` is intentional (matches the messages-side projection
-    so non-ASCII chunks don't underestimate the disk footprint).
+    Mirrors the messages-GIN formula: ``rows × avg(octet_length(text)) ×
+    fts_v2_blowup × gin_size``. ``octet_length`` (not ``length``) so
+    non-ASCII chunks don't underestimate the UTF-8 byte footprint.
     """
     if not _table_exists(conn, "message_chunks"):
         warnings.append(_CHUNKS_GIN_EMPTY_WARNING)

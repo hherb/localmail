@@ -42,14 +42,24 @@ def test_cli_estimate_upgrade_json_output(cli_config, db_conn):
 
 
 def test_cli_estimate_upgrade_db_unreachable(monkeypatch, tmp_path):
-    """Bad DSN -> non-zero exit + clear error on stderr."""
+    """Bad DSN -> exit 1 (Click idiom) + clear error on stderr.
+
+    Pins the wire contract documented in the Failure modes table of
+    docs/superpowers/specs/2026-05-27-large-archive-upgrade-estimator-design.md:
+    `click.ClickException` exits 1, matching every other `localmail`
+    subcommand. Scripts that need a structured channel use
+    `--format json`; the exit code is not differentiated from other
+    CLI errors.
+    """
     stub = tmp_path / "config.toml"
     stub.write_text('[database]\ndsn = "postgresql://unreachable:1/no_such_db"\n')
     monkeypatch.setenv("LOCALMAIL_CONFIG", str(stub))
 
     runner = CliRunner()
     result = runner.invoke(main, ["estimate-upgrade"])
-    assert result.exit_code != 0
+    assert result.exit_code == 1, (
+        f"expected exit 1 (Click idiom), got {result.exit_code}: {result.output!r}"
+    )
     # Don't pin the exact wording — psycopg's connection-error string
     # varies by platform. Broaden the check to cover common forms:
     # "connect", "could not", "resolve", "no such host", etc.

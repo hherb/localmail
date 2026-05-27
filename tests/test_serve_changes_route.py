@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from localmail.config import ServeConfig
 from localmail.serve.app import create_app
+from localmail.serve.routes.changes import _DEFAULT_LIMIT
 
 # Tests insert + read messages within the same millisecond; the production
 # safe-horizon would mask every just-seeded row. Drop it to 0 so the test
@@ -185,6 +186,47 @@ def test_changes_wire_date_falls_back_to_date_sent_when_internal_date_null(
     r = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
     body = r.json()
     assert datetime.fromisoformat(body["new_messages"][0]["date"]) == header_date
+
+
+def test_changes_no_cursor_caps_at_default_limit_in_desc_order(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    """`/v1/changes` without a cursor is a **tail subscription**, not a
+    full archive scan — it returns at most ``_DEFAULT_LIMIT`` rows in
+    ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC``
+    order. This pins the wire contract resolved in #38: backfill goes
+    through ``/v1/messages``; ``/v1/changes`` stays tail-only. Removing
+    the cap (e.g. to support initial archive scroll) would make a
+    first-time client against a 1M-message archive try to load the whole
+    table in one response — exactly the surprise #38 was filed against.
+
+    Seeds ``_DEFAULT_LIMIT + 5`` rows so the cap is observable and not
+    coincidentally equal to the seeded count.
+    """
+    base = datetime.now(timezone.utc) - timedelta(days=1)
+    seeded = _DEFAULT_LIMIT + 5
+    seeded_ids: list[int] = []
+    for i in range(seeded):
+        when = base + timedelta(seconds=i)
+        # 4-char hex suffix scales to 65535 rows; _seed_msg expands it to
+        # a valid BYTEA via ``bytes.fromhex(suffix * 32)``, unique per i.
+        suffix = f"{i:04x}"
+        seeded_ids.append(_seed_msg(db_conn, when, suffix))
+    db_conn.commit()
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG))
+    r = c.get("/v1/changes", headers={"Authorization": f"Bearer {api_token}"})
+    assert r.status_code == 200
+    body = r.json()
+    new_messages = body["new_messages"]
+    assert len(new_messages) == _DEFAULT_LIMIT
+
+    # DESC order: each seeded row had a strictly increasing date, so the
+    # first row in the response is the highest-seeded id, and every
+    # subsequent id is strictly smaller.
+    returned_ids = [int(m["message_id"]) for m in new_messages]
+    assert returned_ids == sorted(returned_ids, reverse=True)
+    assert returned_ids[0] == seeded_ids[-1]
 
 
 def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db_conn) -> None:

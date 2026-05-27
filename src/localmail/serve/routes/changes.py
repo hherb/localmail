@@ -23,6 +23,16 @@ def changes(
 ) -> dict[str, Any]:
     """Return messages whose id > since cursor (or recent if no cursor).
 
+    **Tail-subscription endpoint, not a backfill walk (#38).** Capped at
+    ``_DEFAULT_LIMIT`` (200) rows per call. With no ``since`` cursor the
+    response is the 200 most recent messages across the caller's allowed
+    accounts; with ``since=N`` it is up to 200 messages newer than ``id=N``.
+    Clients use this for live polling — initial backfill and "load older"
+    pagination go through ``GET /v1/messages`` (keyset cursor on the same
+    sort order, no row cap). The spec at
+    ``docs/superpowers/specs/2026-05-17-localmail-gui-design.md`` codifies
+    the split; do NOT add a ``min_id`` / ``before`` parameter here.
+
     Filtered to accounts the caller can read (`user_accounts` join). Users
     with no grants get an empty result set and a `next_cursor` of "0" — the
     same shape the v1 client already handles for fresh-account polling.

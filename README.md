@@ -322,6 +322,12 @@ response carries `next_cursor`; pass it back as `?cursor=…` to walk
 the archive. The cursor is opaque (URL-safe base64) — do not parse it
 client-side.
 
+`/v1/messages` is the canonical **backfill / "load older"** endpoint;
+`/v1/changes` is the live-tail subscription (capped at 200 rows per
+call, with or without a `since` cursor). Clients use `/v1/messages`
+for initial mail-list load and history scroll, and `/v1/changes` for
+polling new arrivals.
+
 `GET /v1/search` supports two cursor flavours, transparently:
 
 - **Pool cursor** (`"<token>:<page>"`) — paged result from the

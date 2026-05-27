@@ -102,6 +102,14 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 > [docs/superpowers/specs/2026-05-18-per-user-account-acl-design.md](docs/superpowers/specs/2026-05-18-per-user-account-acl-design.md)
 > for the full design.
 
+> **Upgrading on a populated archive?** Before running `localmail
+> init-db` against a large pre-existing `messages` table, read
+> [docs/operations/upgrade-runbook.md](docs/operations/upgrade-runbook.md)
+> and run `localmail estimate-upgrade` first. Migration 0006 holds an
+> `ACCESS EXCLUSIVE` lock for the duration of an `ADD COLUMN ...
+> GENERATED STORED` table rewrite, which can take minutes to hours
+> on a multi-million-row archive.
+
 ## Gmail OAuth2 setup
 
 Gmail requires OAuth2 for IMAP since 2022. To configure an OAuth2 account:

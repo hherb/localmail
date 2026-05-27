@@ -45,6 +45,8 @@ uv run localmail lang-backfill                 # one-shot body_lang detection fo
 uv run localmail backfill-internal-date [--account N]  # IMAP INTERNALDATE for legacy rows
 uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
 uv run localmail retry-failed-extractions      # re-attempt every failed extraction
+uv run localmail estimate-upgrade [--format text|json]   # pre-flight size/duration for lock-heavy migrations
+# see docs/operations/upgrade-runbook.md
 # search-status reports Phase 2 attachment_text/attachment_chunks counts and
 # body_lang_populated / body_lang_pending
 ```

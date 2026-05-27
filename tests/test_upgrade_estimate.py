@@ -65,6 +65,41 @@ def _seed_messages_with_known_text(
     conn.commit()
 
 
+def _seed_message_chunks(
+    conn, *, message_id: int, count: int, text_len: int
+) -> None:
+    """Insert ``count`` rows into ``message_chunks`` against ``message_id``.
+
+    Each chunk has ``text`` of length ``text_len`` (ASCII, so
+    octet_length == len), kind 'body', and unique chunk_idx within the
+    message. ``token_count`` is a rough estimate and not load-bearing
+    for the estimator (which reads ``text`` only).
+    """
+    text = "c" * text_len
+    token_count = max(1, text_len // 4)
+    with conn.cursor() as cur:
+        for i in range(count):
+            cur.execute(
+                """
+                INSERT INTO message_chunks (
+                    message_id, kind, chunk_idx, text, token_count
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (message_id, "body", i, text, token_count),
+            )
+    conn.commit()
+
+
+def _first_message_id(conn) -> int:
+    """Return any message id; the chunks-GIN projection doesn't care which."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM messages LIMIT 1")
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
 def test_estimate_result_is_immutable_dataclass():
     """EstimateResult is frozen — accidental mutation must fail."""
     r = EstimateResult(
@@ -248,3 +283,98 @@ def test_estimate_0006_applied_with_index_missing_emits_warning(db_conn):
     ), f"expected missing-index warning in {result.warnings!r}"
     # The chunks GIN still exists, so it should still report a size.
     assert "message_chunks_fts_idx" in result.current_bytes
+
+
+# ---- issue #106: chunks-GIN projection when message_chunks is populated ---
+
+
+def test_estimate_0006_pending_with_populated_chunks_projects_chunks_gin(db_conn):
+    """When message_chunks is non-empty, gin_chunks projection is positive
+    and the 'cannot be projected' warning is absent.
+
+    Acceptance criterion from issue #106.
+    """
+    account_id = _seed_account(db_conn)
+    _seed_messages_with_known_text(
+        db_conn, account_id=account_id, count=5, body_len=200
+    )
+    chunks_count = 20
+    chunk_text_len = 500
+    _seed_message_chunks(
+        db_conn,
+        message_id=_first_message_id(db_conn),
+        count=chunks_count,
+        text_len=chunk_text_len,
+    )
+
+    cfg = UpgradeEstimateConfig()
+    result = estimate_0006(db_conn, cfg, applied=False)
+
+    assert result.status == "pending"
+    assert result.projected_bytes["gin_chunks"] > 0
+    # text is ASCII so octet_length == len(text); applying the same int()
+    # truncation as the helper makes the expected value exact.
+    expected_gin_chunks = int(
+        chunks_count
+        * chunk_text_len
+        * cfg.fts_v2_blowup_factor
+        * cfg.gin_size_factor
+    )
+    assert result.projected_bytes["gin_chunks"] == expected_gin_chunks
+    # The "cannot be projected" warning must NOT appear when chunks exist.
+    assert not any(
+        "chunks GIN size cannot be projected" in w for w in result.warnings
+    ), (
+        "unexpected chunks-projection warning when chunks populated: "
+        f"{result.warnings!r}"
+    )
+
+
+def test_estimate_0006_pending_chunks_gin_contributes_to_duration(db_conn):
+    """The chunks-GIN component must contribute to projected_duration_s.
+
+    Compare the same message corpus with and without chunks: populating
+    chunks must push the projected duration strictly higher, because the
+    duration formula sums both GIN sizes / build throughput.
+    """
+    account_id = _seed_account(db_conn)
+    _seed_messages_with_known_text(
+        db_conn, account_id=account_id, count=5, body_len=200
+    )
+    cfg = UpgradeEstimateConfig()
+    baseline = estimate_0006(db_conn, cfg, applied=False)
+
+    _seed_message_chunks(
+        db_conn,
+        message_id=_first_message_id(db_conn),
+        count=20,
+        text_len=500,
+    )
+    with_chunks = estimate_0006(db_conn, cfg, applied=False)
+
+    assert with_chunks.projected_duration_s > baseline.projected_duration_s
+
+
+def test_estimate_0006_pending_empty_chunks_still_warns(db_conn):
+    """Regression pin: when ``message_chunks`` is empty the
+    'cannot be projected' warning must still appear and gin_chunks
+    must be zero.
+
+    Tightens the contract documented in the runbook and addresses
+    issue #105 (was a one-line follow-up of PR #102).
+    """
+    account_id = _seed_account(db_conn)
+    _seed_messages_with_known_text(
+        db_conn, account_id=account_id, count=5, body_len=200
+    )
+    cfg = UpgradeEstimateConfig()
+
+    result = estimate_0006(db_conn, cfg, applied=False)
+
+    assert result.projected_bytes["gin_chunks"] == 0
+    assert any(
+        "chunks GIN size cannot be projected" in w for w in result.warnings
+    ), (
+        "expected chunks-GIN cannot-be-projected warning when chunks empty: "
+        f"{result.warnings!r}"
+    )

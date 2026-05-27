@@ -218,3 +218,25 @@ def test_estimate_0006_applied_reports_actual_sizes(db_conn):
     # message_chunks_fts_idx is on an empty table here, so its
     # pg_total_relation_size will be small but should still be returned.
     assert "message_chunks_fts_idx" in result.current_bytes
+
+
+def test_estimate_0006_applied_with_index_missing_emits_warning(db_conn):
+    """Drop the messages GIN inside a savepoint; estimator must report it."""
+    cfg = UpgradeEstimateConfig()
+
+    with db_conn.cursor() as cur:
+        cur.execute("SAVEPOINT before_drop_idx")
+        cur.execute("DROP INDEX messages_fts_v2_idx")
+
+        try:
+            result = estimate_0006(db_conn, cfg, applied=True)
+        finally:
+            cur.execute("ROLLBACK TO SAVEPOINT before_drop_idx")
+
+    assert result.status == "applied"
+    assert "messages_fts_v2_idx" not in result.current_bytes
+    assert any(
+        "messages_fts_v2_idx missing" in w for w in result.warnings
+    ), f"expected missing-index warning in {result.warnings!r}"
+    # The chunks GIN still exists, so it should still report a size.
+    assert "message_chunks_fts_idx" in result.current_bytes

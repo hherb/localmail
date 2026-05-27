@@ -1,8 +1,9 @@
-//! GET /v1/changes — recent messages across all accounts.
+//! GET /v1/changes — tail-only polling for recently-arrived messages.
 //!
-//! Sub-plan 3 uses the no-cursor form to seed the message list with the
-//! latest ~200 messages. A `since` cursor for incremental polling lands in
-//! Sub-plan 5 (background change polling).
+//! Used by `mail.svelte.ts::pollOnce` for the foreground change banner. The
+//! `since` cursor advances forward only; the endpoint is **not** a backwards
+//! browse / backfill path (#38). For initial load, pagination, and
+//! selection-driven refetch, see `browse.rs` (`GET /v1/messages`).
 
 use serde::{Deserialize, Serialize};
 

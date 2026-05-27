@@ -1,8 +1,14 @@
 //! GET /v1/messages — keyset-paginated browse.
 //!
-//! Mirrors the wire shape of /v1/changes but supports a `cursor` query
-//! parameter for paging into older messages. /v1/changes stays in place
-//! for forward incremental polling.
+//! Canonical browse / backfill endpoint (#38). Supports `account_ids`,
+//! `folder_ids`, `limit`, and a `cursor` query parameter for paging into
+//! older messages, ordered `COALESCE(internal_date, date_sent) DESC NULLS
+//! LAST, id DESC`. The GUI's initial mail-list load and every `setSelection`
+//! refetch go here.
+//!
+//! `/v1/changes` (see `changes.rs`) stays in place for forward incremental
+//! polling only — it is tail-only by design and does NOT take a backwards
+//! cursor.
 
 use serde::{Deserialize, Serialize};
 

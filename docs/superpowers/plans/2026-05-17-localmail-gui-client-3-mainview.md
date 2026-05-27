@@ -1,5 +1,23 @@
 # localmail GUI Client — Sub-plan 3: Main view shell
 
+> **HISTORICAL — superseded for the "Known shortcut" only.** This sub-plan
+> shipped as written. The `/v1/changes`-as-initial-loader workaround
+> documented under *Known shortcut (acknowledged tech debt)* below has
+> since been resolved: `/v1/messages` (keyset browse) shipped in
+> [PR #70](https://github.com/hherb/localmail/pull/70) and is now the
+> canonical initial-load + pagination + selection-refetch endpoint in
+> `mail.svelte.ts`. `/v1/changes` is tail-polling only — codified in
+> [PR #110](https://github.com/hherb/localmail/pull/110) /
+> [#38](https://github.com/hherb/localmail/issues/38). The rest of the
+> sub-plan (Rust commands, store shape, components, screen composition)
+> is still the live record of how the main view was built. Treat the
+> *Known shortcut* paragraph and the `selectionMatches`-via-client-side-
+> filter design as historical context, not current behaviour.
+>
+> See the up-to-date pagination plan at
+> [`2026-05-20-pagination.md`](2026-05-20-pagination.md) for the
+> `/v1/messages` wiring details.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the Sub-plan 2 placeholder `AuthenticatedShell` with a real Layout-A 3-pane main view: account/folder tree on the left, message list in the middle, plain-text reading pane on the right. Done when you launch the app, log in, see your accounts + folders in the tree, the latest ~200 messages in the middle, and clicking a message renders its plain-text body + key headers in the reading pane.

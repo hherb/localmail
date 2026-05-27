@@ -183,7 +183,7 @@ the standard login screen appears with the current view preserved.
 |---|---|---|
 | `GET` | `/v1/accounts` | Array of `{id, name, address, capabilities: {can_sync, is_archive_only, is_shared}, last_sync_at, message_count}`. |
 | `GET` | `/v1/accounts/{id}/folders` | Array of `{id, name, full_path, flags, message_count, last_uid}`. |
-| `GET` | `/v1/folders/{id}/messages` | List messages newest-first, cursor-paginated, `MessageSummary` shape. |
+| `GET` | `/v1/messages?account_id&folder_id&cursor&limit` | Keyset-paginated browse of messages, newest first. `account_id` and `folder_id` are repeatable query params and intersect with the caller's ACL grants at the SQL boundary. Returns `{messages: [MessageSummary], next_cursor}` where `next_cursor` is opaque (URL-safe base64); `null` when the scan reaches the end. This is the **canonical backfill / browse** endpoint; clients use it for initial mail-list load and for "load older" pagination. See also `/v1/changes` (live tail) below. |
 
 #### Search
 
@@ -264,11 +264,28 @@ so a sanitizer bypass cannot load remote resources or run scripts.
 Attachments are keyed by SHA-256 globally (content-addressable). Per-message
 filename lives in `MessageDetail.attachments`.
 
-#### Changes (polling)
+#### Changes (polling / live tail)
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/v1/changes?since=<cursor>` | `{new_messages: [MessageSummary], next_cursor}`. Client polls e.g. every 30s on the active folder/search. v1 returns new messages only (no deletions/flag changes — localmail is read-only w.r.t. IMAP). |
+
+**`/v1/changes` is the live-tail subscription, not a backfill endpoint** (#38).
+With no `since` cursor the response is capped at the 200 most recent
+messages across the caller's allowed accounts; with `since=N` it returns
+up to 200 messages newer than `id=N`. This bounds the polling cost and
+makes reconnects cheap, but it means a first-time client cannot walk
+older history through this endpoint.
+
+**For initial backfill and "load older" pagination, use `/v1/messages`**
+(see [Accounts & folders](#accounts--folders) above). Both endpoints
+use the same `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC`
+sort order and the same `MessageSummary` shape, so a client that mixes
+`/v1/messages` (backfill on open) with `/v1/changes` (poll for new
+arrivals) renders them identically. Do not extend `/v1/changes` with a
+`min_id` / `before` parameter — that would couple a polling endpoint
+to a backfill use case and complicate the safe-horizon semantics
+(which only make sense for forward / "new" rows).
 
 ### Deliberately deferred
 

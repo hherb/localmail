@@ -26,6 +26,13 @@ def browse(
 ) -> dict[str, Any]:
     """Keyset-paginated browse of messages, newest first.
 
+    **Canonical browse / backfill endpoint (#38).** Clients use this for
+    initial mail-list load and "load older" pagination. Sort order is
+    ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC``,
+    matching ``/v1/changes`` so a client that mixes the two renders rows
+    identically. Unbounded scroll (no row cap, no ``since`` analogue);
+    live polling for newly-arrived mail goes through ``GET /v1/changes``.
+
     `account_id` / `folder_id` are repeatable query parameters and intersect
     with the caller's ACL grants at the service-layer SQL boundary.
     """

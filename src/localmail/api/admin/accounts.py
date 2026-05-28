@@ -14,6 +14,7 @@ from typing import Literal, cast
 import psycopg
 from psycopg.types.json import Jsonb
 
+from localmail import secrets as _secrets
 from localmail.api.errors import NotFound
 
 
@@ -239,3 +240,23 @@ def delete_account(conn: psycopg.Connection, account_id: int,
                     f"account {account_id} still has messages; pass force=True"
                 )
         cur.execute("DELETE FROM accounts WHERE id = %s", (account_id,))
+
+
+def store_password(account: Account, password: str) -> None:
+    """Store an IMAP password for the given account in the keyring."""
+    if account.auth_method != 'password':
+        raise AccountFieldError(
+            f"store_password requires auth_method='password', got "
+            f"{account.auth_method!r}"
+        )
+    _secrets.set_password(account.name, password)
+
+
+def clear_secret(account: Account) -> None:
+    """Best-effort clear both the password and any refresh-token entries.
+
+    Missing entries are tolerated — the operator-facing intent is
+    "leave nothing behind", not "fail if nothing is there".
+    """
+    _secrets.delete_password(account.name)
+    _secrets.delete_refresh_token(account.name)

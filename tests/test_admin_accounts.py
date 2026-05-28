@@ -1,12 +1,13 @@
 """Service-layer tests for localmail.api.admin.accounts."""
 
+import keyring
 import pytest
 
 from localmail.api.admin.accounts import (
     Account, AccountSummary,
     AccountFieldError, AccountInUse,
-    create_account, delete_account, get_account,
-    list_accounts, update_account,
+    clear_secret, create_account, delete_account, get_account,
+    list_accounts, store_password, update_account,
 )
 from localmail.api.errors import NotFound
 
@@ -185,3 +186,26 @@ def test_delete_account_with_messages_force_cascades(db_conn):
     delete_account(db_conn, aid, force=True)
     with pytest.raises(NotFound):
         get_account(db_conn, aid)
+
+
+def test_store_password_writes_keyring(db_conn):
+    aid = _insert_account(db_conn, name='kring')
+    acct = get_account(db_conn, aid)
+    store_password(acct, 'sekret')
+    assert keyring.get_password('localmail', 'kring') == 'sekret'
+
+
+def test_clear_secret_removes_keyring_entries(db_conn):
+    aid = _insert_account(db_conn, name='kring2')
+    acct = get_account(db_conn, aid)
+    store_password(acct, 'sekret')
+    keyring.set_password('localmail', 'kring2:refresh', 'refr')
+    clear_secret(acct)
+    assert keyring.get_password('localmail', 'kring2') is None
+    assert keyring.get_password('localmail', 'kring2:refresh') is None
+
+
+def test_clear_secret_tolerates_missing_keyring_entries(db_conn):
+    aid = _insert_account(db_conn, name='kring3')
+    acct = get_account(db_conn, aid)
+    clear_secret(acct)  # no-op, no raise

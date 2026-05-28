@@ -99,7 +99,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0022_api_users_sessions_invalidated_at.sql
+migrations/         # 0001_init.sql … 0022_api_users_sessions_invalidated_at.sql (0020_accounts_canonical.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -121,7 +121,12 @@ User-facing config lives at `~/.config/localmail/config.toml` (override with
 Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
 `attachment_blobs`, `attachment_text`, `attachment_chunks`,
 `failed_messages`, `failed_extractions`, `api_users`, `api_tokens`,
-`user_accounts`, `schema_migrations`. Dedup model:
+`user_accounts`, `schema_migrations`. Migration `0020_accounts_canonical.sql`
+extended `accounts` with `folder_allow`, `folder_deny`, `folder_deny_flags`,
+`sync_enabled`, `updated_at`, lifted the `NOT NULL` constraint from
+`imap_host`/`imap_port`, widened `auth_method` to include `'archive'`, and
+added the `accounts_live_requires_host` check constraint (live accounts must
+have a host). Dedup model:
 
 - **Messages — per-account, by `Message-Id`**: same Message-Id in INBOX + 3
   Gmail labels produces one `messages` row + four `message_labels` rows. The
@@ -495,6 +500,45 @@ for the full design.
   callers that don't pass `issued_at` (CLI lookups, smoke paths)
   skip the comparison entirely so they keep working on a
   revoked user.
+- **DB-canonical accounts + admin CRUD (Sub-plan 2A)**: migration
+  `0020_accounts_canonical.sql` makes `accounts` the write-authoritative
+  store for IMAP configuration — adding `folder_allow`, `folder_deny`,
+  `folder_deny_flags` (RFC 6154 flag-based denial), `sync_enabled`,
+  `updated_at`; lifting NOT NULL from `imap_host`/`imap_port`; extending
+  `auth_method` to include `'archive'`; and adding the
+  `accounts_live_requires_host` check constraint so live accounts always
+  carry a host. The v1 daemon does not yet honour `sync_enabled` (deferred
+  to Sub-plan 2A.2 along with TOML→DB seed and CLI rewiring). The service
+  layer in
+  [`src/localmail/api/admin/accounts.py`](src/localmail/api/admin/accounts.py)
+  exposes `list_accounts`, `get_account`, `create_account`,
+  `update_account`, `delete_account` (cascade-or-refuse: refuses when
+  messages exist unless `force=True`), `store_password`,
+  `clear_secret`, and `probe_connection` (renamed from `test_connection`
+  to avoid pytest auto-collection). The web OAuth flow for Gmail accounts
+  lives in
+  [`src/localmail/api/admin/oauth.py`](src/localmail/api/admin/oauth.py)
+  — `start_oauth` returns a Google consent URL and writes a stateless
+  HMAC-signed state token via
+  [`src/localmail/api/admin/oauth_state.py`](src/localmail/api/admin/oauth_state.py)
+  (`encode_state`/`decode_state`: JSON payload + `base64url(hmac_sha256(key,
+  payload))`); `complete_oauth` verifies the state, exchanges the code,
+  and persists the refresh token — closes #114 (`[serve].state_signing_key`
+  now has a real consumer). HTTP routes for CRUD + password + test-connection
+  live under `/v1/admin/accounts` (the test-connection URL keeps the
+  `test-connection` name for API consistency even though the Python function
+  is `probe_connection`); OAuth routes are `POST
+  /v1/admin/accounts/{id}/oauth/start` and `GET /admin/oauth/callback`. The
+  callback reads `state`/`code` via `get_unscrubbed_query_params(request)`
+  because `ScrubSensitiveQueryParamsMiddleware` would otherwise redact them.
+  Cookie `Path` is `"/"` — required so the admin session cookie reaches
+  `/v1/admin/*` routes; SameSite=Lax + per-route CSRF tokens
+  (`X-CSRF-Token` header, bound to `(user_id, action-url)`) remain the
+  primary CSRF defences. No `/v1/*` machine endpoint reads cookies (machine
+  clients use `Authorization: Bearer …`), so the broader scope adds no
+  smuggling surface. Deferred to Sub-plan 2A.2: rewiring CLI commands
+  (`add-account`, `oauth-login`, `remove-account`) to write to the DB and
+  TOML→DB seed at `init-db`.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.
@@ -675,8 +719,8 @@ for the full design.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
   Latest is `0022_api_users_sessions_invalidated_at.sql`; next would be
-  `0023_*.sql`. (The gap at `0020_*` is reserved for the unshipped
-  `accounts_canonical` migration planned by the admin UI design doc.)
+  `0023_*.sql`. (`0020_accounts_canonical.sql` has now shipped — the gap
+  is filled.)
 
 ## Testing notes
 

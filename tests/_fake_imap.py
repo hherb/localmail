@@ -34,6 +34,17 @@ class FakeIMAPClient:
 
     # --- test setup helpers (not part of the IMAP protocol) ------------------
 
+    @classmethod
+    def with_folders(cls, names: list[str]) -> 'FakeIMAPClient':
+        """Construct a FakeIMAPClient with the named folders already created.
+
+        All folders get empty flags and the standard '/' delimiter.
+        """
+        client = cls()
+        for name in names:
+            client.add_folder(name)
+        return client
+
     def add_folder(self, name: str, *, flags: tuple[str, ...] = (), uidvalidity: int = 1) -> FakeFolder:
         f = FakeFolder(name=name, flags=flags, uidvalidity=uidvalidity)
         self.folders[name] = f

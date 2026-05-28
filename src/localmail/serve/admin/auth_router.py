@@ -155,7 +155,11 @@ def post_login(
         SESSION_COOKIE_NAME,
         token,
         max_age=SESSION_TTL_SECONDS,
-        path="/admin",
+        # Path "/" so the cookie is sent to both /admin/* (HTML/Jinja2
+        # pages) and /v1/admin/* (JSON API consumed by the htmx UI).
+        # The cookie is HttpOnly + SameSite=Lax; other /v1/* endpoints
+        # use bearer-token auth and do not read this cookie.
+        path="/",
         secure=_cookie_secure(request),
         httponly=True,
         samesite="lax",
@@ -183,7 +187,9 @@ def post_logout(
         SESSION_COOKIE_NAME,
         "",
         max_age=0,
-        path="/admin",
+        # Match the path used at login (set_cookie path must match on
+        # delete or the browser keeps the original cookie).
+        path="/",
         secure=_cookie_secure(request),
         httponly=True,
         samesite="lax",

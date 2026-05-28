@@ -40,7 +40,7 @@ docs landed beyond NEXT_SESSION.md and its frozen snapshot.
 ### Commits (post-PR-117-merge on main)
 
 ```
-<new>    docs(handoffs): land 2026-05-28T1241 UTC post-PR-117-merge snapshot
+b542d41  docs(handoffs): land 2026-05-28T1241 UTC post-PR-117-merge snapshot
 53fcaa5  feat(admin): server-side session revocation via sessions_invalidated_at (#113) (#117)
 a32550c  docs(handoffs): land 2026-05-28T0936 UTC post-PR-116-merge snapshot
 1d036af  refactor(auth): promote login-helper private surface to public names (#115) (#116)
@@ -224,7 +224,7 @@ cd /Users/hherb/src/localmail
 # Verify state:
 git status                           # expect clean working tree (only .claude/* untracked)
 git log --oneline -5                 # tip on main:
-                                     #   <new>     docs(handoffs): land 2026-05-28T1241 UTC post-PR-117-merge snapshot
+                                     #   b542d41   docs(handoffs): land 2026-05-28T1241 UTC post-PR-117-merge snapshot
                                      #   53fcaa5   feat(admin): server-side session revocation via sessions_invalidated_at (#113) (#117)
                                      #   a32550c   docs(handoffs): land 2026-05-28T0936 UTC post-PR-116-merge snapshot
                                      #   1d036af   refactor(auth): promote login-helper private surface to public names (#115) (#116)
@@ -270,6 +270,6 @@ docs/handoffs/
   …
 ```
 
-`main` is at `<new>` after this session's handoff commit. Working
+`main` is at `b542d41` after this session's handoff commit. Working
 tree clean (only `.claude/settings.local.json` untracked, by
 design). 2 local branches (`main`, `issue-87-…`); no open PRs.

@@ -139,3 +139,46 @@ def test_user_deleted_after_cookie_issued_redirects(pool: ConnectionPool) -> Non
     client.cookies.set(SESSION_COOKIE_NAME, tok)
     r = client.get("/admin/probe")
     assert r.status_code == 303
+
+
+def test_token_issued_before_revocation_redirects(pool: ConnectionPool) -> None:
+    """Token minted, then operator revokes sessions → next request 303s."""
+    from localmail.api.admin.auth import revoke_admin_sessions
+
+    uid = _seed_admin(pool)
+    # Backdate the token's issued_at so the revocation timestamp (now()) is
+    # comfortably ahead — avoids any same-second precision worries.
+    now = int(time.time())
+    tok = encode_session_token(
+        SessionPayload(user_id=uid, issued_at=now - 3600, exp=now + 3600),
+        key=KEY,
+    )
+    with pool.connection() as conn:
+        revoke_admin_sessions(conn, username="horst")
+    client = TestClient(_make_app(pool), follow_redirects=False)
+    client.cookies.set(SESSION_COOKIE_NAME, tok)
+    r = client.get("/admin/probe")
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/admin/login")
+
+
+def test_token_issued_after_revocation_admits(pool: ConnectionPool) -> None:
+    """Operator revoked at T1; admin logged back in at T2 > T1 → new token works."""
+    from localmail.api.admin.auth import revoke_admin_sessions
+
+    uid = _seed_admin(pool)
+    with pool.connection() as conn:
+        revoke_admin_sessions(conn, username="horst")
+    # Token's issued_at is "now", which is later than the revocation timestamp.
+    # Bias one second to dodge any same-second truncation in the SQL comparison.
+    time.sleep(1.1)
+    now = int(time.time())
+    tok = encode_session_token(
+        SessionPayload(user_id=uid, issued_at=now, exp=now + 3600),
+        key=KEY,
+    )
+    client = TestClient(_make_app(pool), follow_redirects=False)
+    client.cookies.set(SESSION_COOKIE_NAME, tok)
+    r = client.get("/admin/probe")
+    assert r.status_code == 200
+    assert r.json() == {"id": uid, "username": "horst"}

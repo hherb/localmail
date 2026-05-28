@@ -20,6 +20,15 @@ class NotAnAdmin(Exception):
     """User exists but is_admin = FALSE."""
 
 
+class SessionInvalidated(Exception):
+    """Token's issued_at predates the user's sessions_invalidated_at.
+
+    The operator ran `localmail revoke-admin-sessions USERNAME` after this
+    token was minted; the dependency layer translates this to a redirect to
+    `/admin/login` so the admin re-authenticates.
+    """
+
+
 @dataclass(frozen=True)
 class AdminUser:
     id: int
@@ -59,24 +68,47 @@ def authenticate_admin(
     return AdminUser(id=int(uid), username=username)
 
 
-def get_admin_user(conn: psycopg.Connection, *, user_id: int) -> AdminUser:
-    """Look up an admin by id. Raises UserNotFound / NotAnAdmin.
+def get_admin_user(
+    conn: psycopg.Connection,
+    *,
+    user_id: int,
+    issued_at: int | None = None,
+) -> AdminUser:
+    """Look up an admin by id. Raises UserNotFound / NotAnAdmin / SessionInvalidated.
 
     A disabled user (disabled_at IS NOT NULL) is treated as UserNotFound so
     the session middleware redirects to login rather than returning 403.
+
+    When ``issued_at`` is supplied (Unix seconds since epoch — the
+    ``SessionPayload.issued_at`` carried by the admin cookie), the row's
+    ``sessions_invalidated_at`` is fetched in the same SELECT and the
+    comparison ``to_timestamp(issued_at) < sessions_invalidated_at`` is
+    evaluated by Postgres. Tokens minted before the revocation moment
+    raise ``SessionInvalidated``. Tokens minted afterwards (or when no
+    revocation has ever been issued — column is NULL) pass through.
+
+    Existing callers that don't carry a session — `grant_admin`, CLI
+    checks, tests — leave ``issued_at`` unset and skip the revocation
+    check entirely, preserving today's behaviour.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT username, is_admin FROM api_users"
+            "SELECT username,"
+            "       is_admin,"
+            "       (sessions_invalidated_at IS NOT NULL AND"
+            "        to_timestamp(%s) < sessions_invalidated_at) "
+            "  FROM api_users"
             " WHERE id = %s AND disabled_at IS NULL",
-            (user_id,),
+            (issued_at if issued_at is not None else 0, user_id),
         )
         row = cur.fetchone()
     if row is None:
         raise UserNotFound(f"no user with id={user_id}")
-    username, is_admin = row
+    username, is_admin, revoked = row
     if not is_admin:
         raise NotAnAdmin(f"user {user_id} is not an admin")
+    if issued_at is not None and revoked:
+        raise SessionInvalidated(f"sessions revoked after token for user {user_id} was issued")
     return AdminUser(id=user_id, username=username)
 
 
@@ -98,6 +130,36 @@ def revoke_admin(conn: psycopg.Connection, *, username: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE api_users SET is_admin = FALSE WHERE username = %s RETURNING id",
+            (username,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise UserNotFound(f"no user named {username!r}")
+    conn.commit()
+
+
+def revoke_admin_sessions(conn: psycopg.Connection, *, username: str) -> None:
+    """Invalidate every outstanding admin cookie for the named user.
+
+    Sets ``sessions_invalidated_at = now()``. The next request bearing a
+    token whose ``issued_at`` predates that moment is rejected with
+    :class:`SessionInvalidated` and the dependency layer redirects the
+    admin back to ``/admin/login``.
+
+    Idempotent: a second call just bumps the timestamp forward, catching
+    any token that sneaked in between the two calls. Raises
+    :class:`UserNotFound` if the username is unknown — there is nothing
+    to revoke and we'd rather signal the typo than silently no-op.
+
+    Works on every ``api_users`` row, not only admins: the column lives
+    on ``api_users`` and a future cookie-session path for non-admins
+    would reuse the same mechanism. Refusing here would force a parallel
+    implementation later.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_users SET sessions_invalidated_at = now()"
+            " WHERE username = %s RETURNING id",
             (username,),
         )
         row = cur.fetchone()

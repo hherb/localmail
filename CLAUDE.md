@@ -99,7 +99,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0019_api_login_attempts.sql
+migrations/         # 0001_init.sql … 0022_api_users_sessions_invalidated_at.sql
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -480,6 +480,21 @@ for the full design.
   [docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md](docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md).
   Do NOT also set `uvicorn --forwarded-allow-ips`; it rewrites
   `request.client.host` before our admission check and collapses it.
+- **Admin session revocation (#113)**: migration
+  `0022_api_users_sessions_invalidated_at.sql` adds a nullable
+  `sessions_invalidated_at TIMESTAMPTZ` column on `api_users`. The
+  admin-cookie dependency (`localmail.serve.admin.dependencies.require_admin_session`)
+  passes the session token's `issued_at` into `get_admin_user`; the
+  service does `to_timestamp(issued_at) < sessions_invalidated_at`
+  in the same SELECT and raises `SessionInvalidated` when the token
+  predates the revocation moment — translated to a 303 redirect to
+  `/admin/login`. NULL means "never revoked" and is the default.
+  Operators bump the column shell-side via
+  `localmail revoke-admin-sessions USERNAME`; admin privileges are
+  untouched (use `revoke-admin` for that). The check is opt-in:
+  callers that don't pass `issued_at` (CLI lookups, smoke paths)
+  skip the comparison entirely so they keep working on a
+  revoked user.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.
@@ -659,7 +674,9 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0019_api_login_attempts.sql`; next would be `0020_*.sql`.
+  Latest is `0022_api_users_sessions_invalidated_at.sql`; next would be
+  `0023_*.sql`. (The gap at `0020_*` is reserved for the unshipped
+  `accounts_canonical` migration planned by the admin UI design doc.)
 
 ## Testing notes
 

@@ -75,3 +75,49 @@ def test_add_api_user_admin_flag(db_conn: psycopg.Connection, db_dsn: str, tmp_p
     res = runner.invoke(main, ["--config", str(cfg), "add-api-user", "--admin", "--password", "hunter2", "horst"], env=env)
     assert res.exit_code == 0, res.output
     assert _is_admin(db_conn, "horst") is True
+
+
+def _sessions_invalidated_at(conn: psycopg.Connection, username: str):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sessions_invalidated_at FROM api_users WHERE username = %s",
+            (username,),
+        )
+        row = cur.fetchone()
+    return None if row is None else row[0]
+
+
+def test_revoke_admin_sessions_bumps_column(
+    db_conn: psycopg.Connection, db_dsn: str, tmp_path: Path
+) -> None:
+    cfg = _make_cfg(tmp_path, db_dsn)
+    env = _env(db_dsn)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        main,
+        ["--config", str(cfg), "add-api-user", "--admin", "--password", "hunter2", "horst"],
+        env=env,
+    )
+    assert res.exit_code == 0, res.output
+    assert _sessions_invalidated_at(db_conn, "horst") is None
+
+    res = runner.invoke(
+        main, ["--config", str(cfg), "revoke-admin-sessions", "horst"], env=env
+    )
+    assert res.exit_code == 0, res.output
+    assert _sessions_invalidated_at(db_conn, "horst") is not None
+
+
+def test_revoke_admin_sessions_unknown_user_errors(
+    db_conn: psycopg.Connection, db_dsn: str, tmp_path: Path
+) -> None:
+    cfg = _make_cfg(tmp_path, db_dsn)
+    env = _env(db_dsn)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        main, ["--config", str(cfg), "revoke-admin-sessions", "ghost"], env=env
+    )
+    assert res.exit_code != 0
+    assert "no user named 'ghost'" in res.output

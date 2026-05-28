@@ -1261,5 +1261,26 @@ def revoke_admin_cmd(ctx: click.Context, username: str) -> None:
     click.echo(f"revoked admin from {username!r}")
 
 
+@main.command("revoke-admin-sessions")
+@click.argument("username")
+@click.pass_context
+def revoke_admin_sessions_cmd(ctx: click.Context, username: str) -> None:
+    """Invalidate every outstanding admin cookie for USERNAME.
+
+    Bumps `api_users.sessions_invalidated_at` to now() so the next request
+    bearing a token minted before this moment is rejected and the admin is
+    redirected to /admin/login. Admin privileges themselves are unaffected
+    — use `revoke-admin` for that.
+    """
+    from localmail.api.admin.auth import UserNotFound, revoke_admin_sessions
+
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        try:
+            revoke_admin_sessions(conn, username=username)
+        except UserNotFound as exc:
+            raise click.ClickException(str(exc))
+    click.echo(f"revoked outstanding sessions for {username!r}")
+
+
 if __name__ == "__main__":
     main()

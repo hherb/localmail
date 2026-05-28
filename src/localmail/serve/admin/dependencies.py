@@ -13,6 +13,7 @@ from fastapi.responses import RedirectResponse
 from localmail.api.admin.auth import (
     AdminUser,
     NotAnAdmin,
+    SessionInvalidated,
     UserNotFound,
     get_admin_user,
 )
@@ -56,8 +57,14 @@ def require_admin_session():
         pool = request.app.state.pool
         with pool.connection() as conn:
             try:
-                return get_admin_user(conn, user_id=payload.user_id)
+                return get_admin_user(
+                    conn,
+                    user_id=payload.user_id,
+                    issued_at=payload.issued_at,
+                )
             except UserNotFound:
+                raise _AdminRedirect()
+            except SessionInvalidated:
                 raise _AdminRedirect()
             except NotAnAdmin:
                 raise HTTPException(

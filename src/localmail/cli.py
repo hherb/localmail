@@ -878,12 +878,15 @@ def _dsn_from_ctx(ctx: click.Context) -> str:
               help="Read the password from stdin (no echo, no prompt). For "
                    "scripts and CI; refuses to run on a TTY to avoid silent "
                    "hangs.")
+@click.option("--admin", "is_admin", is_flag=True, default=False,
+              help="Create the user with is_admin=TRUE (admin-UI bootstrap).")
 @click.pass_context
 def add_api_user(
     ctx: click.Context,
     username: str,
     password_opt: str | None,
     password_stdin: bool,
+    is_admin: bool,
 ) -> None:
     """Create a new API user. Password is hashed with argon2id.
 
@@ -915,6 +918,13 @@ def add_api_user(
             conn.commit()
         except psycopg.errors.UniqueViolation:
             raise click.ClickException(f"user {username!r} already exists")
+        if is_admin:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE api_users SET is_admin = TRUE WHERE username = %s",
+                    (username,),
+                )
+            conn.commit()
     click.echo(f"created user {username!r} (id={uid})")
     click.echo(
         f"note: no account grants yet. Use "
@@ -1219,6 +1229,36 @@ def retry_failed_extractions(sha256_hex: str | None) -> None:
     finally:
         pool.close()
     click.echo(f"cleared {n} failed_extractions rows")
+
+
+@main.command("grant-admin")
+@click.argument("username")
+@click.pass_context
+def grant_admin_cmd(ctx: click.Context, username: str) -> None:
+    """Grant admin privileges to USERNAME (shell-only bootstrap path)."""
+    from localmail.api.admin.auth import UserNotFound, grant_admin
+
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        try:
+            grant_admin(conn, username=username)
+        except UserNotFound as exc:
+            raise click.ClickException(str(exc))
+    click.echo(f"granted admin to {username!r}")
+
+
+@main.command("revoke-admin")
+@click.argument("username")
+@click.pass_context
+def revoke_admin_cmd(ctx: click.Context, username: str) -> None:
+    """Revoke admin privileges from USERNAME."""
+    from localmail.api.admin.auth import UserNotFound, revoke_admin
+
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        try:
+            revoke_admin(conn, username=username)
+        except UserNotFound as exc:
+            raise click.ClickException(str(exc))
+    click.echo(f"revoked admin from {username!r}")
 
 
 if __name__ == "__main__":

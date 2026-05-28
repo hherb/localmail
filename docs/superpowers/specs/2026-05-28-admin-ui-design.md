@@ -499,7 +499,7 @@ remain SHA-256 hashed in `api_tokens`.
 - Cookie attributes:
   - `HttpOnly`, `Secure`, `SameSite=Lax` (Lax not Strict so the OAuth
     callback redirect carries the cookie).
-  - `Path=/admin` — never sent to `/v1/*` routes.
+  - `Path=/` — required so the cookie reaches `/v1/admin/*` routes. SameSite=Lax + per-route CSRF tokens are the primary CSRF defenses. No `/v1/*` machine endpoint reads cookies (machine clients use bearer auth on `Authorization:`), so the broader scope adds no smuggling surface. (Sub-plan 2A erratum — original design intent was `/admin` but that's incompatible with the `/v1/admin/*` URL contract.)
   - 8-hour default lifetime; sliding-window renewal on each request.
   - Payload: HMAC-signed `{user_id, issued_at, exp}`. Signed with a
     **separate key** from the OAuth state key:

@@ -15,7 +15,9 @@ from localmail.api.admin.auth import (
 )
 from localmail.api.admin.csrf import CSRFError, make_csrf_token, verify_csrf_token
 from localmail.api.admin.session_tokens import SessionPayload, encode_session_token
-from localmail.api.errors import AuthenticationFailed
+from localmail.api.auth import _check_login_rate_limits, _record_login_attempt
+from localmail.api.client_ip import resolve_client_ip
+from localmail.api.errors import AuthenticationFailed, RateLimited
 from localmail.serve.admin.dependencies import SESSION_COOKIE_NAME, require_admin_session
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -61,10 +63,34 @@ def post_login(
         return HTMLResponse("CSRF token missing or invalid", status_code=400)
 
     pool = request.app.state.pool
+    auth_cfg = request.app.state.auth_config
+    client_ip = resolve_client_ip(
+        socket_peer=request.client.host if request.client else None,
+        xff_header=request.headers.get("X-Forwarded-For"),
+        trusted_proxies=auth_cfg.trusted_proxies_parsed,
+        max_hops=auth_cfg.trusted_proxies_max_hops,
+    )
     with pool.connection() as conn:
+        # Rate-limit check before credential verification (no argon2 cost on blocked IPs).
+        try:
+            _check_login_rate_limits(conn, username, client_ip, cfg=auth_cfg)
+        except RateLimited:
+            csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
+            return templates.TemplateResponse(
+                request=request,
+                name="login.html",
+                context={
+                    "csrf_token": csrf,
+                    "error": "Too many login attempts. Please try again later.",
+                    "current_user": None,
+                    "flashes": [],
+                },
+                status_code=429,
+            )
         try:
             admin = authenticate_admin(conn, username=username, password=password)
         except AuthenticationFailed:
+            _record_login_attempt(conn, username, client_ip, "failure")
             csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
             return templates.TemplateResponse(
                 request=request,
@@ -78,6 +104,7 @@ def post_login(
                 status_code=401,
             )
         except NotAnAdmin:
+            _record_login_attempt(conn, username, client_ip, "failure")
             csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
             return templates.TemplateResponse(
                 request=request,
@@ -90,6 +117,7 @@ def post_login(
                 },
                 status_code=403,
             )
+        _record_login_attempt(conn, username, client_ip, "success")
 
     now = int(time.time())
     token = encode_session_token(

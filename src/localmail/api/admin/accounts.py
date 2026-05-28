@@ -92,14 +92,20 @@ _PORT_MIN = 1
 _PORT_MAX = 65535
 
 
-def _validate_create_fields(*, name: str, email_address: str,
-                             auth_method: str, imap_host: str | None,
-                             imap_port: int | None,
-                             oauth_provider: str | None) -> None:
-    if not name or not name.strip():
-        raise AccountFieldError("name must not be blank")
-    if len(name) > _NAME_MAX:
-        raise AccountFieldError(f"name longer than {_NAME_MAX} chars")
+def _validate_email(email_address: str) -> None:
+    if not email_address or not email_address.strip():
+        raise AccountFieldError("email_address must not be blank")
+    if '@' not in email_address:
+        raise AccountFieldError("email_address must contain '@'")
+
+
+def _validate_combo(*, auth_method: str, imap_host: str | None,
+                    imap_port: int | None,
+                    oauth_provider: str | None) -> None:
+    """Shape rule for (auth_method, host, port, oauth_provider).
+
+    Used by both create and update so the two paths cannot diverge.
+    """
     if auth_method not in ('password', 'oauth2', 'archive'):
         raise AccountFieldError(f"unknown auth_method {auth_method!r}")
     if auth_method == 'archive':
@@ -109,26 +115,32 @@ def _validate_create_fields(*, name: str, email_address: str,
             )
     else:
         if not imap_host:
-            raise AccountFieldError("imap_host required for live accounts")
+            raise AccountFieldError("live accounts require imap_host")
         if len(imap_host) > _HOSTNAME_MAX:
             raise AccountFieldError("imap_host too long")
         if imap_port is None or not (_PORT_MIN <= imap_port <= _PORT_MAX):
-            raise AccountFieldError("imap_port required and in 1..65535")
+            raise AccountFieldError(
+                "live accounts require imap_port in 1..65535"
+            )
     if auth_method == 'oauth2' and oauth_provider not in ('gmail',):
         raise AccountFieldError(
             "oauth2 accounts require oauth_provider='gmail'"
         )
 
 
-def _validate_update_field_combo(*, current_method: str,
-                                  new_method: str | None,
-                                  imap_host: str | None,
-                                  imap_port: int | None) -> None:
-    method = new_method or current_method
-    if method == 'archive' and (imap_host is not None or imap_port is not None):
-        raise AccountFieldError(
-            "archive accounts must not have imap_host/imap_port"
-        )
+def _validate_create_fields(*, name: str, email_address: str,
+                             auth_method: str, imap_host: str | None,
+                             imap_port: int | None,
+                             oauth_provider: str | None) -> None:
+    if not name or not name.strip():
+        raise AccountFieldError("name must not be blank")
+    if len(name) > _NAME_MAX:
+        raise AccountFieldError(f"name longer than {_NAME_MAX} chars")
+    _validate_email(email_address)
+    _validate_combo(
+        auth_method=auth_method, imap_host=imap_host,
+        imap_port=imap_port, oauth_provider=oauth_provider,
+    )
 
 
 def create_account(
@@ -192,11 +204,14 @@ def update_account(conn: psycopg.Connection, account_id: int,
         return get_account(conn, account_id)
 
     current = get_account(conn, account_id)
-    _validate_update_field_combo(
-        current_method=current.auth_method,
-        new_method=cast('str | None', fields.get('auth_method')),
+    if 'email_address' in fields:
+        _validate_email(cast('str', fields['email_address']))
+    _validate_combo(
+        auth_method=cast('str', fields.get('auth_method', current.auth_method)),
         imap_host=cast('str | None', fields.get('imap_host', current.imap_host)),
         imap_port=cast('int | None', fields.get('imap_port', current.imap_port)),
+        oauth_provider=cast('str | None', fields.get(
+            'oauth_provider', current.oauth_provider)),
     )
 
     set_sql_parts: list[str] = []
@@ -217,8 +232,12 @@ def update_account(conn: psycopg.Connection, account_id: int,
                 f"UPDATE accounts SET {', '.join(set_sql_parts)} WHERE id = %s",
                 values,
             )
-        except (psycopg.errors.UniqueViolation, psycopg.errors.CheckViolation) as e:
+        except psycopg.errors.UniqueViolation as e:
             raise AccountFieldError(str(e).split('\n', 1)[0]) from e
+        except psycopg.errors.CheckViolation as e:
+            raise AccountFieldError(
+                "update violates a CHECK constraint on accounts"
+            ) from e
         if cur.rowcount == 0:
             raise NotFound(f"account {account_id} not found")
     return get_account(conn, account_id)
@@ -274,13 +293,16 @@ class FolderInfo:
 
 def _open_imap_connection(account: Account) -> AbstractContextManager[IMAPClient]:
     """Indirection point so tests can monkeypatch without touching real IMAP."""
+    # Account.auth_method's Literal includes 'archive' but AccountConfig's
+    # doesn't (the daemon's config has no archive concept). The caller
+    # (probe_connection) refuses archive accounts before we get here.
     cfg = _AccountConfig(
         name=account.name,
         email=account.email_address,
         imap_host=account.imap_host or '',
         imap_port=account.imap_port or 993,
-        auth_method=account.auth_method,  # type: ignore[arg-type]  # archive case rejected by guard above
-        oauth_provider=account.oauth_provider,  # type: ignore[arg-type]  # archive case rejected by guard above
+        auth_method=account.auth_method,  # type: ignore[arg-type]
+        oauth_provider=account.oauth_provider,  # type: ignore[arg-type]
     )
     return _imap.open_connection(cfg)
 
@@ -288,18 +310,21 @@ def _open_imap_connection(account: Account) -> AbstractContextManager[IMAPClient
 def probe_connection(conn: psycopg.Connection, account_id: int) -> list[FolderInfo]:
     """Open IMAP, list folders, return summary. Raises on connect failure.
 
-    Archive accounts raise AccountFieldError.
-
-    Note: oauth2 accounts require the gmail_client_secrets config field
-    to be wired through _open_imap_connection (not done in this task —
-    Task 9 / Task 10 will route OAuth credentials through). Calling
-    probe_connection on an oauth2 account before that wiring will raise
-    a RuntimeError from imap_client.open_connection.
+    Archive accounts raise AccountFieldError. OAuth2 accounts also raise
+    AccountFieldError until Sub-plan 2A.2 routes the Gmail client secrets
+    through `_open_imap_connection` — without that wiring the underlying
+    `imap_client.open_connection` cannot mint an XOAUTH2 access token, so
+    invoking it would surface as an opaque 500.
     """
     account = get_account(conn, account_id)
     if account.auth_method == 'archive':
         raise AccountFieldError(
             "probe_connection not applicable to archive accounts"
+        )
+    if account.auth_method == 'oauth2':
+        raise AccountFieldError(
+            "probe_connection not yet supported for oauth2 accounts "
+            "(Sub-plan 2A.2 will wire Gmail credentials through)"
         )
     with _open_imap_connection(account) as client:
         listing = client.list_folders()

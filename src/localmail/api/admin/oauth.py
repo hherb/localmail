@@ -21,7 +21,9 @@ from localmail.api.admin.oauth_state import (
 
 _GOOGLE_SCOPES = ['https://mail.google.com/']
 _NONCE_BYTES = 16
-_STATE_TTL_SECONDS = 300
+# 15 minutes — comfortably covers a Google consent screen even with
+# account-picker re-auth, while still keeping replay windows short.
+_STATE_TTL_SECONDS = 900
 
 
 class PermissionDenied(RuntimeError):

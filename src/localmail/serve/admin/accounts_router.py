@@ -19,9 +19,9 @@ from pydantic import BaseModel, Field
 
 from localmail.api.admin import accounts as svc
 from localmail.api.admin.auth import AdminUser
-from localmail.api.admin.csrf import CSRFError, verify_csrf_token
 from localmail.api.errors import NotFound
 from localmail.api.ids import parse_int_id
+from localmail.serve.admin.csrf import check_csrf
 from localmail.serve.admin.dependencies import require_admin_session
 
 
@@ -88,30 +88,6 @@ def _account_dict(a: svc.Account) -> dict:
     }
 
 
-def _signing_key(request: Request) -> bytes:
-    cfg = request.app.state.serve_config
-    key = cfg.session_signing_key
-    if not key:
-        raise RuntimeError("session_signing_key is empty; admin UI disabled")
-    return key.encode("ascii") if isinstance(key, str) else key
-
-
-def _check_csrf(
-    request: Request,
-    admin: AdminUser,
-    csrf_token: str,
-    action: str,
-) -> None:
-    """Raise HTTPException(400) if the CSRF token is missing or invalid."""
-    if not csrf_token:
-        raise HTTPException(status_code=400, detail="CSRF token missing")
-    key = _signing_key(request)
-    try:
-        verify_csrf_token(csrf_token, user_id=admin.id, action=action, key=key)
-    except CSRFError:
-        raise HTTPException(status_code=400, detail="CSRF token invalid")
-
-
 # ---------- routes ----------
 
 @router.get("/accounts")
@@ -132,7 +108,7 @@ def create_account(
     admin: AdminUser = require_admin_session(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
-    _check_csrf(request, admin, x_csrf_token, "/v1/admin/accounts")
+    check_csrf(request, admin, x_csrf_token, "/v1/admin/accounts")
     pool = request.app.state.pool
     with pool.connection() as conn:
         try:
@@ -178,7 +154,7 @@ def patch_account(
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     aid = parse_int_id(account_id, field="account_id")
-    _check_csrf(request, admin, x_csrf_token, f"/v1/admin/accounts/{aid}")
+    check_csrf(request, admin, x_csrf_token, f"/v1/admin/accounts/{aid}")
     fields = body.model_dump(exclude_unset=True)
     pool = request.app.state.pool
     with pool.connection() as conn:
@@ -200,7 +176,7 @@ def delete_account(
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
     aid = parse_int_id(account_id, field="account_id")
-    _check_csrf(request, admin, x_csrf_token, f"/v1/admin/accounts/{aid}")
+    check_csrf(request, admin, x_csrf_token, f"/v1/admin/accounts/{aid}")
     pool = request.app.state.pool
     with pool.connection() as conn:
         try:
@@ -221,7 +197,7 @@ def post_password(
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
     aid = parse_int_id(account_id, field="account_id")
-    _check_csrf(
+    check_csrf(
         request, admin, x_csrf_token,
         f"/v1/admin/accounts/{aid}/password",
     )
@@ -247,10 +223,10 @@ def test_connection(
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     """URL kept as `test-connection` per the design doc; backed by
-    ``accounts.probe_connection`` (renamed in Task 6 so pytest stops trying
-    to collect it as a test function)."""
+    ``accounts.probe_connection`` (renamed so pytest's auto-collector
+    doesn't pick up the ``test_`` prefix as a test function)."""
     aid = parse_int_id(account_id, field="account_id")
-    _check_csrf(
+    check_csrf(
         request, admin, x_csrf_token,
         f"/v1/admin/accounts/{aid}/test-connection",
     )

@@ -238,3 +238,59 @@ def test_probe_connection_archive_raises_field_error(db_conn):
                           host=None, port=None)
     with pytest.raises(AccountFieldError):
         probe_connection(db_conn, aid)
+
+
+def test_probe_connection_oauth2_raises_field_error(db_conn):
+    """Until Sub-plan 2A.2 wires Gmail credentials, oauth2 probes are
+    short-circuited at the service layer so the HTTP route can translate
+    to a clean 400 rather than a confusing 500."""
+    aid = _insert_account(db_conn, name='gm-probe', method='oauth2',
+                          host='imap.gmail.com', port=993,
+                          oauth_provider='gmail')
+    with pytest.raises(AccountFieldError):
+        probe_connection(db_conn, aid)
+
+
+def test_create_account_rejects_blank_email(db_conn):
+    with pytest.raises(AccountFieldError):
+        create_account(
+            db_conn, name='blank-email', email_address='   ',
+            auth_method='password',
+            imap_host='h', imap_port=993,
+            oauth_provider=None,
+            folder_allow=None, folder_deny=None, folder_deny_flags=None,
+        )
+
+
+def test_create_account_rejects_email_without_at(db_conn):
+    with pytest.raises(AccountFieldError):
+        create_account(
+            db_conn, name='bad-email', email_address='nope',
+            auth_method='password',
+            imap_host='h', imap_port=993,
+            oauth_provider=None,
+            folder_allow=None, folder_deny=None, folder_deny_flags=None,
+        )
+
+
+def test_update_archive_to_password_without_host_raises_field_error(db_conn):
+    """archive → live transition must require host at the service layer
+    (DB CHECK is the second line of defense, not the first)."""
+    aid = _insert_account(db_conn, name='arch2live', method='archive',
+                          host=None, port=None)
+    with pytest.raises(AccountFieldError):
+        update_account(db_conn, aid, auth_method='password')
+
+
+def test_update_password_to_oauth2_without_provider_raises_field_error(db_conn):
+    """password → oauth2 transition without setting oauth_provider must
+    fail at the service layer (DB has no CHECK to catch this)."""
+    aid = _insert_account(db_conn, name='pw2oauth', method='password')
+    with pytest.raises(AccountFieldError):
+        update_account(db_conn, aid, auth_method='oauth2')
+
+
+def test_update_email_rejects_blank(db_conn):
+    aid = _insert_account(db_conn, name='blank-update')
+    with pytest.raises(AccountFieldError):
+        update_account(db_conn, aid, email_address='')

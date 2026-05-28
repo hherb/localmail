@@ -325,6 +325,36 @@ def test_test_connection_returns_folders(admin_client, monkeypatch):
     assert names == ["INBOX", "Sent", "[Gmail]/All Mail"]
 
 
+def test_test_connection_oauth2_returns_400_not_500(admin_client):
+    """Gmail OAuth account at /test-connection: until Sub-plan 2A.2 wires
+    the Google client secrets through `_open_imap_connection`, the
+    service layer must short-circuit with AccountFieldError so the route
+    translates to a clean 400 rather than a 500 from imap_client."""
+    create = admin_client.post(
+        "/v1/admin/accounts",
+        json={
+            "name": "tc-oauth",
+            "email_address": "g@example.test",
+            "auth_method": "oauth2",
+            "oauth_provider": "gmail",
+            "imap_host": "imap.gmail.com",
+            "imap_port": 993,
+        },
+        headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/accounts")},
+    )
+    assert create.status_code == 201, create.text
+    aid = create.json()["id"]
+    r = admin_client.post(
+        f"/v1/admin/accounts/{aid}/test-connection",
+        headers={
+            "X-CSRF-Token": admin_client.csrf_for(
+                f"/v1/admin/accounts/{aid}/test-connection"
+            ),
+        },
+    )
+    assert r.status_code == 400, r.text
+
+
 # ---------- unauthenticated ----------
 
 def test_unauthenticated_request_redirects(client_no_auth):

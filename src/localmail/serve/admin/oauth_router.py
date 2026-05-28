@@ -15,31 +15,23 @@ import logging
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-logger = logging.getLogger("localmail.serve")
-
 from localmail.api.admin import oauth as svc
 from localmail.api.admin.auth import AdminUser
-from localmail.api.admin.csrf import CSRFError, verify_csrf_token
 from localmail.api.admin.oauth_state import StateExpired, StateInvalid
 from localmail.api.errors import NotFound
 from localmail.api.ids import parse_int_id
+from localmail.serve.admin.csrf import check_csrf
 from localmail.serve.admin.dependencies import require_admin_session
 from localmail.serve.admin.middleware import get_unscrubbed_query_params
 
+
+logger = logging.getLogger("localmail.serve")
 
 _HTTP_SEE_OTHER = 303
 
 
 router_v1 = APIRouter(tags=["admin-oauth-api"])
 router_admin = APIRouter(tags=["admin-oauth-callback"])
-
-
-def _signing_key(request: Request) -> bytes:
-    cfg = request.app.state.serve_config
-    key = cfg.session_signing_key
-    if not key:
-        raise RuntimeError("session_signing_key is empty; admin UI disabled")
-    return key.encode("ascii") if isinstance(key, str) else key
 
 
 def _state_signing_key(request: Request) -> bytes:
@@ -55,22 +47,6 @@ def _oauth_callback_url(request: Request) -> str:
     return cfg.oauth_callback_url
 
 
-def _check_csrf(
-    request: Request,
-    admin: AdminUser,
-    csrf_token: str,
-    action: str,
-) -> None:
-    """Raise HTTPException(400) if the CSRF token is missing or invalid."""
-    if not csrf_token:
-        raise HTTPException(status_code=400, detail="CSRF token missing")
-    key = _signing_key(request)
-    try:
-        verify_csrf_token(csrf_token, user_id=admin.id, action=action, key=key)
-    except CSRFError:
-        raise HTTPException(status_code=400, detail="CSRF token invalid")
-
-
 @router_v1.post("/accounts/{account_id}/oauth/start")
 def oauth_start(
     account_id: str,
@@ -80,7 +56,7 @@ def oauth_start(
 ) -> dict:
     """Mint a Google consent URL with a signed state token."""
     aid = parse_int_id(account_id, field="account_id")
-    _check_csrf(
+    check_csrf(
         request, admin, x_csrf_token,
         f"/v1/admin/accounts/{aid}/oauth/start",
     )

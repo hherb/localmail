@@ -21,6 +21,8 @@ def _bind_string(user_id: int, action: str) -> bytes:
 
 
 def make_csrf_token(*, user_id: int, action: str, key: bytes) -> str:
+    if not isinstance(key, (bytes, bytearray)) or len(key) < 16:
+        raise ValueError("key must be at least 16 bytes")
     bound = _bind_string(user_id, action)
     mac = hmac.new(key, bound, sha256).digest()
     return _b64url_encode(mac)

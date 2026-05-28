@@ -18,6 +18,7 @@ def serve_cfg() -> ServeConfig:
         session_signing_key="x" * 43,
         state_signing_key="y" * 43,
         oauth_callback_url="https://example.com/admin/oauth/callback",
+        cookie_secure=False,  # TestClient uses http://testserver
     )
 
 
@@ -47,7 +48,7 @@ def _login(client: TestClient, db_conn: psycopg.Connection) -> None:
 
 def test_logout_clears_cookie(client: TestClient, db_conn: psycopg.Connection, serve_cfg) -> None:
     _login(client, db_conn)
-    s_key = serve_cfg.session_signing_key.encode("latin1")
+    s_key = serve_cfg.session_signing_key.encode("ascii")
     csrf = make_csrf_token(user_id=1, action="/admin/logout", key=s_key)
     r = client.post("/admin/logout", data={"csrf_token": csrf})
     assert r.status_code == 303

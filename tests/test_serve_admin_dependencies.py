@@ -24,7 +24,7 @@ def _make_app(pool: ConnectionPool, *, key: bytes = KEY) -> FastAPI:
     app = FastAPI()
     app.state.pool = pool
     app.state.serve_config = type("Cfg", (), {
-        "session_signing_key": key.decode("latin1"),
+        "session_signing_key": key.decode("ascii"),
     })()
 
     @app.get("/admin/probe")

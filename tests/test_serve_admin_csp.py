@@ -13,6 +13,7 @@ def client(db_dsn):
         session_signing_key="x" * 43,
         state_signing_key="y" * 43,
         oauth_callback_url="https://example.com/admin/oauth/callback",
+        cookie_secure=False,
     )
     app = create_app(db_dsn=db_dsn, serve_config=cfg)
     return TestClient(app, follow_redirects=False)

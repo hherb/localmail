@@ -35,3 +35,10 @@ def test_malformed_rejected() -> None:
     for bad in ["", "no-dot", "a.b.c"]:
         with pytest.raises(CSRFError):
             verify_csrf_token(bad, user_id=7, action="/admin/x", key=KEY)
+
+
+def test_short_key_rejected() -> None:
+    """Matches encode_session_token's >= 16 byte requirement so the two
+    primitives can't be misused with the same too-short key."""
+    with pytest.raises(ValueError, match="at least 16 bytes"):
+        make_csrf_token(user_id=7, action="/admin/x", key=b"a" * 8)

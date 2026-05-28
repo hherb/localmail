@@ -19,7 +19,8 @@ def _csrf(html: str) -> str:
 @pytest.fixture
 def app(db_dsn):
     cfg = ServeConfig(session_signing_key="x"*43, state_signing_key="y"*43,
-                      oauth_callback_url="https://example.com/admin/oauth/callback")
+                      oauth_callback_url="https://example.com/admin/oauth/callback",
+                      cookie_secure=False)
     # Tighten the per-user cap to make the test fast.
     auth_cfg = AuthConfig(login_per_user_max=2, login_per_user_window_s=60)
     return create_app(db_dsn=db_dsn, serve_config=cfg, auth_config=auth_cfg)

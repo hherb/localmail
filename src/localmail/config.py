@@ -66,6 +66,13 @@ class ServeConfig(BaseModel):
     # flow disabled; CLI desktop loopback flow remains available.
     oauth_callback_url: str = ""
 
+    # Mark admin session cookies as Secure. Default True: behind a
+    # TLS-terminating reverse proxy the wire scheme is HTTPS even when the
+    # uvicorn socket sees plain HTTP, so we can't infer Secure from
+    # request.url.scheme. Operators running 127.0.0.1 dev with --no-tls
+    # must set this to False or the browser will reject the cookie.
+    cookie_secure: bool = True
+
     @field_validator("session_signing_key", "state_signing_key")
     @classmethod
     def _validate_signing_key(cls, v: str) -> str:

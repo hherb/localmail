@@ -1,10 +1,11 @@
 """GET /admin/login (render form), POST /admin/login (validate + cookie)."""
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Form, Request, status
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -23,6 +24,8 @@ from localmail.serve.admin.dependencies import SESSION_COOKIE_NAME, require_admi
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
+_log = logging.getLogger("localmail.serve.admin")
+
 LOGIN_CSRF_ACTION = "/admin/login"
 SESSION_TTL_SECONDS = 8 * 3600
 
@@ -32,12 +35,24 @@ def _session_key(request: Request) -> bytes:
     s_key = cfg.session_signing_key
     if not s_key:
         raise RuntimeError("session_signing_key is empty; admin UI disabled")
-    return s_key.encode("latin1") if isinstance(s_key, str) else s_key
+    # token_urlsafe(32) is pure ASCII; the config validator enforces ≥ 32 chars.
+    return s_key.encode("ascii") if isinstance(s_key, str) else s_key
+
+
+def _cookie_secure(request: Request) -> bool:
+    return bool(getattr(request.app.state.serve_config, "cookie_secure", True))
 
 
 router = APIRouter()
 
 
+# The login form's CSRF token is bound to (user_id=0, "/admin/login") and is
+# therefore identical for every visitor of a given server install. That's
+# acceptable for the unauthenticated login form — login CSRF (forcing a victim
+# to sign in to the attacker's account) is a different threat model from
+# action CSRF on authenticated forms, and SameSite=Lax on the response cookie
+# is the real defense once the session exists. Do NOT replicate user_id=0 for
+# any post-login form; bind to the real user_id (see dashboard_router).
 @router.get("/login", response_class=HTMLResponse)
 def get_login(request: Request) -> HTMLResponse:
     s_key = _session_key(request)
@@ -87,6 +102,12 @@ def post_login(
                 },
                 status_code=429,
             )
+        # Collapse "wrong password" and "valid creds but not admin" into a
+        # single 401 to avoid leaking whether a username exists with a known
+        # password (the attacker can't distinguish "found a non-admin user" from
+        # "wrong password"). The NotAnAdmin case is logged server-side so a
+        # legitimate non-admin user mistyping the admin URL is still visible to
+        # operators.
         try:
             admin = authenticate_admin(conn, username=username, password=password)
         except AuthenticationFailed:
@@ -105,17 +126,22 @@ def post_login(
             )
         except NotAnAdmin:
             _record_login_attempt(conn, username, client_ip, "failure")
+            _log.warning(
+                "non-admin login attempt at /admin/login: username=%r client_ip=%s",
+                username,
+                client_ip,
+            )
             csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
             return templates.TemplateResponse(
                 request=request,
                 name="login.html",
                 context={
                     "csrf_token": csrf,
-                    "error": "This account is not an admin.",
+                    "error": "Invalid credentials.",
                     "current_user": None,
                     "flashes": [],
                 },
-                status_code=403,
+                status_code=401,
             )
         _record_login_attempt(conn, username, client_ip, "success")
 
@@ -130,7 +156,7 @@ def post_login(
         token,
         max_age=SESSION_TTL_SECONDS,
         path="/admin",
-        secure=(request.url.scheme == "https"),
+        secure=_cookie_secure(request),
         httponly=True,
         samesite="lax",
     )
@@ -158,7 +184,7 @@ def post_logout(
         "",
         max_age=0,
         path="/admin",
-        secure=(request.url.scheme == "https"),
+        secure=_cookie_secure(request),
         httponly=True,
         samesite="lax",
     )

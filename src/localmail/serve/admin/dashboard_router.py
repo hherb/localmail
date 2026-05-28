@@ -22,7 +22,7 @@ def get_dashboard(
     request: Request,
     admin: AdminUser = require_admin_session(),
 ) -> HTMLResponse:
-    s_key = request.app.state.serve_config.session_signing_key.encode("latin1")
+    s_key = request.app.state.serve_config.session_signing_key.encode("ascii")
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html",

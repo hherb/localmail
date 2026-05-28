@@ -92,7 +92,11 @@ def create_app(
         #
         # Admin UI paths need a relaxed CSP: htmx.min.js and admin.css are
         # served from 'self', and forms POST to 'self'. All other paths keep
-        # the locked-down policy.
+        # the locked-down policy. 'unsafe-inline' on style-src is preserved
+        # for /admin/* because htmx injects inline `style="..."` attributes
+        # during swaps (display:none transitions, optimistic UI), which a
+        # strict CSP would break. The risk is contained: admin pages are
+        # rendered from Jinja templates we control, not from email bodies.
         if request.url.path.startswith("/admin"):
             csp = (
                 "default-src 'none'; img-src 'self' data:; "

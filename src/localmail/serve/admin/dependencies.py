@@ -39,7 +39,7 @@ def _signing_key(request: Request) -> bytes:
             "ServeConfig.session_signing_key is empty; admin UI requires it. "
             "Set [serve] session_signing_key in config.toml."
         )
-    return key_str.encode("latin1") if isinstance(key_str, str) else key_str
+    return key_str.encode("ascii") if isinstance(key_str, str) else key_str
 
 
 def require_admin_session():

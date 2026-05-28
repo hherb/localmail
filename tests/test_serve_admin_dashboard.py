@@ -16,6 +16,7 @@ def serve_cfg() -> ServeConfig:
         session_signing_key="x" * 43,
         state_signing_key="y" * 43,
         oauth_callback_url="https://example.com/admin/oauth/callback",
+        cookie_secure=False,  # TestClient uses http://testserver
     )
 
 

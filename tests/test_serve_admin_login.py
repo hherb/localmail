@@ -17,6 +17,7 @@ def serve_cfg() -> ServeConfig:
         session_signing_key="x" * 43,
         state_signing_key="y" * 43,
         oauth_callback_url="https://example.com/admin/oauth/callback",
+        cookie_secure=False,  # TestClient uses http://testserver
     )
 
 
@@ -76,7 +77,9 @@ def test_post_login_wrong_password_re_renders_form(client: TestClient, admin_use
     assert "invalid credentials" in r.text.lower()
 
 
-def test_post_login_non_admin_rejected(client: TestClient, db_conn: psycopg.Connection) -> None:
+def test_post_login_non_admin_rejected(
+    client: TestClient, db_conn: psycopg.Connection, caplog
+) -> None:
     pwh = hash_password("hunter2")
     with db_conn.cursor() as cur:
         cur.execute(
@@ -87,12 +90,23 @@ def test_post_login_non_admin_rejected(client: TestClient, db_conn: psycopg.Conn
     db_conn.commit()
     form = client.get("/admin/login").text
     csrf = _extract_csrf(form)
-    r = client.post(
-        "/admin/login",
-        data={"username": "regular", "password": "hunter2", "csrf_token": csrf},
+    import logging
+    with caplog.at_level(logging.WARNING, logger="localmail.serve.admin"):
+        r = client.post(
+            "/admin/login",
+            data={"username": "regular", "password": "hunter2", "csrf_token": csrf},
+        )
+    # Wire response collapses to 401 with a generic message — the response
+    # must not betray "this user exists with this password but isn't an admin".
+    assert r.status_code == 401
+    assert "invalid credentials" in r.text.lower()
+    assert "not an admin" not in r.text.lower()
+    # The server-side log keeps the distinction so operators can see when a
+    # legitimate non-admin user mistypes the admin URL.
+    assert any(
+        "non-admin login attempt" in rec.message and "regular" in rec.message
+        for rec in caplog.records
     )
-    assert r.status_code == 403
-    assert "admin" in r.text.lower()
 
 
 def test_post_login_missing_csrf_rejected(client: TestClient, admin_user: int) -> None:
@@ -116,3 +130,38 @@ def _extract_csrf(html: str) -> str:
     m = re.search(r'name="csrf_token"\s+value="([^"]+)"', html)
     assert m, f"no csrf_token in form html"
     return m.group(1)
+
+
+def test_cookie_secure_attr_driven_by_config(db_dsn, db_conn: psycopg.Connection) -> None:
+    """cookie_secure=True sets Secure on the cookie even when the inbound
+    request looks like plain HTTP — that's the production case behind a
+    TLS-terminating reverse proxy where uvicorn sees http but the wire is https.
+    """
+    cfg = ServeConfig(
+        session_signing_key="x" * 43,
+        state_signing_key="y" * 43,
+        oauth_callback_url="https://example.com/admin/oauth/callback",
+        cookie_secure=True,
+    )
+    app = create_app(db_dsn=db_dsn, serve_config=cfg)
+    client = TestClient(app, follow_redirects=False)
+
+    pwh = hash_password("hunter2")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash, is_admin) "
+            "VALUES (%s, %s, TRUE)",
+            ("horst", pwh),
+        )
+    db_conn.commit()
+
+    form = client.get("/admin/login").text
+    csrf = _extract_csrf(form)
+    r = client.post(
+        "/admin/login",
+        data={"username": "horst", "password": "hunter2", "csrf_token": csrf},
+    )
+    assert r.status_code == 303, r.text
+    set_cookie = r.headers["set-cookie"]
+    # http://testserver but cookie_secure=True → Secure attribute set anyway.
+    assert "Secure" in set_cookie, set_cookie

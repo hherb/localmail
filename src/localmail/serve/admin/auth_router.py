@@ -16,7 +16,7 @@ from localmail.api.admin.auth import (
 )
 from localmail.api.admin.csrf import CSRFError, make_csrf_token, verify_csrf_token
 from localmail.api.admin.session_tokens import SessionPayload, encode_session_token
-from localmail.api.auth import _check_login_rate_limits, _record_login_attempt
+from localmail.api.auth import check_login_rate_limits, record_login_attempt
 from localmail.api.client_ip import resolve_client_ip
 from localmail.api.errors import AuthenticationFailed, RateLimited
 from localmail.serve.admin.dependencies import SESSION_COOKIE_NAME, require_admin_session
@@ -88,7 +88,7 @@ def post_login(
     with pool.connection() as conn:
         # Rate-limit check before credential verification (no argon2 cost on blocked IPs).
         try:
-            _check_login_rate_limits(conn, username, client_ip, cfg=auth_cfg)
+            check_login_rate_limits(conn, username, client_ip, cfg=auth_cfg)
         except RateLimited:
             csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
             return templates.TemplateResponse(
@@ -111,7 +111,7 @@ def post_login(
         try:
             admin = authenticate_admin(conn, username=username, password=password)
         except AuthenticationFailed:
-            _record_login_attempt(conn, username, client_ip, "failure")
+            record_login_attempt(conn, username, client_ip, "failure")
             csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
             return templates.TemplateResponse(
                 request=request,
@@ -125,7 +125,7 @@ def post_login(
                 status_code=401,
             )
         except NotAnAdmin:
-            _record_login_attempt(conn, username, client_ip, "failure")
+            record_login_attempt(conn, username, client_ip, "failure")
             _log.warning(
                 "non-admin login attempt at /admin/login: username=%r client_ip=%s",
                 username,
@@ -143,7 +143,7 @@ def post_login(
                 },
                 status_code=401,
             )
-        _record_login_attempt(conn, username, client_ip, "success")
+        record_login_attempt(conn, username, client_ip, "success")
 
     now = int(time.time())
     token = encode_session_token(

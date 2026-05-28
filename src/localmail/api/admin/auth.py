@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import psycopg
 
-from localmail.api.auth import verify_password, _DUMMY_PASSWORD_HASH
+from localmail.api.auth import DUMMY_PASSWORD_HASH, verify_password
 from localmail.api.errors import AuthenticationFailed
 
 
@@ -49,7 +49,7 @@ def authenticate_admin(
     if row is None:
         # Constant-time path: run verify against a dummy hash to match the
         # response time of the wrong-password case (mirrors api/auth.py).
-        verify_password(password, _DUMMY_PASSWORD_HASH)
+        verify_password(password, DUMMY_PASSWORD_HASH)
         raise AuthenticationFailed("invalid username or password")
     uid, pwh, is_admin = row
     if not verify_password(password, pwh):

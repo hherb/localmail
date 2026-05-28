@@ -33,7 +33,7 @@ _HASHER = PasswordHasher()
 # the response time for unknown usernames matches the verify-mismatch path.
 # Without this, an unauthenticated attacker can enumerate valid usernames by
 # measuring how long /v1/auth/login takes (argon2 verify is ~50-200 ms).
-_DUMMY_PASSWORD_HASH = _HASHER.hash("dummy-password-for-timing-parity")
+DUMMY_PASSWORD_HASH = _HASHER.hash("dummy-password-for-timing-parity")
 
 
 def hash_password(password: str) -> str:
@@ -69,7 +69,7 @@ def reset_login_rate_limiter(conn: psycopg.Connection) -> None:
         cur.execute("TRUNCATE api_login_attempts RESTART IDENTITY")
 
 
-def _record_login_attempt(
+def record_login_attempt(
     conn: psycopg.Connection,
     username: str,
     client_ip: str | None,
@@ -149,7 +149,7 @@ def _sweep_login_attempts(
             )
 
 
-def _check_login_rate_limits(
+def check_login_rate_limits(
     conn: psycopg.Connection,
     username: str,
     client_ip: str | None,
@@ -163,7 +163,7 @@ def _check_login_rate_limits(
     than reporting whichever cap was tripped first by SQL evaluation.
 
     TOCTOU note: the check is read-only; the audit INSERT happens in
-    ``_record_login_attempt`` after credential verification. Under
+    ``record_login_attempt`` after credential verification. Under
     concurrent traffic ``workers`` requests can each pass the check
     before any inserts land, so a cap of N can be exceeded by up to
     ``workers - 1`` in flight. This bounds argon2 CPU work to
@@ -245,7 +245,7 @@ def _maybe_sweep(conn: psycopg.Connection, cfg: AuthConfig) -> None:
     """Run the cleanup sweep if it's been >= cfg.login_cleanup_interval_s
     since this worker's last sweep, committing the DELETE eagerly.
 
-    Like ``_record_login_attempt``, the eager commit is required because
+    Like ``record_login_attempt``, the eager commit is required because
     every login attempt eventually raises AuthenticationFailed (failure
     path) or returns through the route's outer commit (success path).
     Under failure-only traffic the route's outer rollback would discard
@@ -371,7 +371,7 @@ def login(
     loaded ``LocalmailConfig.auth``.
 
     Caller invariant: ``conn`` must have no uncommitted writes when this
-    is invoked. ``_record_login_attempt`` and ``_maybe_sweep`` each call
+    is invoked. ``record_login_attempt`` and ``_maybe_sweep`` each call
     ``conn.commit()`` eagerly so the audit row + sweep DELETE survive the
     route's outer rollback on ``AuthenticationFailed`` — any uncommitted
     work on the connection would be force-committed alongside the audit
@@ -381,7 +381,7 @@ def login(
     """
     if cfg is None:
         cfg = AuthConfig()
-    _check_login_rate_limits(conn, username, client_ip, cfg=cfg)
+    check_login_rate_limits(conn, username, client_ip, cfg=cfg)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash FROM api_users "
@@ -390,12 +390,12 @@ def login(
         )
         row = cur.fetchone()
     if row is None:
-        verify_password(password, _DUMMY_PASSWORD_HASH)
-        _record_login_attempt(conn, username, client_ip, "failure")
+        verify_password(password, DUMMY_PASSWORD_HASH)
+        record_login_attempt(conn, username, client_ip, "failure")
         _maybe_sweep(conn, cfg)
         raise AuthenticationFailed("invalid username or password")
     if not verify_password(password, row[1]):
-        _record_login_attempt(conn, username, client_ip, "failure")
+        record_login_attempt(conn, username, client_ip, "failure")
         _maybe_sweep(conn, cfg)
         raise AuthenticationFailed("invalid username or password")
     # On the success path we commit the "success" audit row BEFORE
@@ -404,8 +404,8 @@ def login(
     # resets but the caller has to retry. The blast radius is bounded
     # (one stale-success at most; user just logs in again) and reversing
     # the order would defeat the survives-route-rollback guarantee
-    # documented on ``_record_login_attempt``.
-    _record_login_attempt(conn, username, client_ip, "success")
+    # documented on ``record_login_attempt``.
+    record_login_attempt(conn, username, client_ip, "success")
     _maybe_sweep(conn, cfg)
     return issue_token(conn, row[0])
 
@@ -470,7 +470,7 @@ def change_password(
             (user_id,),
         )
         row = cur.fetchone()
-    stored_hash = row[0] if row is not None else _DUMMY_PASSWORD_HASH
+    stored_hash = row[0] if row is not None else DUMMY_PASSWORD_HASH
     if not verify_password(old_password, stored_hash) or row is None:
         raise AuthenticationFailed("old password is incorrect")
     new_hash = hash_password(new_password)
@@ -479,3 +479,12 @@ def change_password(
             "UPDATE api_users SET password_hash = %s WHERE id = %s",
             (new_hash, user_id),
         )
+
+
+# Deprecated underscored aliases — kept for one release per issue #115's
+# deprecation window. New code MUST use the public names. The aliases are
+# the same objects (identity, not copies) so callers don't fork the dummy
+# hash or the helper closures.
+_DUMMY_PASSWORD_HASH = DUMMY_PASSWORD_HASH
+_check_login_rate_limits = check_login_rate_limits
+_record_login_attempt = record_login_attempt

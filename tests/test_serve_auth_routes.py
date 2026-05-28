@@ -125,7 +125,7 @@ def test_route_driven_login_failures_persist_audit_rows(db_dsn: str, api_user) -
     despite the route's outer-rollback-on-error transaction semantics.
 
     Regression for the bug found in the final cross-task review of #7:
-    _record_login_attempt previously deferred its commit to the route,
+    record_login_attempt previously deferred its commit to the route,
     but the route raises AuthenticationFailed (or rate-limited variants)
     and the outer rollback discarded the audit row — defeating the
     per-user and per-IP failure caps in production.
@@ -158,11 +158,11 @@ def test_route_driven_login_failures_persist_audit_rows(db_dsn: str, api_user) -
 
 def test_login_429_carries_retry_after_and_cap(db_dsn: str, api_user, db_conn) -> None:
     """Global cap trips, 429 carries Retry-After header and cap field."""
-    from localmail.api.auth import _record_login_attempt
+    from localmail.api.auth import record_login_attempt
     from localmail.config import AuthConfig
 
     for u in ("a", "b", "c", "d", "e"):
-        _record_login_attempt(db_conn, u, "9.9.9.9", "failure")
+        record_login_attempt(db_conn, u, "9.9.9.9", "failure")
     db_conn.commit()
 
     c = _client(db_dsn)

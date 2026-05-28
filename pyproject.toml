@@ -33,6 +33,7 @@ dependencies = [
     "nh3>=0.2.18",
     "cryptography>=43.0",
     "sqlparse>=0.5",
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]

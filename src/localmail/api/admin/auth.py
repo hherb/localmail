@@ -89,17 +89,30 @@ def get_admin_user(
 
     Existing callers that don't carry a session — `grant_admin`, CLI
     checks, tests — leave ``issued_at`` unset and skip the revocation
-    check entirely, preserving today's behaviour.
+    check entirely, preserving today's behaviour. Passing ``None``
+    sends SQL NULL; ``to_timestamp(NULL)`` is NULL and the surrounding
+    boolean collapses to NULL → Python falsy, so the Python guard
+    below short-circuits without raising.
+
+    Precision boundary: ``issued_at`` is second-resolution (Unix
+    epoch BIGINT) while ``sessions_invalidated_at`` is microsecond
+    TIMESTAMPTZ. A token whose true mint time falls in the same
+    wall-clock second as the revocation can land on either side of
+    the comparison depending on truncation, biasing toward
+    over-revocation (a freshly-minted token may be rejected if the
+    revoke landed in the same second). That's safe: the operator
+    just re-logs-in. Never the reverse — a token cannot escape
+    revocation by sub-second timing.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT username,"
             "       is_admin,"
             "       (sessions_invalidated_at IS NOT NULL AND"
-            "        to_timestamp(%s) < sessions_invalidated_at) "
+            "        to_timestamp(%s::bigint) < sessions_invalidated_at) "
             "  FROM api_users"
             " WHERE id = %s AND disabled_at IS NULL",
-            (issued_at if issued_at is not None else 0, user_id),
+            (issued_at, user_id),
         )
         row = cur.fetchone()
     if row is None:

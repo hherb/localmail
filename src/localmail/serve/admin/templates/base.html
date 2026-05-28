@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}localmail admin{% endblock %}</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+  <script src="/admin/static/htmx.min.js" defer></script>
+</head>
+<body{% if current_user %} hx-headers='{"X-CSRF-Token": "{{ csrf_token_for("htmx") }}"}'{% endif %}>
+  <header class="admin-header">
+    <a href="/admin/" class="admin-logo">localmail admin</a>
+    {% if current_user %}
+      <nav class="admin-nav">
+        <a href="/admin/">Dashboard</a>
+        <a href="/admin/accounts">Accounts</a>
+        <a href="/admin/daemon">Daemon</a>
+        <a href="/admin/imports">Imports</a>
+        <a href="/admin/users">Users</a>
+      </nav>
+      <form method="post" action="/admin/logout" class="admin-logout-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_for('/admin/logout') }}">
+        <span class="admin-user">{{ current_user.username }}</span>
+        <button type="submit">Sign out</button>
+      </form>
+    {% endif %}
+  </header>
+
+  {% if flashes %}
+    <ul class="admin-flashes">
+      {% for category, message in flashes %}
+        <li class="admin-flash admin-flash-{{ category }}">{{ message }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  <main class="admin-main">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

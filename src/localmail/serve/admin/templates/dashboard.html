@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — localmail admin{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<p>Signed in as <strong>{{ current_user.username }}</strong>.</p>
+<div class="admin-card">
+  <p>Admin actions will appear here once the rest of Sub-plans 2–6 ship:</p>
+  <ul>
+    <li>Account management — Sub-plan 3</li>
+    <li>Daemon control — Sub-plan 5</li>
+    <li>Mbox imports — Sub-plan 6</li>
+  </ul>
+</div>
+{% endblock %}

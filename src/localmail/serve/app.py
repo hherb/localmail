@@ -2,13 +2,19 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from psycopg_pool import ConnectionPool
 
 from localmail.api.errors import APIError, RateLimited
 from localmail.config import AuthConfig, ServeConfig
+from localmail.serve.admin import auth_router as admin_auth_router
+from localmail.serve.admin import dashboard_router as admin_dashboard_router
+from localmail.serve.admin.dependencies import install_admin_redirect_handler
+from localmail.serve.admin.middleware import ScrubSensitiveQueryParamsMiddleware
 from localmail.serve.middleware import APIErrorHandlerMiddleware, RequestIdMiddleware
 from localmail.serve.routes import accounts as accounts_routes
 from localmail.serve.routes import auth as auth_routes
@@ -83,12 +89,51 @@ def create_app(
         # and form-submission abuse on rendered HTML email bodies. base-uri
         # blocks <base href> hijacks that would shift relative URLs (e.g. the
         # /v1/attachments rewrites) to an attacker-controlled origin.
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
-            "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
-        )
+        #
+        # Admin UI paths need a relaxed CSP: htmx.min.js and admin.css are
+        # served from 'self', and forms POST to 'self'. All other paths keep
+        # the locked-down policy. 'unsafe-inline' on style-src is preserved
+        # for /admin/* because htmx injects inline `style="..."` attributes
+        # during swaps (display:none transitions, optimistic UI), which a
+        # strict CSP would break. The risk is contained: admin pages are
+        # rendered from Jinja templates we control, not from email bodies.
+        if request.url.path.startswith("/admin"):
+            csp = (
+                "default-src 'none'; img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+                "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+            )
+        else:
+            csp = (
+                "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
+                "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+            )
+        response.headers["Content-Security-Policy"] = csp
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
+
+    # Admin UI: only mount if signing keys are configured. Empty keys mean
+    # the operator hasn't opted in; we still build the rest of the app.
+    if cfg.session_signing_key:
+        if not cfg.state_signing_key:
+            raise RuntimeError(
+                "ServeConfig.state_signing_key is empty while session_signing_key is "
+                "set; admin UI requires both. See "
+                "docs/superpowers/specs/2026-05-28-admin-ui-design.md §3."
+            )
+        app.add_middleware(
+            ScrubSensitiveQueryParamsMiddleware,
+            sensitive=("code", "state", "password"),
+        )
+        install_admin_redirect_handler(app)
+        app.include_router(admin_auth_router.router, prefix="/admin")
+        app.include_router(admin_dashboard_router.router, prefix="/admin")
+        admin_static = Path(__file__).parent / "admin" / "static"
+        app.mount(
+            "/admin/static",
+            StaticFiles(directory=str(admin_static)),
+            name="admin_static",
+        )
 
     app.include_router(version_routes.router, prefix="/v1")
     app.include_router(auth_routes.router, prefix="/v1/auth")

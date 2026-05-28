@@ -16,7 +16,7 @@ from localmail.api.admin.auth import (
 from localmail.api.admin.csrf import CSRFError, make_csrf_token, verify_csrf_token
 from localmail.api.admin.session_tokens import SessionPayload, encode_session_token
 from localmail.api.errors import AuthenticationFailed
-from localmail.serve.admin.dependencies import SESSION_COOKIE_NAME
+from localmail.serve.admin.dependencies import SESSION_COOKIE_NAME, require_admin_session
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -101,6 +101,34 @@ def post_login(
         SESSION_COOKIE_NAME,
         token,
         max_age=SESSION_TTL_SECONDS,
+        path="/admin",
+        secure=(request.url.scheme == "https"),
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+LOGOUT_CSRF_ACTION = "/admin/logout"
+
+
+@router.post("/logout")
+def post_logout(
+    request: Request,
+    csrf_token: str = Form(""),
+    admin: AdminUser = require_admin_session(),
+):
+    s_key = _session_key(request)
+    try:
+        verify_csrf_token(csrf_token, user_id=admin.id, action=LOGOUT_CSRF_ACTION, key=s_key)
+    except CSRFError:
+        return HTMLResponse("CSRF token missing or invalid", status_code=400)
+
+    response = RedirectResponse("/admin/login", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        "",
+        max_age=0,
         path="/admin",
         secure=(request.url.scheme == "https"),
         httponly=True,

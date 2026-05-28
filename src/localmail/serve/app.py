@@ -11,6 +11,7 @@ from psycopg_pool import ConnectionPool
 
 from localmail.api.errors import APIError, RateLimited
 from localmail.config import AuthConfig, ServeConfig
+from localmail.serve.admin import accounts_router as admin_accounts_router
 from localmail.serve.admin import auth_router as admin_auth_router
 from localmail.serve.admin import dashboard_router as admin_dashboard_router
 from localmail.serve.admin.dependencies import install_admin_redirect_handler
@@ -128,6 +129,7 @@ def create_app(
         install_admin_redirect_handler(app)
         app.include_router(admin_auth_router.router, prefix="/admin")
         app.include_router(admin_dashboard_router.router, prefix="/admin")
+        app.include_router(admin_accounts_router.router, prefix="/v1/admin")
         admin_static = Path(__file__).parent / "admin" / "static"
         app.mount(
             "/admin/static",

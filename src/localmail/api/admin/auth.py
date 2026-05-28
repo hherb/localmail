@@ -41,7 +41,8 @@ def authenticate_admin(
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, password_hash, is_admin FROM api_users WHERE username = %s",
+            "SELECT id, password_hash, is_admin FROM api_users"
+            " WHERE username = %s AND disabled_at IS NULL",
             (username,),
         )
         row = cur.fetchone()
@@ -59,10 +60,15 @@ def authenticate_admin(
 
 
 def get_admin_user(conn: psycopg.Connection, *, user_id: int) -> AdminUser:
-    """Look up an admin by id. Raises UserNotFound / NotAnAdmin."""
+    """Look up an admin by id. Raises UserNotFound / NotAnAdmin.
+
+    A disabled user (disabled_at IS NOT NULL) is treated as UserNotFound so
+    the session middleware redirects to login rather than returning 403.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT username, is_admin FROM api_users WHERE id = %s",
+            "SELECT username, is_admin FROM api_users"
+            " WHERE id = %s AND disabled_at IS NULL",
             (user_id,),
         )
         row = cur.fetchone()

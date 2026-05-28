@@ -102,3 +102,21 @@ def test_revoke_admin_idempotent(db_conn: psycopg.Connection) -> None:
 def test_revoke_admin_unknown_user(db_conn: psycopg.Connection) -> None:
     with pytest.raises(UserNotFound):
         revoke_admin(db_conn, username="ghost")
+
+
+def test_authenticate_admin_disabled_user_rejected(db_conn: psycopg.Connection) -> None:
+    uid = _insert_user(db_conn, "horst", "hunter2", is_admin=True)
+    with db_conn.cursor() as cur:
+        cur.execute("UPDATE api_users SET disabled_at = now() WHERE id = %s", (uid,))
+    db_conn.commit()
+    with pytest.raises(AuthenticationFailed):
+        authenticate_admin(db_conn, username="horst", password="hunter2")
+
+
+def test_get_admin_user_disabled_user_rejected(db_conn: psycopg.Connection) -> None:
+    uid = _insert_user(db_conn, "horst", "hunter2", is_admin=True)
+    with db_conn.cursor() as cur:
+        cur.execute("UPDATE api_users SET disabled_at = now() WHERE id = %s", (uid,))
+    db_conn.commit()
+    with pytest.raises(UserNotFound):
+        get_admin_user(db_conn, user_id=uid)

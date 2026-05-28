@@ -217,3 +217,25 @@ def update_account(conn: psycopg.Connection, account_id: int,
         if cur.rowcount == 0:
             raise NotFound(f"account {account_id} not found")
     return get_account(conn, account_id)
+
+
+class AccountInUse(RuntimeError):
+    """Raised when delete is refused because messages reference the account."""
+
+
+def delete_account(conn: psycopg.Connection, account_id: int,
+                   *, force: bool = False) -> None:
+    """Delete an account. Refuses if messages reference it unless force=True."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM accounts WHERE id = %s", (account_id,))
+        if cur.fetchone() is None:
+            raise NotFound(f"account {account_id} not found")
+        if not force:
+            cur.execute(
+                "SELECT 1 FROM messages WHERE account_id = %s LIMIT 1",
+                (account_id,))
+            if cur.fetchone() is not None:
+                raise AccountInUse(
+                    f"account {account_id} still has messages; pass force=True"
+                )
+        cur.execute("DELETE FROM accounts WHERE id = %s", (account_id,))

@@ -4,8 +4,8 @@ import pytest
 
 from localmail.api.admin.accounts import (
     Account, AccountSummary,
-    AccountFieldError,
-    create_account, get_account,
+    AccountFieldError, AccountInUse,
+    create_account, delete_account, get_account,
     list_accounts, update_account,
 )
 from localmail.api.errors import NotFound
@@ -153,3 +153,35 @@ def test_update_account_violation_raises_field_error(db_conn):
     aid = _insert_account(db_conn, name='constraint-target')
     with pytest.raises(AccountFieldError):
         update_account(db_conn, aid, imap_host=None)
+
+
+def test_delete_empty_account_succeeds(db_conn):
+    aid = _insert_account(db_conn, name='empty')
+    delete_account(db_conn, aid)
+    with pytest.raises(NotFound):
+        get_account(db_conn, aid)
+
+
+def test_delete_account_with_messages_refuses_without_force(db_conn):
+    aid = _insert_account(db_conn, name='busy')
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO messages (account_id, raw_bytes, raw_sha256, "
+            "size_bytes, headers, attachments) "
+            "VALUES (%s, %s, %s, %s, '{}'::jsonb, '[]'::jsonb)",
+            (aid, b'x', b'a'*32, 1))
+    with pytest.raises(AccountInUse):
+        delete_account(db_conn, aid)
+
+
+def test_delete_account_with_messages_force_cascades(db_conn):
+    aid = _insert_account(db_conn, name='busy2')
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO messages (account_id, raw_bytes, raw_sha256, "
+            "size_bytes, headers, attachments) "
+            "VALUES (%s, %s, %s, %s, '{}'::jsonb, '[]'::jsonb)",
+            (aid, b'x', b'b'*32, 1))
+    delete_account(db_conn, aid, force=True)
+    with pytest.raises(NotFound):
+        get_account(db_conn, aid)

@@ -20,6 +20,7 @@ class FakeFlow:
     """Stand-in for google_auth_oauthlib.flow.Flow."""
 
     redirect_uri: str = 'https://example.test/cb'
+    client_secrets_file: object = None
     code_to_refresh: dict[str, str] = field(
         default_factory=lambda: {'good-code': 'refresh-xyz'}
     )

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from localmail.api.admin.csrf import make_csrf_token
 from localmail.api.auth import hash_password
 from localmail.config import ServeConfig
+from localmail.serve.admin.csrf import csrf_action
 from localmail.serve.app import create_app
 from tests._fake_imap import FakeIMAPClient
 
@@ -76,8 +77,9 @@ def admin_client(app, admin_user_id):
 
     key = _SIGNING_KEY.encode("ascii")
 
-    def csrf_for(action: str) -> str:
-        return make_csrf_token(user_id=admin_user_id, action=action, key=key)
+    def csrf_for(action: str, method: str = "POST") -> str:
+        bound = csrf_action(method, action)
+        return make_csrf_token(user_id=admin_user_id, action=bound, key=key)
 
     client.csrf_for = csrf_for  # type: ignore[attr-defined]
     return client
@@ -196,11 +198,38 @@ def test_patch_account_changes_folder_deny(admin_client):
         f"/v1/admin/accounts/{aid}",
         json={"folder_deny": ["Spam", "Trash"]},
         headers={
-            "X-CSRF-Token": admin_client.csrf_for(f"/v1/admin/accounts/{aid}"),
+            "X-CSRF-Token": admin_client.csrf_for(
+                f"/v1/admin/accounts/{aid}", "PATCH"
+            ),
         },
     )
     assert r.status_code == 200, r.text
     assert r.json()["folder_deny"] == ["Spam", "Trash"]
+
+
+def test_patch_csrf_token_is_not_replayable_on_delete(admin_client):
+    """A CSRF token minted for PATCH must not authorize DELETE on the same
+    shared path — CSRF actions are method-bound (#122)."""
+    create = admin_client.post(
+        "/v1/admin/accounts",
+        json={
+            "name": "method-bound",
+            "email_address": "x@y.test",
+            "auth_method": "password",
+            "imap_host": "h",
+            "imap_port": 993,
+        },
+        headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/accounts")},
+    )
+    assert create.status_code == 201, create.text
+    aid = create.json()["id"]
+    # Token minted for PATCH, replayed against DELETE on the same path.
+    patch_token = admin_client.csrf_for(f"/v1/admin/accounts/{aid}", "PATCH")
+    r = admin_client.delete(
+        f"/v1/admin/accounts/{aid}",
+        headers={"X-CSRF-Token": patch_token},
+    )
+    assert r.status_code == 400, r.text
 
 
 # ---------- delete ----------
@@ -222,7 +251,9 @@ def test_delete_empty_account_returns_204(admin_client):
     r = admin_client.delete(
         f"/v1/admin/accounts/{aid}",
         headers={
-            "X-CSRF-Token": admin_client.csrf_for(f"/v1/admin/accounts/{aid}"),
+            "X-CSRF-Token": admin_client.csrf_for(
+                f"/v1/admin/accounts/{aid}", "DELETE"
+            ),
         },
     )
     assert r.status_code == 204
@@ -252,7 +283,9 @@ def test_delete_account_with_messages_returns_409(admin_client, db_conn):
     r = admin_client.delete(
         f"/v1/admin/accounts/{aid}",
         headers={
-            "X-CSRF-Token": admin_client.csrf_for(f"/v1/admin/accounts/{aid}"),
+            "X-CSRF-Token": admin_client.csrf_for(
+                f"/v1/admin/accounts/{aid}", "DELETE"
+            ),
         },
     )
     assert r.status_code == 409

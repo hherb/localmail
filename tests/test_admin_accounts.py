@@ -4,7 +4,9 @@ import pytest
 
 from localmail.api.admin.accounts import (
     Account, AccountSummary,
-    list_accounts, get_account,
+    AccountFieldError,
+    create_account, get_account,
+    list_accounts, update_account,
 )
 from localmail.api.errors import NotFound
 
@@ -56,3 +58,98 @@ def test_get_account_returns_full_record(db_conn):
 def test_get_account_missing_raises_not_found(db_conn):
     with pytest.raises(NotFound):
         get_account(db_conn, 9999)
+
+
+def test_create_account_password_round_trip(db_conn):
+    acct = create_account(
+        db_conn,
+        name='work',
+        email_address='work@example.test',
+        auth_method='password',
+        imap_host='imap.example',
+        imap_port=993,
+        oauth_provider=None,
+        folder_allow=None,
+        folder_deny=['Spam'],
+        folder_deny_flags=['\\Junk'],
+    )
+    assert acct.id > 0 and acct.name == 'work'
+    assert acct.folder_deny == ['Spam']
+    fetched = get_account(db_conn, acct.id)
+    assert fetched == acct
+
+
+def test_create_account_archive_has_null_host(db_conn):
+    acct = create_account(
+        db_conn,
+        name='legacy-2017',
+        email_address='archive@local.test',
+        auth_method='archive',
+        imap_host=None,
+        imap_port=None,
+        oauth_provider=None,
+        folder_allow=None,
+        folder_deny=None,
+        folder_deny_flags=None,
+    )
+    assert acct.auth_method == 'archive'
+    assert acct.imap_host is None and acct.imap_port is None
+
+
+def test_create_account_rejects_blank_name(db_conn):
+    with pytest.raises(AccountFieldError):
+        create_account(
+            db_conn,
+            name='',
+            email_address='x@y.test',
+            auth_method='password',
+            imap_host='h', imap_port=993,
+            oauth_provider=None,
+            folder_allow=None, folder_deny=None, folder_deny_flags=None,
+        )
+
+
+def test_create_account_rejects_password_without_host(db_conn):
+    with pytest.raises(AccountFieldError):
+        create_account(
+            db_conn,
+            name='x',
+            email_address='x@y.test',
+            auth_method='password',
+            imap_host=None, imap_port=None,
+            oauth_provider=None,
+            folder_allow=None, folder_deny=None, folder_deny_flags=None,
+        )
+
+
+def test_update_account_changes_folders_and_bumps_updated_at(db_conn):
+    aid = _insert_account(db_conn, name='u')
+    before = get_account(db_conn, aid)
+    updated = update_account(
+        db_conn,
+        aid,
+        folder_deny=['Trash', 'Bin'],
+        sync_enabled=False,
+    )
+    assert updated.folder_deny == ['Trash', 'Bin']
+    assert updated.sync_enabled is False
+    assert updated.updated_at >= before.updated_at
+
+
+def test_update_account_missing_raises_not_found(db_conn):
+    with pytest.raises(NotFound):
+        update_account(db_conn, 9999, sync_enabled=False)
+
+
+def test_update_account_rejects_changing_auth_method_to_archive_with_host(db_conn):
+    aid = _insert_account(db_conn, name='live')
+    with pytest.raises(AccountFieldError):
+        update_account(db_conn, aid, auth_method='archive')
+
+
+def test_update_account_violation_raises_field_error(db_conn):
+    """If an UPDATE violates accounts_live_requires_host, the service layer
+    surfaces AccountFieldError rather than the raw psycopg CheckViolation."""
+    aid = _insert_account(db_conn, name='constraint-target')
+    with pytest.raises(AccountFieldError):
+        update_account(db_conn, aid, imap_host=None)

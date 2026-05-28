@@ -17,6 +17,13 @@ poll_seconds       = 300    # poll non-INBOX folders every 5 minutes
 # pool_max_size    = 12     # uncomment to override auto-computed pool cap
                             # (defaults to 2*N_accounts + workers + 2 + floor)
 
+[serve]
+# Admin UI signing keys. Required when admin UI is in use.
+# Generate each with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+# session_signing_key = "..."
+# state_signing_key   = "..."
+# oauth_callback_url  = "https://localmail.example.com/admin/oauth/callback"
+
 [auth]
 # Login rate-limit thresholds (all Postgres-backed; survive
 # uvicorn --workers N and serve restarts).

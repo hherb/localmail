@@ -53,6 +53,32 @@ class ServeConfig(BaseModel):
     # sync transactions that genuinely take longer.
     changes_safe_horizon_s: int = 5
 
+    # Admin UI signing keys. Empty default = admin UI disabled; populated
+    # only when the operator opts in by setting them in config.toml. Both
+    # keys must be at least 32 base64url characters (~24 bytes decoded).
+    # See docs/superpowers/specs/2026-05-28-admin-ui-design.md §3.
+    session_signing_key: str = ""
+    state_signing_key: str = ""
+
+    # OAuth2 callback URL the admin UI redirects to after Google consent.
+    # Must match an Authorized redirect URI registered in Google Cloud
+    # Console for the localmail OAuth client. Empty default = OAuth web
+    # flow disabled; CLI desktop loopback flow remains available.
+    oauth_callback_url: str = ""
+
+    @field_validator("session_signing_key", "state_signing_key")
+    @classmethod
+    def _validate_signing_key(cls, v: str) -> str:
+        if v == "":
+            return v
+        if len(v) < 32:
+            raise ValueError(
+                "signing key must be at least 32 characters "
+                "(generate with `python -c 'import secrets; "
+                "print(secrets.token_urlsafe(32))'`)"
+            )
+        return v
+
 
 class AuthConfig(BaseModel):
     """Tunables for the login rate limiter (Postgres-backed)."""

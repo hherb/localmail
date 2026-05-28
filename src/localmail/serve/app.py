@@ -89,10 +89,22 @@ def create_app(
         # and form-submission abuse on rendered HTML email bodies. base-uri
         # blocks <base href> hijacks that would shift relative URLs (e.g. the
         # /v1/attachments rewrites) to an attacker-controlled origin.
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
-            "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
-        )
+        #
+        # Admin UI paths need a relaxed CSP: htmx.min.js and admin.css are
+        # served from 'self', and forms POST to 'self'. All other paths keep
+        # the locked-down policy.
+        if request.url.path.startswith("/admin"):
+            csp = (
+                "default-src 'none'; img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+                "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+            )
+        else:
+            csp = (
+                "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
+                "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+            )
+        response.headers["Content-Security-Policy"] = csp
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 

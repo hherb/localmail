@@ -9,9 +9,10 @@ import hashlib
 import logging
 import secrets
 import time as _monotonic_time
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import psycopg
 from argon2 import PasswordHasher
@@ -26,6 +27,28 @@ from localmail.api.errors import (
 from localmail.config import AuthConfig
 
 logger = logging.getLogger("localmail.api.auth")
+
+__all__ = [
+    "AuthenticatedUser",
+    "DUMMY_PASSWORD_HASH",
+    "LAST_USED_REFRESH_SECONDS",
+    "TOKEN_TTL_DAYS",
+    "change_password",
+    "check_login_rate_limits",
+    "create_user",
+    "generate_token",
+    "hash_password",
+    "hash_token",
+    "issue_token",
+    "login",
+    "logout",
+    "record_login_attempt",
+    "refresh_token",
+    "reset_login_rate_limiter",
+    "verify_password",
+    "verify_token",
+    "whoami",
+]
 
 _HASHER = PasswordHasher()
 
@@ -482,9 +505,25 @@ def change_password(
 
 
 # Deprecated underscored aliases — kept for one release per issue #115's
-# deprecation window. New code MUST use the public names. The aliases are
-# the same objects (identity, not copies) so callers don't fork the dummy
-# hash or the helper closures.
-_DUMMY_PASSWORD_HASH = DUMMY_PASSWORD_HASH
-_check_login_rate_limits = check_login_rate_limits
-_record_login_attempt = record_login_attempt
+# deprecation window. Resolved via PEP 562 ``__getattr__`` so callers get
+# a runtime ``DeprecationWarning`` pointing at their import site, and the
+# returned object is the public one (identity, not a copy) so callers
+# don't fork the dummy hash or the helper closures.
+_DEPRECATED_ALIASES: dict[str, str] = {
+    "_DUMMY_PASSWORD_HASH": "DUMMY_PASSWORD_HASH",
+    "_check_login_rate_limits": "check_login_rate_limits",
+    "_record_login_attempt": "record_login_attempt",
+}
+
+
+def __getattr__(name: str) -> Any:
+    target = _DEPRECATED_ALIASES.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    warnings.warn(
+        f"{name} is deprecated; use {target} instead "
+        "(removal targeted for the release after #115).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return globals()[target]

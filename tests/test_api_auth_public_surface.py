@@ -12,6 +12,7 @@ callable end-to-end against the real DB.
 from __future__ import annotations
 
 import psycopg
+import pytest
 
 from localmail.api import auth as auth_mod
 from localmail.api.auth import (
@@ -21,6 +22,7 @@ from localmail.api.auth import (
     reset_login_rate_limiter,
     verify_password,
 )
+from localmail.api.errors import RateLimited
 from localmail.config import AuthConfig
 
 
@@ -36,12 +38,29 @@ def test_public_names_exposed_on_module() -> None:
 
 def test_underscored_aliases_resolve_to_public_objects() -> None:
     """Issue #115 commits to a one-release deprecation window — the
-    underscored names still import and are the *same object* as the public
-    name so existing callers don't double-evaluate or drift.
+    underscored names still resolve via ``__getattr__`` and are the *same
+    object* as the public name so existing callers don't double-evaluate
+    or drift. Each lookup also emits ``DeprecationWarning`` so a caller
+    still importing the old name gets a runtime signal before the alias
+    is removed.
     """
-    assert auth_mod._DUMMY_PASSWORD_HASH is auth_mod.DUMMY_PASSWORD_HASH
-    assert auth_mod._check_login_rate_limits is auth_mod.check_login_rate_limits
-    assert auth_mod._record_login_attempt is auth_mod.record_login_attempt
+    for old, new in (
+        ("_DUMMY_PASSWORD_HASH", "DUMMY_PASSWORD_HASH"),
+        ("_check_login_rate_limits", "check_login_rate_limits"),
+        ("_record_login_attempt", "record_login_attempt"),
+    ):
+        with pytest.warns(DeprecationWarning, match=old):
+            resolved = getattr(auth_mod, old)
+        assert resolved is getattr(auth_mod, new)
+
+
+def test_unknown_attribute_still_raises_attribute_error() -> None:
+    """``__getattr__`` only handles the three deprecated aliases — other
+    misses must surface as ``AttributeError`` so typos aren't silently
+    swallowed.
+    """
+    with pytest.raises(AttributeError, match="does_not_exist"):
+        auth_mod.does_not_exist  # type: ignore[attr-defined]
 
 
 def test_public_dummy_hash_verifies_as_mismatch() -> None:
@@ -64,8 +83,6 @@ def test_public_record_then_check_round_trip(db_conn: psycopg.Connection) -> Non
     record_login_attempt(db_conn, "alice", "10.0.0.1", "failure")
     record_login_attempt(db_conn, "alice", "10.0.0.1", "failure")
     db_conn.commit()
-    import pytest
-    from localmail.api.errors import RateLimited
     with pytest.raises(RateLimited) as excinfo:
         check_login_rate_limits(db_conn, "alice", "10.0.0.1", cfg=cfg)
     assert excinfo.value.cap == "user"

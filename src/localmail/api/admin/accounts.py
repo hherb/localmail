@@ -7,15 +7,19 @@ the AccountConfig model in localmail.config.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, cast
 
 import psycopg
+from imapclient import IMAPClient
 from psycopg.types.json import Jsonb
 
+from localmail import imap_client as _imap
 from localmail import secrets as _secrets
 from localmail.api.errors import NotFound
+from localmail.config import AccountConfig as _AccountConfig
 
 
 AuthMethod = Literal['password', 'oauth2', 'archive']
@@ -260,3 +264,43 @@ def clear_secret(account: Account) -> None:
     """
     _secrets.delete_password(account.name)
     _secrets.delete_refresh_token(account.name)
+
+
+@dataclass(frozen=True)
+class FolderInfo:
+    name: str
+    flags: tuple[str, ...]
+
+
+def _open_imap_connection(account: Account) -> AbstractContextManager[IMAPClient]:
+    """Indirection point so tests can monkeypatch without touching real IMAP."""
+    cfg = _AccountConfig(
+        name=account.name,
+        email=account.email_address,
+        imap_host=account.imap_host or '',
+        imap_port=account.imap_port or 993,
+        auth_method=account.auth_method,  # type: ignore[arg-type]  # archive case rejected by guard above
+        oauth_provider=account.oauth_provider,  # type: ignore[arg-type]  # archive case rejected by guard above
+    )
+    return _imap.open_connection(cfg)
+
+
+def probe_connection(conn: psycopg.Connection, account_id: int) -> list[FolderInfo]:
+    """Open IMAP, list folders, return summary. Raises on connect failure.
+
+    Archive accounts raise AccountFieldError.
+
+    Note: oauth2 accounts require the gmail_client_secrets config field
+    to be wired through _open_imap_connection (not done in this task —
+    Task 9 / Task 10 will route OAuth credentials through). Calling
+    probe_connection on an oauth2 account before that wiring will raise
+    a RuntimeError from imap_client.open_connection.
+    """
+    account = get_account(conn, account_id)
+    if account.auth_method == 'archive':
+        raise AccountFieldError(
+            "probe_connection not applicable to archive accounts"
+        )
+    with _open_imap_connection(account) as client:
+        listing = client.list_folders()
+    return [FolderInfo(name=name, flags=tuple(flags)) for flags, _delim, name in listing]

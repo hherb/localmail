@@ -6,10 +6,12 @@ import pytest
 from localmail.api.admin.accounts import (
     Account, AccountSummary,
     AccountFieldError, AccountInUse,
+    FolderInfo,
     clear_secret, create_account, delete_account, get_account,
-    list_accounts, store_password, update_account,
+    list_accounts, probe_connection, store_password, update_account,
 )
 from localmail.api.errors import NotFound
+from tests._fake_imap import FakeIMAPClient
 
 
 def _insert_account(conn, *, name, email='x@y.test', method='password',
@@ -209,3 +211,30 @@ def test_clear_secret_tolerates_missing_keyring_entries(db_conn):
     aid = _insert_account(db_conn, name='kring3')
     acct = get_account(db_conn, aid)
     clear_secret(acct)  # no-op, no raise
+
+
+def test_probe_connection_returns_folder_list(db_conn, monkeypatch):
+    from contextlib import contextmanager
+
+    aid = _insert_account(db_conn, name='tc')
+
+    fake = FakeIMAPClient.with_folders(['INBOX', '[Gmail]/All Mail', 'Sent'])
+
+    @contextmanager
+    def fake_open_connection(account):
+        yield fake
+
+    monkeypatch.setattr(
+        'localmail.api.admin.accounts._open_imap_connection',
+        fake_open_connection,
+    )
+    folders = probe_connection(db_conn, aid)
+    assert [f.name for f in folders] == ['INBOX', '[Gmail]/All Mail', 'Sent']
+    assert all(isinstance(f, FolderInfo) for f in folders)
+
+
+def test_probe_connection_archive_raises_field_error(db_conn):
+    aid = _insert_account(db_conn, name='arch-probe', method='archive',
+                          host=None, port=None)
+    with pytest.raises(AccountFieldError):
+        probe_connection(db_conn, aid)

@@ -1,0 +1,109 @@
+"""GET /admin/login (render form), POST /admin/login (validate + cookie)."""
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from fastapi import APIRouter, Form, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+
+from localmail.api.admin.auth import (
+    AdminUser,
+    NotAnAdmin,
+    authenticate_admin,
+)
+from localmail.api.admin.csrf import CSRFError, make_csrf_token, verify_csrf_token
+from localmail.api.admin.session_tokens import SessionPayload, encode_session_token
+from localmail.api.errors import AuthenticationFailed
+from localmail.serve.admin.dependencies import SESSION_COOKIE_NAME
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+LOGIN_CSRF_ACTION = "/admin/login"
+SESSION_TTL_SECONDS = 8 * 3600
+
+
+def _session_key(request: Request) -> bytes:
+    cfg = request.app.state.serve_config
+    s_key = cfg.session_signing_key
+    if not s_key:
+        raise RuntimeError("session_signing_key is empty; admin UI disabled")
+    return s_key.encode("latin1") if isinstance(s_key, str) else s_key
+
+
+router = APIRouter()
+
+
+@router.get("/login", response_class=HTMLResponse)
+def get_login(request: Request) -> HTMLResponse:
+    s_key = _session_key(request)
+    csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={"csrf_token": csrf, "current_user": None, "flashes": []},
+    )
+
+
+@router.post("/login")
+def post_login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    csrf_token: str = Form(""),
+):
+    s_key = _session_key(request)
+    try:
+        verify_csrf_token(csrf_token, user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
+    except CSRFError:
+        return HTMLResponse("CSRF token missing or invalid", status_code=400)
+
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        try:
+            admin = authenticate_admin(conn, username=username, password=password)
+        except AuthenticationFailed:
+            csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
+            return templates.TemplateResponse(
+                request=request,
+                name="login.html",
+                context={
+                    "csrf_token": csrf,
+                    "error": "Invalid credentials.",
+                    "current_user": None,
+                    "flashes": [],
+                },
+                status_code=401,
+            )
+        except NotAnAdmin:
+            csrf = make_csrf_token(user_id=0, action=LOGIN_CSRF_ACTION, key=s_key)
+            return templates.TemplateResponse(
+                request=request,
+                name="login.html",
+                context={
+                    "csrf_token": csrf,
+                    "error": "This account is not an admin.",
+                    "current_user": None,
+                    "flashes": [],
+                },
+                status_code=403,
+            )
+
+    now = int(time.time())
+    token = encode_session_token(
+        SessionPayload(user_id=admin.id, issued_at=now, exp=now + SESSION_TTL_SECONDS),
+        key=s_key,
+    )
+    response = RedirectResponse("/admin/", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=SESSION_TTL_SECONDS,
+        path="/admin",
+        secure=(request.url.scheme == "https"),
+        httponly=True,
+        samesite="lax",
+    )
+    return response

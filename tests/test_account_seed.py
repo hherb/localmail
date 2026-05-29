@@ -70,3 +70,77 @@ def test_list_accounts_full_returns_full_rows(db_conn) -> None:
     assert row.folder_allow == ["INBOX"]
     assert row.folder_deny_flags == ["\\Trash"]
     assert row.sync_enabled is True
+
+
+from localmail.account_seed import (
+    AccountDrift,
+    SeedPlan,
+    plan_account_seed,
+)
+
+
+def test_plan_empty_config_is_empty_plan() -> None:
+    plan = plan_account_seed([], {})
+    assert plan == SeedPlan(to_insert=[], drift=[])
+
+
+def test_plan_all_new_names_all_insert() -> None:
+    cfgs = [_cfg("alice"), _cfg("bob")]
+    plan = plan_account_seed(cfgs, {})
+    assert plan.to_insert == cfgs
+    assert plan.drift == []
+
+
+def test_plan_identical_match_is_skipped_no_drift() -> None:
+    cfg = _cfg("alice")
+    existing = {"alice": _db_account("alice")}
+    plan = plan_account_seed([cfg], existing)
+    assert plan.to_insert == []
+    assert plan.drift == []
+
+
+def test_plan_single_field_drift_lists_that_field() -> None:
+    cfg = _cfg("alice", imap_port=143)
+    existing = {"alice": _db_account("alice", imap_port=993)}
+    plan = plan_account_seed([cfg], existing)
+    assert plan.to_insert == []
+    assert plan.drift == [AccountDrift(name="alice", fields=["imap_port"])]
+
+
+def test_plan_multi_field_drift_lists_all() -> None:
+    cfg = _cfg("alice", imap_port=143, email="new@example.com")
+    existing = {"alice": _db_account("alice", imap_port=993,
+                                     email_address="old@example.com")}
+    plan = plan_account_seed([cfg], existing)
+    assert plan.to_insert == []
+    assert len(plan.drift) == 1
+    assert set(plan.drift[0].fields) == {"imap_port", "email_address"}
+
+
+def test_plan_folder_none_vs_empty_is_not_drift() -> None:
+    cfg = _cfg("alice", folder_allow=[])
+    existing = {"alice": _db_account("alice", folder_allow=None)}
+    plan = plan_account_seed([cfg], existing)
+    assert plan.drift == []
+
+
+def test_plan_folder_order_matters() -> None:
+    cfg = _cfg("alice", folder_allow=["A", "B"])
+    existing = {"alice": _db_account("alice", folder_allow=["B", "A"])}
+    plan = plan_account_seed([cfg], existing)
+    assert plan.drift == [AccountDrift(name="alice", fields=["folder_allow"])]
+
+
+def test_plan_mixed_batch() -> None:
+    cfgs = [
+        _cfg("new"),                       # insert
+        _cfg("same"),                      # skip, no drift
+        _cfg("drift", imap_port=143),      # skip, drift
+    ]
+    existing = {
+        "same": _db_account("same"),
+        "drift": _db_account("drift", imap_port=993),
+    }
+    plan = plan_account_seed(cfgs, existing)
+    assert [c.name for c in plan.to_insert] == ["new"]
+    assert plan.drift == [AccountDrift(name="drift", fields=["imap_port"])]

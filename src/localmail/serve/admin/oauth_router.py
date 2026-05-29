@@ -85,6 +85,8 @@ def oauth_start(
             raise HTTPException(status_code=404, detail="account not found")
         except svc.AccountFieldError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except svc.OAuthNotConfigured as e:
+            raise HTTPException(status_code=503, detail=str(e))
     return {'auth_url': url}
 
 

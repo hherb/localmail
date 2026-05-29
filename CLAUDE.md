@@ -547,7 +547,13 @@ for the full design.
   `gmail_oauth.client_secrets_file` is threaded in from
   `app.state.gmail_client_secrets_file` (set by `create_app`'s
   `gmail_client_secrets_file=`) — the service layer never calls
-  `load_config()` per request (#120). Account-row reads use psycopg
+  `load_config()` per request (#120). When that path is unset,
+  `oauth.py::_build_flow` raises `OAuthNotConfigured` (a
+  `RuntimeError` subclass), which `oauth_start` maps to a clean
+  **503** "Gmail OAuth is not configured" rather than letting a bare
+  `RuntimeError` escape as a 500 (#126); the callback's broad
+  `except Exception` already catches it as a failed-redirect.
+  Account-row reads use psycopg
   `class_row` (name-based column→field mapping, not positional unpack), and
   `AccountInUse` subclasses `ValueError` like its sibling
   `AccountFieldError` (#119, #123). Deferred to Sub-plan 2A.2: rewiring CLI

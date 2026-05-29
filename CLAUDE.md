@@ -581,8 +581,12 @@ for the full design.
   overwrite) and survives solely for the still-TOML-driven one-shot `localmail
   sync` CLI. Per-account `poll_seconds` TOML overrides are no longer honoured
   by the daemon (no DB column); the daemon-wide `cfg.daemon.poll_seconds`
-  applies to every account. Still deferred to **2A.2d**: rewiring CLI
-  `add-account` / `oauth-login` / `remove-account` / one-shot `sync` to the DB.
+  applies to every account. **The account set is read once at `Daemon.__init__`**
+  (a one-shot `psycopg.connect`, before the pool opens, since pool sizing
+  depends on the count) — admin-UI/CLI account changes take effect on the next
+  daemon restart, not live; hot reload is deferred to daemon control (2B).
+  Still deferred to **2A.2d**: rewiring CLI `add-account` / `oauth-login` /
+  `remove-account` / one-shot `sync` to the DB.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.

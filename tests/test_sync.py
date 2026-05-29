@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import Any
 
 from localmail.config import AccountConfig
-from localmail.sync import backfill_internal_date, folders_to_sync, sync_account
+from localmail.api.admin.accounts import create_account, get_account
+from localmail.sync import backfill_internal_date, folders_to_sync, sync_account, upsert_account
 
 from . import _eml
 from ._fake_imap import FakeIMAPClient
@@ -507,3 +508,38 @@ def test_messages_without_message_id_dedup_via_sha(db_conn, tmp_path: Path):
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages WHERE message_id IS NULL")
         assert cur.fetchone()[0] == 1
+
+
+def test_upsert_account_does_not_overwrite_canonical_columns(db_conn):
+    """DB is canonical: upsert_account is now get-or-create, never overwrite."""
+    created = create_account(
+        db_conn, name="acct", email_address="orig@example.com",
+        auth_method="password", imap_host="orig.example.com", imap_port=993,
+        oauth_provider=None, folder_allow=None, folder_deny=None,
+        folder_deny_flags=None,
+    )
+    db_conn.commit()
+
+    drift = AccountConfig(
+        name="acct", email="drift@example.com",
+        imap_host="drift.example.com", imap_port=143, auth_method="password",
+    )
+    returned_id = upsert_account(db_conn, drift)
+    db_conn.commit()
+
+    assert returned_id == created.id
+    row = get_account(db_conn, created.id)
+    assert row.email_address == "orig@example.com"
+    assert row.imap_host == "orig.example.com"
+    assert row.imap_port == 993
+
+
+def test_upsert_account_inserts_brand_new_name(db_conn):
+    acct = AccountConfig(
+        name="fresh", email="f@example.com",
+        imap_host="h.example.com", imap_port=993, auth_method="password",
+    )
+    new_id = upsert_account(db_conn, acct)
+    db_conn.commit()
+    assert isinstance(new_id, int)
+    assert get_account(db_conn, new_id).name == "fresh"

@@ -556,9 +556,25 @@ for the full design.
   Account-row reads use psycopg
   `class_row` (name-based column→field mapping, not positional unpack), and
   `AccountInUse` subclasses `ValueError` like its sibling
-  `AccountFieldError` (#119, #123). Deferred to Sub-plan 2A.2: rewiring CLI
-  commands (`add-account`, `oauth-login`, `remove-account`) to write to the
-  DB and TOML→DB seed at `init-db`.
+  `AccountFieldError` (#119, #123).
+- **TOML→DB seed (Sub-plan 2A.2 slice 1, shipped):** `init-db` now merges
+  `config.toml` `[[accounts]]` into the `accounts` table after migrations
+  apply — idempotent, keyed by `name`, **DB-canonical** (existing rows are
+  never overwritten; a drifted TOML value logs a WARNING naming the fields
+  and is otherwise ignored). Implemented as a pure planner
+  (`account_seed.plan_account_seed`) + thin IO wrapper
+  (`account_seed.seed_accounts`, inserting via `create_account` to reuse
+  validation, reading existing rows via the new public
+  `api.admin.accounts.list_accounts_full`); `init-db` echoes
+  `seeded accounts: inserted=N skipped=M drifted=K` and maps a malformed
+  block's `AccountFieldError` to a clean non-zero `ClickException` (whole
+  seed runs in one uncommitted transaction, so a failure leaves no partial
+  rows). Still deferred to later 2A.2 slices: rewiring CLI `add-account` /
+  `oauth-login` / `remove-account` to the DB, switching the daemon's account
+  source to the DB, and honouring `sync_enabled`. Note `sync.py:upsert_account`
+  still overwrites `email/host/port/auth_method/oauth_provider` from config
+  on first sync, so the DB is not yet *fully* canonical against the running
+  daemon until the daemon-source slice lands.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.

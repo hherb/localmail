@@ -83,6 +83,88 @@ def test_full_account(tmp_path: Path):
     assert a.folder_deny == ["[Gmail]/All Mail"]
 
 
+def test_duplicate_account_names_rejected(tmp_path: Path):
+    """Two [[accounts]] sharing a name fail load_config, naming the duplicate.
+
+    Account `name` is the canonical key everywhere (keyring username, DB
+    `accounts.name` unique constraint, the init-db seed's dedup key), so a
+    duplicate name is never valid. Reject it loudly at config-load instead of
+    letting it surface opaquely downstream (issue #129).
+    """
+    p = write(
+        tmp_path / "c.toml",
+        """
+        [database]
+        dsn = "postgresql:///localmail"
+
+        [[accounts]]
+        name = "dup"
+        email = "a@example.com"
+        imap_host = "imap.example.com"
+        auth_method = "password"
+
+        [[accounts]]
+        name = "dup"
+        email = "b@example.com"
+        imap_host = "imap.example.com"
+        auth_method = "password"
+        """,
+    )
+    with pytest.raises(ValidationError, match="dup"):
+        load_config(p)
+
+
+def test_distinct_account_names_accepted(tmp_path: Path):
+    """Distinct names per account load fine — the validator is duplicate-only."""
+    p = write(
+        tmp_path / "c.toml",
+        """
+        [database]
+        dsn = "postgresql:///localmail"
+
+        [[accounts]]
+        name = "one"
+        email = "a@example.com"
+        imap_host = "imap.example.com"
+        auth_method = "password"
+
+        [[accounts]]
+        name = "two"
+        email = "b@example.com"
+        imap_host = "imap.example.com"
+        auth_method = "password"
+        """,
+    )
+    cfg = load_config(p)
+    assert [a.name for a in cfg.accounts] == ["one", "two"]
+
+
+def test_duplicate_account_names_message_lists_all_duplicates():
+    """The error names every duplicated name (deduped, sorted), not just the first."""
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(
+            {
+                "database": {"dsn": "x"},
+                "accounts": [
+                    {"name": "alpha", "email": "a@x.com", "imap_host": "h", "auth_method": "password"},
+                    {"name": "beta", "email": "b@x.com", "imap_host": "h", "auth_method": "password"},
+                    {"name": "alpha", "email": "c@x.com", "imap_host": "h", "auth_method": "password"},
+                    {"name": "beta", "email": "d@x.com", "imap_host": "h", "auth_method": "password"},
+                    {"name": "beta", "email": "e@x.com", "imap_host": "h", "auth_method": "password"},
+                ],
+            }
+        )
+    msg = str(exc_info.value)
+    assert "alpha" in msg
+    assert "beta" in msg
+
+
+def test_empty_accounts_list_passes_duplicate_check():
+    """No accounts → no duplicates → validator is a no-op."""
+    cfg = Config.model_validate({"database": {"dsn": "x"}})
+    assert cfg.accounts == []
+
+
 def test_model_default_daemon_values():
     cfg = Config.model_validate({"database": {"dsn": "x"}})
     assert cfg.daemon.idle_renew_seconds == 1740

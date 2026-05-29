@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections import Counter
 from ipaddress import ip_network
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 # Imported (not redefined) so client_ip.py is the single source of truth for
 # the TrustedProxies alias. client_ip.py must remain free of any
@@ -374,6 +375,22 @@ class Config(BaseModel):
     accounts: list[AccountConfig] = Field(default_factory=list)
     search: SearchConfig = Field(default_factory=SearchConfig)
     upgrade: UpgradeEstimateConfig = Field(default_factory=UpgradeEstimateConfig)
+
+    @model_validator(mode="after")
+    def _reject_duplicate_account_names(self) -> Config:
+        # `name` is the canonical account key everywhere (keyring username, DB
+        # `accounts.name` unique constraint, the init-db seed's dedup key), so
+        # a duplicate is never valid. Fail loud here rather than let it surface
+        # opaquely in a downstream consumer (issue #129).
+        duplicates = sorted(
+            name for name, count in Counter(a.name for a in self.accounts).items()
+            if count > 1
+        )
+        if duplicates:
+            raise ValueError(
+                "duplicate account name(s) in config: " + ", ".join(duplicates)
+            )
+        return self
 
 
 # Alias for plans/future code that reference LocalmailConfig

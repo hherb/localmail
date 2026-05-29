@@ -162,6 +162,10 @@ Gmail requires OAuth2 for IMAP since 2022. To configure an OAuth2 account:
    folder_deny_flags = ["\\Trash", "\\Junk", "\\All"]
    ```
 
+   `name` is the account's canonical key (keyring entry, database row, the
+   `init-db` seed key), so it must be unique across all `[[accounts]]` blocks —
+   a duplicate fails config load with an error naming the offending name.
+
 6. **Run the consent flow once**:
 
    ```bash

@@ -30,3 +30,6 @@ gui/.svelte-kit/
 
 # Cloudflare Pages build output (copied from docs/manual/users by site/build.sh)
 site/manual/
+
+# Local-only Claude Code permissions (machine-specific, never in the repo)
+.claude/settings.local.json

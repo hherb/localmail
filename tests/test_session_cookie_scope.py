@@ -20,6 +20,10 @@ from localmail.serve.app import create_app
 
 # Qualname of the closure returned by require_admin_session(); shared across
 # every call because closures of one `def` share __qualname__.
+# MAINTENANCE: this is a string match against an internal closure name. If the
+# inner `_dep` function in serve/admin/dependencies.py:require_admin_session is
+# ever renamed, update this constant — otherwise the dependency-detection half
+# of the invariant goes silently vacuous (the cookie-name half still fires).
 _ADMIN_SESSION_DEP_QUALNAME = "require_admin_session.<locals>._dep"
 
 
@@ -56,9 +60,36 @@ def _machine_v1_routes(app):
             yield route
 
 
+def _admin_v1_routes(app):
+    for route in app.routes:
+        if isinstance(route, APIRoute) and route.path.startswith("/v1/admin/"):
+            yield route
+
+
 def test_machine_v1_routes_exist(app):
     """Guard the guard: if the walk finds nothing, the invariant is vacuous."""
     assert list(_machine_v1_routes(app)), "no /v1/ machine routes discovered"
+
+
+def test_dep_detector_fires_on_admin_routes(app):
+    """Guard the guard: prove the fragile detector string actually matches a
+    live /v1/admin/* route. `_ADMIN_SESSION_DEP_QUALNAME` is a hand-written
+    match against an internal closure name, so if the inner `_dep` in
+    require_admin_session is renamed this fails loudly — otherwise the
+    machine-route assertion's dependency half would pass vacuously.
+
+    (The cookie-name half needs no such guard: admin routes read the cookie
+    imperatively inside `_dep` via `request.cookies.get(...)`, not as a
+    declared FastAPI Cookie param, so it never appears in `cookie_params`;
+    and `SESSION_COOKIE_NAME` is imported, so it cannot drift out of sync.)"""
+    dep_seen = any(
+        _ADMIN_SESSION_DEP_QUALNAME in _walk_dependant(route.dependant)[1]
+        for route in _admin_v1_routes(app)
+    )
+    assert dep_seen, (
+        f"no /v1/admin/* route depends on {_ADMIN_SESSION_DEP_QUALNAME!r} — "
+        "require_admin_session's closure was likely renamed"
+    )
 
 
 def test_no_machine_v1_route_reads_admin_session_cookie(app):

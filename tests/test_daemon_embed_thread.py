@@ -22,7 +22,7 @@ class _E:
         pass
 
 
-def test_daemon_starts_embed_worker_when_enabled(db_dsn):
+def test_daemon_starts_embed_worker_when_enabled(db_dsn, db_conn):
     cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_embed_worker = True
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
@@ -36,7 +36,7 @@ def test_daemon_starts_embed_worker_when_enabled(db_dsn):
     assert not any(n.startswith("embed_worker") for n in names_after)
 
 
-def test_daemon_skips_embed_worker_when_disabled(db_dsn):
+def test_daemon_skips_embed_worker_when_disabled(db_dsn, db_conn):
     cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_embed_worker = False
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())

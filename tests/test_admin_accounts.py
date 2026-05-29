@@ -8,7 +8,8 @@ from localmail.api.admin.accounts import (
     AccountFieldError, AccountInUse,
     FolderInfo,
     clear_secret, create_account, delete_account, get_account,
-    list_accounts, probe_connection, store_password, update_account,
+    list_accounts, list_syncable_accounts, probe_connection,
+    store_password, update_account,
 )
 from localmail.api.errors import NotFound
 from tests._fake_imap import FakeIMAPClient
@@ -301,3 +302,20 @@ def test_update_email_rejects_blank(db_conn):
     aid = _insert_account(db_conn, name='blank-update')
     with pytest.raises(AccountFieldError):
         update_account(db_conn, aid, email_address='')
+
+
+def test_list_syncable_accounts_excludes_archive_and_disabled(db_conn):
+    pw = _insert_account(db_conn, name='pw')
+    oauth = _insert_account(db_conn, name='oauth', method='oauth2',
+                            host='imap.gmail.com', oauth_provider='gmail')
+    # archive: check constraint requires NULL host/port
+    _insert_account(db_conn, name='arch', method='archive', host=None, port=None)
+    off = _insert_account(db_conn, name='off')
+    update_account(db_conn, off, sync_enabled=False)
+    db_conn.commit()
+
+    rows = list_syncable_accounts(db_conn)
+
+    assert [r.name for r in rows] == ['pw', 'oauth']
+    assert [r.id for r in rows] == [pw, oauth]
+    assert all(isinstance(r, Account) for r in rows)

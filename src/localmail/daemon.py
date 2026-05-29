@@ -7,7 +7,11 @@ import signal
 import threading
 from typing import Any
 
+import psycopg
+
+from .api.admin.accounts import Account, list_syncable_accounts
 from .config import Config
+from .daemon_accounts import account_config_from_row
 from .db import compute_daemon_pool_size, open_pool
 from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
@@ -29,17 +33,19 @@ class Daemon:
         self.ssl = ssl
         self._dsn = dsn or cfg.database.dsn
         self._stop_event = threading.Event()
+        self._syncable = self._load_syncable_accounts()
+        n_accounts = len(self._syncable)
         configured_max_size = cfg.daemon.pool_max_size
         if configured_max_size is None:
             resolved_max_size = compute_daemon_pool_size(
-                n_accounts=len(cfg.accounts),
+                n_accounts=n_accounts,
                 run_embed=cfg.search.run_embed_worker,
                 run_extract=cfg.search.run_extract_worker,
             )
         else:
             resolved_max_size = configured_max_size
         resolved_min_size = min(
-            len(cfg.accounts) * 2
+            n_accounts * 2
             + (1 if cfg.search.run_embed_worker else 0)
             + (1 if cfg.search.run_extract_worker else 0)
             or 1,
@@ -49,7 +55,7 @@ class Daemon:
             "daemon pool sizing: max_size=%d min_size=%d (accounts=%d, embed=%s, extract=%s)",
             resolved_max_size,
             resolved_min_size,
-            len(cfg.accounts),
+            n_accounts,
             cfg.search.run_embed_worker,
             cfg.search.run_extract_worker,
         )
@@ -59,6 +65,14 @@ class Daemon:
         self.threads: list[threading.Thread] = []
         self._embedding_backend_factory = embedding_backend_factory
         self._started = False
+
+    def _load_syncable_accounts(self) -> list[Account]:
+        """Enumerate live, sync-enabled accounts from the DB (one-shot conn).
+
+        Done before the pool opens because pool sizing depends on the count.
+        """
+        with psycopg.connect(self._dsn) as conn:
+            return list_syncable_accounts(conn)
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("received signal %s; stopping daemon", signum)
@@ -71,13 +85,14 @@ class Daemon:
         gmail_secrets = (
             self.cfg.gmail_oauth.client_secrets_file if self.cfg.gmail_oauth else None
         )
-        for account in self.cfg.accounts:
+        for account_row in self._syncable:
             ctx = WorkerContext(
-                account=account,
+                account=account_config_from_row(account_row),
+                account_id=account_row.id,
                 pool=self.pool,
                 attachments_root=self.cfg.attachments.root,
                 idle_renew_seconds=self.cfg.daemon.idle_renew_seconds,
-                poll_seconds=account.poll_seconds or self.cfg.daemon.poll_seconds,
+                poll_seconds=self.cfg.daemon.poll_seconds,
                 gmail_client_secrets=gmail_secrets,
                 stop=self._stop_event,
                 ssl=self.ssl,
@@ -85,19 +100,19 @@ class Daemon:
             t_idle = threading.Thread(
                 target=run_inbox_idle_loop,
                 args=(ctx,),
-                name=f"idle-{account.name}",
+                name=f"idle-{account_row.name}",
                 daemon=True,
             )
             t_poll = threading.Thread(
                 target=run_poll_loop,
                 args=(ctx,),
-                name=f"poll-{account.name}",
+                name=f"poll-{account_row.name}",
                 daemon=True,
             )
             t_idle.start()
             t_poll.start()
             self.threads += [t_idle, t_poll]
-            log.info("started workers for %s", account.name)
+            log.info("started workers for %s", account_row.name)
 
         if self.cfg.search.run_embed_worker:
             from localmail.search.embed_worker import run_embed_worker  # noqa: PLC0415
@@ -157,8 +172,8 @@ class Daemon:
     def run_forever(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
-        if not self.cfg.accounts:
-            log.warning("no accounts configured; daemon exiting")
+        if not self._syncable:
+            log.warning("no syncable accounts in the DB; daemon exiting")
             return
         self.start_workers()
         try:

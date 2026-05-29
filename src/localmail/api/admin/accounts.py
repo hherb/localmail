@@ -97,6 +97,22 @@ def list_accounts_full(conn: psycopg.Connection) -> list[Account]:
         return cur.fetchall()
 
 
+def list_syncable_accounts(conn: psycopg.Connection) -> list[Account]:
+    """Return live (non-archive), sync-enabled accounts, oldest first.
+
+    This is the daemon's account source: archive accounts have no IMAP host
+    and `sync_enabled = FALSE` accounts are paused, so neither spawns workers.
+    Shares `_SELECT_FULL` with `get_account` so the column shape can't drift.
+    """
+    with conn.cursor(row_factory=class_row(Account)) as cur:
+        cur.execute(
+            _SELECT_FULL
+            + " WHERE auth_method IN ('password', 'oauth2') AND sync_enabled"
+            + " ORDER BY id"
+        )
+        return cur.fetchall()
+
+
 class AccountFieldError(ValueError):
     """Raised when field validation rejects a create/update."""
 

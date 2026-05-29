@@ -33,9 +33,20 @@ def make_account() -> AccountConfig:
     )
 
 
-def make_ctx(pool: ConnectionPool, tmp_path: Path, stop: threading.Event) -> WorkerContext:
+def make_ctx(
+    pool: ConnectionPool,
+    tmp_path: Path,
+    stop: threading.Event,
+    *,
+    account: AccountConfig | None = None,
+) -> WorkerContext:
+    account = account or make_account()
+    with pool.connection() as conn:
+        account_id = upsert_account(conn, account)
+        conn.commit()
     return WorkerContext(
-        account=make_account(),
+        account=account,
+        account_id=account_id,
         pool=pool,
         attachments_root=tmp_path,
         idle_renew_seconds=60,
@@ -208,11 +219,7 @@ def test_one_poll_pass_respects_folder_deny_flags(pool, tmp_path: Path, monkeypa
         name="acct", email="me@example.com", imap_host="imap.example.com",
         auth_method="password", folder_deny_flags=["\\Trash"],
     )
-    ctx = WorkerContext(
-        account=account, pool=pool, attachments_root=tmp_path,
-        idle_renew_seconds=60, poll_seconds=1, gmail_client_secrets=None,
-        stop=threading.Event(), ssl=False,
-    )
+    ctx = make_ctx(pool, tmp_path, threading.Event(), account=account)
     results = _one_poll_pass(ctx)
     assert results == {}  # Bin was denied, INBOX is owned by IDLE
 
@@ -237,3 +244,37 @@ def test_one_poll_pass_stops_early_when_stop_event_set(pool, tmp_path: Path, mon
 
     results = _one_poll_pass(ctx)
     assert results == {}
+
+
+def test_one_poll_pass_does_not_call_upsert_account(pool, tmp_path: Path, monkeypatch):
+    """The daemon already has account_id from the DB; the poll pass must not
+    re-upsert the account row (would re-introduce the canonical overwrite).
+
+    Guards two re-introduction styles: a `sync.upsert_account(...)` call is
+    caught by the wraps-spy; a `from .sync import upsert_account` re-import is
+    caught by asserting the name is absent from poller's namespace.
+    """
+    from unittest.mock import Mock
+
+    from localmail import sync as sync_mod
+
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.add_folder("Archive")
+    imap.append("Archive", _eml.plain())
+
+    @contextmanager
+    def fake_open(account, **kw):  # noqa: ARG001
+        yield imap
+
+    monkeypatch.setattr(poll_mod, "open_connection", fake_open)
+
+    ctx = make_ctx(pool, tmp_path, threading.Event())
+
+    spy = Mock(wraps=sync_mod.upsert_account)
+    monkeypatch.setattr(sync_mod, "upsert_account", spy)
+
+    _one_poll_pass(ctx)
+
+    spy.assert_not_called()
+    assert not hasattr(poll_mod, "upsert_account")

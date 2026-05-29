@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 
+from localmail.api.admin.accounts import create_account, update_account
 from localmail.config import DaemonConfig, LocalmailConfig
 from localmail.daemon import Daemon
 from localmail.db import (
@@ -82,8 +83,11 @@ def test_compute_daemon_pool_size_embed_only_vs_extract_only() -> None:
 # --- Daemon integration ---------------------------------------------------
 
 
-def test_daemon_pool_max_size_auto_computed(db_dsn) -> None:
-    """No override → daemon picks the compute_daemon_pool_size value."""
+def test_daemon_pool_max_size_auto_computed(db_dsn, db_conn) -> None:
+    """No override → daemon picks the compute_daemon_pool_size value.
+
+    db_conn truncates accounts so the DB-backed enumeration sees zero.
+    """
     cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_embed_worker = True
     cfg.search.run_extract_worker = True
@@ -112,7 +116,7 @@ def test_daemon_pool_max_size_respects_explicit_override(db_dsn) -> None:
         d.pool.close()
 
 
-def test_daemon_uses_single_pool_for_all_workers(db_dsn, monkeypatch) -> None:
+def test_daemon_uses_single_pool_for_all_workers(db_dsn, db_conn, monkeypatch) -> None:
     """Embed + extract workers must run off the *same* ``self.pool`` object.
 
     The previous design opened a second pool for embed_worker and used a raw
@@ -160,3 +164,50 @@ def test_daemon_config_defaults_pool_max_size_to_none() -> None:
     """The auto-compute path is opt-out, not opt-in."""
     cfg = DaemonConfig()
     assert cfg.pool_max_size is None
+
+
+def _seed_two_syncable_plus_noise(conn) -> None:
+    create_account(conn, name="pw", email_address="a@x.com",
+                   auth_method="password", imap_host="h", imap_port=993,
+                   oauth_provider=None, folder_allow=None, folder_deny=None,
+                   folder_deny_flags=None)
+    create_account(conn, name="oauth", email_address="b@x.com",
+                   auth_method="oauth2", imap_host="h", imap_port=993,
+                   oauth_provider="gmail", folder_allow=None, folder_deny=None,
+                   folder_deny_flags=None)
+    create_account(conn, name="arch", email_address="c@x.com",
+                   auth_method="archive", imap_host=None, imap_port=None,
+                   oauth_provider=None, folder_allow=None, folder_deny=None,
+                   folder_deny_flags=None)
+    off = create_account(conn, name="off", email_address="d@x.com",
+                         auth_method="password", imap_host="h", imap_port=993,
+                         oauth_provider=None, folder_allow=None,
+                         folder_deny=None, folder_deny_flags=None)
+    update_account(conn, off.id, sync_enabled=False)
+    conn.commit()
+
+
+def test_daemon_syncable_excludes_archive_and_disabled(db_dsn, db_conn) -> None:
+    _seed_two_syncable_plus_noise(db_conn)
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
+    cfg.search.run_embed_worker = False
+    cfg.search.run_extract_worker = False
+    d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _FakeBackend())
+    try:
+        assert [r.name for r in d._syncable] == ["pw", "oauth"]
+    finally:
+        d.pool.close()
+
+
+def test_daemon_pool_sizes_from_db_account_count(db_dsn, db_conn) -> None:
+    _seed_two_syncable_plus_noise(db_conn)
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
+    cfg.search.run_embed_worker = False
+    cfg.search.run_extract_worker = False
+    d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _FakeBackend())
+    try:
+        assert d.pool.max_size == compute_daemon_pool_size(
+            n_accounts=2, run_embed=False, run_extract=False
+        )
+    finally:
+        d.pool.close()

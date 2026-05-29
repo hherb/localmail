@@ -67,12 +67,11 @@ def upsert_account(conn: psycopg.Connection, account: AccountConfig) -> int:
             INSERT INTO accounts
                 (name, email_address, imap_host, imap_port, auth_method, oauth_provider)
             VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (name) DO UPDATE SET
-                email_address  = EXCLUDED.email_address,
-                imap_host      = EXCLUDED.imap_host,
-                imap_port      = EXCLUDED.imap_port,
-                auth_method    = EXCLUDED.auth_method,
-                oauth_provider = EXCLUDED.oauth_provider
+            -- DB is canonical for accounts (Sub-plan 2A.2b): get-or-create only.
+            -- The no-op SET makes RETURNING fire for the existing row on
+            -- conflict (DO NOTHING would return nothing) without touching any
+            -- canonical column.
+            ON CONFLICT (name) DO UPDATE SET name = accounts.name
             RETURNING id
             """,
             (

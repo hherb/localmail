@@ -22,7 +22,7 @@ class _E:
         pass
 
 
-def test_daemon_starts_extract_worker_when_enabled(db_dsn) -> None:
+def test_daemon_starts_extract_worker_when_enabled(db_dsn, db_conn) -> None:
     cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_extract_worker = True
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
@@ -36,7 +36,7 @@ def test_daemon_starts_extract_worker_when_enabled(db_dsn) -> None:
     assert not any(n.startswith("extract_worker") for n in names_after)
 
 
-def test_daemon_skips_extract_worker_when_disabled(db_dsn) -> None:
+def test_daemon_skips_extract_worker_when_disabled(db_dsn, db_conn) -> None:
     cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_extract_worker = False
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
@@ -49,31 +49,27 @@ def test_daemon_skips_extract_worker_when_disabled(db_dsn) -> None:
 
 
 def test_daemon_starts_idle_poll_extract_together_and_joins_on_stop(
-    db_dsn,
+    db_dsn, db_conn,
 ) -> None:
     """All three thread types must spawn alongside each other AND join on stop.
 
-    The previous tests in this file used ``accounts: []`` so the IDLE/poll
-    spawn loop was skipped entirely — that left the actual shutdown sequence
-    (IDLE + poll + embed + extract joined together via the shared
-    ``stop_event``) untested. Without this test, a regression that wedges the
-    join order — e.g. an IDLE thread that ignores ``stop_event`` while
-    backing off — would only surface in production. We point the account at
-    an unreachable IMAP host so the worker threads exercise their backoff
-    path; the backoff uses ``stop_event.wait`` so cancellation is prompt.
+    The account is seeded into the DB — the daemon's canonical account source
+    as of Sub-plan 2A.2b — pointing at an unreachable IMAP host, so the worker
+    threads exercise their backoff path; the backoff uses ``stop_event.wait``
+    so cancellation is prompt. This pins the shutdown sequence (IDLE + poll +
+    embed + extract joined together via the shared ``stop_event``).
     """
-    cfg = LocalmailConfig.model_validate({
-        "database": {"dsn": db_dsn},
-        "accounts": [
-            {
-                "name": "test-acct",
-                "email": "test@example.invalid",
-                "imap_host": "127.0.0.1",
-                "imap_port": 1,
-                "auth_method": "password",
-            }
-        ],
-    })
+    from localmail.api.admin.accounts import create_account
+
+    create_account(
+        db_conn, name="test-acct", email_address="test@example.invalid",
+        auth_method="password", imap_host="127.0.0.1", imap_port=1,
+        oauth_provider=None, folder_allow=None, folder_deny=None,
+        folder_deny_flags=None,
+    )
+    db_conn.commit()
+
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_extract_worker = True
     cfg.search.run_embed_worker = True
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
@@ -93,7 +89,9 @@ def test_daemon_starts_idle_poll_extract_together_and_joins_on_stop(
     assert "extract_worker" not in names_after
 
 
-def test_daemon_start_then_run_forever_does_not_double_spawn(db_dsn) -> None:
+def test_daemon_start_then_run_forever_does_not_double_spawn(
+    db_dsn, db_conn,
+) -> None:
     """Calling ``start()`` then ``run_forever()`` must not duplicate workers.
 
     A regression where ``run_forever`` re-invokes ``start_workers`` would

@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from .imap_client import open_connection
-from .sync import sync_mailbox, upsert_account, upsert_mailbox
+from .sync import sync_mailbox, upsert_mailbox
 from .worker import WorkerContext
 
 log = logging.getLogger(__name__)
@@ -90,12 +90,11 @@ def _idle_step(ctx: WorkerContext, imap: Any, account_id: int, renew_at: float) 
 
 def _ensure_inbox_row(ctx: WorkerContext):
     with ctx.pool.connection() as conn:
-        account_id = upsert_account(conn, ctx.account)
         mailbox = upsert_mailbox(
-            conn, account_id=account_id, name=INBOX, delimiter=None, flags=[]
+            conn, account_id=ctx.account_id, name=INBOX, delimiter=None, flags=[]
         )
         conn.commit()
-    return account_id, mailbox
+    return ctx.account_id, mailbox
 
 
 def _sync_inbox(ctx: WorkerContext, imap: Any, account_id: int) -> int:

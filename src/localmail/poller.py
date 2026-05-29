@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from .imap_client import open_connection
-from .sync import folders_to_sync, sync_mailbox, upsert_account, upsert_mailbox
+from .sync import folders_to_sync, sync_mailbox, upsert_mailbox
 from .worker import WorkerContext
 
 log = logging.getLogger(__name__)
@@ -40,9 +40,7 @@ def _one_poll_pass(ctx: WorkerContext) -> dict[str, int]:
         ssl=ctx.ssl,
         gmail_client_secrets=ctx.gmail_client_secrets,
     ) as imap:
-        with ctx.pool.connection() as conn:
-            account_id = upsert_account(conn, ctx.account)
-            conn.commit()
+        account_id = ctx.account_id
 
         folders = imap.list_folders()
         selectable = folders_to_sync(

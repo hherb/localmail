@@ -244,3 +244,33 @@ def test_one_poll_pass_stops_early_when_stop_event_set(pool, tmp_path: Path, mon
 
     results = _one_poll_pass(ctx)
     assert results == {}
+
+
+def test_one_poll_pass_does_not_call_upsert_account(pool, tmp_path: Path, monkeypatch):
+    """The daemon already has account_id from the DB; the poll pass must not
+    re-upsert the account row (would re-introduce the canonical overwrite)."""
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.add_folder("Archive")
+    imap.append("Archive", _eml.plain())
+
+    @contextmanager
+    def fake_open(account, **kw):  # noqa: ARG001
+        yield imap
+
+    monkeypatch.setattr(poll_mod, "open_connection", fake_open)
+
+    calls = {"n": 0}
+    real = poll_mod.upsert_account if hasattr(poll_mod, "upsert_account") else None
+
+    def spy(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    if real is not None:
+        monkeypatch.setattr(poll_mod, "upsert_account", spy)
+
+    ctx = make_ctx(pool, tmp_path, threading.Event())
+    _one_poll_pass(ctx)
+
+    assert calls["n"] == 0

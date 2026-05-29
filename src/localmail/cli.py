@@ -16,6 +16,8 @@ import logging
 from . import secrets
 from .config import AccountConfig, Config, default_config_path, load_config
 from .daemon import Daemon
+from .account_seed import seed_accounts
+from .api.admin.accounts import AccountFieldError
 from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
@@ -101,7 +103,7 @@ def main(ctx: click.Context, config_path: Path | None) -> None:
 @main.command("init-db")
 @click.pass_context
 def init_db(ctx: click.Context) -> None:
-    """Apply pending schema migrations to the database."""
+    """Apply pending schema migrations, then seed accounts from config.toml."""
     cfg = load_config(ctx.obj["config_path"])
     applied = apply_migrations(
         cfg.database.dsn,
@@ -112,6 +114,17 @@ def init_db(ctx: click.Context) -> None:
             click.echo(f"applied {rev}")
     else:
         click.echo("schema already up to date")
+
+    try:
+        with psycopg.connect(cfg.database.dsn) as conn:
+            result = seed_accounts(conn, cfg.accounts)
+            conn.commit()
+    except AccountFieldError as exc:
+        raise click.ClickException(f"account seed failed: {exc}") from exc
+    click.echo(
+        f"seeded accounts: inserted={result.inserted} "
+        f"skipped={result.skipped} drifted={result.drifted}"
+    )
 
 
 @main.command("list-accounts")

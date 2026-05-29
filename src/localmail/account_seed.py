@@ -101,3 +101,48 @@ def plan_account_seed(
         if fields:
             drift.append(AccountDrift(name=cfg.name, fields=fields))
     return SeedPlan(to_insert=to_insert, drift=drift)
+
+
+def seed_accounts(
+    conn: psycopg.Connection,
+    config_accounts: list[AccountConfig],
+    *,
+    logger: logging.Logger = logger,
+) -> SeedResult:
+    """Merge config.toml accounts into the DB, keyed by name.
+
+    New accounts are inserted via the admin service layer (reusing its
+    validation); existing accounts are skipped and any drift is logged at
+    WARNING. The DB is canonical — existing rows are never modified. The
+    caller owns the transaction (commit on success).
+    """
+    existing = {row.name: row for row in list_accounts_full(conn)}
+    plan = plan_account_seed(config_accounts, existing)
+
+    for cfg in plan.to_insert:
+        create_account(
+            conn,
+            name=cfg.name,
+            email_address=cfg.email,
+            auth_method=cfg.auth_method,
+            imap_host=cfg.imap_host,
+            imap_port=cfg.imap_port,
+            oauth_provider=cfg.oauth_provider,
+            folder_allow=cfg.folder_allow,
+            folder_deny=cfg.folder_deny,
+            folder_deny_flags=cfg.folder_deny_flags,
+        )
+
+    for d in plan.drift:
+        logger.warning(
+            "account %r: config.toml differs from DB (fields: %s); "
+            "DB is canonical, TOML ignored",
+            d.name,
+            ", ".join(d.fields),
+        )
+
+    return SeedResult(
+        inserted=len(plan.to_insert),
+        skipped=len(config_accounts) - len(plan.to_insert),
+        drifted=len(plan.drift),
+    )

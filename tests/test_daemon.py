@@ -248,7 +248,16 @@ def test_one_poll_pass_stops_early_when_stop_event_set(pool, tmp_path: Path, mon
 
 def test_one_poll_pass_does_not_call_upsert_account(pool, tmp_path: Path, monkeypatch):
     """The daemon already has account_id from the DB; the poll pass must not
-    re-upsert the account row (would re-introduce the canonical overwrite)."""
+    re-upsert the account row (would re-introduce the canonical overwrite).
+
+    Guards two re-introduction styles: a `sync.upsert_account(...)` call is
+    caught by the wraps-spy; a `from .sync import upsert_account` re-import is
+    caught by asserting the name is absent from poller's namespace.
+    """
+    from unittest.mock import Mock
+
+    from localmail import sync as sync_mod
+
     imap = FakeIMAPClient()
     imap.add_folder("INBOX")
     imap.add_folder("Archive")
@@ -260,17 +269,12 @@ def test_one_poll_pass_does_not_call_upsert_account(pool, tmp_path: Path, monkey
 
     monkeypatch.setattr(poll_mod, "open_connection", fake_open)
 
-    calls = {"n": 0}
-    real = poll_mod.upsert_account if hasattr(poll_mod, "upsert_account") else None
-
-    def spy(*a, **k):
-        calls["n"] += 1
-        return real(*a, **k)
-
-    if real is not None:
-        monkeypatch.setattr(poll_mod, "upsert_account", spy)
-
     ctx = make_ctx(pool, tmp_path, threading.Event())
+
+    spy = Mock(wraps=sync_mod.upsert_account)
+    monkeypatch.setattr(sync_mod, "upsert_account", spy)
+
     _one_poll_pass(ctx)
 
-    assert calls["n"] == 0
+    spy.assert_not_called()
+    assert not hasattr(poll_mod, "upsert_account")

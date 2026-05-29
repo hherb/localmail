@@ -86,6 +86,17 @@ def get_account(conn: psycopg.Connection, account_id: int) -> Account:
     return row
 
 
+def list_accounts_full(conn: psycopg.Connection) -> list[Account]:
+    """Return every account as a full Account row, oldest first.
+
+    Shares the `_SELECT_FULL` column shape with `get_account` so the two
+    cannot drift. Used by the init-db TOML->DB seed to detect config drift.
+    """
+    with conn.cursor(row_factory=class_row(Account)) as cur:
+        cur.execute(_SELECT_FULL + " ORDER BY id")
+        return cur.fetchall()
+
+
 class AccountFieldError(ValueError):
     """Raised when field validation rejects a create/update."""
 

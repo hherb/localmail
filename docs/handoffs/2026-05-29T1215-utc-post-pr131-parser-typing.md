@@ -6,7 +6,7 @@
 > — as **PR #131**
 > (`fix(parser): clear 4 mypy errors via a typed payload-decode helper`),
 > **open, not yet merged**. Branch `fix-parser-typing-debt` pushed; tip
-> `5fb3cb5`.
+> `25bdeb6`.
 >
 > Reconciled remote state at the top: **PR #130 (reject duplicate `[[accounts]]`
 > names, closes #129) had already merged** before this session opened — local
@@ -33,7 +33,7 @@ A single-purpose, TDD, behaviour-preserving fix: **clear the 4 longstanding
 commit on `fix-parser-typing-debt`:
 
 ```
-5fb3cb5  fix(parser): clear 4 mypy errors via a typed payload-decode helper
+25bdeb6  fix(parser): clear 4 mypy errors via a typed payload-decode helper
 ```
 
 ### What the change does (PR #131)
@@ -219,6 +219,6 @@ docs/handoffs/
 ```
 
 `main` at `3964c4c`. Branch `fix-parser-typing-debt` pushed (PR #131 open) at
-`5fb3cb5`. Working tree clean (only `.claude/settings.local.json` untracked,
+`25bdeb6`. Working tree clean (only `.claude/settings.local.json` untracked,
 by design). 2 local branches (`main`, `fix-parser-typing-debt`); 1 open PR
 (#131).

@@ -126,6 +126,24 @@ def test_oauth_start_returns_consent_url(admin_client, fake_flow):
     assert 'accounts.google.com' in r.json()['auth_url']
 
 
+def test_oauth_start_unconfigured_secrets_returns_503_not_500(admin_client):
+    """With gmail_client_secrets_file unset (the ``app`` fixture's default
+    None) and no ``fake_flow`` monkeypatch, the real ``_build_flow`` raises
+    OAuthNotConfigured; the route maps it to a clean 503 with an actionable
+    detail rather than letting it escape as a 500 (#126)."""
+    aid = _create_gmail_account(admin_client)
+    r = admin_client.post(
+        f'/v1/admin/accounts/{aid}/oauth/start',
+        headers={
+            "X-CSRF-Token": admin_client.csrf_for(
+                f"/v1/admin/accounts/{aid}/oauth/start"
+            ),
+        },
+    )
+    assert r.status_code == 503, r.text
+    assert 'not configured' in r.json()['detail'].lower()
+
+
 def test_oauth_callback_round_trip_stores_refresh(admin_client, fake_flow):
     aid = _create_gmail_account(admin_client)
     r1 = admin_client.post(
@@ -168,4 +186,41 @@ def test_oauth_callback_failure_redirects_with_failed_flag(
     assert r2.status_code == 303
     assert 'oauth=failed' in r2.headers['location']
     # Confirm the failed callback did NOT silently store a token.
+    assert keyring.get_password('localmail', 'gm-http:refresh') is None
+
+
+def test_oauth_callback_tolerates_secrets_removed_after_start(
+    admin_client, fake_flow, monkeypatch
+):
+    """If Gmail secrets become unconfigured between start and callback
+    (operator removed ``[gmail_oauth]`` + restarted while a consent URL was
+    outstanding), ``complete_oauth``'s ``_build_flow`` raises
+    OAuthNotConfigured. The callback's broad ``except Exception`` must turn
+    that into a clean 303 failed-redirect, never a 500 (#126)."""
+    aid = _create_gmail_account(admin_client)
+    r1 = admin_client.post(
+        f'/v1/admin/accounts/{aid}/oauth/start',
+        headers={
+            "X-CSRF-Token": admin_client.csrf_for(
+                f"/v1/admin/accounts/{aid}/oauth/start"
+            ),
+        },
+    )
+    state = r1.json()['auth_url'].split('state=')[1]
+
+    from localmail.api.admin.oauth import OAuthNotConfigured
+
+    def _raise_unconfigured(*, redirect_uri, client_secrets_file):
+        raise OAuthNotConfigured("secrets removed since start")
+
+    monkeypatch.setattr(
+        'localmail.api.admin.oauth._build_flow', _raise_unconfigured
+    )
+    r2 = admin_client.get(
+        f'/admin/oauth/callback?state={state}&code=good-code',
+        follow_redirects=False,
+    )
+    assert r2.status_code == 303, r2.text
+    assert 'oauth=failed' in r2.headers['location']
+    # The aborted callback must not have stored a token.
     assert keyring.get_password('localmail', 'gm-http:refresh') is None

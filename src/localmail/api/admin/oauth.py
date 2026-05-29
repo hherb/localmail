@@ -31,6 +31,18 @@ class PermissionDenied(RuntimeError):
     """Raised when the completing admin's user_id does not match the start."""
 
 
+class OAuthNotConfigured(RuntimeError):
+    """Raised when Gmail OAuth client secrets are not configured on the server.
+
+    This is an operator misconfiguration (no ``[gmail_oauth]`` section or no
+    ``client_secrets_file``), not a client error or a server bug — the route
+    layer maps it to a clean 503 with an actionable detail rather than letting
+    a bare RuntimeError escape as a 500 (#126). Subclasses RuntimeError so the
+    callback's broad ``except Exception`` (and any legacy ``except
+    RuntimeError``) still catch it.
+    """
+
+
 def _build_flow(*, redirect_uri: str, client_secrets_file: Path | None):
     """Real Google OAuth Flow builder — pure over the secrets path.
 
@@ -41,9 +53,9 @@ def _build_flow(*, redirect_uri: str, client_secrets_file: Path | None):
     from google_auth_oauthlib.flow import Flow  # type: ignore[import-not-found]
 
     if client_secrets_file is None:
-        raise RuntimeError(
-            "gmail_oauth.client_secrets_file not configured in config.toml; "
-            "cannot build OAuth flow"
+        raise OAuthNotConfigured(
+            "Gmail OAuth is not configured on this server "
+            "(gmail_oauth.client_secrets_file is unset in config.toml)"
         )
     flow = Flow.from_client_secrets_file(
         client_secrets_file=str(client_secrets_file),

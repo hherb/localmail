@@ -533,12 +533,26 @@ for the full design.
   because `ScrubSensitiveQueryParamsMiddleware` would otherwise redact them.
   Cookie `Path` is `"/"` — required so the admin session cookie reaches
   `/v1/admin/*` routes; SameSite=Lax + per-route CSRF tokens
-  (`X-CSRF-Token` header, bound to `(user_id, action-url)`) remain the
-  primary CSRF defences. No `/v1/*` machine endpoint reads cookies (machine
-  clients use `Authorization: Bearer …`), so the broader scope adds no
-  smuggling surface. Deferred to Sub-plan 2A.2: rewiring CLI commands
-  (`add-account`, `oauth-login`, `remove-account`) to write to the DB and
-  TOML→DB seed at `init-db`.
+  (`X-CSRF-Token` header) remain the primary CSRF defences. The JSON-router
+  CSRF token is bound to `(user_id, "<METHOD>:<action-url>")` —
+  `check_csrf` derives the method from `request.method` via
+  `serve/admin/csrf.py::csrf_action`, so a token minted for `PATCH` on a
+  shared URL can't be replayed against `DELETE` (#122). No `/v1/*` machine
+  endpoint reads cookies (machine clients use `Authorization: Bearer …`),
+  so the broader cookie scope adds no smuggling surface — pinned by
+  [tests/test_session_cookie_scope.py](tests/test_session_cookie_scope.py),
+  which walks the FastAPI dependant tree and fails if any non-`/v1/admin/*`
+  route under `/v1/` reads the session cookie or depends on
+  `require_admin_session` (#121). The OAuth flow's
+  `gmail_oauth.client_secrets_file` is threaded in from
+  `app.state.gmail_client_secrets_file` (set by `create_app`'s
+  `gmail_client_secrets_file=`) — the service layer never calls
+  `load_config()` per request (#120). Account-row reads use psycopg
+  `class_row` (name-based column→field mapping, not positional unpack), and
+  `AccountInUse` subclasses `ValueError` like its sibling
+  `AccountFieldError` (#119, #123). Deferred to Sub-plan 2A.2: rewiring CLI
+  commands (`add-account`, `oauth-login`, `remove-account`) to write to the
+  DB and TOML→DB seed at `init-db`.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.

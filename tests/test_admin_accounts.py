@@ -28,6 +28,13 @@ def _insert_account(conn, *, name, email='x@y.test', method='password',
         return row[0]
 
 
+def test_account_in_use_is_a_value_error():
+    """AccountInUse and AccountFieldError both signal caller-supplied bad
+    state, so they share the ValueError parent (#123)."""
+    assert issubclass(AccountInUse, ValueError)
+    assert issubclass(AccountFieldError, ValueError)
+
+
 def test_list_accounts_returns_summaries_in_id_order(db_conn):
     id_a = _insert_account(db_conn, name='alpha')
     id_b = _insert_account(db_conn, name='beta')

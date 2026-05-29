@@ -14,6 +14,7 @@ from typing import Literal, cast
 
 import psycopg
 from imapclient import IMAPClient
+from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
 from localmail import imap_client as _imap
@@ -51,8 +52,11 @@ class Account:
     updated_at: datetime
 
 
-# Column order below MUST stay in sync with Account field order — get_account
-# uses Account(*row) which is a positional unpack. mypy cannot catch a mismatch.
+# Selected column NAMES must match the Account dataclass field names — both
+# reads below use psycopg `class_row`, which maps result columns to
+# constructor kwargs by name. Column ORDER is therefore irrelevant, and a
+# rename/extra column fails loudly at fetch time rather than silently
+# shifting positions (#119).
 _SELECT_FULL = """
     SELECT id, name, email_address, auth_method, oauth_provider,
            imap_host, imap_port,
@@ -64,22 +68,22 @@ _SELECT_FULL = """
 
 def list_accounts(conn: psycopg.Connection) -> list[AccountSummary]:
     """Return every configured account, oldest first."""
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=class_row(AccountSummary)) as cur:
         cur.execute(
             "SELECT id, name, email_address, auth_method, sync_enabled "
             "FROM accounts ORDER BY id"
         )
-        return [AccountSummary(*row) for row in cur.fetchall()]
+        return cur.fetchall()
 
 
 def get_account(conn: psycopg.Connection, account_id: int) -> Account:
     """Return one account by id. Raises NotFound if absent."""
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=class_row(Account)) as cur:
         cur.execute(_SELECT_FULL + " WHERE id = %s", (account_id,))
         row = cur.fetchone()
     if row is None:
         raise NotFound(f"account {account_id} not found")
-    return Account(*row)
+    return row
 
 
 class AccountFieldError(ValueError):
@@ -243,8 +247,12 @@ def update_account(conn: psycopg.Connection, account_id: int,
     return get_account(conn, account_id)
 
 
-class AccountInUse(RuntimeError):
-    """Raised when delete is refused because messages reference the account."""
+class AccountInUse(ValueError):
+    """Raised when delete is refused because messages reference the account.
+
+    Subclasses ValueError to match the sibling AccountFieldError parent —
+    both signal caller-supplied state that's wrong (#123).
+    """
 
 
 def delete_account(conn: psycopg.Connection, account_id: int,

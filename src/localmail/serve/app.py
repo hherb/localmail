@@ -33,13 +33,18 @@ def create_app(
     searcher=None,
     serve_config: ServeConfig | None = None,
     auth_config: AuthConfig | None = None,
+    gmail_client_secrets_file: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a Postgres pool and (optionally) a Searcher.
 
     `searcher` is None in baseline tests; production runs pass a configured
     Searcher created via `localmail.search.create_searcher`. `serve_config`
     controls pool sizing; the default is fine for a single-user local
-    deployment.
+    deployment. `gmail_client_secrets_file` is the resolved
+    `[gmail_oauth] client_secrets_file` path; the admin OAuth router threads
+    it into the service layer so OAuth never calls load_config() per request
+    (#120). None disables the web OAuth flow (the service raises at
+    flow-build time).
     """
     cfg = serve_config or ServeConfig()
     auth_cfg = auth_config or AuthConfig()
@@ -62,6 +67,7 @@ def create_app(
     app.state.searcher = searcher
     app.state.serve_config = cfg
     app.state.auth_config = auth_cfg
+    app.state.gmail_client_secrets_file = gmail_client_secrets_file
 
     # Exception handler for APIError raised inside route handlers / dependencies.
     # FastAPI's DI layer catches these before BaseHTTPMiddleware sees them, so we

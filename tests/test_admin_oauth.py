@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import keyring
 import pytest
 
@@ -15,6 +17,7 @@ from tests._fake_google_oauth import FakeFlow
 
 KEY = b"k" * 32
 CB = "https://example.test/admin/oauth/callback"
+SECRETS = Path("/nonexistent/client_secrets.json")  # _build_flow is mocked
 
 
 def _make_oauth_account(conn) -> int:
@@ -34,8 +37,9 @@ def _make_oauth_account(conn) -> int:
 def fake_flow(monkeypatch):
     flow = FakeFlow()
 
-    def _capture_redirect(*, redirect_uri):
+    def _capture_redirect(*, redirect_uri, client_secrets_file):
         flow.redirect_uri = redirect_uri
+        flow.client_secrets_file = client_secrets_file
         return flow
 
     monkeypatch.setattr(
@@ -48,18 +52,29 @@ def fake_flow(monkeypatch):
 def test_start_oauth_returns_consent_url_with_signed_state(db_conn, fake_flow):
     aid = _make_oauth_account(db_conn)
     url = start_oauth(db_conn, aid, admin_user_id=42,
-                      signing_key=KEY, redirect_uri=CB)
+                      signing_key=KEY, redirect_uri=CB,
+                      client_secrets_file=SECRETS)
     assert url.startswith('https://accounts.google.com/o/oauth2/auth?state=')
+
+
+def test_start_oauth_threads_client_secrets_path_into_flow(db_conn, fake_flow):
+    """The resolved client_secrets_file is handed to _build_flow rather than
+    re-read from config inside the service layer (#120)."""
+    aid = _make_oauth_account(db_conn)
+    start_oauth(db_conn, aid, admin_user_id=42, signing_key=KEY,
+                redirect_uri=CB, client_secrets_file=SECRETS)
+    assert fake_flow.client_secrets_file == SECRETS
 
 
 def test_complete_oauth_stores_refresh_token(db_conn, fake_flow):
     aid = _make_oauth_account(db_conn)
     url = start_oauth(db_conn, aid, admin_user_id=42,
-                      signing_key=KEY, redirect_uri=CB)
+                      signing_key=KEY, redirect_uri=CB,
+                      client_secrets_file=SECRETS)
     state = url.split('state=')[1]
     acct = complete_oauth(db_conn, state=state, code='good-code',
                           admin_user_id=42, signing_key=KEY,
-                          redirect_uri=CB)
+                          redirect_uri=CB, client_secrets_file=SECRETS)
     assert acct.id == aid
     assert keyring.get_password('localmail', 'gm:refresh') == 'refresh-xyz'
 
@@ -67,22 +82,24 @@ def test_complete_oauth_stores_refresh_token(db_conn, fake_flow):
 def test_complete_oauth_rejects_cross_user_replay(db_conn, fake_flow):
     aid = _make_oauth_account(db_conn)
     url = start_oauth(db_conn, aid, admin_user_id=42,
-                      signing_key=KEY, redirect_uri=CB)
+                      signing_key=KEY, redirect_uri=CB,
+                      client_secrets_file=SECRETS)
     state = url.split('state=')[1]
     with pytest.raises(PermissionDenied):
         complete_oauth(db_conn, state=state, code='good-code',
                        admin_user_id=99, signing_key=KEY,
-                       redirect_uri=CB)
+                       redirect_uri=CB, client_secrets_file=SECRETS)
 
 
 def test_complete_oauth_rejects_tampered_state(db_conn, fake_flow):
     aid = _make_oauth_account(db_conn)
     url = start_oauth(db_conn, aid, admin_user_id=42,
-                      signing_key=KEY, redirect_uri=CB)
+                      signing_key=KEY, redirect_uri=CB,
+                      client_secrets_file=SECRETS)
     state = url.split('state=')[1]
     head, sig = state.split('.', 1)
     bad_state = head[:-1] + ('A' if head[-1] != 'A' else 'B') + '.' + sig
     with pytest.raises(StateInvalid):
         complete_oauth(db_conn, state=bad_state, code='good-code',
                        admin_user_id=42, signing_key=KEY,
-                       redirect_uri=CB)
+                       redirect_uri=CB, client_secrets_file=SECRETS)

@@ -1097,11 +1097,15 @@ def serve_cmd(
         dsn = override
         serve_cfg = ServeConfig()
         auth_cfg = AuthConfig()
+        gmail_secrets = None
     else:
         cfg = load_config(ctx.obj["config_path"])
         dsn = cfg.database.dsn
         serve_cfg = cfg.serve
         auth_cfg = cfg.auth
+        gmail_secrets = (
+            cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
+        )
 
     try:
         pending = pending_migrations(dsn)
@@ -1131,6 +1135,7 @@ def serve_cmd(
         searcher=searcher,
         serve_config=serve_cfg,
         auth_config=auth_cfg,
+        gmail_client_secrets_file=gmail_secrets,
     )
 
     if no_tls:

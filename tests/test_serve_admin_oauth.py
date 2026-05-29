@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from localmail.api.admin.csrf import make_csrf_token
 from localmail.api.auth import hash_password
 from localmail.config import ServeConfig
+from localmail.serve.admin.csrf import csrf_action
 from localmail.serve.app import create_app
 from tests._fake_google_oauth import FakeFlow
 
@@ -69,8 +70,9 @@ def admin_client(app, admin_user_id):
 
     key = _SIGNING_KEY.encode("ascii")
 
-    def csrf_for(action: str) -> str:
-        return make_csrf_token(user_id=admin_user_id, action=action, key=key)
+    def csrf_for(action: str, method: str = "POST") -> str:
+        bound = csrf_action(method, action)
+        return make_csrf_token(user_id=admin_user_id, action=bound, key=key)
 
     client.csrf_for = csrf_for  # type: ignore[attr-defined]
     return client
@@ -80,8 +82,9 @@ def admin_client(app, admin_user_id):
 def fake_flow(monkeypatch):
     flow = FakeFlow()
 
-    def _capture(*, redirect_uri):
+    def _capture(*, redirect_uri, client_secrets_file):
         flow.redirect_uri = redirect_uri
+        flow.client_secrets_file = client_secrets_file
         return flow
 
     monkeypatch.setattr(

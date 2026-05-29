@@ -11,6 +11,7 @@ endpoint runs under the cookie-session admin gate.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -47,6 +48,16 @@ def _oauth_callback_url(request: Request) -> str:
     return cfg.oauth_callback_url
 
 
+def _gmail_client_secrets_file(request: Request) -> Path | None:
+    """Resolve the Gmail client-secrets path once from app state.
+
+    Threaded into the service layer so it never calls load_config() per
+    request (#120). None when no [gmail_oauth] section is configured —
+    the service raises a clean RuntimeError at flow-build time.
+    """
+    return getattr(request.app.state, "gmail_client_secrets_file", None)
+
+
 @router_v1.post("/accounts/{account_id}/oauth/start")
 def oauth_start(
     account_id: str,
@@ -68,6 +79,7 @@ def oauth_start(
                 admin_user_id=admin.id,
                 signing_key=_state_signing_key(request),
                 redirect_uri=_oauth_callback_url(request),
+                client_secrets_file=_gmail_client_secrets_file(request),
             )
         except NotFound:
             raise HTTPException(status_code=404, detail="account not found")
@@ -104,6 +116,7 @@ def oauth_callback(
                 admin_user_id=admin.id,
                 signing_key=_state_signing_key(request),
                 redirect_uri=_oauth_callback_url(request),
+                client_secrets_file=_gmail_client_secrets_file(request),
             )
     except (StateInvalid, StateExpired, svc.PermissionDenied, NotFound) as e:
         logger.warning("oauth_callback rejected: %s: %s", type(e).__name__, e)

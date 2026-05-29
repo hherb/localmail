@@ -33,9 +33,20 @@ def make_account() -> AccountConfig:
     )
 
 
-def make_ctx(pool: ConnectionPool, tmp_path: Path, stop: threading.Event) -> WorkerContext:
+def make_ctx(
+    pool: ConnectionPool,
+    tmp_path: Path,
+    stop: threading.Event,
+    *,
+    account: AccountConfig | None = None,
+) -> WorkerContext:
+    account = account or make_account()
+    with pool.connection() as conn:
+        account_id = upsert_account(conn, account)
+        conn.commit()
     return WorkerContext(
-        account=make_account(),
+        account=account,
+        account_id=account_id,
         pool=pool,
         attachments_root=tmp_path,
         idle_renew_seconds=60,
@@ -208,11 +219,7 @@ def test_one_poll_pass_respects_folder_deny_flags(pool, tmp_path: Path, monkeypa
         name="acct", email="me@example.com", imap_host="imap.example.com",
         auth_method="password", folder_deny_flags=["\\Trash"],
     )
-    ctx = WorkerContext(
-        account=account, pool=pool, attachments_root=tmp_path,
-        idle_renew_seconds=60, poll_seconds=1, gmail_client_secrets=None,
-        stop=threading.Event(), ssl=False,
-    )
+    ctx = make_ctx(pool, tmp_path, threading.Event(), account=account)
     results = _one_poll_pass(ctx)
     assert results == {}  # Bin was denied, INBOX is owned by IDLE
 

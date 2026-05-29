@@ -14,6 +14,7 @@ from .config import AccountConfig
 @dataclass
 class WorkerContext:
     account: AccountConfig
+    account_id: int
     pool: ConnectionPool
     attachments_root: Path
     idle_renew_seconds: int

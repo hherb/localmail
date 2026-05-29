@@ -124,9 +124,18 @@ def test_plan_folder_none_vs_empty_is_not_drift() -> None:
     assert plan.drift == []
 
 
-def test_plan_folder_order_matters() -> None:
+def test_plan_folder_reorder_is_not_drift() -> None:
+    # Folder lists are set-like in IMAP semantics: reordering doesn't change
+    # which folders sync, so a pure reorder must not be reported as drift.
     cfg = _cfg("alice", folder_allow=["A", "B"])
     existing = {"alice": _db_account("alice", folder_allow=["B", "A"])}
+    plan = plan_account_seed([cfg], existing)
+    assert plan.drift == []
+
+
+def test_plan_folder_set_difference_is_drift() -> None:
+    cfg = _cfg("alice", folder_allow=["A", "B"])
+    existing = {"alice": _db_account("alice", folder_allow=["A", "C"])}
     plan = plan_account_seed([cfg], existing)
     assert plan.drift == [AccountDrift(name="alice", fields=["folder_allow"])]
 

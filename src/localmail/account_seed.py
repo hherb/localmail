@@ -51,15 +51,20 @@ class SeedResult:
     drifted: int
 
 
-def _norm_folders(value: list[str] | None) -> list[str]:
-    """Normalize a folder list so NULL (DB) and [] (TOML default) compare equal."""
-    return list(value) if value is not None else []
+def _norm_folders(value: list[str] | None) -> set[str]:
+    """Normalize a folder list to a set for drift comparison.
+
+    Folder allow/deny lists are set-like in IMAP semantics — reordering or
+    repeating an entry doesn't change which folders sync — so drift compares
+    them as sets. This also makes NULL (DB) and [] (TOML default) compare equal.
+    """
+    return set(value) if value is not None else set()
 
 
 def _drifted_fields(cfg: AccountConfig, db: Account) -> list[str]:
     """Return the seedable field names whose config value differs from the DB row.
 
-    Folder lists are compared order-sensitively after None->[] normalization.
+    Folder lists are compared as sets (order- and duplicate-insensitive).
     """
     drifted: list[str] = []
     if cfg.email != db.email_address:

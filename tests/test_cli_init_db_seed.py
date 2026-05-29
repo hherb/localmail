@@ -62,9 +62,18 @@ def test_init_db_seed_aborts_non_zero_on_invalid_account(
     # oauth2 without an oauth_provider passes pydantic but fails
     # create_account's validation -> AccountFieldError -> ClickException.
     cfg = tmp_path / "config.toml"
+    # A valid account ("good") is ordered BEFORE the broken one so the test
+    # proves the whole batch is atomic: the good insert must be rolled back
+    # when the later block aborts, not merely that the broken block is skipped.
     cfg.write_text(
         f'[database]\ndsn = "{db_dsn}"\n\n'
         f'[attachments]\nroot = "{tmp_path / "att"}"\n\n'
+        '[[accounts]]\n'
+        'name = "good"\n'
+        'email = "good@example.com"\n'
+        'imap_host = "imap.example.com"\n'
+        'imap_port = 993\n'
+        'auth_method = "password"\n\n'
         '[[accounts]]\n'
         'name = "broken"\n'
         'email = "broken@example.com"\n'
@@ -78,6 +87,7 @@ def test_init_db_seed_aborts_non_zero_on_invalid_account(
 
     assert r.exit_code != 0
     assert "account seed failed" in r.output
-    # The seed runs in one uncommitted transaction — no partial rows.
+    # The seed runs in one uncommitted transaction — the earlier valid
+    # "good" insert must be rolled back too, leaving no partial rows.
     with psycopg.connect(db_dsn) as conn:
         assert list_accounts_full(conn) == []

@@ -305,15 +305,19 @@ class SeedResult:
     drifted: int
 
 
-def _norm_folders(value: list[str] | None) -> list[str]:
-    """Normalize a folder list so NULL (DB) and [] (TOML default) compare equal."""
-    return list(value) if value is not None else []
+def _norm_folders(value: list[str] | None) -> set[str]:
+    """Normalize a folder list to a set for drift comparison.
+
+    Folder allow/deny lists are set-like in IMAP semantics, so reordering or
+    repeating an entry is not drift. Also makes NULL (DB) ≡ [] (TOML default).
+    """
+    return set(value) if value is not None else set()
 
 
 def _drifted_fields(cfg: AccountConfig, db: Account) -> list[str]:
     """Return the seedable field names whose config value differs from the DB row.
 
-    Folder lists are compared order-sensitively after None->[] normalization.
+    Folder lists are compared as sets (order- and duplicate-insensitive).
     """
     drifted: list[str] = []
     if cfg.email != db.email_address:
@@ -369,7 +373,7 @@ git add src/localmail/account_seed.py tests/test_account_seed.py
 git commit -m "feat(seed): pure plan_account_seed planner for TOML->DB merge
 
 Decides inserts vs skip-with-drift from config accounts + existing DB
-rows. Folder lists normalized None->[] and compared order-sensitively.
+rows. Folder lists normalized None->set and compared as sets.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```

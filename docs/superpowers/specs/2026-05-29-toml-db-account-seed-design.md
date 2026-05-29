@@ -99,8 +99,9 @@ the DB default `TRUE`), `poll_seconds` (no DB column), `created_at` /
 list); `create_account` stores `[]` as a JSONB array, but an admin-UI-created
 row may store `NULL`. Before comparing, normalize `None → []` on both sides so
 a NULL DB column does not false-positive as drift against TOML's empty default.
-The comparison is order-sensitive list equality on the normalized values
-(folder lists are operator-authored and order is meaningful).
+The comparison is set equality on the normalized values: folder allow/deny
+lists are set-like in IMAP semantics (reordering or repeating an entry does
+not change which folders sync), so a pure reorder is not reported as drift.
 
 ### IO wrapper
 

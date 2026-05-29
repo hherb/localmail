@@ -165,6 +165,10 @@ class AccountConfig(BaseModel):
     folder_allow: list[str] = Field(default_factory=list)
     folder_deny: list[str] = Field(default_factory=list)
     folder_deny_flags: list[str] = Field(default_factory=list)
+    # No longer consumed as of Sub-plan 2A.2b: the daemon enumerates accounts
+    # from the DB (no per-account poll column) and uses the daemon-wide
+    # `[daemon].poll_seconds`. Kept parseable for back-compat only — an
+    # existing per-account value is silently ignored, never an error.
     poll_seconds: int | None = None
 
 

@@ -1,7 +1,10 @@
+import email
+import email.policy
 import hashlib
 from datetime import timezone
+from email.message import EmailMessage
 
-from localmail.parser import parse_message
+from localmail.parser import _decode_part_text, parse_message
 
 from . import _eml
 
@@ -160,3 +163,58 @@ def test_non_inline_attachment_has_none_content_id():
     p = parse_message(_eml.with_attachment())
     assert len(p.attachments) == 1
     assert p.attachments[0].content_id is None
+
+
+def test_text_part_with_unknown_charset_falls_back_to_utf8_replace():
+    """A part declaring an unrecognised charset must not crash parsing.
+    ``get_content()`` raises LookupError on the unknown codec; the parser
+    falls back to a loose UTF-8 decode of the raw payload bytes."""
+    raw = (
+        b"From: alice@example.com\r\n"
+        b"To: bob@example.com\r\n"
+        b"Subject: Bad charset\r\n"
+        b"Date: Wed, 01 Jan 2025 12:00:00 +0000\r\n"
+        b"Message-Id: <badcharset@example.com>\r\n"
+        b'Content-Type: text/plain; charset="x-no-such-charset"\r\n'
+        b"Content-Transfer-Encoding: 8bit\r\n"
+        b"\r\n"
+        b"hello fallback body\r\n"
+    )
+    p = parse_message(raw)
+    assert p.body_text is not None
+    assert "hello fallback body" in p.body_text
+
+
+def test_text_part_get_content_unicodeerror_uses_loose_fallback(monkeypatch):
+    """The ``except UnicodeDecodeError`` arm of ``_decode_part_text`` must fall
+    back to a loose UTF-8 decode of the raw payload, never propagate.
+
+    ``get_content()`` decodes text with ``errors="replace"`` internally, so it
+    cannot raise ``UnicodeDecodeError`` on a real text part — the arm is only
+    reachable if a stricter codec path ever surfaces. Force it here so the
+    fallback (``_decoded_payload`` + ``errors="replace"``) is pinned as a
+    regression guard for the typed-helper refactor (PR #131)."""
+    raw = (
+        b"From: alice@example.com\r\n"
+        b"To: bob@example.com\r\n"
+        b"Subject: Bad bytes\r\n"
+        b"Date: Wed, 01 Jan 2025 12:00:00 +0000\r\n"
+        b"Message-Id: <badbytes@example.com>\r\n"
+        b'Content-Type: text/plain; charset="utf-8"\r\n'
+        b"Content-Transfer-Encoding: 8bit\r\n"
+        b"\r\n"
+        b"caf\xe9 body\r\n"  # 0xe9 is not valid standalone UTF-8
+    )
+    msg = email.message_from_bytes(raw, _class=EmailMessage, policy=email.policy.default)
+    part = msg.get_body(preferencelist=("plain",))
+    assert part is not None
+
+    def _raise(*_a, **_k):
+        raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "forced")
+
+    monkeypatch.setattr(part, "get_content", _raise)
+
+    out = _decode_part_text(part)
+    assert out is not None
+    assert "body" in out
+    assert "�" in out  # the 0xe9 byte round-trips through errors="replace"

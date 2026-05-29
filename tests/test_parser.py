@@ -160,3 +160,23 @@ def test_non_inline_attachment_has_none_content_id():
     p = parse_message(_eml.with_attachment())
     assert len(p.attachments) == 1
     assert p.attachments[0].content_id is None
+
+
+def test_text_part_with_unknown_charset_falls_back_to_utf8_replace():
+    """A part declaring an unrecognised charset must not crash parsing.
+    ``get_content()`` raises LookupError on the unknown codec; the parser
+    falls back to a loose UTF-8 decode of the raw payload bytes."""
+    raw = (
+        b"From: alice@example.com\r\n"
+        b"To: bob@example.com\r\n"
+        b"Subject: Bad charset\r\n"
+        b"Date: Wed, 01 Jan 2025 12:00:00 +0000\r\n"
+        b"Message-Id: <badcharset@example.com>\r\n"
+        b'Content-Type: text/plain; charset="x-no-such-charset"\r\n'
+        b"Content-Transfer-Encoding: 8bit\r\n"
+        b"\r\n"
+        b"hello fallback body\r\n"
+    )
+    p = parse_message(raw)
+    assert p.body_text is not None
+    assert "hello fallback body" in p.body_text

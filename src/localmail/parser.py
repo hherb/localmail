@@ -7,8 +7,9 @@ import email.policy
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from email.message import EmailMessage
+from email.message import EmailMessage, MIMEPart
 from email.utils import getaddresses
+from typing import Any
 
 
 @dataclass
@@ -99,16 +100,24 @@ def _no_nul_list(xs: list[str]) -> list[str]:
     return [x.replace("\x00", "") if "\x00" in x else x for x in xs]
 
 
-def _decode_part_text(part: EmailMessage) -> str | None:
+def _decoded_payload(part: MIMEPart[Any, Any]) -> bytes:
+    """Decoded payload bytes for a leaf part, or ``b""`` when absent.
+
+    ``Message.get_payload(decode=True)`` is typed loosely (``bytes | Any``)
+    even though a leaf part yields ``bytes | None`` at runtime; narrow it here
+    so callers receive a concrete ``bytes`` instead of an unchecked union.
+    """
+    payload = part.get_payload(decode=True)
+    return payload if isinstance(payload, bytes) else b""
+
+
+def _decode_part_text(part: MIMEPart[Any, Any]) -> str | None:
     try:
         content = part.get_content()
     except (LookupError, UnicodeDecodeError):
-        # Unknown charset or undecodable bytes: fall back to raw bytes decoded loosely.
-        payload = part.get_payload(decode=True) or b""
-        try:
-            return payload.decode("utf-8", errors="replace")
-        except Exception:
-            return None
+        # Unknown charset or undecodable bytes: fall back to raw bytes decoded
+        # loosely. errors="replace" guarantees this never raises.
+        return _decoded_payload(part).decode("utf-8", errors="replace")
     if isinstance(content, bytes):
         return content.decode("utf-8", errors="replace")
     return content
@@ -143,7 +152,7 @@ def _attachments(msg: EmailMessage) -> list[Attachment]:
     out: list[Attachment] = []
     for part in msg.iter_attachments():
         filename = part.get_filename() or "attachment"
-        payload = part.get_payload(decode=True) or b""
+        payload = _decoded_payload(part)
         out.append(
             Attachment(
                 filename=filename,

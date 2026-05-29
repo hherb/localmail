@@ -57,7 +57,7 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 
 | Command | Purpose |
 | --- | --- |
-| `localmail init-db` | Apply pending schema migrations. Idempotent. |
+| `localmail init-db` | Apply pending schema migrations, then seed `[[accounts]]` from `config.toml` into the database. Idempotent; the DB is authoritative, so existing rows are never overwritten (a drifted TOML value logs a warning and is ignored). |
 | `localmail list-accounts` | Show configured accounts and whether a secret is stored. |
 | `localmail add-account NAME` | Prompt for an IMAP password and store it in the keyring. |
 | `localmail oauth-login NAME` | Run the Gmail OAuth desktop consent flow. Stores the refresh token in the keyring. |

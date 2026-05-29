@@ -1,6 +1,6 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-05-29T1417 UTC.**
+> **Status as of 2026-05-29T1215 UTC.**
 > This session shipped a small TDD typing-debt fix — **clear the 4 pre-existing
 > `mypy` errors in `src/localmail/parser.py`** (risk #1 from the prior handoff)
 > — as **PR #131**
@@ -79,7 +79,7 @@ The fix:
 ### Docs
 
 - **NEXT_SESSION.md** — *replaced this session* (this file).
-- **docs/handoffs/2026-05-29T1417-utc-post-pr131-parser-typing.md** — *new*
+- **docs/handoffs/2026-05-29T1215-utc-post-pr131-parser-typing.md** — *new*
   (this file's frozen snapshot).
 - **README.md** — not touched (internal typing-debt fix; no user-facing change).
 - **CLAUDE.md** — not touched (no architecture change).
@@ -211,7 +211,7 @@ NEXT_SESSION.md                                          # REPLACED this session
 src/localmail/parser.py                                  # +_decoded_payload helper, MIMEPart typing (PR #131)
 tests/test_parser.py                                     # +unknown-charset fallback test (PR #131)
 docs/handoffs/
-  2026-05-29T1417-utc-post-pr131-parser-typing.md        # NEW (this session's snapshot)
+  2026-05-29T1215-utc-post-pr131-parser-typing.md        # NEW (this session's snapshot)
   2026-05-29T1147-utc-post-pr130-dup-account-names.md     # prior
   2026-05-29T0945-utc-post-pr128-toml-db-seed.md          # prior
   2026-05-29T0412-utc-post-pr127-oauth-503.md             # prior

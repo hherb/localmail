@@ -6,10 +6,11 @@
 > **without a restart** — spawning threads for newly-syncable accounts, tearing
 > down threads for accounts that became non-syncable (deleted / paused /
 > archived), and respawning an account whose config *or credentials* changed.
-> All work is committed on branch **`daemon-control-2b-respec`** (11 commits;
-> tip `9b18747`). **No PR opened yet** (see "What's next §0"). Full suite
-> **1081 passed**, mypy clean (76 files). Final holistic code review: **ready
-> to merge**, no issues.
+> All work is committed and pushed on branch **`daemon-control-2b-respec`**
+> (12 commits incl. this handoff; tip `193e7d1`) and opened as **PR #138**
+> (<https://github.com/hherb/localmail/pull/138>, **open, not yet merged**).
+> Full suite **1081 passed**, mypy clean (76 files). Final holistic code
+> review: **ready to merge**, no issues.
 >
 > 2B.1 is **slice 1 of 5** of a re-spec'd "daemon control (2B)" arc. The
 > remaining slices (heartbeats, command queue, supervisor+HTTP, admin-UI panel)
@@ -99,18 +100,18 @@ dc9334e  feat(accounts): bump updated_at on credential change      (Task 5)
 
 ## What's next
 
-### 0. **Open the PR for 2B.1** *(immediate)*
+### 0. **Review & merge PR #138** *(immediate)*
 
-The branch is complete and green but **no PR exists yet**. Open it:
+PR #138 (<https://github.com/hherb/localmail/pull/138>) is **open and green**
+(1081 passed, mypy clean, final review ready-to-merge). Review and merge it.
+There is **no GitHub issue** for 2B.1 (it came out of the re-spec), so nothing
+to "close". After merge:
 
 ```bash
-gh pr create --base main --head daemon-control-2b-respec \
-  --title "feat(daemon): account hot-reload without restart (2B.1)" \
-  --body "Slice 1 of the re-spec'd daemon-control (2B) arc. …"
+gh pr merge 138 --squash --delete-branch
+git checkout main && git fetch --prune origin && git merge --ff-only origin/main
+git branch -D daemon-control-2b-respec
 ```
-
-There is **no GitHub issue** for 2B.1 (it came out of the re-spec), so nothing
-to "close". After merge: `git fetch --prune`, ff `main`, delete the branch.
 
 ### 1. **Optional follow-ups noted by review (non-blocking)**
 
@@ -198,9 +199,9 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 
 git status                               # clean apart from .claude/ local files
-git branch -vv                           # main + daemon-control-2b-respec (tip 9b18747)
-git --no-pager log --oneline -11         # the 2B.1 series
-gh pr list --state open                  # (none for 2B.1 yet — see What's next §0)
+git branch -vv                           # main + daemon-control-2b-respec (tip 193e7d1)
+git --no-pager log --oneline -12         # the 2B.1 series
+gh pr view 138                           # the 2B.1 PR (open until merged)
 gh issue list --state open --limit 40    # 6 open
 
 # Verify state (expect 1081 passed, mypy clean):
@@ -210,14 +211,7 @@ unset VIRTUAL_ENV && uv run mypy src/localmail
 unset VIRTUAL_ENV && uv run pytest -q tests/test_daemon_reconcile.py tests/test_daemon_hot_reload.py
 ```
 
-Open the 2B.1 PR:
-
-```bash
-gh pr create --base main --head daemon-control-2b-respec \
-  --title "feat(daemon): account hot-reload without restart (2B.1)"
-```
-
-Pick up **2B.2 (heartbeats)** after merge:
+Pick up **2B.2 (heartbeats)** after PR #138 merges:
 
 ```bash
 git checkout main && git pull
@@ -252,6 +246,6 @@ docs/handoffs/2026-05-31T0030-utc-post-2b1-daemon-hot-reload.md   # frozen snaps
 ```
 
 `main` at `77741d0` (== `origin/main`). Branch `daemon-control-2b-respec` at
-`9b18747` (11 commits, **not pushed, no PR**). Working tree clean (only
-`.claude/` local files). 2 local branches (`main`, `daemon-control-2b-respec`);
-0 open PRs.
+`193e7d1`, **pushed** (== `origin/daemon-control-2b-respec`), **PR #138 open**.
+Working tree clean (only `.claude/` local files). 2 local branches (`main`,
+`daemon-control-2b-respec`); 1 open PR (#138).

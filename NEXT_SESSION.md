@@ -6,7 +6,9 @@
 > deleting `sync.upsert_account`. Opened as **PR #135**
 > (`feat(cli): CLI account commands read/write the DB (Sub-plan 2A.2d)`),
 > **open, not yet merged**. Branch `sub-plan-2a2d-cli-db-source` pushed; tip
-> `b1d2983`. Final whole-implementation review verdict: **READY TO MERGE**.
+> `96cff73`. Final whole-implementation review verdict: **READY TO MERGE** — its
+> 4 non-blocking test-gap follow-ups were then **filled within this PR**
+> (`96cff73`); full suite **1037 passed**, mypy clean.
 >
 > Reconciled remote state at session start: **PR #132 (Sub-plan 2A.2b) had
 > already merged** — local `main` is at `f59a3f2`. Pruned the now-`[gone]`
@@ -54,6 +56,8 @@ f87280c  feat(cli): list-accounts reads the DB                                  
 450b7be  feat(cli): one-shot sync reads DB accounts; delete sync.upsert_account   (Task 8)
 277f399  docs: CLI account commands are DB-canonical (Sub-plan 2A.2d)            (Task 9)
 b1d2983  docs(handoffs): land 2026-05-30T0123 UTC post-PR-135 snapshot
+825a0be  docs(handoffs): correct post-PR-135 handoff (T0123 snapshot was stale)
+96cff73  test(cli): pin 4 review-flagged account-command edge cases
 ```
 
 ### What the change does (PR #135)
@@ -93,10 +97,10 @@ b1d2983  docs(handoffs): land 2026-05-30T0123 UTC post-PR-135 snapshot
 - `grep -rn "upsert_account" src/ tests/` — **empty**.
 - Final whole-implementation review (subagent): spec-compliant, no
   critical/important bugs, READY TO MERGE. It flagged **4 non-blocking test
-  gaps** worth filing as follow-ups (the code paths are correct, just
-  unpinned): `add-account` rejects an archive DB row; `oauth-login` seeds from
-  TOML when absent; `sync --account` overrides a *paused* account;
-  `sync --account` rejects an archive account.
+  gaps** (correct code paths, just unpinned) — **filled within this PR**
+  (`96cff73`): `add-account` rejects an archive DB row; `oauth-login` seeds
+  from TOML when absent; `sync --account` overrides a *paused* account;
+  `sync --account` rejects an archive account. Full suite **1037 passed**.
 
 ### The #134 oauth_state flake (do NOT chase)
 
@@ -139,14 +143,14 @@ next commit.)
 
 ### 0. **Merge PR #135** *(immediate)*
 
-PR #135 is open and green (1033 tests, mypy clean, final review = ready to
-merge). Review + merge, then `git fetch --prune`, fast-forward local `main`,
-prune `sub-plan-2a2d-cli-db-source`.
+PR #135 is open and green (1037 tests, mypy clean, final review = ready to
+merge; the review's 4 follow-up tests are folded in). Review + merge, then
+`git fetch --prune`, fast-forward local `main`, prune
+`sub-plan-2a2d-cli-db-source`.
 
-### 1. **(Optional, fast) Pin the 4 review follow-up tests + a `sync_enabled` toggle**
+### 1. **(Optional, small) `sync_enabled` CLI/UI setter**
 
-- Add the 4 non-blocking test cases the final review flagged (above) to
-  `tests/test_cli_accounts_db.py` — they pin already-correct code paths.
+- (The 4 review-flagged follow-up tests are already done — `96cff73`.)
 - **`sync_enabled` CLI/UI setter.** The daemon honours `sync_enabled` and
   `sync --account` overrides it, but only `update_account` / direct SQL can
   *set* it. A `localmail enable-account` / `disable-account` (or a UI switch in
@@ -229,7 +233,7 @@ gh pr view 135                           # the CLI DB-source slice
 gh issue list --state open --limit 40    # expect 7 open (#5,#25,#47,#90,#125,#133,#134)
 
 # Useful one-shots:
-unset VIRTUAL_ENV && uv run pytest -q tests/        # full suite (expect 1033 passed; #134 may flake)
+unset VIRTUAL_ENV && uv run pytest -q tests/        # full suite (expect 1037 passed; #134 may flake)
 unset VIRTUAL_ENV && uv run mypy src/localmail      # clean, 73 files
 unset VIRTUAL_ENV && uv run pytest -q tests/test_cli_accounts_db.py tests/test_cli_account_resolve.py  # this slice
 ```
@@ -280,6 +284,6 @@ docs/handoffs/
 ```
 
 `main` at `f59a3f2`. Branch `sub-plan-2a2d-cli-db-source` pushed (PR #135
-open) at `b1d2983` (this corrected handoff will advance it). Working tree clean
+open) at `96cff73` (this handoff commit will advance it). Working tree clean
 (only `.claude/` local files untracked, by design). 2 local branches
 (`main`, `sub-plan-2a2d-cli-db-source`); 1 open PR (#135).

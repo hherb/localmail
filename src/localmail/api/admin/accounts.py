@@ -86,6 +86,19 @@ def get_account(conn: psycopg.Connection, account_id: int) -> Account:
     return row
 
 
+def get_account_by_name(conn: psycopg.Connection, name: str) -> Account | None:
+    """Return one account by name, or None if absent.
+
+    Unlike `get_account`, absence returns None (not NotFound): CLI callers
+    treat a missing name as a normal branch (seed from TOML, or fail with a
+    domain-specific message). Reuses `_SELECT_FULL` so the column shape cannot
+    drift from the other readers.
+    """
+    with conn.cursor(row_factory=class_row(Account)) as cur:
+        cur.execute(_SELECT_FULL + " WHERE name = %s", (name,))
+        return cur.fetchone()
+
+
 def list_accounts_full(conn: psycopg.Connection) -> list[Account]:
     """Return every account as a full Account row, oldest first.
 

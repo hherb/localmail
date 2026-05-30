@@ -273,7 +273,9 @@ class Daemon:
     def stop(self) -> None:
         """Signal every thread to stop (master event + all per-account events)."""
         self._stop_event.set()
-        for bundle in self._account_threads.values():
+        # Snapshot: reconcile() may mutate _account_threads on the daemon
+        # thread while stop() runs from another thread (signal / supervisor).
+        for bundle in list(self._account_threads.values()):
             bundle.stop_event.set()
 
     def join(self, timeout: float | None = None) -> None:

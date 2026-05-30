@@ -304,6 +304,25 @@ def test_update_email_rejects_blank(db_conn):
         update_account(db_conn, aid, email_address='')
 
 
+def test_get_account_by_name_returns_row(db_conn):
+    from localmail.api.admin.accounts import get_account_by_name
+    created = create_account(
+        db_conn, name="work-by-name", email_address="w@example.com",
+        auth_method="password", imap_host="imap.example.com", imap_port=993,
+        oauth_provider=None, folder_allow=None, folder_deny=None,
+        folder_deny_flags=None,
+    )
+    got = get_account_by_name(db_conn, "work-by-name")
+    assert got is not None
+    assert got.id == created.id
+    assert got.name == "work-by-name"
+
+
+def test_get_account_by_name_missing_returns_none(db_conn):
+    from localmail.api.admin.accounts import get_account_by_name
+    assert get_account_by_name(db_conn, "nope") is None
+
+
 def test_list_syncable_accounts_excludes_archive_and_disabled(db_conn):
     pw = _insert_account(db_conn, name='pw')
     oauth = _insert_account(db_conn, name='oauth', method='oauth2',

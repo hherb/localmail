@@ -86,6 +86,25 @@ def _drifted_fields(cfg: AccountConfig, db: Account) -> list[str]:
     return drifted
 
 
+def account_create_kwargs(cfg: AccountConfig) -> dict:
+    """Map an AccountConfig to create_account(...) keyword arguments.
+
+    Single source of truth for the TOML->DB field mapping, shared by the
+    init-db seed and the CLI add-account/oauth-login seed-from-TOML bridge.
+    """
+    return {
+        "name": cfg.name,
+        "email_address": cfg.email,
+        "auth_method": cfg.auth_method,
+        "imap_host": cfg.imap_host,
+        "imap_port": cfg.imap_port,
+        "oauth_provider": cfg.oauth_provider,
+        "folder_allow": cfg.folder_allow,
+        "folder_deny": cfg.folder_deny,
+        "folder_deny_flags": cfg.folder_deny_flags,
+    }
+
+
 def plan_account_seed(
     config_accounts: list[AccountConfig],
     existing: Mapping[str, Account],
@@ -125,18 +144,7 @@ def seed_accounts(
     plan = plan_account_seed(config_accounts, existing)
 
     for cfg in plan.to_insert:
-        create_account(
-            conn,
-            name=cfg.name,
-            email_address=cfg.email,
-            auth_method=cfg.auth_method,
-            imap_host=cfg.imap_host,
-            imap_port=cfg.imap_port,
-            oauth_provider=cfg.oauth_provider,
-            folder_allow=cfg.folder_allow,
-            folder_deny=cfg.folder_deny,
-            folder_deny_flags=cfg.folder_deny_flags,
-        )
+        create_account(conn, **account_create_kwargs(cfg))
 
     for d in plan.drift:
         logger.warning(

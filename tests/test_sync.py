@@ -3,8 +3,9 @@ from pathlib import Path
 from typing import Any
 
 from localmail.config import AccountConfig
-from localmail.api.admin.accounts import create_account, get_account
-from localmail.sync import backfill_internal_date, folders_to_sync, sync_account, upsert_account
+from localmail.account_seed import account_create_kwargs
+from localmail.api.admin.accounts import create_account, get_account_by_name
+from localmail.sync import backfill_internal_date, folders_to_sync, sync_account
 
 from . import _eml
 from ._fake_imap import FakeIMAPClient
@@ -20,6 +21,19 @@ def make_account(**over: Any) -> AccountConfig:
     )
     defaults.update(over)
     return AccountConfig(**defaults)
+
+
+def _ensure_account(conn, account: AccountConfig) -> int:
+    existing = get_account_by_name(conn, account.name)
+    if existing is not None:
+        return existing.id
+    return create_account(conn, **account_create_kwargs(account)).id
+
+
+def _sync(conn, imap, *, account: AccountConfig | None = None, **kw):
+    account = account or make_account()
+    account_id = _ensure_account(conn, account)
+    return sync_account(conn, imap, account=account, account_id=account_id, **kw)
 
 
 # --- folder filter unit tests ------------------------------------------------
@@ -73,9 +87,7 @@ def test_first_sync_imports_all_messages(db_conn, tmp_path: Path):
     imap.append("INBOX", _eml.plain())
     imap.append("INBOX", _eml.multipart_alt())
 
-    results = sync_account(
-        db_conn, imap, account=make_account(), attachments_root=tmp_path
-    )
+    results = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     assert results == {"INBOX": 2}
     with db_conn.cursor() as cur:
@@ -107,7 +119,7 @@ def test_sync_persists_imap_internaldate_to_internal_date_column(
     sent_at_imap = datetime(2024, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
     imap.append("INBOX", _eml.plain(), internal_date=sent_at_imap)
 
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT internal_date FROM messages")
@@ -127,7 +139,7 @@ def test_sync_leaves_internal_date_null_when_imap_omits_it(
     imap.add_folder("INBOX")
     imap.append("INBOX", _eml.plain())  # no internal_date
 
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT internal_date FROM messages")
@@ -149,7 +161,7 @@ def test_backfill_internal_date_fills_nulls_from_imap(
     # mimics the pre-migration-0018 archive state.
     imap.append("INBOX", _eml.plain())
     imap.append("INBOX", _eml.utf8_subject())
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages WHERE internal_date IS NULL")
         assert cur.fetchone()[0] == 2
@@ -191,7 +203,7 @@ def test_backfill_internal_date_is_idempotent_and_skips_populated_rows(
     imap.add_folder("INBOX")
     when_imap = datetime(2025, 1, 1, tzinfo=timezone.utc)
     imap.append("INBOX", _eml.plain(), internal_date=when_imap)
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     # Sanity: the regular sync already populated internal_date.
     with db_conn.cursor() as cur:
@@ -212,10 +224,8 @@ def test_resync_inserts_zero_new_messages(db_conn, tmp_path: Path):
     imap.add_folder("INBOX")
     imap.append("INBOX", _eml.plain())
 
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
-    second = sync_account(
-        db_conn, imap, account=make_account(), attachments_root=tmp_path
-    )
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    second = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     assert second == {"INBOX": 0}
     with db_conn.cursor() as cur:
@@ -227,14 +237,12 @@ def test_incremental_sync_picks_up_only_new_uids(db_conn, tmp_path: Path):
     imap = FakeIMAPClient()
     imap.add_folder("INBOX")
     imap.append("INBOX", _eml.plain())  # UID 1
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     imap.append("INBOX", _eml.multipart_alt())  # UID 2
     imap.append("INBOX", _eml.utf8_subject())   # UID 3
 
-    second = sync_account(
-        db_conn, imap, account=make_account(), attachments_root=tmp_path
-    )
+    second = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
     assert second == {"INBOX": 2}
 
 
@@ -248,7 +256,7 @@ def test_same_message_in_two_folders_creates_one_message_two_labels(
     imap.append("INBOX", raw)
     imap.append("Archive", raw)
 
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages")
@@ -264,14 +272,14 @@ def test_uidvalidity_change_triggers_full_resync(db_conn, tmp_path: Path):
     imap = FakeIMAPClient()
     imap.add_folder("INBOX", uidvalidity=10)
     imap.append("INBOX", _eml.plain())
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     # Server reassigns UIDs. The same message body re-appears under UID 1.
     imap.folders["INBOX"].messages.clear()
     imap.bump_uidvalidity("INBOX")
     imap.append("INBOX", _eml.plain())
 
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages")
@@ -291,7 +299,7 @@ def test_attachments_are_written_and_recorded(db_conn, tmp_path: Path):
     imap.add_folder("INBOX")
     imap.append("INBOX", _eml.with_attachment())
 
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT id, attachments FROM messages")
@@ -326,7 +334,7 @@ def test_same_attachment_in_two_messages_dedupes_to_one_blob(db_conn, tmp_path: 
     imap.append("INBOX", raw_a)
     imap.append("INBOX", raw_b)
 
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages")
@@ -355,9 +363,7 @@ def test_poison_pill_message_is_skipped_without_breaking_the_batch(
 
     monkeypatch.setattr(sync_mod, "upsert_message", maybe_explode)
 
-    results = sync_account(
-        db_conn, imap, account=make_account(), attachments_root=tmp_path
-    )
+    results = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
     # UID 1 and UID 3 inserted; UID 2 skipped.
     assert results == {"INBOX": 2}
 
@@ -402,7 +408,7 @@ def test_retry_failed_messages_recovers_after_parser_fix(
         return real_upsert(conn, account_id=account_id, parsed=parsed, internal_date=internal_date)
 
     monkeypatch.setattr(sync_mod, "upsert_message", maybe_explode)
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages")
@@ -434,7 +440,7 @@ def test_retry_still_failing_bumps_retry_count(db_conn, tmp_path: Path, monkeypa
         raise ValueError("still broken")
 
     monkeypatch.setattr(sync_mod, "upsert_message", always_explode)
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     ok, still = retry_failed_messages(db_conn, attachments_root=tmp_path)
     assert (ok, still) == (0, 1)
@@ -459,7 +465,7 @@ def test_max_messages_caps_inserts_and_next_run_resumes(db_conn, tmp_path: Path)
         msg = _eml.plain().replace(b"<plain-123@example.com>", f"<m{i}@e.com>".encode())
         imap.append("INBOX", msg)
 
-    first = sync_account(
+    first = _sync(
         db_conn, imap, account=make_account(),
         attachments_root=tmp_path, max_messages=2,
     )
@@ -470,9 +476,7 @@ def test_max_messages_caps_inserts_and_next_run_resumes(db_conn, tmp_path: Path)
         # We processed UIDs 1, 2 → uidnext should advance to 3.
         assert cur.fetchone()[0] == 3
 
-    second = sync_account(
-        db_conn, imap, account=make_account(), attachments_root=tmp_path,
-    )
+    second = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
     assert second == {"INBOX": 3}
 
     with db_conn.cursor() as cur:
@@ -486,7 +490,7 @@ def test_progress_callback_is_invoked(db_conn, tmp_path: Path):
     imap.append("INBOX", _eml.plain())
 
     messages: list[str] = []
-    sync_account(
+    _sync(
         db_conn, imap, account=make_account(),
         attachments_root=tmp_path, progress=messages.append,
     )
@@ -500,46 +504,13 @@ def test_messages_without_message_id_dedup_via_sha(db_conn, tmp_path: Path):
     imap.add_folder("INBOX")
     imap.append("INBOX", raw)
 
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
     # Re-append the identical bytes under a new UID; should not duplicate.
     imap.append("INBOX", raw)
-    sync_account(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages WHERE message_id IS NULL")
         assert cur.fetchone()[0] == 1
 
 
-def test_upsert_account_does_not_overwrite_canonical_columns(db_conn):
-    """DB is canonical: upsert_account is now get-or-create, never overwrite."""
-    created = create_account(
-        db_conn, name="acct", email_address="orig@example.com",
-        auth_method="password", imap_host="orig.example.com", imap_port=993,
-        oauth_provider=None, folder_allow=None, folder_deny=None,
-        folder_deny_flags=None,
-    )
-    db_conn.commit()
-
-    drift = AccountConfig(
-        name="acct", email="drift@example.com",
-        imap_host="drift.example.com", imap_port=143, auth_method="password",
-    )
-    returned_id = upsert_account(db_conn, drift)
-    db_conn.commit()
-
-    assert returned_id == created.id
-    row = get_account(db_conn, created.id)
-    assert row.email_address == "orig@example.com"
-    assert row.imap_host == "orig.example.com"
-    assert row.imap_port == 993
-
-
-def test_upsert_account_inserts_brand_new_name(db_conn):
-    acct = AccountConfig(
-        name="fresh", email="f@example.com",
-        imap_host="h.example.com", imap_port=993, auth_method="password",
-    )
-    new_id = upsert_account(db_conn, acct)
-    db_conn.commit()
-    assert isinstance(new_id, int)
-    assert get_account(db_conn, new_id).name == "fresh"

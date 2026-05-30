@@ -577,16 +577,29 @@ for the full design.
   adapter (archive + `sync_enabled = FALSE` rows spawn no threads — 2A.2c
   folded in). The DB `account_id` is carried on `WorkerContext`, so the
   IDLE/poll workers use `ctx.account_id` and no longer call `upsert_account`.
-  `sync.py:upsert_account` is now **get-or-create only** (no canonical-column
-  overwrite) and survives solely for the still-TOML-driven one-shot `localmail
-  sync` CLI. Per-account `poll_seconds` TOML overrides are no longer honoured
+  Per-account `poll_seconds` TOML overrides are no longer honoured
   by the daemon (no DB column); the daemon-wide `cfg.daemon.poll_seconds`
   applies to every account. **The account set is read once at `Daemon.__init__`**
   (a one-shot `psycopg.connect`, before the pool opens, since pool sizing
   depends on the count) — admin-UI/CLI account changes take effect on the next
   daemon restart, not live; hot reload is deferred to daemon control (2B).
-  Still deferred to **2A.2d**: rewiring CLI `add-account` / `oauth-login` /
-  `remove-account` / one-shot `sync` to the DB.
+  **Sub-plan 2A.2d shipped (DB-canonical CLI):** `list-accounts`,
+  `add-account`, `oauth-login`, `remove-account`, and the one-shot `localmail
+  sync` now read/write the `accounts` table via `api.admin.accounts` instead of
+  `cfg.accounts`. `sync.py:upsert_account` is **deleted** (no callers remain);
+  `sync.sync_account` now takes an explicit `account_id: int` resolved by the
+  caller (it never creates the account row). `add-account` / `oauth-login`
+  resolve a name via the pure `cli_account_resolve`
+  (`Found`/`SeedThenUse`/`NotFound`); a name absent from the DB but present in
+  `config.toml` is seeded via `create_account` + the shared
+  `account_seed.account_create_kwargs` mapping (CLI helper
+  `cli._resolve_account_row`). `remove-account` is **secrets-only by default**
+  (DB row untouched, back-compat); `--delete-row` deletes the row, `--force`
+  cascades when messages reference it. One-shot `sync` (bare) iterates
+  `list_syncable_accounts` like the daemon; `--account NAME` resolves via
+  `get_account_by_name` and syncs even a paused (`sync_enabled = FALSE`)
+  account, rejecting archive accounts. `backfill-internal-date` remains
+  TOML-driven (`_account_or_die`) — out of 2A.2d scope. No new migration.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.

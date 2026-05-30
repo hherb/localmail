@@ -16,8 +16,19 @@ import logging
 from . import secrets
 from .config import AccountConfig, Config, default_config_path, load_config
 from .daemon import Daemon
-from .account_seed import seed_accounts
-from .api.admin.accounts import AccountFieldError
+from .daemon_accounts import account_config_from_row
+from .account_seed import account_create_kwargs, seed_accounts
+from .api.admin.accounts import (
+    Account,
+    AccountFieldError,
+    AccountInUse,
+    create_account,
+    delete_account,
+    get_account_by_name,
+    list_accounts_full,
+    list_syncable_accounts,
+)
+from .cli_account_resolve import Found, NotFound, plan_account_resolution
 from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
@@ -85,6 +96,30 @@ def _account_or_die(cfg: Config, name: str) -> AccountConfig:
     )
 
 
+def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Account:
+    """Resolve `name` to an Account row, seeding it from TOML if absent.
+
+    Returns the DB Account. Raises click.ClickException when the name is in
+    neither the DB nor config.toml, or when a malformed TOML block fails
+    create_account validation. The caller owns the transaction (commit).
+    """
+    existing = {row.name: row for row in list_accounts_full(conn)}
+    res = plan_account_resolution(name, cfg.accounts, existing)
+    if isinstance(res, Found):
+        return res.account
+    if isinstance(res, NotFound):
+        raise click.ClickException(
+            f"unknown account {name!r}: not in the DB and no matching "
+            f"[[accounts]] block in config.toml"
+        )
+    try:
+        return create_account(conn, **account_create_kwargs(res.config))
+    except AccountFieldError as exc:
+        raise click.ClickException(
+            f"cannot create account {name!r}: {exc}"
+        ) from exc
+
+
 @click.group()
 @click.option(
     "--config",
@@ -130,20 +165,25 @@ def init_db(ctx: click.Context) -> None:
 @main.command("list-accounts")
 @click.pass_context
 def list_accounts(ctx: click.Context) -> None:
-    """Show accounts configured in config.toml and whether a secret is stored."""
+    """Show accounts in the DB and whether a secret is stored."""
     cfg = load_config(ctx.obj["config_path"])
-    if not cfg.accounts:
-        click.echo("no accounts configured")
+    with psycopg.connect(cfg.database.dsn) as conn:
+        rows = list_accounts_full(conn)
+    if not rows:
+        click.echo("no accounts")
         return
-    for a in cfg.accounts:
-        if a.auth_method == "password":
-            has_secret = secrets.get_password(a.name) is not None
-            secret_label = "password" if has_secret else "MISSING"
+    for a in rows:
+        if a.auth_method == "archive":
+            endpoint, secret_label = "archive", "n/a"
+        elif a.auth_method == "password":
+            endpoint = f"{a.imap_host}:{a.imap_port}"
+            secret_label = "password" if secrets.get_password(a.name) else "MISSING"
         else:
-            has_secret = secrets.get_refresh_token(a.name) is not None
-            secret_label = "oauth-token" if has_secret else "MISSING"
+            endpoint = f"{a.imap_host}:{a.imap_port}"
+            secret_label = "oauth-token" if secrets.get_refresh_token(a.name) else "MISSING"
         click.echo(
-            f"{a.name}\t{a.email}\t{a.imap_host}:{a.imap_port}\t{a.auth_method}\t[{secret_label}]"
+            f"{a.name}\t{a.email_address}\t{endpoint}\t{a.auth_method}"
+            f"\tsync={a.sync_enabled}\t[{secret_label}]"
         )
 
 
@@ -153,66 +193,104 @@ def list_accounts(ctx: click.Context) -> None:
     "--password",
     "password_opt",
     default=None,
-    help="Password (prompted securely if omitted). Only used for auth_method='password'.",
+    help="Password (prompted securely if omitted). Only for auth_method='password'.",
 )
 @click.pass_context
 def add_account(ctx: click.Context, name: str, password_opt: str | None) -> None:
-    """Store the IMAP password (or refresh-token slot for OAuth) for an account.
+    """Store the IMAP password for an account in the keyring.
 
-    The account must already be declared in config.toml.
+    Resolves NAME against the DB; if absent but declared in config.toml, the
+    DB row is created from that block first, then the password is stored.
     """
     cfg = load_config(ctx.obj["config_path"])
-    account = _account_or_die(cfg, name)
-
-    if account.auth_method == "password":
-        pw = password_opt or click.prompt(
-            f"IMAP password for {account.email}", hide_input=True, confirmation_prompt=True
-        )
-        secrets.set_password(name, pw)
-        click.echo(f"stored password for {name} in keyring")
-    else:
-        raise click.ClickException(
-            f"account {name!r} uses {account.auth_method!r}; "
-            f"run `localmail oauth-login {name}` instead"
-        )
+    with psycopg.connect(cfg.database.dsn) as conn:
+        account = _resolve_account_row(conn, cfg, name)
+        # Validate before commit: a mismatched command must not leave a
+        # newly-seeded row behind. Raising here rolls back the seed.
+        if account.auth_method == "oauth2":
+            raise click.ClickException(
+                f"account {name!r} uses oauth2; run `localmail oauth-login {name}` instead"
+            )
+        if account.auth_method != "password":
+            raise click.ClickException(
+                f"account {name!r} is an archive account; it has no IMAP secret"
+            )
+        conn.commit()
+    pw = password_opt or click.prompt(
+        f"IMAP password for {account.email_address}",
+        hide_input=True, confirmation_prompt=True,
+    )
+    secrets.set_password(name, pw)
+    click.echo(f"stored password for {name} in keyring")
 
 
 @main.command("remove-account")
 @click.argument("name")
+@click.option("--delete-row", is_flag=True, default=False,
+              help="Also delete the account row from the DB (not just secrets).")
+@click.option("--force", is_flag=True, default=False,
+              help="With --delete-row: cascade-delete even if messages exist.")
 @click.pass_context
-def remove_account(ctx: click.Context, name: str) -> None:
-    """Remove any stored secret for an account from the keyring."""
+def remove_account(ctx: click.Context, name: str,
+                   delete_row: bool, force: bool) -> None:
+    """Clear stored secrets for an account. With --delete-row, also remove
+    the DB row (refusing if messages reference it unless --force)."""
+    if force and not delete_row:
+        raise click.ClickException("--force only applies with --delete-row")
+    cfg = load_config(ctx.obj["config_path"])
+    if not delete_row:
+        secrets.delete_password(name)
+        secrets.delete_refresh_token(name)
+        click.echo(f"cleared secrets for {name}")
+        return
+    with psycopg.connect(cfg.database.dsn) as conn:
+        account = get_account_by_name(conn, name)
+        if account is None:
+            secrets.delete_password(name)
+            secrets.delete_refresh_token(name)
+            click.echo(f"no DB row for {name}; cleared keyring only")
+            return
+        try:
+            delete_account(conn, account.id, force=force)
+        except AccountInUse as exc:
+            raise click.ClickException(
+                f"{exc}; pass --force to delete it and its messages"
+            ) from exc
+        conn.commit()
     secrets.delete_password(name)
     secrets.delete_refresh_token(name)
-    click.echo(f"cleared secrets for {name}")
+    click.echo(f"deleted account {name} and cleared its secrets")
 
 
 @main.command("oauth-login")
 @click.argument("name")
 @click.pass_context
 def oauth_login(ctx: click.Context, name: str) -> None:
-    """Run the Gmail OAuth2 consent flow and store the refresh token in the keyring.
+    """Run the Gmail OAuth2 consent flow and store the refresh token.
 
-    Opens a local browser. The account must be declared as auth_method='oauth2'
-    in config.toml and [gmail_oauth] client_secrets_file must point to the
-    Google Cloud Desktop OAuth client JSON.
+    Resolves NAME against the DB (seeding from config.toml if absent). The
+    account must be auth_method='oauth2' with oauth_provider='gmail', and
+    [gmail_oauth] client_secrets_file must be set.
     """
     cfg = load_config(ctx.obj["config_path"])
-    account = _account_or_die(cfg, name)
-    if account.auth_method != "oauth2":
-        raise click.ClickException(
-            f"account {name!r} uses auth_method={account.auth_method!r}; "
-            f"oauth-login only applies to OAuth2 accounts"
-        )
-    if account.oauth_provider != "gmail":
-        raise click.ClickException(
-            f"unsupported oauth_provider: {account.oauth_provider!r}"
-        )
+    with psycopg.connect(cfg.database.dsn) as conn:
+        account = _resolve_account_row(conn, cfg, name)
+        # Validate before commit: a mismatched command must not leave a
+        # newly-seeded row behind. Raising here rolls back the seed.
+        if account.auth_method != "oauth2":
+            raise click.ClickException(
+                f"account {name!r} uses auth_method={account.auth_method!r}; "
+                f"oauth-login only applies to OAuth2 accounts"
+            )
+        if account.oauth_provider != "gmail":
+            raise click.ClickException(
+                f"unsupported oauth_provider: {account.oauth_provider!r}"
+            )
+        conn.commit()
     if cfg.gmail_oauth is None:
         raise click.ClickException(
             "config.toml is missing [gmail_oauth] client_secrets_file"
         )
-
     click.echo("opening browser for Google consent ...")
     creds = run_consent_flow(cfg.gmail_oauth.client_secrets_file)
     secrets.set_refresh_token(name, creds.refresh_token)
@@ -221,41 +299,43 @@ def oauth_login(ctx: click.Context, name: str) -> None:
 
 @main.command("sync")
 @click.option("--account", "account_name", default=None,
-              help="Sync only this account (default: all accounts in config).")
+              help="Sync only this account (default: all syncable DB accounts).")
 @click.option("--no-ssl", is_flag=True, default=False,
               help="Disable TLS — for testing against a local IMAP server only.")
 @click.option("--limit-per-folder", "limit_per_folder", type=int, default=None,
               help="Fetch at most N new UIDs per folder in this run. "
-                   "Useful for smoke-testing; the next run resumes from the checkpoint.")
+                   "The next run resumes from the checkpoint.")
 @click.pass_context
-def sync_cmd(
-    ctx: click.Context,
-    account_name: str | None,
-    no_ssl: bool,
-    limit_per_folder: int | None,
-) -> None:
-    """One-shot incremental sync. Useful for cron and manual testing."""
+def sync_cmd(ctx: click.Context, account_name: str | None,
+             no_ssl: bool, limit_per_folder: int | None) -> None:
+    """One-shot incremental sync over the DB accounts. For cron + manual testing."""
     cfg = load_config(ctx.obj["config_path"])
-    accounts = (
-        [_account_or_die(cfg, account_name)] if account_name else cfg.accounts
-    )
-    if not accounts:
-        raise click.ClickException("no accounts configured")
-
     gmail_secrets = cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
     with psycopg.connect(cfg.database.dsn, autocommit=False) as conn:
-        for account in accounts:
+        if account_name:
+            row = get_account_by_name(conn, account_name)
+            if row is None:
+                raise click.ClickException(f"no such account: {account_name!r}")
+            if row.auth_method == "archive":
+                raise click.ClickException(
+                    f"account {account_name!r} is an archive account; not synced"
+                )
+            rows = [row]
+        else:
+            rows = list_syncable_accounts(conn)
+        if not rows:
+            raise click.ClickException("no syncable accounts")
+
+        for row in rows:
+            account = account_config_from_row(row)
             click.echo(f"--- syncing {account.name} ---")
             with open_connection(
                 account, ssl=not no_ssl, gmail_client_secrets=gmail_secrets
             ) as imap:
                 results = sync_account(
-                    conn,
-                    imap,
-                    account=account,
+                    conn, imap, account=account, account_id=row.id,
                     attachments_root=cfg.attachments.root,
-                    max_messages=limit_per_folder,
-                    progress=click.echo,
+                    max_messages=limit_per_folder, progress=click.echo,
                 )
             for folder, n in results.items():
                 click.echo(f"  {folder}: +{n} new")

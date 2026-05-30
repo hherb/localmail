@@ -22,7 +22,8 @@ Postgres and the attachment tree without touching IMAP.
 - Secrets (IMAP passwords, OAuth refresh tokens) live in the OS keyring —
   macOS Keychain on darwin, Secret Service (gnome-keyring / KWallet) on Linux.
 - Per-account topology (host, email, auth method, folder allow/deny) lives in
-  a single TOML file.
+  the `accounts` database table. A single TOML file seeds it on `init-db`; the
+  DB is authoritative thereafter.
 
 ## Quickstart
 
@@ -55,14 +56,22 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 
 ### Sync & accounts
 
+> **The database is canonical for accounts.** `config.toml` `[[accounts]]`
+> blocks are a *seed*: `localmail init-db` merges them into the `accounts`
+> table, after which the DB is authoritative. The daemon, the one-shot `sync`,
+> and every account command read and write the DB — not the TOML. A TOML block
+> still serves as the seed source for `add-account` / `oauth-login` when the
+> named row does not exist yet, but editing TOML after a row exists has no
+> runtime effect (a drift warning is logged at `init-db`).
+
 | Command | Purpose |
 | --- | --- |
 | `localmail init-db` | Apply pending schema migrations, then seed `[[accounts]]` from `config.toml` into the database. Idempotent; the DB is authoritative, so existing rows are never overwritten (a drifted TOML value logs a warning and is ignored). |
-| `localmail list-accounts` | Show configured accounts and whether a secret is stored. |
-| `localmail add-account NAME` | Prompt for an IMAP password and store it in the keyring. |
-| `localmail oauth-login NAME` | Run the Gmail OAuth desktop consent flow. Stores the refresh token in the keyring. |
-| `localmail remove-account NAME` | Drop any stored secrets (password + refresh token) for an account. |
-| `localmail sync [--account NAME] [--limit-per-folder K] [--no-ssl]` | One-shot incremental sync. |
+| `localmail list-accounts` | Show accounts in the database and whether a secret is stored. |
+| `localmail add-account NAME` | Prompt for an IMAP password and store it in the keyring. Resolves `NAME` against the DB; if absent but declared in `config.toml`, the DB row is created from that block first. |
+| `localmail oauth-login NAME` | Run the Gmail OAuth desktop consent flow. Stores the refresh token in the keyring. Resolves `NAME` against the DB (seeding from `config.toml` if absent). |
+| `localmail remove-account NAME [--delete-row] [--force]` | Clear stored secrets for an account. `--delete-row` also removes the DB account row (`--force` cascades when messages reference it). |
+| `localmail sync [--account NAME] [--limit-per-folder K] [--no-ssl]` | One-shot incremental sync over the syncable database accounts (live + `sync_enabled`). `--account NAME` syncs one account even if it is paused (`sync_enabled = false`); archive accounts are rejected. |
 | `localmail run [--log-level …] [--no-ssl]` | Foreground daemon: per-account IDLE thread on INBOX + periodic poll thread for other folders. SIGTERM/SIGINT shut down cleanly. |
 | `localmail list-failed [--account NAME] [--limit K]` | Show messages that sync skipped due to errors. |
 | `localmail retry-failed [--account NAME]` | Re-attempt every failed message. Successful retries move from `failed_messages` to `messages`. |
@@ -92,6 +101,8 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | `localmail grant-account USERNAME ACCOUNT_NAME` | Grant `USERNAME` read access to `ACCOUNT_NAME` (per-user account ACL). Idempotent. |
 | `localmail revoke-account USERNAME ACCOUNT_NAME` | Revoke `USERNAME`'s access to `ACCOUNT_NAME`. |
 | `localmail rotate-tls --cert PATH --key PATH [--hostname H] [--force]` | Generate (or regenerate) a self-signed TLS cert + key. |
+| `localmail grant-admin USERNAME` / `localmail revoke-admin USERNAME` | Toggle `api_users.is_admin` for the admin UI. Shell-only bootstrap. |
+| `localmail revoke-admin-sessions USERNAME` | Invalidate all of `USERNAME`'s admin cookie sessions (admin privilege itself is untouched — use `revoke-admin` for that). |
 
 > **Upgrading to migration 0016.** Per-user account ACL is now enforced
 > at the API boundary: by default a freshly-created user can read **no**

@@ -156,6 +156,17 @@ class GmailOAuthConfig(BaseModel):
 
 
 class AccountConfig(BaseModel):
+    """One IMAP account.
+
+    As of Sub-plan 2A.2d the database is canonical for accounts: these
+    ``[[accounts]]`` TOML blocks are read only as the ``init-db`` seed and as
+    the seed-from-TOML source for ``add-account`` / ``oauth-login`` when the
+    named DB row does not yet exist. No account command (nor the daemon, nor
+    the one-shot ``sync``) reads TOML at runtime once the DB row exists.
+    Field validation is shared with the admin service layer in
+    ``api/admin/accounts.py``.
+    """
+
     name: str
     email: str
     imap_host: str

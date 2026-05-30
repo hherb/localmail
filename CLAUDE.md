@@ -35,6 +35,8 @@ uv run localmail init-db         # apply pending migrations
 uv run localmail list-accounts   # show config'd accounts and whether a secret is stored
 uv run localmail add-account N   # store password for account N (must exist in config.toml)
 uv run localmail remove-account N  # drop stored secrets for account N
+uv run localmail enable-account N    # resume syncing account N (sync_enabled = TRUE)
+uv run localmail disable-account N   # pause syncing account N (sync_enabled = FALSE)
 uv run localmail oauth-login N   # Gmail desktop OAuth flow → refresh token in keyring
 uv run localmail sync [--account N] [--limit-per-folder K]   # one-shot incremental sync
 uv run localmail run             # foreground daemon (IDLE on INBOX + periodic poll)
@@ -600,6 +602,14 @@ for the full design.
   `get_account_by_name` and syncs even a paused (`sync_enabled = FALSE`)
   account, rejecting archive accounts. `backfill-internal-date` remains
   TOML-driven (`_account_or_die`) — out of 2A.2d scope. No new migration.
+- **`sync_enabled` CLI setter (follow-up to 2A.2):** `enable-account NAME` /
+  `disable-account NAME` toggle `accounts.sync_enabled` via the pure planner
+  `cli_sync_toggle.plan_sync_toggle` (reject / noop / apply). Name resolution is
+  DB-only (no TOML seed — toggling presupposes the row exists); archive rows are
+  rejected (the daemon never syncs them); an account already in the target state
+  is a no-op that leaves `updated_at` untouched. Both commands share the
+  `cli._apply_sync_toggle` helper, which only calls `update_account` on the
+  `apply` branch. No new migration (`sync_enabled` ships in `0020`).
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.

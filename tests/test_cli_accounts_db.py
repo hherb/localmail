@@ -452,3 +452,101 @@ def test_sync_rejects_archive_account(
     result = _run(["sync", "--account", "legacy"], cfg)
     assert result.exit_code != 0
     assert "archive" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# enable-account / disable-account (sync_enabled CLI setter)
+# ---------------------------------------------------------------------------
+
+def test_disable_then_enable_account_flips_sync_enabled(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    """disable-account clears sync_enabled; enable-account sets it again."""
+    _make_db_account(db_dsn, "work")  # password account, sync_enabled defaults TRUE
+    cfg = _write_config(tmp_path, db_dsn)
+
+    result = _run(["disable-account", "work"], cfg)
+    assert result.exit_code == 0, result.output
+    assert "disabled" in result.output
+    with psycopg.connect(db_dsn) as conn:
+        acct = get_account_by_name(conn, "work")
+    assert acct is not None and acct.sync_enabled is False
+
+    result = _run(["enable-account", "work"], cfg)
+    assert result.exit_code == 0, result.output
+    assert "enabled" in result.output
+    with psycopg.connect(db_dsn) as conn:
+        acct = get_account_by_name(conn, "work")
+    assert acct is not None and acct.sync_enabled is True
+
+
+def test_enable_account_idempotent_does_not_bump_updated_at(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    """Re-enabling an already-enabled account echoes 'already' and is a no-op."""
+    _make_db_account(db_dsn, "work")  # already sync_enabled = TRUE
+    cfg = _write_config(tmp_path, db_dsn)
+    with psycopg.connect(db_dsn) as conn:
+        before = get_account_by_name(conn, "work").updated_at
+
+    result = _run(["enable-account", "work"], cfg)
+    assert result.exit_code == 0, result.output
+    assert "already enabled" in result.output
+    with psycopg.connect(db_dsn) as conn:
+        after = get_account_by_name(conn, "work").updated_at
+    assert after == before  # no write -> updated_at unchanged
+
+
+def test_enable_account_unknown_name_errors(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["enable-account", "ghost"], cfg)
+    assert result.exit_code != 0
+    assert "no such account" in result.output
+
+
+def test_enable_account_archive_is_rejected(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    _make_db_account(db_dsn, "legacy", auth="archive")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["enable-account", "legacy"], cfg)
+    assert result.exit_code != 0
+    assert "archive" in result.output.lower()
+
+
+def test_disable_account_archive_is_rejected(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    _make_db_account(db_dsn, "legacy", auth="archive")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["disable-account", "legacy"], cfg)
+    assert result.exit_code != 0
+    assert "archive" in result.output.lower()
+
+
+def test_disable_account_idempotent_does_not_bump_updated_at(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    """Re-disabling an already-paused account echoes 'already' and is a no-op."""
+    _make_db_account(db_dsn, "work", sync_enabled=False)
+    cfg = _write_config(tmp_path, db_dsn)
+    with psycopg.connect(db_dsn) as conn:
+        before = get_account_by_name(conn, "work").updated_at
+
+    result = _run(["disable-account", "work"], cfg)
+    assert result.exit_code == 0, result.output
+    assert "already disabled" in result.output
+    with psycopg.connect(db_dsn) as conn:
+        after = get_account_by_name(conn, "work").updated_at
+    assert after == before  # no write -> updated_at unchanged
+
+
+def test_disable_account_unknown_name_errors(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["disable-account", "ghost"], cfg)
+    assert result.exit_code != 0
+    assert "no such account" in result.output

@@ -71,6 +71,7 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | `localmail add-account NAME` | Prompt for an IMAP password and store it in the keyring. Resolves `NAME` against the DB; if absent but declared in `config.toml`, the DB row is created from that block first. |
 | `localmail oauth-login NAME` | Run the Gmail OAuth desktop consent flow. Stores the refresh token in the keyring. Resolves `NAME` against the DB (seeding from `config.toml` if absent). |
 | `localmail remove-account NAME [--delete-row] [--force]` | Clear stored secrets for an account. `--delete-row` also removes the DB account row (`--force` cascades when messages reference it). |
+| `localmail enable-account NAME` / `localmail disable-account NAME` | Resume or pause syncing for an account by flipping `sync_enabled` in the DB. A paused account spawns no daemon threads; a one-shot `localmail sync --account NAME` still runs it. Archive accounts are rejected; re-running on an account already in the target state is a no-op. |
 | `localmail sync [--account NAME] [--limit-per-folder K] [--no-ssl]` | One-shot incremental sync over the syncable database accounts (live + `sync_enabled`). `--account NAME` syncs one account even if it is paused (`sync_enabled = false`); archive accounts are rejected. |
 | `localmail run [--log-level …] [--no-ssl]` | Foreground daemon: per-account IDLE thread on INBOX + periodic poll thread for other folders. SIGTERM/SIGINT shut down cleanly. |
 | `localmail list-failed [--account NAME] [--limit K]` | Show messages that sync skipped due to errors. |

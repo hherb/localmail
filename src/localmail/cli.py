@@ -27,8 +27,10 @@ from .api.admin.accounts import (
     get_account_by_name,
     list_accounts_full,
     list_syncable_accounts,
+    update_account,
 )
 from .cli_account_resolve import Found, NotFound, plan_account_resolution
+from .cli_sync_toggle import plan_sync_toggle
 from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
@@ -260,6 +262,41 @@ def remove_account(ctx: click.Context, name: str,
     secrets.delete_password(name)
     secrets.delete_refresh_token(name)
     click.echo(f"deleted account {name} and cleared its secrets")
+
+
+def _apply_sync_toggle(ctx: click.Context, name: str, *, enable: bool) -> None:
+    """Resolve NAME in the DB and enable/disable its sync per the pure planner."""
+    cfg = load_config(ctx.obj["config_path"])
+    with psycopg.connect(cfg.database.dsn) as conn:
+        account = get_account_by_name(conn, name)
+        if account is None:
+            raise click.ClickException(f"no such account: {name!r}")
+        plan = plan_sync_toggle(
+            name=name, auth_method=account.auth_method,
+            currently_enabled=account.sync_enabled, enable=enable,
+        )
+        if plan.action == "reject":
+            raise click.ClickException(plan.message)
+        if plan.action == "apply":
+            update_account(conn, account.id, sync_enabled=enable)
+            conn.commit()
+        click.echo(plan.message)
+
+
+@main.command("enable-account")
+@click.argument("name")
+@click.pass_context
+def enable_account(ctx: click.Context, name: str) -> None:
+    """Resume syncing an account (set sync_enabled = TRUE)."""
+    _apply_sync_toggle(ctx, name, enable=True)
+
+
+@main.command("disable-account")
+@click.argument("name")
+@click.pass_context
+def disable_account(ctx: click.Context, name: str) -> None:
+    """Pause syncing an account (set sync_enabled = FALSE)."""
+    _apply_sync_toggle(ctx, name, enable=False)
 
 
 @main.command("oauth-login")

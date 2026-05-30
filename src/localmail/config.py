@@ -40,6 +40,13 @@ class DaemonConfig(BaseModel):
     # Set explicitly to override for tight Postgres `max_connections` budgets
     # or for operators who want more concurrency than the formula gives.
     pool_max_size: int | None = None
+    # Startup backoff (#133): if Postgres is briefly unreachable when the
+    # daemon launches (DB still coming up under systemd, transient blip), the
+    # construction-time DB touches retry with exponential backoff between
+    # `startup_backoff_initial_s` and `startup_backoff_max_s` rather than
+    # crashing. Mirrors the 1s→60s shape the IDLE/poll worker loops use.
+    startup_backoff_initial_s: float = 1.0
+    startup_backoff_max_s: float = 60.0
 
 
 class ServeConfig(BaseModel):

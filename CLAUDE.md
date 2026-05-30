@@ -324,6 +324,30 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
   override for tight Postgres `max_connections` budgets or higher concurrency.
   The chosen value is logged at startup ("daemon pool sizing: max_size=…").
 
+  **Startup backoff (#133)**: `Daemon.__init__` does DB IO during
+  construction — `_load_syncable_accounts` (a one-shot `psycopg.connect`,
+  before the pool opens, since pool sizing needs the account count) then
+  `open_pool`. The **synchronous** `_load_syncable_accounts` touch goes
+  through `retry.retry_with_backoff` so a briefly unreachable Postgres at
+  launch (DB still coming up under systemd, transient blip) makes the daemon
+  *wait* — bounded exponential backoff between
+  `daemon.startup_backoff_initial_s` (default 1.0) and
+  `daemon.startup_backoff_max_s` (default 60.0) — rather than crashing on
+  construction. `open_pool` is **not** wrapped: it opens with `wait=False`
+  (returns immediately, fills lazily on background threads) and so never
+  raises synchronously on an unreachable DB — wrapping it would catch only
+  config errors, which aren't transient. By the time `_load_syncable_accounts`
+  returns, Postgres has answered; a blip in the window before a worker first
+  acquires a connection is absorbed by the IDLE/poll loops' own 1s→60s
+  backoff. The shared `retry.next_backoff` (pure: `min(current*factor, max)`)
+  plus `retry_with_backoff` (respects the stop event; first attempt is
+  immediate; a stop signal during a wait raises `RetryAborted`) live in
+  [src/localmail/retry.py](src/localmail/retry.py). Signal handlers install in
+  `run_forever` *after* construction, so during a startup-backoff wait
+  SIGTERM/SIGINT fall to the default handler (process exits) — the
+  `RetryAborted` escape is for an injected `stop_event` (tests, future daemon
+  control), not the systemd path, where the supervisor owns kill semantics.
+
 `sync_mailbox` checkpoints `mailboxes.uidnext` after each 50-message batch, so
 a crash mid-run loses at most one batch of progress. Re-running is safe — the
 existing-id check + `ON CONFLICT DO NOTHING` make inserts idempotent.

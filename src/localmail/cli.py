@@ -232,14 +232,16 @@ def remove_account(ctx: click.Context, name: str) -> None:
 @click.argument("name")
 @click.pass_context
 def oauth_login(ctx: click.Context, name: str) -> None:
-    """Run the Gmail OAuth2 consent flow and store the refresh token in the keyring.
+    """Run the Gmail OAuth2 consent flow and store the refresh token.
 
-    Opens a local browser. The account must be declared as auth_method='oauth2'
-    in config.toml and [gmail_oauth] client_secrets_file must point to the
-    Google Cloud Desktop OAuth client JSON.
+    Resolves NAME against the DB (seeding from config.toml if absent). The
+    account must be auth_method='oauth2' with oauth_provider='gmail', and
+    [gmail_oauth] client_secrets_file must be set.
     """
     cfg = load_config(ctx.obj["config_path"])
-    account = _account_or_die(cfg, name)
+    with psycopg.connect(cfg.database.dsn) as conn:
+        account = _resolve_account_row(conn, cfg, name)
+        conn.commit()
     if account.auth_method != "oauth2":
         raise click.ClickException(
             f"account {name!r} uses auth_method={account.auth_method!r}; "
@@ -253,7 +255,6 @@ def oauth_login(ctx: click.Context, name: str) -> None:
         raise click.ClickException(
             "config.toml is missing [gmail_oauth] client_secrets_file"
         )
-
     click.echo("opening browser for Google consent ...")
     creds = run_consent_flow(cfg.gmail_oauth.client_secrets_file)
     secrets.set_refresh_token(name, creds.refresh_token)

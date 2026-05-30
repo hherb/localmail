@@ -15,6 +15,7 @@ from .daemon_accounts import account_config_from_row
 from .db import compute_daemon_pool_size, open_pool
 from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
+from .retry import retry_with_backoff
 from .worker import WorkerContext
 
 log = logging.getLogger(__name__)
@@ -28,12 +29,20 @@ class Daemon:
         ssl: bool = True,
         dsn: str | None = None,
         embedding_backend_factory=None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.cfg = cfg
         self.ssl = ssl
         self._dsn = dsn or cfg.database.dsn
-        self._stop_event = threading.Event()
-        self._syncable = self._load_syncable_accounts()
+        self._stop_event = stop_event or threading.Event()
+        self._syncable = retry_with_backoff(
+            self._load_syncable_accounts,
+            stop_event=self._stop_event,
+            initial_s=cfg.daemon.startup_backoff_initial_s,
+            max_s=cfg.daemon.startup_backoff_max_s,
+            description="loading syncable accounts from the DB",
+            log=log,
+        )
         n_accounts = len(self._syncable)
         configured_max_size = cfg.daemon.pool_max_size
         if configured_max_size is None:
@@ -59,6 +68,13 @@ class Daemon:
             cfg.search.run_embed_worker,
             cfg.search.run_extract_worker,
         )
+        # `open_pool` opens with `wait=False`: it returns immediately and fills
+        # lazily on background threads, so it never raises synchronously on an
+        # unreachable DB — no retry wrapper here would catch a connectivity
+        # failure. The synchronous gate is `_load_syncable_accounts` above; by
+        # the time it returns, Postgres has answered, and any brief blip in the
+        # window before a worker first acquires a connection is absorbed by the
+        # IDLE/poll loops' own 1s→60s backoff.
         self.pool = open_pool(
             self._dsn, min_size=resolved_min_size, max_size=resolved_max_size
         )

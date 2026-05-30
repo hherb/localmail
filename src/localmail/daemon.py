@@ -15,6 +15,7 @@ import psycopg
 from .api.admin.accounts import Account, list_syncable_accounts
 from .config import Config
 from .daemon_accounts import account_config_from_row
+from .daemon_reconcile import plan_reconcile
 from .db import compute_daemon_pool_size, open_pool
 from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
@@ -177,6 +178,43 @@ class Daemon:
             log.info("daemon pool resized: max_size=%d (accounts=%d)",
                      max_size, len(self._account_threads))
 
+    def reconcile(self) -> None:
+        """Converge the running per-account threads on the DB's syncable set.
+
+        A transient DB read failure is logged and swallowed for this tick;
+        existing threads keep running and the next tick retries. Apply order is
+        teardown -> respawn -> spawn so freed pool slots are reused first.
+        """
+        try:
+            with psycopg.connect(self._dsn) as conn:
+                desired_rows = list_syncable_accounts(conn)
+        except Exception:
+            log.warning(
+                "reconcile: failed to read accounts; keeping current threads",
+                exc_info=True,
+            )
+            return
+
+        rows_by_id = {row.id: row for row in desired_rows}
+        desired = {row.id: row.updated_at for row in desired_rows}
+        plan = plan_reconcile(self._running_fingerprints(), desired)
+        if plan.is_empty:
+            return
+
+        for account_id in plan.to_teardown:
+            self._teardown_account(account_id)
+        for account_id in plan.to_respawn:
+            self._teardown_account(account_id)
+            self._spawn_account(rows_by_id[account_id])
+        for account_id in plan.to_spawn:
+            self._spawn_account(rows_by_id[account_id])
+
+        self._resize_pool()
+        log.info(
+            "reconcile: spawned=%d torn_down=%d respawned=%d",
+            len(plan.to_spawn), len(plan.to_teardown), len(plan.to_respawn),
+        )
+
     def start_workers(self) -> None:
         if self._started:
             return
@@ -247,15 +285,15 @@ class Daemon:
             t.join(timeout=timeout)
 
     def run_forever(self) -> None:
-        signal.signal(signal.SIGTERM, self._handle_signal)
-        signal.signal(signal.SIGINT, self._handle_signal)
-        if not self._syncable:
-            log.warning("no syncable accounts in the DB; daemon exiting")
-            return
-        self.start_workers()
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, self._handle_signal)
+            signal.signal(signal.SIGINT, self._handle_signal)
+        self.start_workers()  # initial account spawn + embed/extract workers
+        log.info("daemon running; reconciling every %ds",
+                 self.cfg.daemon.reload_seconds)
         try:
-            while not self._stop_event.is_set():
-                self._stop_event.wait(60)
+            while not self._stop_event.wait(self.cfg.daemon.reload_seconds):
+                self.reconcile()
         finally:
             log.info("waiting for worker threads to finish")
             for account_id in list(self._account_threads):

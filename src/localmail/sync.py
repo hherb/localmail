@@ -60,34 +60,6 @@ class MailboxRow:
     uidnext: int | None
 
 
-def upsert_account(conn: psycopg.Connection, account: AccountConfig) -> int:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO accounts
-                (name, email_address, imap_host, imap_port, auth_method, oauth_provider)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            -- DB is canonical for accounts (Sub-plan 2A.2b): get-or-create only.
-            -- The no-op SET makes RETURNING fire for the existing row on
-            -- conflict (DO NOTHING would return nothing) without touching any
-            -- canonical column.
-            ON CONFLICT (name) DO UPDATE SET name = accounts.name
-            RETURNING id
-            """,
-            (
-                account.name,
-                account.email,
-                account.imap_host,
-                account.imap_port,
-                account.auth_method,
-                account.oauth_provider,
-            ),
-        )
-        row = cur.fetchone()
-        assert row is not None
-        return row[0]
-
-
 def upsert_mailbox(
     conn: psycopg.Connection,
     *,
@@ -716,14 +688,16 @@ def sync_account(
     imap: ImapLike,
     *,
     account: AccountConfig,
+    account_id: int,
     attachments_root: Path,
     max_messages: int | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, int]:
-    """Sync every mailbox of an account. Returns {mailbox_name: inserted}."""
-    account_id = upsert_account(conn, account)
-    conn.commit()
+    """Sync every mailbox of an account. Returns {mailbox_name: inserted}.
 
+    The caller resolves `account_id` from the DB (the DB is canonical for
+    accounts — Sub-plan 2A.2d). This function never creates the account row.
+    """
     folders = imap.list_folders()
     selectable = folders_to_sync(
         folders,

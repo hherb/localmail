@@ -273,3 +273,85 @@ def test_remove_account_force_without_delete_row_errors(
     cfg = _write_config(tmp_path, db_dsn)
     result = _run(["remove-account", "work", "--force"], cfg)
     assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# Task 8: sync reads DB accounts
+# ---------------------------------------------------------------------------
+
+from contextlib import contextmanager
+
+from . import _eml
+from ._fake_imap import FakeIMAPClient
+
+
+def _fake_open_connection_factory(imap):
+    """Return a context-manager factory that always yields `imap`."""
+    @contextmanager
+    def _fake_open(account, **kw):  # noqa: ARG001
+        yield imap
+    return _fake_open
+
+
+def test_sync_reads_db_accounts(
+    db_conn, db_dsn: str, tmp_path: Path, monkeypatch
+) -> None:
+    """sync command must sync every syncable DB account (no TOML needed)."""
+    from localmail import cli as cli_mod
+
+    _make_db_account(db_dsn, "work")
+    cfg = _write_config(tmp_path, db_dsn)  # no [[accounts]] in TOML
+
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())
+
+    monkeypatch.setattr(cli_mod, "open_connection", _fake_open_connection_factory(imap))
+    result = _run(["sync", "--no-ssl"], cfg)
+    assert result.exit_code == 0, result.output
+    assert "work" in result.output
+    with psycopg.connect(db_dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages")
+        assert cur.fetchone()[0] == 1
+
+
+def test_sync_single_account_by_name(
+    db_conn, db_dsn: str, tmp_path: Path, monkeypatch
+) -> None:
+    """--account NAME restricts sync to that one DB account."""
+    from localmail import cli as cli_mod
+
+    _make_db_account(db_dsn, "work")
+    _make_db_account(db_dsn, "personal")
+    cfg = _write_config(tmp_path, db_dsn)
+
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())
+
+    monkeypatch.setattr(cli_mod, "open_connection", _fake_open_connection_factory(imap))
+    result = _run(["sync", "--no-ssl", "--account", "work"], cfg)
+    assert result.exit_code == 0, result.output
+    assert "work" in result.output
+    with psycopg.connect(db_dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages")
+        assert cur.fetchone()[0] == 1
+
+
+def test_sync_unknown_account_fails(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    """--account NAME with an unknown name must exit non-zero."""
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["sync", "--account", "ghost"], cfg)
+    assert result.exit_code != 0
+    assert "ghost" in result.output
+
+
+def test_sync_no_syncable_accounts_fails(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    """sync with no syncable accounts (empty DB) must exit non-zero."""
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["sync"], cfg)
+    assert result.exit_code != 0

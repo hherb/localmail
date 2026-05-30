@@ -16,11 +16,20 @@ from localmail import poller as poll_mod
 from localmail.config import AccountConfig
 from localmail.idle import _idle_step, _one_inbox_session
 from localmail.poller import _one_poll_pass
-from localmail.sync import upsert_account, upsert_mailbox
+from localmail.sync import upsert_mailbox
 from localmail.worker import WorkerContext
+from localmail.account_seed import account_create_kwargs
+from localmail.api.admin.accounts import create_account, get_account_by_name
 
 from . import _eml
 from ._fake_imap import FakeIMAPClient
+
+
+def _ensure_account(conn, account: AccountConfig) -> int:
+    existing = get_account_by_name(conn, account.name)
+    if existing is not None:
+        return existing.id
+    return create_account(conn, **account_create_kwargs(account)).id
 
 
 def make_account() -> AccountConfig:
@@ -42,7 +51,7 @@ def make_ctx(
 ) -> WorkerContext:
     account = account or make_account()
     with pool.connection() as conn:
-        account_id = upsert_account(conn, account)
+        account_id = _ensure_account(conn, account)
         conn.commit()
     return WorkerContext(
         account=account,
@@ -85,7 +94,7 @@ def test_idle_step_returns_same_deadline_when_nothing_happens(pool, tmp_path: Pa
     imap.idle()
 
     with pool.connection() as conn:
-        account_id = upsert_account(conn, make_account())
+        account_id = _ensure_account(conn, make_account())
         upsert_mailbox(conn, account_id=account_id, name="INBOX", delimiter=None, flags=[])
         conn.commit()
 
@@ -105,7 +114,7 @@ def test_idle_step_syncs_and_re_idles_on_new_mail(pool, tmp_path: Path):
     imap.simulate_new_mail(1)
 
     with pool.connection() as conn:
-        account_id = upsert_account(conn, make_account())
+        account_id = _ensure_account(conn, make_account())
         upsert_mailbox(conn, account_id=account_id, name="INBOX", delimiter=None, flags=[])
         conn.commit()
 
@@ -130,7 +139,7 @@ def test_idle_step_renews_idle_when_deadline_passed(pool, tmp_path: Path):
     imap.idle()
 
     with pool.connection() as conn:
-        account_id = upsert_account(conn, make_account())
+        account_id = _ensure_account(conn, make_account())
         upsert_mailbox(conn, account_id=account_id, name="INBOX", delimiter=None, flags=[])
         conn.commit()
 
@@ -246,35 +255,3 @@ def test_one_poll_pass_stops_early_when_stop_event_set(pool, tmp_path: Path, mon
     assert results == {}
 
 
-def test_one_poll_pass_does_not_call_upsert_account(pool, tmp_path: Path, monkeypatch):
-    """The daemon already has account_id from the DB; the poll pass must not
-    re-upsert the account row (would re-introduce the canonical overwrite).
-
-    Guards two re-introduction styles: a `sync.upsert_account(...)` call is
-    caught by the wraps-spy; a `from .sync import upsert_account` re-import is
-    caught by asserting the name is absent from poller's namespace.
-    """
-    from unittest.mock import Mock
-
-    from localmail import sync as sync_mod
-
-    imap = FakeIMAPClient()
-    imap.add_folder("INBOX")
-    imap.add_folder("Archive")
-    imap.append("Archive", _eml.plain())
-
-    @contextmanager
-    def fake_open(account, **kw):  # noqa: ARG001
-        yield imap
-
-    monkeypatch.setattr(poll_mod, "open_connection", fake_open)
-
-    ctx = make_ctx(pool, tmp_path, threading.Event())
-
-    spy = Mock(wraps=sync_mod.upsert_account)
-    monkeypatch.setattr(sync_mod, "upsert_account", spy)
-
-    _one_poll_pass(ctx)
-
-    spy.assert_not_called()
-    assert not hasattr(poll_mod, "upsert_account")

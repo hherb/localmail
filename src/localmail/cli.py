@@ -294,41 +294,46 @@ def oauth_login(ctx: click.Context, name: str) -> None:
 
 @main.command("sync")
 @click.option("--account", "account_name", default=None,
-              help="Sync only this account (default: all accounts in config).")
+              help="Sync only this account (default: all syncable DB accounts).")
 @click.option("--no-ssl", is_flag=True, default=False,
               help="Disable TLS — for testing against a local IMAP server only.")
 @click.option("--limit-per-folder", "limit_per_folder", type=int, default=None,
               help="Fetch at most N new UIDs per folder in this run. "
-                   "Useful for smoke-testing; the next run resumes from the checkpoint.")
+                   "The next run resumes from the checkpoint.")
 @click.pass_context
-def sync_cmd(
-    ctx: click.Context,
-    account_name: str | None,
-    no_ssl: bool,
-    limit_per_folder: int | None,
-) -> None:
-    """One-shot incremental sync. Useful for cron and manual testing."""
-    cfg = load_config(ctx.obj["config_path"])
-    accounts = (
-        [_account_or_die(cfg, account_name)] if account_name else cfg.accounts
-    )
-    if not accounts:
-        raise click.ClickException("no accounts configured")
+def sync_cmd(ctx: click.Context, account_name: str | None,
+             no_ssl: bool, limit_per_folder: int | None) -> None:
+    """One-shot incremental sync over the DB accounts. For cron + manual testing."""
+    from .api.admin.accounts import get_account_by_name, list_syncable_accounts
+    from .daemon_accounts import account_config_from_row
 
+    cfg = load_config(ctx.obj["config_path"])
     gmail_secrets = cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
     with psycopg.connect(cfg.database.dsn, autocommit=False) as conn:
-        for account in accounts:
+        if account_name:
+            row = get_account_by_name(conn, account_name)
+            if row is None:
+                raise click.ClickException(f"no such account: {account_name!r}")
+            if row.auth_method == "archive":
+                raise click.ClickException(
+                    f"account {account_name!r} is an archive account; not synced"
+                )
+            rows = [row]
+        else:
+            rows = list_syncable_accounts(conn)
+        if not rows:
+            raise click.ClickException("no syncable accounts")
+
+        for row in rows:
+            account = account_config_from_row(row)
             click.echo(f"--- syncing {account.name} ---")
             with open_connection(
                 account, ssl=not no_ssl, gmail_client_secrets=gmail_secrets
             ) as imap:
                 results = sync_account(
-                    conn,
-                    imap,
-                    account=account,
+                    conn, imap, account=account, account_id=row.id,
                     attachments_root=cfg.attachments.root,
-                    max_messages=limit_per_folder,
-                    progress=click.echo,
+                    max_messages=limit_per_folder, progress=click.echo,
                 )
             for folder, n in results.items():
                 click.echo(f"  {folder}: +{n} new")

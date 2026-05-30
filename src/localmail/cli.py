@@ -220,12 +220,43 @@ def add_account(ctx: click.Context, name: str, password_opt: str | None) -> None
 
 @main.command("remove-account")
 @click.argument("name")
+@click.option("--delete-row", is_flag=True, default=False,
+              help="Also delete the account row from the DB (not just secrets).")
+@click.option("--force", is_flag=True, default=False,
+              help="With --delete-row: cascade-delete even if messages exist.")
 @click.pass_context
-def remove_account(ctx: click.Context, name: str) -> None:
-    """Remove any stored secret for an account from the keyring."""
+def remove_account(ctx: click.Context, name: str,
+                   delete_row: bool, force: bool) -> None:
+    """Clear stored secrets for an account. With --delete-row, also remove
+    the DB row (refusing if messages reference it unless --force)."""
+    if force and not delete_row:
+        raise click.ClickException("--force only applies with --delete-row")
+    cfg = load_config(ctx.obj["config_path"])
+    if not delete_row:
+        secrets.delete_password(name)
+        secrets.delete_refresh_token(name)
+        click.echo(f"cleared secrets for {name}")
+        return
+    from .api.admin.accounts import (
+        AccountInUse, delete_account, get_account_by_name,
+    )
+    with psycopg.connect(cfg.database.dsn) as conn:
+        account = get_account_by_name(conn, name)
+        if account is None:
+            secrets.delete_password(name)
+            secrets.delete_refresh_token(name)
+            click.echo(f"no DB row for {name}; cleared keyring only")
+            return
+        try:
+            delete_account(conn, account.id, force=force)
+        except AccountInUse as exc:
+            raise click.ClickException(
+                f"{exc}; pass --force to delete it and its messages"
+            ) from exc
+        conn.commit()
     secrets.delete_password(name)
     secrets.delete_refresh_token(name)
-    click.echo(f"cleared secrets for {name}")
+    click.echo(f"deleted account {name} and cleared its secrets")
 
 
 @main.command("oauth-login")

@@ -202,3 +202,74 @@ def test_oauth_login_rejects_password_row(
     result = _run(["oauth-login", "work"], cfg)
     assert result.exit_code != 0
     assert "oauth" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 7: remove-account
+# ---------------------------------------------------------------------------
+
+def test_remove_account_default_clears_secrets_keeps_row(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    _make_db_account(db_dsn, "work")
+    from localmail import secrets as s
+    s.set_password("work", "pw")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["remove-account", "work"], cfg)
+    assert result.exit_code == 0, result.output
+    assert s.get_password("work") is None              # secret cleared
+    with psycopg.connect(db_dsn) as conn:
+        assert get_account_by_name(conn, "work") is not None  # row survives
+
+
+def test_remove_account_delete_row_removes_row(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    _make_db_account(db_dsn, "work")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["remove-account", "work", "--delete-row"], cfg)
+    assert result.exit_code == 0, result.output
+    with psycopg.connect(db_dsn) as conn:
+        assert get_account_by_name(conn, "work") is None
+
+
+def test_remove_account_delete_row_refuses_when_messages_without_force(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    acct_id = _make_db_account(db_dsn, "work")
+    with psycopg.connect(db_dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO messages (account_id, raw_sha256, headers, "
+            "  raw_bytes, size_bytes) "
+            "VALUES (%s, %s, '{}'::jsonb, %s, 3)",
+            (acct_id, b"\x00" * 32, b"abc"),
+        )
+        conn.commit()
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["remove-account", "work", "--delete-row"], cfg)
+    assert result.exit_code != 0
+    assert "force" in result.output.lower()
+    # --force succeeds and cascades
+    ok = _run(["remove-account", "work", "--delete-row", "--force"], cfg)
+    assert ok.exit_code == 0, ok.output
+    with psycopg.connect(db_dsn) as conn:
+        assert get_account_by_name(conn, "work") is None
+
+
+def test_remove_account_delete_row_missing_clears_keyring_only(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    from localmail import secrets as s
+    s.set_password("ghost", "pw")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["remove-account", "ghost", "--delete-row"], cfg)
+    assert result.exit_code == 0, result.output
+    assert s.get_password("ghost") is None
+
+
+def test_remove_account_force_without_delete_row_errors(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["remove-account", "work", "--force"], cfg)
+    assert result.exit_code != 0

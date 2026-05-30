@@ -7,6 +7,7 @@ import signal
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -55,22 +56,7 @@ class Daemon:
             log=log,
         )
         n_accounts = len(self._syncable)
-        configured_max_size = cfg.daemon.pool_max_size
-        if configured_max_size is None:
-            resolved_max_size = compute_daemon_pool_size(
-                n_accounts=n_accounts,
-                run_embed=cfg.search.run_embed_worker,
-                run_extract=cfg.search.run_extract_worker,
-            )
-        else:
-            resolved_max_size = configured_max_size
-        resolved_min_size = min(
-            n_accounts * 2
-            + (1 if cfg.search.run_embed_worker else 0)
-            + (1 if cfg.search.run_extract_worker else 0)
-            or 1,
-            resolved_max_size,
-        )
+        resolved_min_size, resolved_max_size = self._pool_sizes(n_accounts)
         log.info(
             "daemon pool sizing: max_size=%d min_size=%d (accounts=%d, embed=%s, extract=%s)",
             resolved_max_size,
@@ -107,7 +93,7 @@ class Daemon:
         log.info("received signal %s; stopping daemon", signum)
         self._stop_event.set()
 
-    def _gmail_secrets(self):
+    def _gmail_secrets(self) -> Path | None:
         return (
             self.cfg.gmail_oauth.client_secrets_file
             if self.cfg.gmail_oauth

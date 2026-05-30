@@ -85,6 +85,36 @@ def _account_or_die(cfg: Config, name: str) -> AccountConfig:
     )
 
 
+def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str):
+    """Resolve `name` to an Account row, seeding it from TOML if absent.
+
+    Returns the DB Account. Raises click.ClickException when the name is in
+    neither the DB nor config.toml, or when a malformed TOML block fails
+    create_account validation. The caller owns the transaction (commit).
+    """
+    from .account_seed import account_create_kwargs
+    from .api.admin.accounts import create_account
+    from .cli_account_resolve import (
+        Found, NotFound, SeedThenUse, plan_account_resolution,
+    )
+
+    existing = {row.name: row for row in list_accounts_full(conn)}
+    res = plan_account_resolution(name, cfg.accounts, existing)
+    if isinstance(res, Found):
+        return res.account
+    if isinstance(res, NotFound):
+        raise click.ClickException(
+            f"unknown account {name!r}: not in the DB and no matching "
+            f"[[accounts]] block in config.toml"
+        )
+    try:
+        return create_account(conn, **account_create_kwargs(res.config))
+    except AccountFieldError as exc:
+        raise click.ClickException(
+            f"cannot create account {name!r}: {exc}"
+        ) from exc
+
+
 @click.group()
 @click.option(
     "--config",
@@ -158,27 +188,33 @@ def list_accounts(ctx: click.Context) -> None:
     "--password",
     "password_opt",
     default=None,
-    help="Password (prompted securely if omitted). Only used for auth_method='password'.",
+    help="Password (prompted securely if omitted). Only for auth_method='password'.",
 )
 @click.pass_context
 def add_account(ctx: click.Context, name: str, password_opt: str | None) -> None:
-    """Store the IMAP password (or refresh-token slot for OAuth) for an account.
+    """Store the IMAP password for an account in the keyring.
 
-    The account must already be declared in config.toml.
+    Resolves NAME against the DB; if absent but declared in config.toml, the
+    DB row is created from that block first, then the password is stored.
     """
     cfg = load_config(ctx.obj["config_path"])
-    account = _account_or_die(cfg, name)
-
+    with psycopg.connect(cfg.database.dsn) as conn:
+        account = _resolve_account_row(conn, cfg, name)
+        conn.commit()
     if account.auth_method == "password":
         pw = password_opt or click.prompt(
-            f"IMAP password for {account.email}", hide_input=True, confirmation_prompt=True
+            f"IMAP password for {account.email_address}",
+            hide_input=True, confirmation_prompt=True,
         )
         secrets.set_password(name, pw)
         click.echo(f"stored password for {name} in keyring")
+    elif account.auth_method == "oauth2":
+        raise click.ClickException(
+            f"account {name!r} uses oauth2; run `localmail oauth-login {name}` instead"
+        )
     else:
         raise click.ClickException(
-            f"account {name!r} uses {account.auth_method!r}; "
-            f"run `localmail oauth-login {name}` instead"
+            f"account {name!r} is an archive account; it has no IMAP secret"
         )
 
 

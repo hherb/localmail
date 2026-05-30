@@ -117,3 +117,49 @@ def test_list_accounts_empty_db(db_conn, db_dsn: str, tmp_path: Path) -> None:
     result = _run(["list-accounts"], cfg)
     assert result.exit_code == 0, result.output
     assert "no accounts" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Task 5: add-account
+# ---------------------------------------------------------------------------
+
+def test_add_account_stores_password_for_existing_db_row(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    _make_db_account(db_dsn, "work")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["add-account", "work", "--password", "s3cret"], cfg)
+    assert result.exit_code == 0, result.output
+    from localmail import secrets as s
+    assert s.get_password("work") == "s3cret"
+
+
+def test_add_account_seeds_from_toml_when_absent(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    cfg = _write_config(tmp_path, db_dsn, _toml_block("work", "work@example.com"))
+    result = _run(["add-account", "work", "--password", "s3cret"], cfg)
+    assert result.exit_code == 0, result.output
+    with psycopg.connect(db_dsn) as conn:
+        assert get_account_by_name(conn, "work") is not None  # row created
+    from localmail import secrets as s
+    assert s.get_password("work") == "s3cret"
+
+
+def test_add_account_unknown_name_fails(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["add-account", "ghost", "--password", "x"], cfg)
+    assert result.exit_code != 0
+    assert "ghost" in result.output
+
+
+def test_add_account_rejects_oauth_row(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    _make_db_account(db_dsn, "gmail", auth="oauth2", oauth_provider="gmail")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["add-account", "gmail", "--password", "x"], cfg)
+    assert result.exit_code != 0
+    assert "oauth-login" in result.output

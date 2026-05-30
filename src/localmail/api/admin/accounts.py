@@ -287,6 +287,17 @@ def update_account(conn: psycopg.Connection, account_id: int,
     return get_account(conn, account_id)
 
 
+def touch_account_updated_at(conn: psycopg.Connection, account_id: int) -> None:
+    """Bump accounts.updated_at so the daemon's hot-reload notices a change
+    that did not otherwise edit the row (e.g. a credential rotation)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE accounts SET updated_at = now() WHERE id = %s", (account_id,)
+        )
+        if cur.rowcount == 0:
+            raise NotFound(f"account {account_id} not found")
+
+
 class AccountInUse(ValueError):
     """Raised when delete is refused because messages reference the account.
 

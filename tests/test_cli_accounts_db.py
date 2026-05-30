@@ -165,6 +165,16 @@ def test_add_account_rejects_oauth_row(
     assert "oauth-login" in result.output
 
 
+def test_add_account_rejects_archive_row(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    _make_db_account(db_dsn, "legacy", auth="archive")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["add-account", "legacy", "--password", "x"], cfg)
+    assert result.exit_code != 0
+    assert "archive" in result.output.lower()
+
+
 # ---------------------------------------------------------------------------
 # Task 6: oauth-login
 # ---------------------------------------------------------------------------
@@ -202,6 +212,28 @@ def test_oauth_login_rejects_password_row(
     result = _run(["oauth-login", "work"], cfg)
     assert result.exit_code != 0
     assert "oauth" in result.output.lower()
+
+
+def test_oauth_login_seeds_from_toml_when_absent(
+    db_conn, db_dsn: str, tmp_path: Path, monkeypatch
+) -> None:
+    """oauth-login on a name only in config.toml seeds the DB row, then stores."""
+    cfg = _gmail_config(
+        tmp_path, db_dsn,
+        _toml_block("gmail", "gmail@example.com",
+                    auth="oauth2", oauth_provider="gmail"),
+    )
+
+    class _Creds:
+        refresh_token = "refresh-seed"
+
+    monkeypatch.setattr("localmail.cli.run_consent_flow", lambda _f: _Creds())
+    result = _run(["oauth-login", "gmail"], cfg)
+    assert result.exit_code == 0, result.output
+    with psycopg.connect(db_dsn) as conn:
+        assert get_account_by_name(conn, "gmail") is not None  # row seeded
+    from localmail import secrets as s
+    assert s.get_refresh_token("gmail") == "refresh-seed"
 
 
 # ---------------------------------------------------------------------------
@@ -355,3 +387,35 @@ def test_sync_no_syncable_accounts_fails(
     cfg = _write_config(tmp_path, db_dsn)
     result = _run(["sync"], cfg)
     assert result.exit_code != 0
+
+
+def test_sync_account_override_syncs_paused_account(
+    db_conn, db_dsn: str, tmp_path: Path, monkeypatch
+) -> None:
+    """--account NAME syncs even a paused (sync_enabled=FALSE) account."""
+    from localmail import cli as cli_mod
+
+    _make_db_account(db_dsn, "paused", sync_enabled=False)
+    cfg = _write_config(tmp_path, db_dsn)
+
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())
+
+    monkeypatch.setattr(cli_mod, "open_connection", _fake_open_connection_factory(imap))
+    result = _run(["sync", "--no-ssl", "--account", "paused"], cfg)
+    assert result.exit_code == 0, result.output
+    with psycopg.connect(db_dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages")
+        assert cur.fetchone()[0] == 1
+
+
+def test_sync_rejects_archive_account(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    """--account NAME pointing at an archive account must exit non-zero."""
+    _make_db_account(db_dsn, "legacy", auth="archive")
+    cfg = _write_config(tmp_path, db_dsn)
+    result = _run(["sync", "--account", "legacy"], cfg)
+    assert result.exit_code != 0
+    assert "archive" in result.output.lower()

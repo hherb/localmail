@@ -5,10 +5,11 @@
 > read/write the DB**, retiring the last TOML-coupled account surface and
 > deleting `sync.upsert_account`. Opened as **PR #135**
 > (`feat(cli): CLI account commands read/write the DB (Sub-plan 2A.2d)`),
-> **open, not yet merged**. Branch `sub-plan-2a2d-cli-db-source` pushed; tip
-> `96cff73`. Final whole-implementation review verdict: **READY TO MERGE** — its
+> **open, not yet merged**. Branch `sub-plan-2a2d-cli-db-source` pushed (tip
+> advances with this handoff commit). Final whole-implementation review verdict:
+> **READY TO MERGE** — its
 > 4 non-blocking test-gap follow-ups were then **filled within this PR**
-> (`96cff73`); full suite **1037 passed**, mypy clean.
+> (`8f82686`); full suite **1037 passed**, mypy clean.
 >
 > Reconciled remote state at session start: **PR #132 (Sub-plan 2A.2b) had
 > already merged** — local `main` is at `f59a3f2`. Pruned the now-`[gone]`
@@ -57,7 +58,7 @@ f87280c  feat(cli): list-accounts reads the DB                                  
 277f399  docs: CLI account commands are DB-canonical (Sub-plan 2A.2d)            (Task 9)
 b1d2983  docs(handoffs): land 2026-05-30T0123 UTC post-PR-135 snapshot
 825a0be  docs(handoffs): correct post-PR-135 handoff (T0123 snapshot was stale)
-96cff73  test(cli): pin 4 review-flagged account-command edge cases
+8f82686  test(cli): pin 4 review-flagged account-command edge cases
 ```
 
 ### What the change does (PR #135)
@@ -98,7 +99,7 @@ b1d2983  docs(handoffs): land 2026-05-30T0123 UTC post-PR-135 snapshot
 - Final whole-implementation review (subagent): spec-compliant, no
   critical/important bugs, READY TO MERGE. It flagged **4 non-blocking test
   gaps** (correct code paths, just unpinned) — **filled within this PR**
-  (`96cff73`): `add-account` rejects an archive DB row; `oauth-login` seeds
+  (`8f82686`): `add-account` rejects an archive DB row; `oauth-login` seeds
   from TOML when absent; `sync --account` overrides a *paused* account;
   `sync --account` rejects an archive account. Full suite **1037 passed**.
 
@@ -150,7 +151,7 @@ merge; the review's 4 follow-up tests are folded in). Review + merge, then
 
 ### 1. **(Optional, small) `sync_enabled` CLI/UI setter**
 
-- (The 4 review-flagged follow-up tests are already done — `96cff73`.)
+- (The 4 review-flagged follow-up tests are already done — `8f82686`.)
 - **`sync_enabled` CLI/UI setter.** The daemon honours `sync_enabled` and
   `sync --account` overrides it, but only `update_account` / direct SQL can
   *set* it. A `localmail enable-account` / `disable-account` (or a UI switch in
@@ -284,6 +285,6 @@ docs/handoffs/
 ```
 
 `main` at `f59a3f2`. Branch `sub-plan-2a2d-cli-db-source` pushed (PR #135
-open) at `96cff73` (this handoff commit will advance it). Working tree clean
+open) at `2d39566` (this handoff commit will advance it). Working tree clean
 (only `.claude/` local files untracked, by design). 2 local branches
 (`main`, `sub-plan-2a2d-cli-db-source`); 1 open PR (#135).

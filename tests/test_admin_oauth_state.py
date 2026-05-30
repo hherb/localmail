@@ -9,6 +9,7 @@ import pytest
 from localmail.api.admin.oauth_state import (
     encode_state, decode_state,
     StatePayload, StateExpired, StateInvalid,
+    _b64url_decode, _b64url_encode,
 )
 
 
@@ -39,7 +40,12 @@ def test_decode_rejects_tampered_signature() -> None:
                            nonce='a', exp=int(time.time()) + 60)
     token = encode_state(payload, key=KEY)
     head, sig = token.split('.', 1)
-    bad_token = head + '.' + sig[:-1] + ('A' if sig[-1] != 'A' else 'B')
+    # Tamper at the byte level. Flipping the *last* base64url char is unreliable:
+    # a 32-byte HMAC digest's final char carries 2 dropped padding bits, so for
+    # ~1/16 of digests 'A'->'B' re-encodes to the identical signature bytes and
+    # decode_state (which compares decoded bytes) correctly does NOT raise.
+    raw = _b64url_decode(sig)
+    bad_token = head + '.' + _b64url_encode(bytes([raw[0] ^ 0x01]) + raw[1:])
     with pytest.raises(StateInvalid):
         decode_state(bad_token, key=KEY)
 

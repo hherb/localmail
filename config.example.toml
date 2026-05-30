@@ -15,9 +15,9 @@ root = "~/localmail"
 idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling
 poll_seconds       = 300    # poll non-INBOX folders every 5 minutes
 # pool_max_size    = 12     # uncomment to override auto-computed pool cap
+                            # (defaults to 2*N_accounts + workers + 2 + floor)
 # startup_backoff_initial_s = 1.0   # wait-for-Postgres backoff at daemon launch
 # startup_backoff_max_s     = 60.0  # cap for that exponential backoff
-                            # (defaults to 2*N_accounts + workers + 2 + floor)
 
 [serve]
 # Admin UI signing keys. Required when admin UI is in use.

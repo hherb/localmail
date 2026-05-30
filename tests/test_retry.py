@@ -114,3 +114,30 @@ def test_aborts_when_stop_fires_during_backoff() -> None:
             description="op",
         )
     assert attempts["n"] == 1  # failed once, then stop aborted the retry
+
+
+def test_logs_traceback_only_on_first_failure(caplog) -> None:
+    """A sustained outage must not re-log the same traceback every cycle:
+    full trace on the first failure, one-liner thereafter."""
+    attempts = {"n": 0}
+
+    def op() -> str:
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise ConnectionError("not yet")
+        return "recovered"
+
+    with caplog.at_level("WARNING", logger="localmail.retry"):
+        result = retry_with_backoff(
+            op,
+            stop_event=threading.Event(),
+            initial_s=0.001,
+            max_s=0.01,
+            description="flaky op",
+        )
+
+    assert result == "recovered"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2  # two failures before recovery
+    assert warnings[0].exc_info  # first carries the traceback
+    assert not warnings[1].exc_info  # subsequent ones do not

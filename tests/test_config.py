@@ -374,3 +374,20 @@ def test_auth_trusted_proxies_toml_round_trip(tmp_path: Path) -> None:
     assert cfg.auth.trusted_proxies_max_hops == 5
     assert IPv4Network("10.0.0.0/8") in cfg.auth.trusted_proxies_parsed
     assert IPv4Network("192.168.1.5/32") in cfg.auth.trusted_proxies_parsed
+
+
+def test_daemon_reload_seconds_default():
+    from localmail.config import DaemonConfig
+    assert DaemonConfig().reload_seconds == 30
+
+
+def test_daemon_shutdown_grace_seconds_default():
+    from localmail.config import DaemonConfig
+    assert DaemonConfig().shutdown_grace_seconds == 30.0
+
+
+def test_daemon_reload_knobs_are_overridable():
+    from localmail.config import DaemonConfig
+    cfg = DaemonConfig(reload_seconds=5, shutdown_grace_seconds=2.5)
+    assert cfg.reload_seconds == 5
+    assert cfg.shutdown_grace_seconds == 2.5

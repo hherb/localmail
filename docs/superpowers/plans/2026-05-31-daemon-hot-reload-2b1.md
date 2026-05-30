@@ -887,27 +887,39 @@ In `src/localmail/api/admin/oauth.py`, in `complete_oauth`, after
 (Top-level import is fine too if it does not create a cycle; verify with
 `unset VIRTUAL_ENV && uv run python -c "import localmail.api.admin.oauth"`.)
 
-- [ ] **Step 6: Wire the password-store call sites**
+- [ ] **Step 6: Wire the credential-store call sites**
 
-Find them:
+Find every place a password or refresh token is persisted (the admin service
+uses `store_password`; the CLI `add-account` / `oauth-login` may call the
+keyring wrapper `_secrets.set_password` / `_secrets.set_refresh_token`
+directly):
 
 ```bash
-grep -rn "store_password(" src/localmail --include=*.py | grep -v "def store_password"
+cd /Users/hherb/src/localmail
+grep -rn "store_password(\|set_password(\|set_refresh_token(" src/localmail/cli.py src/localmail/serve/admin/accounts_router.py
 ```
 
-Expected sites: `src/localmail/cli.py` and
-`src/localmail/serve/admin/accounts_router.py`. At each, immediately after the
-`store_password(account, …)` call (where a `conn` is in scope), add:
+Confirmed source site: `src/localmail/serve/admin/accounts_router.py:212`
+(`svc.store_password(account, body.password)`). The CLI's `add-account` /
+`oauth-login` sites are whatever the grep surfaces.
+
+At each site **where a `conn` (or pool connection) is in scope and a DB
+`account.id` is known**, immediately after the credential is stored add:
 
 ```python
         from localmail.api.admin.accounts import touch_account_updated_at  # if not already imported
         touch_account_updated_at(conn, account.id)
-        conn.commit()  # only if the surrounding code does not already commit after this point
 ```
 
-Check the surrounding transaction handling in each file: if the function
-already commits after `store_password`, just add the `touch_account_updated_at`
-line before that commit and do not add a second `conn.commit()`.
+Then make sure the surrounding code commits: if the function already commits
+after this point, do nothing extra; otherwise add `conn.commit()` after the
+touch. Do **not** add a second commit if one already runs.
+
+If a CLI site stores a secret for an account it just created (so `updated_at`
+is already fresh from the `INSERT`), the touch is harmless but unnecessary —
+add it only on the *rotation / re-login* paths (`add-account` on an existing
+account, `oauth-login`). Use judgement per site; the goal is that re-storing a
+credential for an already-running account bumps `updated_at`.
 
 - [ ] **Step 7: Add a `complete_oauth` bump test**
 

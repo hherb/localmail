@@ -17,7 +17,7 @@ from . import secrets
 from .config import AccountConfig, Config, default_config_path, load_config
 from .daemon import Daemon
 from .account_seed import seed_accounts
-from .api.admin.accounts import AccountFieldError
+from .api.admin.accounts import AccountFieldError, list_accounts_full
 from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
@@ -130,20 +130,25 @@ def init_db(ctx: click.Context) -> None:
 @main.command("list-accounts")
 @click.pass_context
 def list_accounts(ctx: click.Context) -> None:
-    """Show accounts configured in config.toml and whether a secret is stored."""
+    """Show accounts in the DB and whether a secret is stored."""
     cfg = load_config(ctx.obj["config_path"])
-    if not cfg.accounts:
-        click.echo("no accounts configured")
+    with psycopg.connect(cfg.database.dsn) as conn:
+        rows = list_accounts_full(conn)
+    if not rows:
+        click.echo("no accounts")
         return
-    for a in cfg.accounts:
-        if a.auth_method == "password":
-            has_secret = secrets.get_password(a.name) is not None
-            secret_label = "password" if has_secret else "MISSING"
+    for a in rows:
+        if a.auth_method == "archive":
+            endpoint, secret_label = "archive", "n/a"
+        elif a.auth_method == "password":
+            endpoint = f"{a.imap_host}:{a.imap_port}"
+            secret_label = "password" if secrets.get_password(a.name) else "MISSING"
         else:
-            has_secret = secrets.get_refresh_token(a.name) is not None
-            secret_label = "oauth-token" if has_secret else "MISSING"
+            endpoint = f"{a.imap_host}:{a.imap_port}"
+            secret_label = "oauth-token" if secrets.get_refresh_token(a.name) else "MISSING"
         click.echo(
-            f"{a.name}\t{a.email}\t{a.imap_host}:{a.imap_port}\t{a.auth_method}\t[{secret_label}]"
+            f"{a.name}\t{a.email_address}\t{endpoint}\t{a.auth_method}"
+            f"\tsync={a.sync_enabled}\t[{secret_label}]"
         )
 
 

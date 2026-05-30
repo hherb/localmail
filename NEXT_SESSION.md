@@ -59,7 +59,18 @@ f87280c  feat(cli): list-accounts reads the DB                                  
 b1d2983  docs(handoffs): land 2026-05-30T0123 UTC post-PR-135 snapshot
 825a0be  docs(handoffs): correct post-PR-135 handoff (T0123 snapshot was stale)
 8f82686  test(cli): pin 4 review-flagged account-command edge cases
+d52a26b  docs(handoffs): correct test-pin SHA refs in post-PR-135 handoff
+(HEAD)   fix(cli): add-account rolls back a seeded row when the account is rejected
 ```
+
+> **Post-handoff fix (this session, after the snapshot above):** a follow-up
+> review test (`test_add_account_seed_mismatch_does_not_persist_row`) exposed
+> that `add-account` committed the seed-from-TOML row *before* the auth_method
+> gate, so rejecting an oauth2/archive name that existed only in `config.toml`
+> left an orphaned DB row. Fixed by moving the auth_method validation **before**
+> `conn.commit()` in `cli.add_account`, so the rejection raises inside the
+> connection context and psycopg rolls the seed back — a failed `add-account`
+> now has no DB side effect. Full suite green, mypy clean, pushed to PR #135.
 
 ### What the change does (PR #135)
 

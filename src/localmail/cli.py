@@ -16,8 +16,19 @@ import logging
 from . import secrets
 from .config import AccountConfig, Config, default_config_path, load_config
 from .daemon import Daemon
-from .account_seed import seed_accounts
-from .api.admin.accounts import AccountFieldError, list_accounts_full
+from .daemon_accounts import account_config_from_row
+from .account_seed import account_create_kwargs, seed_accounts
+from .api.admin.accounts import (
+    Account,
+    AccountFieldError,
+    AccountInUse,
+    create_account,
+    delete_account,
+    get_account_by_name,
+    list_accounts_full,
+    list_syncable_accounts,
+)
+from .cli_account_resolve import Found, NotFound, plan_account_resolution
 from .db import apply_migrations
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
@@ -85,19 +96,13 @@ def _account_or_die(cfg: Config, name: str) -> AccountConfig:
     )
 
 
-def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str):
+def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Account:
     """Resolve `name` to an Account row, seeding it from TOML if absent.
 
     Returns the DB Account. Raises click.ClickException when the name is in
     neither the DB nor config.toml, or when a malformed TOML block fails
     create_account validation. The caller owns the transaction (commit).
     """
-    from .account_seed import account_create_kwargs
-    from .api.admin.accounts import create_account
-    from .cli_account_resolve import (
-        Found, NotFound, SeedThenUse, plan_account_resolution,
-    )
-
     existing = {row.name: row for row in list_accounts_full(conn)}
     res = plan_account_resolution(name, cfg.accounts, existing)
     if isinstance(res, Found):
@@ -200,22 +205,23 @@ def add_account(ctx: click.Context, name: str, password_opt: str | None) -> None
     cfg = load_config(ctx.obj["config_path"])
     with psycopg.connect(cfg.database.dsn) as conn:
         account = _resolve_account_row(conn, cfg, name)
+        # Validate before commit: a mismatched command must not leave a
+        # newly-seeded row behind. Raising here rolls back the seed.
+        if account.auth_method == "oauth2":
+            raise click.ClickException(
+                f"account {name!r} uses oauth2; run `localmail oauth-login {name}` instead"
+            )
+        if account.auth_method != "password":
+            raise click.ClickException(
+                f"account {name!r} is an archive account; it has no IMAP secret"
+            )
         conn.commit()
-    if account.auth_method == "password":
-        pw = password_opt or click.prompt(
-            f"IMAP password for {account.email_address}",
-            hide_input=True, confirmation_prompt=True,
-        )
-        secrets.set_password(name, pw)
-        click.echo(f"stored password for {name} in keyring")
-    elif account.auth_method == "oauth2":
-        raise click.ClickException(
-            f"account {name!r} uses oauth2; run `localmail oauth-login {name}` instead"
-        )
-    else:
-        raise click.ClickException(
-            f"account {name!r} is an archive account; it has no IMAP secret"
-        )
+    pw = password_opt or click.prompt(
+        f"IMAP password for {account.email_address}",
+        hide_input=True, confirmation_prompt=True,
+    )
+    secrets.set_password(name, pw)
+    click.echo(f"stored password for {name} in keyring")
 
 
 @main.command("remove-account")
@@ -237,9 +243,6 @@ def remove_account(ctx: click.Context, name: str,
         secrets.delete_refresh_token(name)
         click.echo(f"cleared secrets for {name}")
         return
-    from .api.admin.accounts import (
-        AccountInUse, delete_account, get_account_by_name,
-    )
     with psycopg.connect(cfg.database.dsn) as conn:
         account = get_account_by_name(conn, name)
         if account is None:
@@ -272,16 +275,18 @@ def oauth_login(ctx: click.Context, name: str) -> None:
     cfg = load_config(ctx.obj["config_path"])
     with psycopg.connect(cfg.database.dsn) as conn:
         account = _resolve_account_row(conn, cfg, name)
+        # Validate before commit: a mismatched command must not leave a
+        # newly-seeded row behind. Raising here rolls back the seed.
+        if account.auth_method != "oauth2":
+            raise click.ClickException(
+                f"account {name!r} uses auth_method={account.auth_method!r}; "
+                f"oauth-login only applies to OAuth2 accounts"
+            )
+        if account.oauth_provider != "gmail":
+            raise click.ClickException(
+                f"unsupported oauth_provider: {account.oauth_provider!r}"
+            )
         conn.commit()
-    if account.auth_method != "oauth2":
-        raise click.ClickException(
-            f"account {name!r} uses auth_method={account.auth_method!r}; "
-            f"oauth-login only applies to OAuth2 accounts"
-        )
-    if account.oauth_provider != "gmail":
-        raise click.ClickException(
-            f"unsupported oauth_provider: {account.oauth_provider!r}"
-        )
     if cfg.gmail_oauth is None:
         raise click.ClickException(
             "config.toml is missing [gmail_oauth] client_secrets_file"
@@ -304,9 +309,6 @@ def oauth_login(ctx: click.Context, name: str) -> None:
 def sync_cmd(ctx: click.Context, account_name: str | None,
              no_ssl: bool, limit_per_folder: int | None) -> None:
     """One-shot incremental sync over the DB accounts. For cron + manual testing."""
-    from .api.admin.accounts import get_account_by_name, list_syncable_accounts
-    from .daemon_accounts import account_config_from_row
-
     cfg = load_config(ctx.obj["config_path"])
     gmail_secrets = cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
     with psycopg.connect(cfg.database.dsn, autocommit=False) as conn:

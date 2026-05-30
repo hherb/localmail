@@ -175,6 +175,23 @@ def test_add_account_rejects_archive_row(
     assert "archive" in result.output.lower()
 
 
+def test_add_account_seed_mismatch_does_not_persist_row(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    """add-account on an oauth2-only-in-TOML name rejects AND rolls back the
+    seeded row — a failed command leaves no DB side effect."""
+    cfg = _write_config(
+        tmp_path, db_dsn,
+        _toml_block("gmail", "gmail@example.com",
+                    auth="oauth2", oauth_provider="gmail"),
+    )
+    result = _run(["add-account", "gmail", "--password", "x"], cfg)
+    assert result.exit_code != 0
+    assert "oauth-login" in result.output
+    with psycopg.connect(db_dsn) as conn:
+        assert get_account_by_name(conn, "gmail") is None  # rolled back
+
+
 # ---------------------------------------------------------------------------
 # Task 6: oauth-login
 # ---------------------------------------------------------------------------
@@ -234,6 +251,22 @@ def test_oauth_login_seeds_from_toml_when_absent(
         assert get_account_by_name(conn, "gmail") is not None  # row seeded
     from localmail import secrets as s
     assert s.get_refresh_token("gmail") == "refresh-seed"
+
+
+def test_oauth_login_seed_mismatch_does_not_persist_row(
+    db_conn, db_dsn: str, tmp_path: Path
+) -> None:
+    """oauth-login on a password-only-in-TOML name rejects AND rolls back the
+    seeded row — a failed command leaves no DB side effect."""
+    cfg = _gmail_config(
+        tmp_path, db_dsn,
+        _toml_block("work", "work@example.com"),  # password block
+    )
+    result = _run(["oauth-login", "work"], cfg)
+    assert result.exit_code != 0
+    assert "oauth" in result.output.lower()
+    with psycopg.connect(db_dsn) as conn:
+        assert get_account_by_name(conn, "work") is None  # rolled back
 
 
 # ---------------------------------------------------------------------------

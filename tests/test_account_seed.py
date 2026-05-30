@@ -225,3 +225,22 @@ def test_seed_mixed_batch_counts(db_conn) -> None:
 
     assert result == SeedResult(inserted=1, skipped=2, drifted=1)
     assert {r.name for r in list_accounts_full(db_conn)} == {"same", "drift", "new"}
+
+
+def test_account_create_kwargs_maps_all_fields():
+    from localmail.account_seed import account_create_kwargs
+    from localmail.config import AccountConfig
+    cfg = AccountConfig(
+        name="work", email="w@example.com",
+        imap_host="imap.example.com", imap_port=993,
+        auth_method="password", oauth_provider=None,
+        folder_allow=["INBOX"], folder_deny=["Spam"], folder_deny_flags=["\\Junk"],
+    )
+    kw = account_create_kwargs(cfg)
+    assert kw == {
+        "name": "work", "email_address": "w@example.com",
+        "auth_method": "password", "imap_host": "imap.example.com",
+        "imap_port": 993, "oauth_provider": None,
+        "folder_allow": ["INBOX"], "folder_deny": ["Spam"],
+        "folder_deny_flags": ["\\Junk"],
+    }

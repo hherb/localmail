@@ -2,12 +2,24 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
+from pathlib import Path
 
 import psycopg
+from psycopg_pool import ConnectionPool
 
-from localmail.config import LocalmailConfig
+from localmail import idle as idle_mod
+from localmail import poller as poll_mod
+from localmail.account_seed import account_create_kwargs
+from localmail.api.admin.accounts import create_account, get_account_by_name
+from localmail.config import AccountConfig, LocalmailConfig
 from localmail.daemon import Daemon
 from localmail.heartbeat import record_heartbeat
+from localmail.idle import _one_inbox_session
+from localmail.poller import _one_poll_pass
+from localmail.worker import WorkerContext
+
+from ._fake_imap import FakeIMAPClient
 
 
 def _cfg(db_dsn: str) -> LocalmailConfig:
@@ -44,6 +56,118 @@ def test_reconcile_records_reconcile_heartbeat(db_dsn: str) -> None:
     finally:
         d.stop()
         d.pool.close()
+
+
+# --- idle/poll loop heartbeat wiring (spy on safe_heartbeat) -----------------
+
+
+class _HBSpy:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def __call__(self, pool, *, worker_kind, account_id, state,
+                 current_folder=None, last_error_msg=None) -> None:
+        self.calls.append((worker_kind, state, current_folder))
+
+
+def _wiring_account() -> AccountConfig:
+    return AccountConfig(
+        name="acct",
+        email="me@example.com",
+        imap_host="imap.example.com",
+        imap_port=993,
+        auth_method="password",
+    )
+
+
+def _ensure_account(conn, account: AccountConfig) -> int:
+    existing = get_account_by_name(conn, account.name)
+    if existing is not None:
+        return existing.id
+    return create_account(conn, **account_create_kwargs(account)).id
+
+
+def _wiring_pool(db_dsn: str) -> ConnectionPool:
+    p = ConnectionPool(conninfo=db_dsn, min_size=1, max_size=4, open=True)
+    with p.connection() as conn:
+        conn.execute(
+            "TRUNCATE accounts, mailboxes, messages, message_labels, "
+            "attachment_blobs, failed_messages, daemon_heartbeats "
+            "RESTART IDENTITY CASCADE"
+        )
+        conn.commit()
+    return p
+
+
+def _wiring_ctx(pool: ConnectionPool, tmp_path: Path,
+                stop: threading.Event) -> WorkerContext:
+    account = _wiring_account()
+    with pool.connection() as conn:
+        account_id = _ensure_account(conn, account)
+        conn.commit()
+    return WorkerContext(
+        account=account,
+        account_id=account_id,
+        pool=pool,
+        attachments_root=tmp_path,
+        idle_renew_seconds=60,
+        poll_seconds=1,
+        gmail_client_secrets=None,
+        stop=stop,
+        ssl=False,
+    )
+
+
+def test_idle_session_records_connecting_then_idle(
+    db_dsn: str, tmp_path: Path, monkeypatch
+) -> None:
+    pool = _wiring_pool(db_dsn)
+    try:
+        imap = FakeIMAPClient()
+        imap.add_folder("INBOX")
+
+        @contextmanager
+        def fake_open(account, **kw):  # noqa: ARG001
+            yield imap
+
+        monkeypatch.setattr(idle_mod, "open_connection", fake_open)
+        spy = _HBSpy()
+        monkeypatch.setattr(idle_mod, "safe_heartbeat", spy)
+
+        stop = threading.Event()
+        ctx = _wiring_ctx(pool, tmp_path, stop)
+        stop.set()  # exit the inner idle loop immediately after connect+idle
+
+        _one_inbox_session(ctx)
+
+        assert ("idle", "connecting", None) in spy.calls
+        assert ("idle", "idle", None) in spy.calls
+    finally:
+        pool.close()
+
+
+def test_poll_pass_records_polling_and_syncing(
+    db_dsn: str, tmp_path: Path, monkeypatch
+) -> None:
+    pool = _wiring_pool(db_dsn)
+    try:
+        imap = FakeIMAPClient.with_folders(["INBOX", "Archive"])
+
+        @contextmanager
+        def fake_open(account, **kw):  # noqa: ARG001
+            yield imap
+
+        monkeypatch.setattr(poll_mod, "open_connection", fake_open)
+        spy = _HBSpy()
+        monkeypatch.setattr(poll_mod, "safe_heartbeat", spy)
+
+        ctx = _wiring_ctx(pool, tmp_path, threading.Event())
+        _one_poll_pass(ctx)
+
+        assert any(c[0] == "poll" and c[1] == "polling" for c in spy.calls)
+        assert ("poll", "syncing", "Archive") in spy.calls
+    finally:
+        pool.close()
 
 
 def test_startup_clears_leftover_heartbeats(db_dsn: str) -> None:

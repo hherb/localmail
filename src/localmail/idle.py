@@ -12,6 +12,7 @@ import logging
 import time
 from typing import Any
 
+from .heartbeat import safe_heartbeat
 from .imap_client import open_connection
 from .sync import sync_mailbox, upsert_mailbox
 from .worker import WorkerContext
@@ -30,8 +31,11 @@ def run_inbox_idle_loop(ctx: WorkerContext) -> None:
         try:
             _one_inbox_session(ctx)
             backoff = 1.0
-        except Exception:
+        except Exception as exc:
             log.exception("inbox-idle session crashed for %s", ctx.account.name)
+            safe_heartbeat(ctx.pool, worker_kind="idle",
+                           account_id=ctx.account_id, state="reconnecting",
+                           last_error_msg=str(exc))
             if ctx.stop.wait(backoff):
                 break
             backoff = min(backoff * 2, 60.0)
@@ -45,6 +49,8 @@ def _one_inbox_session(ctx: WorkerContext) -> None:
         ssl=ctx.ssl,
         gmail_client_secrets=ctx.gmail_client_secrets,
     ) as imap:
+        safe_heartbeat(ctx.pool, worker_kind="idle",
+                       account_id=ctx.account_id, state="connecting")
         account_id, mailbox = _ensure_inbox_row(ctx)
         imap.select_folder(INBOX)
 
@@ -52,6 +58,8 @@ def _one_inbox_session(ctx: WorkerContext) -> None:
         _sync_inbox(ctx, imap, account_id)
 
         imap.idle()
+        safe_heartbeat(ctx.pool, worker_kind="idle",
+                       account_id=ctx.account_id, state="idle")
         try:
             renew_at = time.monotonic() + ctx.idle_renew_seconds
             while not ctx.stop.is_set():
@@ -67,6 +75,8 @@ def _idle_step(ctx: WorkerContext, imap: Any, account_id: int, renew_at: float) 
     """Wait briefly for IDLE notifications. If any, sync and re-issue IDLE.
     If the renewal deadline is reached, force-cycle IDLE. Return the next
     renewal deadline (monotonic timestamp)."""
+    safe_heartbeat(ctx.pool, worker_kind="idle",
+                   account_id=ctx.account_id, state="idle")
     budget = max(1.0, renew_at - time.monotonic())
     timeout = float(min(HEARTBEAT_SECONDS, budget))
     responses = imap.idle_check(timeout=timeout) or []
@@ -76,6 +86,9 @@ def _idle_step(ctx: WorkerContext, imap: Any, account_id: int, renew_at: float) 
 
     if responses:
         imap.idle_done()
+        safe_heartbeat(ctx.pool, worker_kind="idle",
+                       account_id=ctx.account_id, state="syncing",
+                       current_folder=INBOX)
         _sync_inbox(ctx, imap, account_id)
         imap.idle()
         return time.monotonic() + ctx.idle_renew_seconds

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .heartbeat import safe_heartbeat
 from .imap_client import open_connection
 from .sync import folders_to_sync, sync_mailbox, upsert_mailbox
 from .worker import WorkerContext
@@ -21,8 +22,11 @@ def run_poll_loop(ctx: WorkerContext) -> None:
         try:
             _one_poll_pass(ctx)
             backoff = 1.0
-        except Exception:
+        except Exception as exc:
             log.exception("poll pass crashed for %s", ctx.account.name)
+            safe_heartbeat(ctx.pool, worker_kind="poll",
+                           account_id=ctx.account_id, state="reconnecting",
+                           last_error_msg=str(exc))
             if ctx.stop.wait(backoff):
                 break
             backoff = min(backoff * 2, 60.0)
@@ -41,6 +45,8 @@ def _one_poll_pass(ctx: WorkerContext) -> dict[str, int]:
         gmail_client_secrets=ctx.gmail_client_secrets,
     ) as imap:
         account_id = ctx.account_id
+        safe_heartbeat(ctx.pool, worker_kind="poll",
+                       account_id=account_id, state="polling")
 
         folders = imap.list_folders()
         selectable = folders_to_sync(
@@ -55,6 +61,8 @@ def _one_poll_pass(ctx: WorkerContext) -> dict[str, int]:
                 break
             if name == INBOX:
                 continue  # owned by the IDLE loop
+            safe_heartbeat(ctx.pool, worker_kind="poll", account_id=account_id,
+                           state="syncing", current_folder=name)
             results[name] = _sync_folder(ctx, imap, account_id, name, delim, flags)
 
     return results

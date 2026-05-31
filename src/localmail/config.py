@@ -60,6 +60,13 @@ class DaemonConfig(BaseModel):
     # exceeds the beat interval and a healthy worker is never flagged stale by
     # jitter — independent of [daemon] poll_seconds.
     heartbeat_stale_seconds: int = 120
+    # Bound for the daemon's *fresh* (non-pool) psycopg connects —
+    # `_load_syncable_accounts`, `reconcile`, `_clear_heartbeats` (#140). Without
+    # it a network black-hole (host up, packets dropped) blocks the connect for
+    # the OS TCP default (minutes), stalling startup and hot-reload. Integer
+    # seconds because libpq's `connect_timeout` is integer-valued (a float would
+    # serialise to "10.0" in the conninfo string).
+    db_connect_timeout_s: int = 10
 
 
 class ServeConfig(BaseModel):

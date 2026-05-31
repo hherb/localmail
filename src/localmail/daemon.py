@@ -87,12 +87,24 @@ class Daemon:
         self._embedding_backend_factory = embedding_backend_factory
         self._started = False
 
+    def _connect(self) -> psycopg.Connection:
+        """Open a fresh (non-pool) connection with a bounded connect timeout.
+
+        The daemon opens fresh connects in three places — startup account read,
+        reconcile, and the heartbeat clear — none of which borrow from the pool.
+        Routing them all through here guarantees a network black-hole can't
+        block any of them past `daemon.db_connect_timeout_s` (#140).
+        """
+        return psycopg.connect(
+            self._dsn, connect_timeout=self.cfg.daemon.db_connect_timeout_s
+        )
+
     def _load_syncable_accounts(self) -> list[Account]:
         """Enumerate live, sync-enabled accounts from the DB (one-shot conn).
 
         Done before the pool opens because pool sizing depends on the count.
         """
-        with psycopg.connect(self._dsn) as conn:
+        with self._connect() as conn:
             return list_syncable_accounts(conn)
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
@@ -203,7 +215,7 @@ class Daemon:
         teardown -> respawn -> spawn so freed pool slots are reused first.
         """
         try:
-            with psycopg.connect(self._dsn) as conn:
+            with self._connect() as conn:
                 desired_rows = list_syncable_accounts(conn)
         except Exception:
             log.warning(
@@ -248,7 +260,7 @@ class Daemon:
         """Single-instance reset: drop any heartbeat rows from a previous run
         so a crashed predecessor's rows never read as live. Best-effort."""
         try:
-            with psycopg.connect(self._dsn) as conn:
+            with self._connect() as conn:
                 clear_all_heartbeats(conn)
                 conn.commit()
         except Exception:

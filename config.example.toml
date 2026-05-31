@@ -27,6 +27,10 @@ shutdown_grace_seconds = 30 # per-thread join timeout on teardown / shutdown
 # thread even while idling between passes), so the default comfortably exceeds
 # the beat interval independent of poll_seconds above.
 heartbeat_stale_seconds = 120
+# Bound (integer seconds) for the daemon's fresh, non-pool psycopg connects
+# (startup account read, reconcile, heartbeat clear). Stops a network black-hole
+# from blocking startup / hot-reload for the OS TCP default (minutes).
+db_connect_timeout_s = 10
 
 [serve]
 # Admin UI signing keys. Required when admin UI is in use.

@@ -403,3 +403,15 @@ def test_daemon_heartbeat_stale_seconds_override() -> None:
     from localmail.config import DaemonConfig
 
     assert DaemonConfig(heartbeat_stale_seconds=45).heartbeat_stale_seconds == 45
+
+
+def test_daemon_db_connect_timeout_s_default() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig().db_connect_timeout_s == 10
+
+
+def test_daemon_db_connect_timeout_s_override() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig(db_connect_timeout_s=3).db_connect_timeout_s == 3

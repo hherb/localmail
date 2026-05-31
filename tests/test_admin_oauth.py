@@ -124,3 +124,22 @@ def test_complete_oauth_rejects_tampered_state(db_conn, fake_flow):
         complete_oauth(db_conn, state=bad_state, code='good-code',
                        admin_user_id=42, signing_key=KEY,
                        redirect_uri=CB, client_secrets_file=SECRETS)
+
+
+def test_complete_oauth_bumps_updated_at(db_conn, fake_flow):
+    """complete_oauth must bump accounts.updated_at so the daemon's hot-reload
+    notices the credential rotation."""
+    from localmail.api.admin.accounts import get_account
+    aid = _make_oauth_account(db_conn)
+    db_conn.commit()
+    before = get_account(db_conn, aid).updated_at
+    url = start_oauth(db_conn, aid, admin_user_id=42,
+                      signing_key=KEY, redirect_uri=CB,
+                      client_secrets_file=SECRETS)
+    state = url.split('state=')[1]
+    complete_oauth(db_conn, state=state, code='good-code',
+                   admin_user_id=42, signing_key=KEY,
+                   redirect_uri=CB, client_secrets_file=SECRETS)
+    db_conn.commit()
+    after = get_account(db_conn, aid).updated_at
+    assert after > before

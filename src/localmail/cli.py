@@ -27,6 +27,7 @@ from .api.admin.accounts import (
     get_account_by_name,
     list_accounts_full,
     list_syncable_accounts,
+    touch_account_updated_at,
     update_account,
 )
 from .cli_account_resolve import Found, NotFound, plan_account_resolution
@@ -223,6 +224,9 @@ def add_account(ctx: click.Context, name: str, password_opt: str | None) -> None
         hide_input=True, confirmation_prompt=True,
     )
     secrets.set_password(name, pw)
+    with psycopg.connect(cfg.database.dsn) as conn:
+        touch_account_updated_at(conn, account.id)
+        conn.commit()
     click.echo(f"stored password for {name} in keyring")
 
 
@@ -331,6 +335,9 @@ def oauth_login(ctx: click.Context, name: str) -> None:
     click.echo("opening browser for Google consent ...")
     creds = run_consent_flow(cfg.gmail_oauth.client_secrets_file)
     secrets.set_refresh_token(name, creds.refresh_token)
+    with psycopg.connect(cfg.database.dsn) as conn:
+        touch_account_updated_at(conn, account.id)
+        conn.commit()
     click.echo(f"stored OAuth refresh token for {name} in keyring")
 
 

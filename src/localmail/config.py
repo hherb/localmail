@@ -47,6 +47,12 @@ class DaemonConfig(BaseModel):
     # crashing. Mirrors the 1s→60s shape the IDLE/poll worker loops use.
     startup_backoff_initial_s: float = 1.0
     startup_backoff_max_s: float = 60.0
+    # How often the running daemon re-reads the account set and reconciles
+    # its per-account threads (seconds). Hot-reload latency upper bound.
+    reload_seconds: int = 30
+    # Per-thread join timeout on teardown / shutdown (seconds). Reused by the
+    # 2B.4 supervisor's stop() (SIGTERM -> wait -> SIGKILL).
+    shutdown_grace_seconds: float = 30.0
 
 
 class ServeConfig(BaseModel):

@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -12,6 +15,7 @@ import psycopg
 from .api.admin.accounts import Account, list_syncable_accounts
 from .config import Config
 from .daemon_accounts import account_config_from_row
+from .daemon_reconcile import plan_reconcile
 from .db import compute_daemon_pool_size, open_pool
 from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
@@ -19,6 +23,15 @@ from .retry import retry_with_backoff
 from .worker import WorkerContext
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class AccountThreads:
+    account_id: int
+    updated_at: datetime
+    stop_event: threading.Event
+    idle_thread: threading.Thread
+    poll_thread: threading.Thread
 
 
 class Daemon:
@@ -44,22 +57,7 @@ class Daemon:
             log=log,
         )
         n_accounts = len(self._syncable)
-        configured_max_size = cfg.daemon.pool_max_size
-        if configured_max_size is None:
-            resolved_max_size = compute_daemon_pool_size(
-                n_accounts=n_accounts,
-                run_embed=cfg.search.run_embed_worker,
-                run_extract=cfg.search.run_extract_worker,
-            )
-        else:
-            resolved_max_size = configured_max_size
-        resolved_min_size = min(
-            n_accounts * 2
-            + (1 if cfg.search.run_embed_worker else 0)
-            + (1 if cfg.search.run_extract_worker else 0)
-            or 1,
-            resolved_max_size,
-        )
+        resolved_min_size, resolved_max_size = self._pool_sizes(n_accounts)
         log.info(
             "daemon pool sizing: max_size=%d min_size=%d (accounts=%d, embed=%s, extract=%s)",
             resolved_max_size,
@@ -78,7 +76,9 @@ class Daemon:
         self.pool = open_pool(
             self._dsn, min_size=resolved_min_size, max_size=resolved_max_size
         )
-        self.threads: list[threading.Thread] = []
+        self._account_threads: dict[int, AccountThreads] = {}
+        self._worker_threads: list[threading.Thread] = []
+        self._current_max_size = resolved_max_size
         self._embedding_backend_factory = embedding_backend_factory
         self._started = False
 
@@ -94,42 +94,136 @@ class Daemon:
         log.info("received signal %s; stopping daemon", signum)
         self._stop_event.set()
 
+    def _gmail_secrets(self) -> Path | None:
+        return (
+            self.cfg.gmail_oauth.client_secrets_file
+            if self.cfg.gmail_oauth
+            else None
+        )
+
+    def _spawn_account(self, account_row: Account) -> None:
+        stop_event = threading.Event()
+        ctx = WorkerContext(
+            account=account_config_from_row(account_row),
+            account_id=account_row.id,
+            pool=self.pool,
+            attachments_root=self.cfg.attachments.root,
+            idle_renew_seconds=self.cfg.daemon.idle_renew_seconds,
+            poll_seconds=self.cfg.daemon.poll_seconds,
+            gmail_client_secrets=self._gmail_secrets(),
+            stop=stop_event,
+            ssl=self.ssl,
+        )
+        t_idle = threading.Thread(
+            target=run_inbox_idle_loop, args=(ctx,),
+            name=f"idle-{account_row.name}", daemon=True,
+        )
+        t_poll = threading.Thread(
+            target=run_poll_loop, args=(ctx,),
+            name=f"poll-{account_row.name}", daemon=True,
+        )
+        t_idle.start()
+        t_poll.start()
+        self._account_threads[account_row.id] = AccountThreads(
+            account_id=account_row.id,
+            updated_at=account_row.updated_at,
+            stop_event=stop_event,
+            idle_thread=t_idle,
+            poll_thread=t_poll,
+        )
+        log.info("started workers for %s", account_row.name)
+
+    def _teardown_account(self, account_id: int) -> None:
+        bundle = self._account_threads.pop(account_id, None)
+        if bundle is None:
+            return
+        bundle.stop_event.set()
+        grace = self.cfg.daemon.shutdown_grace_seconds
+        bundle.idle_thread.join(timeout=grace)
+        bundle.poll_thread.join(timeout=grace)
+        log.info("stopped workers for account_id=%s", account_id)
+
+    def _running_fingerprints(self) -> dict[int, datetime]:
+        return {
+            aid: bundle.updated_at
+            for aid, bundle in self._account_threads.items()
+        }
+
+    def _pool_sizes(self, n_accounts: int) -> tuple[int, int]:
+        configured = self.cfg.daemon.pool_max_size
+        if configured is None:
+            max_size = compute_daemon_pool_size(
+                n_accounts=n_accounts,
+                run_embed=self.cfg.search.run_embed_worker,
+                run_extract=self.cfg.search.run_extract_worker,
+            )
+        else:
+            max_size = configured
+        min_size = min(
+            n_accounts * 2
+            + (1 if self.cfg.search.run_embed_worker else 0)
+            + (1 if self.cfg.search.run_extract_worker else 0)
+            or 1,
+            max_size,
+        )
+        return min_size, max_size
+
+    def _resize_pool(self) -> None:
+        if self.cfg.daemon.pool_max_size is not None:
+            return  # operator pinned the size; never auto-resize
+        min_size, max_size = self._pool_sizes(len(self._account_threads))
+        if max_size != self._current_max_size:
+            self.pool.resize(min_size=min_size, max_size=max_size)
+            self._current_max_size = max_size
+            log.info("daemon pool resized: max_size=%d (accounts=%d)",
+                     max_size, len(self._account_threads))
+
+    def reconcile(self) -> None:
+        """Converge the running per-account threads on the DB's syncable set.
+
+        A transient DB read failure is logged and swallowed for this tick;
+        existing threads keep running and the next tick retries. Apply order is
+        teardown -> respawn -> spawn so freed pool slots are reused first.
+        """
+        try:
+            with psycopg.connect(self._dsn) as conn:
+                desired_rows = list_syncable_accounts(conn)
+        except Exception:
+            log.warning(
+                "reconcile: failed to read accounts; keeping current threads",
+                exc_info=True,
+            )
+            return
+
+        rows_by_id = {row.id: row for row in desired_rows}
+        desired = {row.id: row.updated_at for row in desired_rows}
+        plan = plan_reconcile(self._running_fingerprints(), desired)
+        if plan.is_empty:
+            return
+
+        for account_id in plan.to_teardown:
+            self._teardown_account(account_id)
+        for account_id in plan.to_respawn:
+            self._teardown_account(account_id)
+            self._spawn_account(rows_by_id[account_id])
+        for account_id in plan.to_spawn:
+            self._spawn_account(rows_by_id[account_id])
+
+        self._resize_pool()
+        log.info(
+            "reconcile: spawned=%d torn_down=%d respawned=%d",
+            len(plan.to_spawn), len(plan.to_teardown), len(plan.to_respawn),
+        )
+
     def start_workers(self) -> None:
         if self._started:
             return
         self._started = True
-        gmail_secrets = (
-            self.cfg.gmail_oauth.client_secrets_file if self.cfg.gmail_oauth else None
-        )
         for account_row in self._syncable:
-            ctx = WorkerContext(
-                account=account_config_from_row(account_row),
-                account_id=account_row.id,
-                pool=self.pool,
-                attachments_root=self.cfg.attachments.root,
-                idle_renew_seconds=self.cfg.daemon.idle_renew_seconds,
-                poll_seconds=self.cfg.daemon.poll_seconds,
-                gmail_client_secrets=gmail_secrets,
-                stop=self._stop_event,
-                ssl=self.ssl,
-            )
-            t_idle = threading.Thread(
-                target=run_inbox_idle_loop,
-                args=(ctx,),
-                name=f"idle-{account_row.name}",
-                daemon=True,
-            )
-            t_poll = threading.Thread(
-                target=run_poll_loop,
-                args=(ctx,),
-                name=f"poll-{account_row.name}",
-                daemon=True,
-            )
-            t_idle.start()
-            t_poll.start()
-            self.threads += [t_idle, t_poll]
-            log.info("started workers for %s", account_row.name)
+            self._spawn_account(account_row)
+        self._spawn_worker_threads()
 
+    def _spawn_worker_threads(self) -> None:
         if self.cfg.search.run_embed_worker:
             from localmail.search.embed_worker import run_embed_worker  # noqa: PLC0415
             from localmail.search.lang_detect import make_detector  # noqa: PLC0415
@@ -149,7 +243,7 @@ class Daemon:
                 daemon=True,
             )
             t_embed.start()
-            self.threads.append(t_embed)
+            self._worker_threads.append(t_embed)
             log.info(
                 "started embed_worker thread (lang_detector=%s)",
                 "on" if lang_detector is not None else "off",
@@ -169,7 +263,7 @@ class Daemon:
                 daemon=True,
             )
             t_extract.start()
-            self.threads.append(t_extract)
+            self._worker_threads.append(t_extract)
             log.info("started extract_worker thread")
 
     def start(self) -> None:
@@ -177,27 +271,36 @@ class Daemon:
         self.start_workers()
 
     def stop(self) -> None:
-        """Signal all threads to stop."""
+        """Signal every thread to stop (master event + all per-account events)."""
         self._stop_event.set()
+        # Snapshot: reconcile() may mutate _account_threads on the daemon
+        # thread while stop() runs from another thread (signal / supervisor).
+        for bundle in list(self._account_threads.values()):
+            bundle.stop_event.set()
 
     def join(self, timeout: float | None = None) -> None:
         """Wait for all worker threads to finish."""
-        for t in self.threads:
+        for bundle in list(self._account_threads.values()):
+            bundle.idle_thread.join(timeout=timeout)
+            bundle.poll_thread.join(timeout=timeout)
+        for t in self._worker_threads:
             t.join(timeout=timeout)
 
     def run_forever(self) -> None:
-        signal.signal(signal.SIGTERM, self._handle_signal)
-        signal.signal(signal.SIGINT, self._handle_signal)
-        if not self._syncable:
-            log.warning("no syncable accounts in the DB; daemon exiting")
-            return
-        self.start_workers()
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, self._handle_signal)
+            signal.signal(signal.SIGINT, self._handle_signal)
+        self.start_workers()  # initial account spawn + embed/extract workers
+        log.info("daemon running; reconciling every %ds",
+                 self.cfg.daemon.reload_seconds)
         try:
-            while not self._stop_event.is_set():
-                self._stop_event.wait(60)
+            while not self._stop_event.wait(self.cfg.daemon.reload_seconds):
+                self.reconcile()
         finally:
             log.info("waiting for worker threads to finish")
-            for t in self.threads:
-                t.join(timeout=10)
+            for account_id in list(self._account_threads):
+                self._teardown_account(account_id)
+            for t in self._worker_threads:
+                t.join(timeout=self.cfg.daemon.shutdown_grace_seconds)
             self.pool.close()
             log.info("daemon stopped")

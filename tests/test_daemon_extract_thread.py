@@ -104,7 +104,7 @@ def test_daemon_start_then_run_forever_does_not_double_spawn(
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
     d.start()
     d.start_workers()  # explicit second call — must be a no-op
-    spawned = list(d.threads)
+    spawned = list(d._worker_threads)
     assert len(spawned) == len({id(t) for t in spawned})
     extract_threads = [t for t in spawned if t.name == "extract_worker"]
     assert len(extract_threads) == 1

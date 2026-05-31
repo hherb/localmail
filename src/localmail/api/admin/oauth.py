@@ -14,7 +14,7 @@ from pathlib import Path
 import psycopg
 
 from localmail import secrets as _secrets
-from localmail.api.admin.accounts import Account, AccountFieldError, get_account
+from localmail.api.admin.accounts import Account, AccountFieldError, get_account, touch_account_updated_at
 from localmail.api.admin.oauth_state import (
     StatePayload, decode_state, encode_state,
 )
@@ -106,4 +106,5 @@ def complete_oauth(conn: psycopg.Connection, *,
     flow.fetch_token(code=code)
     refresh_token = flow.credentials.refresh_token
     _secrets.set_refresh_token(account.name, refresh_token)
+    touch_account_updated_at(conn, account.id)
     return account

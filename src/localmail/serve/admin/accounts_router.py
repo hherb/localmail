@@ -212,6 +212,9 @@ def post_password(
         svc.store_password(account, body.password)
     except svc.AccountFieldError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Bump updated_at so the daemon's hot-reload notices the credential change.
+    with pool.connection() as conn:
+        svc.touch_account_updated_at(conn, account.id)
     return Response(status_code=204)
 
 

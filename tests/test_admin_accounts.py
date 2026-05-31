@@ -338,3 +338,26 @@ def test_list_syncable_accounts_excludes_archive_and_disabled(db_conn):
     assert [r.name for r in rows] == ['pw', 'oauth']
     assert [r.id for r in rows] == [pw, oauth]
     assert all(isinstance(r, Account) for r in rows)
+
+
+def test_touch_account_updated_at_bumps_timestamp(db_conn):
+    from localmail.api.admin.accounts import get_account, touch_account_updated_at
+    acct = create_account(
+        db_conn, name="touch-me", email_address="t@example.com",
+        auth_method="password", imap_host="imap.example.com", imap_port=993,
+        oauth_provider=None, folder_allow=None, folder_deny=None,
+        folder_deny_flags=None,
+    )
+    db_conn.commit()
+    before = get_account(db_conn, acct.id).updated_at
+    touch_account_updated_at(db_conn, acct.id)
+    db_conn.commit()
+    after = get_account(db_conn, acct.id).updated_at
+    assert after > before
+
+
+def test_touch_account_updated_at_unknown_id_raises(db_conn):
+    from localmail.api.admin.accounts import touch_account_updated_at
+    from localmail.api.errors import NotFound
+    with pytest.raises(NotFound):
+        touch_account_updated_at(db_conn, 999999)

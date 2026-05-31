@@ -17,6 +17,7 @@ from .config import Config
 from .daemon_accounts import account_config_from_row
 from .daemon_reconcile import plan_reconcile
 from .db import compute_daemon_pool_size, open_pool
+from .heartbeat import clear_all_heartbeats, safe_heartbeat
 from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
 from .retry import retry_with_backoff
@@ -195,6 +196,9 @@ class Daemon:
             )
             return
 
+        safe_heartbeat(self.pool, worker_kind="reconcile",
+                       account_id=None, state="idle")
+
         rows_by_id = {row.id: row for row in desired_rows}
         desired = {row.id: row.updated_at for row in desired_rows}
         plan = plan_reconcile(self._running_fingerprints(), desired)
@@ -219,9 +223,20 @@ class Daemon:
         if self._started:
             return
         self._started = True
+        self._clear_heartbeats()
         for account_row in self._syncable:
             self._spawn_account(account_row)
         self._spawn_worker_threads()
+
+    def _clear_heartbeats(self) -> None:
+        """Single-instance reset: drop any heartbeat rows from a previous run
+        so a crashed predecessor's rows never read as live. Best-effort."""
+        try:
+            with psycopg.connect(self._dsn) as conn:
+                clear_all_heartbeats(conn)
+                conn.commit()
+        except Exception:
+            log.warning("startup heartbeat clear failed", exc_info=True)
 
     def _spawn_worker_threads(self) -> None:
         if self.cfg.search.run_embed_worker:

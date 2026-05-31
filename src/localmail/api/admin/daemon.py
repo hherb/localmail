@@ -53,6 +53,9 @@ def get_daemon_status(
 
 CommandName = Literal["reload-now", "restart-account", "drain-stop"]
 CommandState = Literal["queued", "done", "failed"]
+# Only the terminal states are a valid mark target — a claimed, in-flight row
+# must never be set back to 'queued' (it would be re-claimed under a held lock).
+TerminalCommandState = Literal["done", "failed"]
 
 
 @dataclass(frozen=True)
@@ -115,7 +118,7 @@ def mark_command(
     conn: psycopg.Connection,
     command_id: int,
     *,
-    state: CommandState,
+    state: TerminalCommandState,
     result_msg: str | None = None,
 ) -> None:
     """Mark a claimed command terminal (done/failed) with a result message and

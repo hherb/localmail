@@ -80,6 +80,14 @@ def clear_all_heartbeats(conn: psycopg.Connection) -> None:
     conn.execute("DELETE FROM daemon_heartbeats")
 
 
+def clear_account_heartbeats(conn: psycopg.Connection, account_id: int) -> None:
+    """Delete one account's thread heartbeat rows (idle/poll). Used on teardown
+    so a paused/removed account no longer reads as a (stale) live thread rather
+    than lingering until the next startup clear. No commit."""
+    conn.execute("DELETE FROM daemon_heartbeats WHERE account_id = %s",
+                 (account_id,))
+
+
 def safe_heartbeat(
     pool: ConnectionPool,
     *,

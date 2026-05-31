@@ -17,7 +17,11 @@ from .config import Config
 from .daemon_accounts import account_config_from_row
 from .daemon_reconcile import plan_reconcile
 from .db import compute_daemon_pool_size, open_pool
-from .heartbeat import clear_all_heartbeats, safe_heartbeat
+from .heartbeat import (
+    clear_account_heartbeats,
+    clear_all_heartbeats,
+    safe_heartbeat,
+)
 from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
 from .retry import retry_with_backoff
@@ -142,7 +146,19 @@ class Daemon:
         grace = self.cfg.daemon.shutdown_grace_seconds
         bundle.idle_thread.join(timeout=grace)
         bundle.poll_thread.join(timeout=grace)
+        self._clear_account_heartbeats(account_id)
         log.info("stopped workers for account_id=%s", account_id)
+
+    def _clear_account_heartbeats(self, account_id: int) -> None:
+        """Drop the torn-down account's idle/poll heartbeat rows so a paused or
+        removed account no longer reads as a live thread. Best-effort — a
+        deleted account's rows also vanish via ON DELETE CASCADE."""
+        try:
+            with self.pool.connection() as conn:
+                clear_account_heartbeats(conn, account_id)
+        except Exception:
+            log.warning("heartbeat clear failed for account_id=%s",
+                        account_id, exc_info=True)
 
     def _running_fingerprints(self) -> dict[int, datetime]:
         return {

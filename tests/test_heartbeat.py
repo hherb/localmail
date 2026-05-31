@@ -9,7 +9,11 @@ from psycopg_pool import ConnectionPool
 from localmail.account_seed import account_create_kwargs
 from localmail.api.admin.accounts import create_account
 from localmail.config import AccountConfig
-from localmail.heartbeat import clear_all_heartbeats, record_heartbeat
+from localmail.heartbeat import (
+    clear_account_heartbeats,
+    clear_all_heartbeats,
+    record_heartbeat,
+)
 
 
 def _account(conn: psycopg.Connection, name: str = "acct") -> int:
@@ -85,6 +89,23 @@ def test_clear_all_heartbeats_empties_table(db_conn: psycopg.Connection) -> None
     clear_all_heartbeats(db_conn)
     db_conn.commit()
     assert _rows(db_conn) == []
+
+
+def test_clear_account_heartbeats_only_removes_that_account(
+    db_conn: psycopg.Connection,
+) -> None:
+    a1 = _account(db_conn, "acct1")
+    a2 = _account(db_conn, "acct2")
+    record_heartbeat(db_conn, worker_kind="idle", account_id=a1, state="idle")
+    record_heartbeat(db_conn, worker_kind="poll", account_id=a1, state="polling")
+    record_heartbeat(db_conn, worker_kind="idle", account_id=a2, state="idle")
+    record_heartbeat(db_conn, worker_kind="embed", account_id=None, state="idle")
+    db_conn.commit()
+    clear_account_heartbeats(db_conn, a1)
+    db_conn.commit()
+    rows = _rows(db_conn)
+    # a1's idle + poll rows gone; a2's account row and the process row remain.
+    assert {(k, a) for k, a, *_ in rows} == {("idle", a2), ("embed", None)}
 
 
 def test_safe_heartbeat_swallows_pool_errors(caplog) -> None:

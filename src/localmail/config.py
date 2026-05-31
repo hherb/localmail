@@ -54,9 +54,11 @@ class DaemonConfig(BaseModel):
     # 2B.4 supervisor's stop() (SIGTERM -> wait -> SIGKILL).
     shutdown_grace_seconds: float = 30.0
     # 2B.2 heartbeats: a worker's heartbeat is "stale" when
-    # now() - last_heartbeat_at exceeds this. Default comfortably exceeds the
-    # ~30s IDLE heartbeat tick (idle.HEARTBEAT_SECONDS) so a healthy worker is
-    # never flagged stale by jitter.
+    # now() - last_heartbeat_at exceeds this. Both the IDLE thread and the poll
+    # thread re-beat every ~30s (idle.HEARTBEAT_SECONDS / poller.HEARTBEAT_SECONDS,
+    # the latter even while idling between passes), so the default comfortably
+    # exceeds the beat interval and a healthy worker is never flagged stale by
+    # jitter — independent of [daemon] poll_seconds.
     heartbeat_stale_seconds: int = 120
 
 

@@ -8,10 +8,15 @@ from pathlib import Path
 import psycopg
 from psycopg_pool import ConnectionPool
 
+import localmail.daemon as daemon_mod
 from localmail import idle as idle_mod
 from localmail import poller as poll_mod
 from localmail.account_seed import account_create_kwargs
-from localmail.api.admin.accounts import create_account, get_account_by_name
+from localmail.api.admin.accounts import (
+    create_account,
+    get_account_by_name,
+    list_syncable_accounts,
+)
 from localmail.config import AccountConfig, LocalmailConfig
 from localmail.daemon import Daemon
 from localmail.heartbeat import record_heartbeat
@@ -170,6 +175,39 @@ def test_poll_pass_records_polling_and_syncing(
         pool.close()
 
 
+def test_poll_wait_between_passes_rebeats_idle_and_caps_sleep(
+    db_dsn: str, tmp_path: Path, monkeypatch
+) -> None:
+    """A healthy poll thread must keep beating while it idles between passes,
+    chunking the wait by HEARTBEAT_SECONDS rather than the (much larger)
+    poll_seconds, so its daemon-status row never reads falsely stale."""
+    pool = _wiring_pool(db_dsn)
+    try:
+        spy = _HBSpy()
+        monkeypatch.setattr(poll_mod, "safe_heartbeat", spy)
+        ctx = _wiring_ctx(pool, tmp_path, threading.Event())
+        ctx.poll_seconds = 600  # >> HEARTBEAT_SECONDS
+
+        waits: list[float] = []
+
+        class _FakeStop:
+            def __init__(self) -> None:
+                self.n = 0
+
+            def wait(self, timeout: float) -> bool:
+                waits.append(timeout)
+                self.n += 1
+                return self.n >= 3  # signal stop after the third chunk
+
+        ctx.stop = _FakeStop()  # type: ignore[assignment]
+
+        assert poll_mod._wait_between_passes(ctx) is True
+        assert spy.calls.count(("poll", "idle", None)) >= 3
+        assert waits and all(w <= poll_mod.HEARTBEAT_SECONDS for w in waits)
+    finally:
+        pool.close()
+
+
 def test_startup_clears_leftover_heartbeats(db_dsn: str) -> None:
     _truncate(db_dsn)
     with psycopg.connect(db_dsn) as conn:
@@ -181,6 +219,41 @@ def test_startup_clears_leftover_heartbeats(db_dsn: str) -> None:
         assert "embed" not in _heartbeat_kinds(db_dsn)
     finally:
         d.stop()
+        d.pool.close()
+
+
+def test_teardown_account_clears_its_heartbeats(
+    db_dsn: str, monkeypatch
+) -> None:
+    """Tearing down an account (paused/removed via hot-reload) must drop its
+    idle/poll heartbeat rows so it no longer reads as a (stale) live thread."""
+    _truncate(db_dsn)
+    monkeypatch.setattr(daemon_mod, "run_inbox_idle_loop",
+                        lambda ctx: ctx.stop.wait())
+    monkeypatch.setattr(daemon_mod, "run_poll_loop", lambda ctx: ctx.stop.wait())
+
+    with psycopg.connect(db_dsn) as conn:
+        aid = _ensure_account(conn, _wiring_account())
+        conn.commit()
+
+    d = Daemon(_cfg(db_dsn), ssl=False, stop_event=threading.Event())
+    try:
+        with psycopg.connect(db_dsn) as conn:
+            row = next(r for r in list_syncable_accounts(conn) if r.id == aid)
+        d._spawn_account(row)
+        with d.pool.connection() as conn:
+            record_heartbeat(conn, worker_kind="idle", account_id=aid,
+                             state="idle")
+            record_heartbeat(conn, worker_kind="poll", account_id=aid,
+                             state="polling")
+            conn.commit()
+        assert _heartbeat_kinds(db_dsn) == {"idle", "poll"}
+
+        d._teardown_account(aid)
+        assert _heartbeat_kinds(db_dsn) == set()
+    finally:
+        d.stop()
+        d.join(timeout=2)
         d.pool.close()
 
 

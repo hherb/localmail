@@ -439,3 +439,27 @@ def test_daemon_db_tcp_user_timeout_ms_override() -> None:
     from localmail.config import DaemonConfig
 
     assert DaemonConfig(db_tcp_user_timeout_ms=5000).db_tcp_user_timeout_ms == 5000
+
+
+def test_daemon_command_listen_defaults():
+    from localmail.config import LocalmailConfig
+
+    cfg = LocalmailConfig.model_validate({"database": {"dsn": "postgresql:///x"}})
+    assert cfg.daemon.command_listen_enabled is True
+    assert cfg.daemon.command_listen_poll_seconds == 5.0
+
+
+def test_daemon_command_listen_override():
+    from localmail.config import LocalmailConfig
+
+    cfg = LocalmailConfig.model_validate(
+        {
+            "database": {"dsn": "postgresql:///x"},
+            "daemon": {
+                "command_listen_enabled": False,
+                "command_listen_poll_seconds": 2.5,
+            },
+        }
+    )
+    assert cfg.daemon.command_listen_enabled is False
+    assert cfg.daemon.command_listen_poll_seconds == 2.5

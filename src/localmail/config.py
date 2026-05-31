@@ -93,6 +93,17 @@ class DaemonConfig(BaseModel):
     # ignores it on platforms without `TCP_USER_TIMEOUT` (e.g. macOS dev). `0`
     # uses the OS default (disables the bound).
     db_tcp_user_timeout_ms: int = 30000
+    # 2B.3 command queue: the daemon LISTENs the `daemon_commands` channel on a
+    # dedicated connection so an enqueue's NOTIFY wakes the reconcile loop early
+    # (reload-now converges immediately instead of waiting out reload_seconds).
+    # The poll path (reload_seconds) is authoritative and correct on its own;
+    # the listener is a pure latency optimization. Disable it where LISTEN is
+    # undesirable — the daemon then still consumes commands on the next tick.
+    command_listen_enabled: bool = True
+    # How long the listener blocks in notifies() before re-checking the stop
+    # event (seconds). Bounds shutdown latency of the listener thread; small so
+    # a stopping daemon's listener exits promptly, large enough not to busy-spin.
+    command_listen_poll_seconds: float = 5.0
 
 
 class ServeConfig(BaseModel):

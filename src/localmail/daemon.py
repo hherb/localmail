@@ -235,8 +235,13 @@ class Daemon:
         Runs at the top of each reconcile tick on a fresh bounded connection. The
         FOR UPDATE lock is held across apply+mark until the single commit, so a
         concurrent consumer (defensive — single daemon assumed) skips claimed
-        rows. A drain failure is logged and swallowed: existing threads keep
-        running and the next tick retries."""
+        rows. For restart-account that hold spans the thread-join inside
+        _teardown_account (bounded by shutdown_grace_seconds per account); no
+        idle_in_transaction timeout is set on these connections, so a stalled
+        worker can hold the lock that long — acceptable under the single-daemon
+        model. A drain failure is logged and swallowed: the transaction rolls
+        back (claimed rows revert to 'queued'), existing threads keep running,
+        and the next tick re-claims and retries."""
         try:
             with self._connect() as conn:
                 commands = claim_commands(conn)
@@ -247,6 +252,10 @@ class Daemon:
                     except Exception as exc:  # noqa: BLE001
                         log.warning("daemon command %s (id=%s) failed",
                                     cmd.command, cmd.id, exc_info=True)
+                        # If even the failure-mark can't be written (connection
+                        # in an error state), let the outer handler roll the
+                        # whole batch back so it's re-claimed next tick rather
+                        # than half-committed.
                         mark_command(conn, cmd.id, state="failed",
                                      result_msg=str(exc))
                 conn.commit()

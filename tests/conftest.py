@@ -76,7 +76,7 @@ def db_conn(db_dsn):
                 "failed_embeddings, embedding_models, failed_chunkings, "
                 "attachment_text, attachment_chunks, failed_extractions, "
                 "api_users, api_tokens, user_accounts, api_login_attempts, "
-                "daemon_heartbeats "
+                "daemon_commands, daemon_heartbeats "
                 "RESTART IDENTITY CASCADE"
             )
         conn.commit()

@@ -13,6 +13,11 @@ from typing import Any
 import psycopg
 
 from .api.admin.accounts import Account, list_syncable_accounts
+from .api.admin.daemon import (
+    DaemonCommand,
+    claim_commands,
+    mark_command,
+)
 from .config import Config
 from .daemon_accounts import account_config_from_row
 from .daemon_reconcile import plan_reconcile
@@ -53,6 +58,7 @@ class Daemon:
         self.ssl = ssl
         self._dsn = dsn or cfg.database.dsn
         self._stop_event = stop_event or threading.Event()
+        self._reconcile_wake = threading.Event()
         self._syncable = retry_with_backoff(
             self._load_syncable_accounts,
             stop_event=self._stop_event,
@@ -223,6 +229,47 @@ class Daemon:
             log.info("daemon pool resized: max_size=%d (accounts=%d)",
                      max_size, len(self._account_threads))
 
+    def _drain_commands(self) -> None:
+        """Claim and apply every queued daemon command, marking each done/failed.
+
+        Runs at the top of each reconcile tick on a fresh bounded connection. The
+        FOR UPDATE lock is held across apply+mark until the single commit, so a
+        concurrent consumer (defensive — single daemon assumed) skips claimed
+        rows. A drain failure is logged and swallowed: existing threads keep
+        running and the next tick retries."""
+        try:
+            with self._connect() as conn:
+                commands = claim_commands(conn)
+                for cmd in commands:
+                    try:
+                        msg = self._apply_command(cmd)
+                        mark_command(conn, cmd.id, state="done", result_msg=msg)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("daemon command %s (id=%s) failed",
+                                    cmd.command, cmd.id, exc_info=True)
+                        mark_command(conn, cmd.id, state="failed",
+                                     result_msg=str(exc))
+                conn.commit()
+        except Exception:
+            log.warning("command drain failed; will retry next tick", exc_info=True)
+
+    def _apply_command(self, cmd: DaemonCommand) -> str:
+        """Apply one command against the live thread registry; return a result
+        message. `restart-account` only tears the bundle down — the same-tick
+        reconcile diff respawns it if the account is still syncable (running set
+        now lacks it; desired set still has it)."""
+        if cmd.command == "reload-now":
+            return "reconcile triggered"
+        if cmd.command == "drain-stop":
+            self._stop_event.set()
+            self._reconcile_wake.set()
+            return "daemon stopping"
+        if cmd.command == "restart-account":
+            assert cmd.account_id is not None  # DB CHECK guarantees this
+            self._teardown_account(cmd.account_id)
+            return f"account {cmd.account_id} torn down for restart"
+        raise ValueError(f"unknown daemon command {cmd.command!r}")
+
     def reconcile(self) -> None:
         """Converge the running per-account threads on the DB's syncable set.
 
@@ -230,6 +277,9 @@ class Daemon:
         existing threads keep running and the next tick retries. Apply order is
         teardown -> respawn -> spawn so freed pool slots are reused first.
         """
+        self._drain_commands()
+        if self._stop_event.is_set():
+            return  # drain-stop fired; run_forever handles shutdown
         try:
             with self._connect() as conn:
                 desired_rows = list_syncable_accounts(conn)

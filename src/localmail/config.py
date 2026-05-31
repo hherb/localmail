@@ -53,6 +53,11 @@ class DaemonConfig(BaseModel):
     # Per-thread join timeout on teardown / shutdown (seconds). Reused by the
     # 2B.4 supervisor's stop() (SIGTERM -> wait -> SIGKILL).
     shutdown_grace_seconds: float = 30.0
+    # 2B.2 heartbeats: a worker's heartbeat is "stale" when
+    # now() - last_heartbeat_at exceeds this. Default comfortably exceeds the
+    # ~30s IDLE heartbeat tick (idle.HEARTBEAT_SECONDS) so a healthy worker is
+    # never flagged stale by jitter.
+    heartbeat_stale_seconds: int = 120
 
 
 class ServeConfig(BaseModel):

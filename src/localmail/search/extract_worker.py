@@ -71,6 +71,7 @@ import psycopg
 from psycopg_pool import ConnectionPool
 
 from localmail.config import SearchConfig
+from localmail.heartbeat import safe_heartbeat
 from localmail.search.extractor import (
     DoclingExtractor,
     ExtractedText,
@@ -504,14 +505,17 @@ def run_extract_worker(
     """
     backoff = _INITIAL_BACKOFF_S
     while not stop_event.is_set():
+        safe_heartbeat(pool, worker_kind="extract", account_id=None, state="idle")
         try:
             with pool.connection() as conn:
                 while not stop_event.is_set():
                     touched = run_extract_worker_once(conn, cfg)
                     if touched == 0:
                         break
-        except Exception:
+        except Exception as exc:
             _LOG.exception("extract_worker: error during sweep")
+            safe_heartbeat(pool, worker_kind="extract", account_id=None,
+                           state="error", last_error_msg=str(exc))
             if stop_event.wait(timeout=backoff):
                 return
             backoff = min(backoff * 2, _MAX_BACKOFF_S)

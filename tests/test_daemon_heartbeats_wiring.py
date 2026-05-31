@@ -182,3 +182,81 @@ def test_startup_clears_leftover_heartbeats(db_dsn: str) -> None:
     finally:
         d.stop()
         d.pool.close()
+
+
+# --- process-level worker heartbeat wiring (embed + extract) -----------------
+
+import time
+
+import localmail.search.embed_worker as embed_mod
+import localmail.search.extract_worker as extract_mod
+from localmail.config import SearchConfig
+
+
+class _ProcHBSpy:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def __call__(self, pool, *, worker_kind, account_id, state,
+                 current_folder=None, last_error_msg=None) -> None:
+        assert account_id is None  # process-level workers are account-agnostic
+        self.calls.append((worker_kind, state))
+
+
+def test_embed_worker_records_embed_heartbeat(db_dsn: str, monkeypatch) -> None:
+    pool = ConnectionPool(conninfo=db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        spy = _ProcHBSpy()
+        monkeypatch.setattr(embed_mod, "safe_heartbeat", spy)
+        monkeypatch.setattr(embed_mod, "run_embed_worker_once", lambda *a, **k: 0)
+        stop = threading.Event()
+
+        class _Backend:
+            name = "fake"
+            model = "fake"
+            dimension = 768
+
+            def embed_documents(self, t):
+                return [[0.0] * 768 for _ in t]
+
+            def embed_query(self, t):
+                return [0.0] * 768
+
+            def health_check(self):
+                pass
+
+        cfg = SearchConfig(embed_worker_poll_interval_s=30)
+        th = threading.Thread(
+            target=embed_mod.run_embed_worker,
+            args=(stop, pool, cfg, _Backend()),
+            daemon=True,
+        )
+        th.start()
+        time.sleep(0.2)
+        stop.set()
+        th.join(timeout=5)
+        assert ("embed", "idle") in spy.calls
+    finally:
+        pool.close()
+
+
+def test_extract_worker_records_extract_heartbeat(db_dsn: str, monkeypatch) -> None:
+    pool = ConnectionPool(conninfo=db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        spy = _ProcHBSpy()
+        monkeypatch.setattr(extract_mod, "safe_heartbeat", spy)
+        monkeypatch.setattr(extract_mod, "run_extract_worker_once", lambda *a, **k: 0)
+        stop = threading.Event()
+        cfg = SearchConfig(extract_worker_poll_interval_s=30)
+        th = threading.Thread(
+            target=extract_mod.run_extract_worker,
+            kwargs={"pool": pool, "cfg": cfg, "stop_event": stop},
+            daemon=True,
+        )
+        th.start()
+        time.sleep(0.2)
+        stop.set()
+        th.join(timeout=5)
+        assert ("extract", "idle") in spy.calls
+    finally:
+        pool.close()

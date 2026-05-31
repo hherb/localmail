@@ -68,15 +68,31 @@ class DaemonConfig(BaseModel):
     # serialise to "10.0" in the conninfo string).
     db_connect_timeout_s: int = 10
     # Companion bound for the *query* phase of those same fresh connects (#142).
-    # `db_connect_timeout_s` bounds only the TCP connect; a black-hole that begins
-    # *after* the connect succeeds still hangs the subsequent single-row SELECT
-    # (`list_syncable_accounts`) or small DELETE (`clear_all_heartbeats`)
-    # indefinitely. Threaded into `Daemon._connect()` as libpq
-    # `options='-c statement_timeout=<N>s'`. Integer seconds (passed with the GUC
-    # `s` unit suffix, so no s->ms magic conversion); these queries are sub-ms so
-    # the default is generous headroom over real load yet finite. `0` disables the
-    # bound (libpq/Postgres semantics).
+    # This is `statement_timeout`, a *server-side* GUC: Postgres aborts a query
+    # that runs longer than this *on the server*. It bounds a slow / stuck query
+    # (lock contention, a pathological plan) — NOT a network black-hole. If
+    # request packets are dropped in transit the server never starts the query
+    # (so the timer never arms), and if the reply is dropped the client blocks on
+    # recv regardless; that post-connect black-hole case is bounded by
+    # `db_tcp_user_timeout_ms` below, not here. Threaded into `Daemon._connect()`
+    # as libpq `options='-c statement_timeout=<N>s'`. Integer seconds (passed with
+    # the GUC `s` unit suffix, so no s->ms magic conversion); these queries are
+    # sub-ms so the default is generous headroom over real load yet finite. `0`
+    # disables the bound (libpq/Postgres semantics).
     db_statement_timeout_s: int = 30
+    # Bound for the *post-connect network black-hole* on those same fresh connects
+    # (#142): host up, packets silently dropped *after* the TCP connect succeeds.
+    # `db_connect_timeout_s` only covers the connect handshake and
+    # `db_statement_timeout_s` is server-side (useless when the server never sees
+    # the query / the reply is dropped), so neither breaks a client stuck in recv.
+    # libpq's `tcp_user_timeout` forces the connection closed after this many
+    # milliseconds of unacknowledged transmitted data — the OS-level escape the
+    # other two can't provide. Integer **milliseconds** (libpq's native unit for
+    # this parameter — distinct from the `_s` knobs above; do not reuse those
+    # naively). Effective on Linux (the systemd deploy target); libpq silently
+    # ignores it on platforms without `TCP_USER_TIMEOUT` (e.g. macOS dev). `0`
+    # uses the OS default (disables the bound).
+    db_tcp_user_timeout_ms: int = 30000
 
 
 class ServeConfig(BaseModel):

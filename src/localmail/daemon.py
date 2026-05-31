@@ -88,19 +88,30 @@ class Daemon:
         self._started = False
 
     def _connect(self) -> psycopg.Connection:
-        """Open a fresh (non-pool) connection with bounded connect + statement.
+        """Open a fresh (non-pool) connection with every phase bounded.
 
         The daemon opens fresh connects in three places — startup account read,
         reconcile, and the heartbeat clear — none of which borrow from the pool.
-        Routing them all through here guarantees a network black-hole can't
-        block any of them past `daemon.db_connect_timeout_s` on the *connect*
-        phase (#140) nor past `daemon.db_statement_timeout_s` on the *query*
-        phase (#142) — `connect_timeout` alone leaves the post-connect SELECT/
-        DELETE able to hang indefinitely if the black-hole opens after connect.
+        Routing them all through here applies three complementary bounds so no
+        phase can hang indefinitely on a network fault (#140, #142):
+
+        - ``connect_timeout`` (``db_connect_timeout_s``) — the TCP handshake.
+        - ``statement_timeout`` (``db_statement_timeout_s``) — server-side query
+          execution; catches a slow / stuck query, not a network black-hole.
+        - ``tcp_user_timeout`` (``db_tcp_user_timeout_ms``) — the actual
+          post-connect black-hole bound: forces the socket closed after that
+          many ms of unacknowledged data, the only one of the three that breaks
+          a client stuck in ``recv`` when packets are dropped *after* connect
+          (Linux-effective; libpq ignores it where ``TCP_USER_TIMEOUT`` is
+          absent, e.g. macOS).
+
+        ``self._dsn`` must not itself carry an ``options=`` conninfo entry — the
+        kwarg below replaces rather than merges it; the daemon's DSN never does.
         """
         return psycopg.connect(
             self._dsn,
             connect_timeout=self.cfg.daemon.db_connect_timeout_s,
+            tcp_user_timeout=self.cfg.daemon.db_tcp_user_timeout_ms,
             options=f"-c statement_timeout={self.cfg.daemon.db_statement_timeout_s}s",
         )
 

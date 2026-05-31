@@ -33,6 +33,7 @@ import traceback
 import psycopg
 
 from localmail.config import SearchConfig
+from localmail.heartbeat import safe_heartbeat
 from localmail.search.chunking import MessageRow, chunk_attachment_text, chunk_message
 from localmail.search.embeddings import EmbeddingBackend
 from localmail.search.lang_detect import LanguageDetector, run_lang_detect_pass
@@ -387,6 +388,7 @@ def run_embed_worker(
     """
     consecutive_empty = 0
     while not stop.is_set():
+        safe_heartbeat(pool, worker_kind="embed", account_id=None, state="idle")
         try:
             with pool.connection() as conn:
                 wrote = run_embed_worker_once(
@@ -394,6 +396,8 @@ def run_embed_worker(
                 )
         except Exception as exc:  # noqa: BLE001
             log.error("embed_worker sweep error: %s", exc, exc_info=True)
+            safe_heartbeat(pool, worker_kind="embed", account_id=None,
+                           state="error", last_error_msg=str(exc))
             wrote = 0
         if wrote == 0:
             consecutive_empty = min(consecutive_empty + 1, 6)

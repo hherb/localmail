@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
+from .heartbeat import safe_heartbeat
 from .imap_client import open_connection
 from .sync import folders_to_sync, sync_mailbox, upsert_mailbox
 from .worker import WorkerContext
@@ -12,6 +14,10 @@ from .worker import WorkerContext
 log = logging.getLogger(__name__)
 
 INBOX = "INBOX"
+# Re-beat liveness at least this often while idling between poll passes, so a
+# healthy poll thread never reads stale even when `poll_seconds` exceeds
+# `heartbeat_stale_seconds`. Matches idle.HEARTBEAT_SECONDS.
+HEARTBEAT_SECONDS = 30
 
 
 def run_poll_loop(ctx: WorkerContext) -> None:
@@ -21,14 +27,33 @@ def run_poll_loop(ctx: WorkerContext) -> None:
         try:
             _one_poll_pass(ctx)
             backoff = 1.0
-        except Exception:
+        except Exception as exc:
             log.exception("poll pass crashed for %s", ctx.account.name)
+            safe_heartbeat(ctx.pool, worker_kind="poll",
+                           account_id=ctx.account_id, state="reconnecting",
+                           last_error_msg=str(exc))
             if ctx.stop.wait(backoff):
                 break
             backoff = min(backoff * 2, 60.0)
             continue
-        if ctx.stop.wait(ctx.poll_seconds):
+        if _wait_between_passes(ctx):
             break
+
+
+def _wait_between_passes(ctx: WorkerContext) -> bool:
+    """Sleep up to `poll_seconds`, re-beating an `idle` liveness heartbeat every
+    `HEARTBEAT_SECONDS` so the daemon-status `stale` flag stays accurate for the
+    poll thread regardless of how large `poll_seconds` is. Returns True if stop
+    was signalled (caller should break)."""
+    deadline = time.monotonic() + ctx.poll_seconds
+    while True:
+        safe_heartbeat(ctx.pool, worker_kind="poll",
+                       account_id=ctx.account_id, state="idle")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if ctx.stop.wait(min(HEARTBEAT_SECONDS, remaining)):
+            return True
 
 
 def _one_poll_pass(ctx: WorkerContext) -> dict[str, int]:
@@ -41,6 +66,8 @@ def _one_poll_pass(ctx: WorkerContext) -> dict[str, int]:
         gmail_client_secrets=ctx.gmail_client_secrets,
     ) as imap:
         account_id = ctx.account_id
+        safe_heartbeat(ctx.pool, worker_kind="poll",
+                       account_id=account_id, state="polling")
 
         folders = imap.list_folders()
         selectable = folders_to_sync(
@@ -55,6 +82,8 @@ def _one_poll_pass(ctx: WorkerContext) -> dict[str, int]:
                 break
             if name == INBOX:
                 continue  # owned by the IDLE loop
+            safe_heartbeat(ctx.pool, worker_kind="poll", account_id=account_id,
+                           state="syncing", current_folder=name)
             results[name] = _sync_folder(ctx, imap, account_id, name, delim, flags)
 
     return results

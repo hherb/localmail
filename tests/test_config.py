@@ -391,3 +391,15 @@ def test_daemon_reload_knobs_are_overridable():
     cfg = DaemonConfig(reload_seconds=5, shutdown_grace_seconds=2.5)
     assert cfg.reload_seconds == 5
     assert cfg.shutdown_grace_seconds == 2.5
+
+
+def test_daemon_heartbeat_stale_seconds_default() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig().heartbeat_stale_seconds == 120
+
+
+def test_daemon_heartbeat_stale_seconds_override() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig(heartbeat_stale_seconds=45).heartbeat_stale_seconds == 45

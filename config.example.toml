@@ -20,6 +20,13 @@ shutdown_grace_seconds = 30 # per-thread join timeout on teardown / shutdown
                             # (defaults to 2*N_accounts + workers + 2 + floor)
 # startup_backoff_initial_s = 1.0   # wait-for-Postgres backoff at daemon launch
 # startup_backoff_max_s     = 60.0  # cap for that exponential backoff
+# A worker's heartbeat is considered "stale" when now() - last_heartbeat_at
+# exceeds this many seconds. The daemon records per-thread liveness in the
+# daemon_heartbeats table; an operator reads it via the admin daemon-status
+# endpoint (2B.4). Both the IDLE and poll threads re-beat every ~30s (the poll
+# thread even while idling between passes), so the default comfortably exceeds
+# the beat interval independent of poll_seconds above.
+heartbeat_stale_seconds = 120
 
 [serve]
 # Admin UI signing keys. Required when admin UI is in use.

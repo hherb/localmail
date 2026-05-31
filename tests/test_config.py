@@ -415,3 +415,27 @@ def test_daemon_db_connect_timeout_s_override() -> None:
     from localmail.config import DaemonConfig
 
     assert DaemonConfig(db_connect_timeout_s=3).db_connect_timeout_s == 3
+
+
+def test_daemon_db_statement_timeout_s_default() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig().db_statement_timeout_s == 30
+
+
+def test_daemon_db_statement_timeout_s_override() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig(db_statement_timeout_s=5).db_statement_timeout_s == 5
+
+
+def test_daemon_db_tcp_user_timeout_ms_default() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig().db_tcp_user_timeout_ms == 30000
+
+
+def test_daemon_db_tcp_user_timeout_ms_override() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig(db_tcp_user_timeout_ms=5000).db_tcp_user_timeout_ms == 5000

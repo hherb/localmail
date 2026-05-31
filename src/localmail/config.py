@@ -67,6 +67,16 @@ class DaemonConfig(BaseModel):
     # seconds because libpq's `connect_timeout` is integer-valued (a float would
     # serialise to "10.0" in the conninfo string).
     db_connect_timeout_s: int = 10
+    # Companion bound for the *query* phase of those same fresh connects (#142).
+    # `db_connect_timeout_s` bounds only the TCP connect; a black-hole that begins
+    # *after* the connect succeeds still hangs the subsequent single-row SELECT
+    # (`list_syncable_accounts`) or small DELETE (`clear_all_heartbeats`)
+    # indefinitely. Threaded into `Daemon._connect()` as libpq
+    # `options='-c statement_timeout=<N>s'`. Integer seconds (passed with the GUC
+    # `s` unit suffix, so no s->ms magic conversion); these queries are sub-ms so
+    # the default is generous headroom over real load yet finite. `0` disables the
+    # bound (libpq/Postgres semantics).
+    db_statement_timeout_s: int = 30
 
 
 class ServeConfig(BaseModel):

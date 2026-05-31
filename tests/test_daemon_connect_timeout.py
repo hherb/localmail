@@ -1,12 +1,15 @@
-"""Bounded connect for the daemon's fresh psycopg connects (#140).
+"""Bounded connect + statement for the daemon's fresh psycopg connects (#140, #142).
 
 Three daemon paths open a *fresh* ``psycopg.connect(self._dsn)`` rather than
 borrowing from the shared pool: ``_load_syncable_accounts`` (construction),
 ``reconcile`` (each tick), and ``_clear_heartbeats`` (startup reset). Without a
 bounded ``connect_timeout`` a network black-hole (host up, packets dropped)
-blocks the connect for the OS TCP default — minutes — stalling startup and the
-reconcile/hot-reload loop. Every fresh connect must pass a ``connect_timeout``
-sourced from config (no magic literal).
+blocks the *connect* for the OS TCP default — minutes — stalling startup and the
+reconcile/hot-reload loop (#140). ``connect_timeout`` bounds only the TCP connect
+phase, so a black-hole that begins *after* the connect succeeds still hangs the
+subsequent SELECT/DELETE indefinitely; ``statement_timeout`` bounds that query
+phase too (#142). Every fresh connect must pass both bounds, sourced from config
+(no magic literal).
 """
 
 from __future__ import annotations
@@ -20,11 +23,16 @@ from localmail.config import LocalmailConfig
 from localmail.daemon import Daemon
 
 
-def _cfg(db_dsn: str, *, connect_timeout: int) -> LocalmailConfig:
+def _cfg(
+    db_dsn: str, *, connect_timeout: int, statement_timeout: int = 30
+) -> LocalmailConfig:
     cfg = LocalmailConfig.model_validate(
         {
             "database": {"dsn": db_dsn},
-            "daemon": {"db_connect_timeout_s": connect_timeout},
+            "daemon": {
+                "db_connect_timeout_s": connect_timeout,
+                "db_statement_timeout_s": statement_timeout,
+            },
         }
     )
     cfg.search.run_embed_worker = False
@@ -82,5 +90,53 @@ def test_construction_connect_passes_connect_timeout(db_dsn: str, monkeypatch) -
     try:
         assert captured, "expected _load_syncable_accounts to open a fresh connect"
         assert all(t == 5 for t in captured), captured
+    finally:
+        d.stop()
+
+
+def test_fresh_connects_pass_statement_timeout_from_config(
+    db_dsn: str, monkeypatch
+) -> None:
+    _truncate(db_dsn)
+
+    real_connect = psycopg.connect
+    captured: list[object] = []
+
+    def spy(*args, **kwargs):
+        captured.append(kwargs.get("options"))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(daemon_mod.psycopg, "connect", spy)
+
+    d = Daemon(_cfg(db_dsn, connect_timeout=7, statement_timeout=11), ssl=False,
+               stop_event=threading.Event())
+    try:
+        captured.clear()  # ignore the construction-time connect; assert the named paths
+        d.reconcile()
+        d._clear_heartbeats()
+    finally:
+        d.stop()
+
+    assert captured, "expected reconcile + _clear_heartbeats to open fresh connects"
+    assert all(opt == "-c statement_timeout=11s" for opt in captured), captured
+
+
+def test_construction_connect_passes_statement_timeout(db_dsn: str, monkeypatch) -> None:
+    _truncate(db_dsn)
+
+    real_connect = psycopg.connect
+    captured: list[object] = []
+
+    def spy(*args, **kwargs):
+        captured.append(kwargs.get("options"))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(daemon_mod.psycopg, "connect", spy)
+
+    d = Daemon(_cfg(db_dsn, connect_timeout=5, statement_timeout=13), ssl=False,
+               stop_event=threading.Event())
+    try:
+        assert captured, "expected _load_syncable_accounts to open a fresh connect"
+        assert all(opt == "-c statement_timeout=13s" for opt in captured), captured
     finally:
         d.stop()

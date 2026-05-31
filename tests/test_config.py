@@ -415,3 +415,15 @@ def test_daemon_db_connect_timeout_s_override() -> None:
     from localmail.config import DaemonConfig
 
     assert DaemonConfig(db_connect_timeout_s=3).db_connect_timeout_s == 3
+
+
+def test_daemon_db_statement_timeout_s_default() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig().db_statement_timeout_s == 30
+
+
+def test_daemon_db_statement_timeout_s_override() -> None:
+    from localmail.config import DaemonConfig
+
+    assert DaemonConfig(db_statement_timeout_s=5).db_statement_timeout_s == 5

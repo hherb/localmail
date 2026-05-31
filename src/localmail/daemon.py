@@ -88,15 +88,20 @@ class Daemon:
         self._started = False
 
     def _connect(self) -> psycopg.Connection:
-        """Open a fresh (non-pool) connection with a bounded connect timeout.
+        """Open a fresh (non-pool) connection with bounded connect + statement.
 
         The daemon opens fresh connects in three places — startup account read,
         reconcile, and the heartbeat clear — none of which borrow from the pool.
         Routing them all through here guarantees a network black-hole can't
-        block any of them past `daemon.db_connect_timeout_s` (#140).
+        block any of them past `daemon.db_connect_timeout_s` on the *connect*
+        phase (#140) nor past `daemon.db_statement_timeout_s` on the *query*
+        phase (#142) — `connect_timeout` alone leaves the post-connect SELECT/
+        DELETE able to hang indefinitely if the black-hole opens after connect.
         """
         return psycopg.connect(
-            self._dsn, connect_timeout=self.cfg.daemon.db_connect_timeout_s
+            self._dsn,
+            connect_timeout=self.cfg.daemon.db_connect_timeout_s,
+            options=f"-c statement_timeout={self.cfg.daemon.db_statement_timeout_s}s",
         )
 
     def _load_syncable_accounts(self) -> list[Account]:

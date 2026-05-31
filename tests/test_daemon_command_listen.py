@@ -46,6 +46,19 @@ def quiet_threads(monkeypatch):
     monkeypatch.setattr(daemon_mod, "run_poll_loop", lambda ctx: ctx.stop.wait())
 
 
+def _await_listening(d, timeout=5):
+    """Block until the listener has issued LISTEN (it publishes _listener_conn
+    right after), so the subsequent NOTIFY can't be lost to a slow connect —
+    Postgres only delivers NOTIFY to sessions already LISTENing. Deterministic
+    readiness gate in place of a fixed sleep (avoids CI flakiness)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if d._listener_conn is not None:
+            return
+        time.sleep(0.02)
+    raise AssertionError("listener did not start LISTENing in time")
+
+
 def test_notify_sets_reconcile_wake(db_conn, db_dsn, quiet_threads):
     """The listener thread sets _reconcile_wake when a NOTIFY arrives."""
     d = Daemon(cfg=_cfg(db_dsn), dsn=db_dsn,
@@ -53,7 +66,7 @@ def test_notify_sets_reconcile_wake(db_conn, db_dsn, quiet_threads):
     listener = threading.Thread(target=d._run_command_listener, daemon=True)
     listener.start()
     try:
-        time.sleep(0.5)  # let the listener LISTEN
+        _await_listening(d)
         enqueue_command(db_conn, command="reload-now", requested_by=None)
         db_conn.commit()
         assert d._reconcile_wake.wait(timeout=5), "NOTIFY did not set the wake"
@@ -79,7 +92,7 @@ def test_run_forever_reconciles_early_on_notify(db_conn, db_dsn, quiet_threads):
     t = threading.Thread(target=d.run_forever, daemon=True)
     t.start()
     try:
-        time.sleep(0.5)  # let the loop reach its wait and the listener LISTEN
+        _await_listening(d)  # listener LISTENing; loop is in its wake-wait
         reconciled.clear()
         enqueue_command(db_conn, command="reload-now", requested_by=None)
         db_conn.commit()

@@ -8,9 +8,10 @@
 > top of each reconcile tick (`FOR UPDATE SKIP LOCKED`), with a **LISTEN/NOTIFY
 > wake** so an enqueue converges immediately instead of waiting out
 > `reload_seconds`. Service-layer **enqueue accessor only** — no HTTP/CLI surface
-> (that's 2B.4). Work is on branch **`daemon-control-2b3-commands`** (10 commits,
-> branched from `main` at `774106e`). Full suite **1137 passed**, mypy clean
-> (78 files). **Not yet pushed / no PR opened** — see "What's next #0".
+> (that's 2B.4). Work is on branch **`daemon-control-2b3-commands`** (branched from
+> `main` at `774106e`), **pushed**, opened as **PR #144**
+> (<https://github.com/hherb/localmail/pull/144>, **open, not yet merged**). Full
+> suite **1137 passed**, mypy clean (78 files).
 >
 > Last session's **PR #143 (#142 statement_timeout + tcp_user_timeout) is MERGED**
 > (`774106e` on main); its stale local + remote branch was deleted this session.
@@ -96,15 +97,13 @@ db490d1  docs: record 2B.3 command queue in README run row
 
 ## What's next
 
-### 0. **Push branch + open PR** *(immediate)*
+### 0. **Review & merge PR #144** *(immediate)*
 
-The branch is committed but **not pushed**. Open a PR (the repo's merge pattern):
+PR #144 (<https://github.com/hherb/localmail/pull/144>) is **open and green**
+(1137 passed, mypy clean). After merge:
 
 ```bash
-git push -u origin daemon-control-2b3-commands
-gh pr create --title "feat(daemon): command queue with LISTEN/NOTIFY wake (2B.3)" --fill
-# After merge:
-gh pr merge <N> --squash --delete-branch
+gh pr merge 144 --squash --delete-branch
 git checkout main && git fetch --prune origin && git merge --ff-only origin/main
 git branch -D daemon-control-2b3-commands
 ```
@@ -206,7 +205,7 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 
 git status                               # clean apart from .claude/ local files
-git branch -vv                           # main + daemon-control-2b3-commands (tip 9076d38)
+git branch -vv                           # main + daemon-control-2b3-commands (pushed, PR #144)
 git --no-pager log --oneline -10
 gh issue list --state open --limit 40    # 6 open
 
@@ -248,6 +247,6 @@ docs/handoffs/2026-05-31T1234-utc-post-2b3-daemon-command-queue.md     # frozen 
 ```
 
 `main` at `774106e` (== `origin/main`, the merged #142). Branch
-`daemon-control-2b3-commands` at `9076d38`, **10 commits, NOT pushed, no PR yet**.
-Working tree clean (only `.claude/` local files). 2 local branches (`main`,
-`daemon-control-2b3-commands`); 0 open PRs.
+`daemon-control-2b3-commands` **pushed** (== `origin/daemon-control-2b3-commands`),
+**PR #144 open**. Working tree clean (only `.claude/` local files). 2 local
+branches (`main`, `daemon-control-2b3-commands`); 1 open PR (#144).

@@ -52,9 +52,9 @@ def get_daemon_status(
 
 
 CommandName = Literal["reload-now", "restart-account", "drain-stop"]
-CommandState = Literal["queued", "done", "failed"]
 # Only the terminal states are a valid mark target — a claimed, in-flight row
 # must never be set back to 'queued' (it would be re-claimed under a held lock).
+# The full 'queued'/'done'/'failed' domain lives in the migration's CHECK.
 TerminalCommandState = Literal["done", "failed"]
 
 

@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -10,13 +11,22 @@ from fastapi.staticfiles import StaticFiles
 from psycopg_pool import ConnectionPool
 
 from localmail.api.errors import APIError, RateLimited
-from localmail.config import AuthConfig, ServeConfig
+from localmail.config import AuthConfig, DaemonConfig, ServeConfig
 from localmail.serve.admin import accounts_router as admin_accounts_router
 from localmail.serve.admin import auth_router as admin_auth_router
+from localmail.serve.admin import daemon_router as admin_daemon_router
 from localmail.serve.admin import dashboard_router as admin_dashboard_router
 from localmail.serve.admin import oauth_router as admin_oauth_router
 from localmail.serve.admin.dependencies import install_admin_redirect_handler
 from localmail.serve.admin.middleware import ScrubSensitiveQueryParamsMiddleware
+from localmail.serve.daemon_control_socket import ControlSocketServer
+from localmail.serve.daemon_supervisor import (
+    DaemonSupervisor,
+    ExternalDaemonSupervisor,
+    default_daemon_argv,
+    resolve_runtime_dir,
+    socket_path,
+)
 from localmail.serve.middleware import APIErrorHandlerMiddleware, RequestIdMiddleware
 from localmail.serve.routes import accounts as accounts_routes
 from localmail.serve.routes import auth as auth_routes
@@ -34,6 +44,9 @@ def create_app(
     serve_config: ServeConfig | None = None,
     auth_config: AuthConfig | None = None,
     gmail_client_secrets_file: Path | None = None,
+    daemon_config: DaemonConfig | None = None,
+    daemon_config_path: Path | None = None,
+    enable_control_socket: bool = False,
 ) -> FastAPI:
     """Build a FastAPI app bound to a Postgres pool and (optionally) a Searcher.
 
@@ -48,6 +61,7 @@ def create_app(
     """
     cfg = serve_config or ServeConfig()
     auth_cfg = auth_config or AuthConfig()
+    daemon_cfg = daemon_config or DaemonConfig()
     pool = ConnectionPool(
         db_dsn,
         min_size=cfg.pool_min_size,
@@ -55,11 +69,36 @@ def create_app(
         open=True,
     )
 
+    # Plane B supervisor: a real subprocess owner when we supervise the daemon,
+    # else a stub reporting `external`. Constructing it is side-effect-free —
+    # the child is spawned only on an explicit start(); the control socket is
+    # bound only by the lifespan when `enable_control_socket` (the serve path).
+    supervisor: DaemonSupervisor | ExternalDaemonSupervisor
+    if cfg.supervise_daemon:
+        supervisor = DaemonSupervisor(
+            argv=default_daemon_argv(config_path=daemon_config_path),
+            grace_seconds=daemon_cfg.shutdown_grace_seconds,
+        )
+    else:
+        supervisor = ExternalDaemonSupervisor()
+
     @asynccontextmanager
-    async def lifespan(_app: FastAPI):
+    async def lifespan(app_: FastAPI):
+        css: ControlSocketServer | None = None
+        if enable_control_socket and isinstance(supervisor, DaemonSupervisor):
+            runtime_dir = resolve_runtime_dir(cfg.runtime_dir, env=os.environ)
+            css = ControlSocketServer(
+                path=socket_path(runtime_dir), supervisor=supervisor
+            )
+            css.start()
+            app_.state.control_socket_server = css
         try:
             yield
         finally:
+            if css is not None:
+                css.close()
+            if isinstance(supervisor, DaemonSupervisor):
+                supervisor.close()
             pool.close()
 
     app = FastAPI(lifespan=lifespan)
@@ -67,6 +106,9 @@ def create_app(
     app.state.searcher = searcher
     app.state.serve_config = cfg
     app.state.auth_config = auth_cfg
+    app.state.daemon_config = daemon_cfg
+    app.state.daemon_supervisor = supervisor
+    app.state.control_socket_server = None
     app.state.gmail_client_secrets_file = gmail_client_secrets_file
 
     # Exception handler for APIError raised inside route handlers / dependencies.
@@ -137,6 +179,7 @@ def create_app(
         app.include_router(admin_auth_router.router, prefix="/admin")
         app.include_router(admin_dashboard_router.router, prefix="/admin")
         app.include_router(admin_accounts_router.router, prefix="/v1/admin")
+        app.include_router(admin_daemon_router.router, prefix="/v1/admin")
         app.include_router(admin_oauth_router.router_v1, prefix="/v1/admin")
         app.include_router(admin_oauth_router.router_admin, prefix="/admin")
         admin_static = Path(__file__).parent / "admin" / "static"

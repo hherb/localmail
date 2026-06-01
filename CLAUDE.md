@@ -101,7 +101,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0022_api_users_sessions_invalidated_at.sql (0020_accounts_canonical.sql also applied)
+migrations/         # 0001_init.sql … 0024_daemon_commands.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -634,6 +634,51 @@ for the full design.
   is a no-op that leaves `updated_at` untouched. Both commands share the
   `cli._apply_sync_toggle` helper, which only calls `update_account` on the
   `apply` branch. No new migration (`sync_enabled` ships in `0020`).
+- **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
+  planes for the sync daemon. **Plane B** (process lifecycle) lives in
+  [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):
+  `DaemonSupervisor` owns `localmail run` via `subprocess.Popen`
+  (`start`/`stop`/`restart`/`status`/`recent_log_lines`), a state machine
+  `stopped → starting → running → stopping → stopped` with `crashed` for an
+  unexpected child exit (detected by the stdout reader thread hitting EOF while
+  state is still `running`), and a bounded ring buffer (`deque(maxlen)`) of the
+  child's combined stdout/stderr. `stop()` is SIGTERM → wait
+  `daemon.shutdown_grace_seconds` → SIGKILL, and deliberately **releases the
+  lock before waiting** so the reader thread can never deadlock against the
+  grace wait. `ExternalDaemonSupervisor` is the stub for
+  `[serve] supervise_daemon = false` (systemd deploy): `status()` reports
+  `external`; lifecycle ops raise `SupervisorUnavailable`. Pure helpers
+  (`resolve_runtime_dir`, `socket_path`, `default_daemon_argv`,
+  `status_to_dict`) are shared by serve + CLI so both derive the same socket
+  path / launch argv / wire shape. The child is launched as
+  `python -m localmail run` (portable — `src/localmail/__main__.py` shim, no
+  PATH dependence). The **control socket**
+  ([src/localmail/serve/daemon_control_socket.py](src/localmail/serve/daemon_control_socket.py))
+  is newline-delimited JSON over a Unix socket at
+  `${runtime_dir}/localmail-supervisor.sock` (mode 0600): `handle_control_request`
+  is a pure dispatcher (supervisor in, dict out, never raises),
+  `ControlSocketServer` wraps it with an accept loop, `send_control_request` is
+  the client half the CLI uses. `create_app` builds the supervisor on
+  `app.state.daemon_supervisor` (real when `supervise_daemon`, stub otherwise)
+  **side-effect-free** — the child spawns only on an explicit `start()`, and the
+  control socket binds only in the lifespan when `enable_control_socket=True`
+  (the `serve` CLI path), so TestClient apps never bind a shared socket. HTTP
+  routes ([src/localmail/serve/admin/daemon_router.py](src/localmail/serve/admin/daemon_router.py),
+  admin-gated, method-bound CSRF): `GET /v1/admin/daemon` fuses supervisor
+  process state + `daemon_heartbeats` + recent log (`supervise_daemon_externally`
+  derives from the supervisor's own `state == external`, not config, so a
+  swapped stub reports correctly); `POST /v1/admin/daemon/{start,stop,restart}`
+  (Plane B; 409 on the external stub); `POST /v1/admin/daemon/reload` and `POST
+  /v1/admin/accounts/{id}/restart-sync` (Plane A → `enqueue_command` reusing 2B.3,
+  not re-implemented; restart-sync 404s an unknown account before enqueue). CLI
+  ([src/localmail/daemon_cli.py](src/localmail/daemon_cli.py), registered via
+  `main.add_command(daemon_group)`): `localmail daemon {status,reload,restart-account}`
+  work against the DB planes even when externally supervised;
+  `{start,stop,restart}` go over the socket and exit non-zero with a clear note
+  when `supervise_daemon=false` (external) or the socket is unreachable (serve
+  not running). `status` always prints heartbeats; an unreachable socket is
+  reported, not a failure. **No new migration** (reuses 0023 heartbeats + 0024
+  commands).
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.
@@ -813,9 +858,9 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0022_api_users_sessions_invalidated_at.sql`; next would be
-  `0023_*.sql`. (`0020_accounts_canonical.sql` has now shipped — the gap
-  is filled.)
+  Latest is `0024_daemon_commands.sql`; next would be `0025_*.sql`.
+  (2B.4 added no migration — the supervisor + routes + CLI are stateless
+  and reuse `0023_daemon_heartbeats.sql` + `0024_daemon_commands.sql`.)
 
 ## Testing notes
 

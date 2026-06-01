@@ -44,6 +44,12 @@ db_statement_timeout_s = 30
 # connect succeeds. Effective on Linux; libpq ignores it where TCP_USER_TIMEOUT
 # is unavailable (e.g. macOS). Set to 0 to use the OS default (disable).
 db_tcp_user_timeout_ms = 30000
+# 2B.3 command queue: LISTEN the daemon_commands channel so an enqueued
+# reload-now / restart-account / drain-stop wakes the reconcile loop early
+# instead of waiting out reload_seconds. The poll path is authoritative; this
+# is a latency optimization. Set command_listen_enabled = false to disable.
+# command_listen_enabled = true
+# command_listen_poll_seconds = 5.0
 
 [serve]
 # Admin UI signing keys. Required when admin UI is in use.

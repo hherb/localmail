@@ -13,6 +13,11 @@ from typing import Any
 import psycopg
 
 from .api.admin.accounts import Account, list_syncable_accounts
+from .api.admin.daemon import (
+    DaemonCommand,
+    claim_commands,
+    mark_command,
+)
 from .config import Config
 from .daemon_accounts import account_config_from_row
 from .daemon_reconcile import plan_reconcile
@@ -53,6 +58,11 @@ class Daemon:
         self.ssl = ssl
         self._dsn = dsn or cfg.database.dsn
         self._stop_event = stop_event or threading.Event()
+        self._reconcile_wake = threading.Event()
+        # Set while the command listener holds a LISTEN connection so stop() can
+        # close it cross-thread and interrupt the in-flight notifies() wait (the
+        # only way to exit faster than command_listen_poll_seconds on shutdown).
+        self._listener_conn: psycopg.Connection | None = None
         self._syncable = retry_with_backoff(
             self._load_syncable_accounts,
             stop_event=self._stop_event,
@@ -126,6 +136,8 @@ class Daemon:
     def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("received signal %s; stopping daemon", signum)
         self._stop_event.set()
+        self._reconcile_wake.set()
+        self._interrupt_listener()
 
     def _gmail_secrets(self) -> Path | None:
         return (
@@ -223,6 +235,103 @@ class Daemon:
             log.info("daemon pool resized: max_size=%d (accounts=%d)",
                      max_size, len(self._account_threads))
 
+    def _drain_commands(self) -> None:
+        """Claim and apply every queued daemon command, marking each done/failed.
+
+        Runs at the top of each reconcile tick on a fresh bounded connection. The
+        FOR UPDATE lock is held across apply+mark until the single commit, so a
+        concurrent consumer (defensive — single daemon assumed) skips claimed
+        rows. For restart-account that hold spans the thread-join inside
+        _teardown_account (bounded by shutdown_grace_seconds per account); no
+        idle_in_transaction timeout is set on these connections, so a stalled
+        worker can hold the lock that long — acceptable under the single-daemon
+        model. A drain failure is logged and swallowed: the transaction rolls
+        back (claimed rows revert to 'queued'), existing threads keep running,
+        and the next tick re-claims and retries."""
+        try:
+            with self._connect() as conn:
+                commands = claim_commands(conn)
+                for cmd in commands:
+                    try:
+                        msg = self._apply_command(cmd)
+                        mark_command(conn, cmd.id, state="done", result_msg=msg)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("daemon command %s (id=%s) failed",
+                                    cmd.command, cmd.id, exc_info=True)
+                        # If even the failure-mark can't be written (connection
+                        # in an error state), let the outer handler roll the
+                        # whole batch back so it's re-claimed next tick rather
+                        # than half-committed.
+                        mark_command(conn, cmd.id, state="failed",
+                                     result_msg=str(exc))
+                conn.commit()
+        except Exception:
+            log.warning("command drain failed; will retry next tick", exc_info=True)
+
+    def _apply_command(self, cmd: DaemonCommand) -> str:
+        """Apply one command against the live thread registry; return a result
+        message. `restart-account` only tears the bundle down — the same-tick
+        reconcile diff respawns it if the account is still syncable (running set
+        now lacks it; desired set still has it)."""
+        if cmd.command == "reload-now":
+            return "reconcile triggered"
+        if cmd.command == "drain-stop":
+            self._stop_event.set()
+            self._reconcile_wake.set()
+            return "daemon stopping"
+        if cmd.command == "restart-account":
+            assert cmd.account_id is not None  # DB CHECK guarantees this
+            self._teardown_account(cmd.account_id)
+            return f"account {cmd.account_id} torn down for restart"
+        raise ValueError(f"unknown daemon command {cmd.command!r}")
+
+    def _run_command_listener(self) -> None:
+        """LISTEN the daemon_commands channel; set the reconcile wake on each
+        NOTIFY so run_forever reconciles early instead of waiting out
+        reload_seconds. A dedicated autocommit connection (LISTEN must be visible
+        immediately and notifications are only delivered outside a transaction).
+        statement_timeout is disabled on this long-lived connection (it would be
+        irrelevant during a socket wait, but disable it for clarity). Reconnects
+        with the same fresh-connect bounds on any error; exits on the stop event.
+        The poll path remains authoritative — this loop only reduces latency."""
+        poll = self.cfg.daemon.command_listen_poll_seconds
+        while not self._stop_event.is_set():
+            try:
+                with self._connect() as conn:
+                    conn.autocommit = True
+                    conn.execute("SET statement_timeout = 0")
+                    conn.execute("LISTEN daemon_commands")
+                    # Publish for stop()/_handle_signal to close cross-thread,
+                    # interrupting the notifies() wait below immediately.
+                    self._listener_conn = conn
+                    try:
+                        while not self._stop_event.is_set():
+                            for _note in conn.notifies(timeout=poll, stop_after=1):
+                                self._reconcile_wake.set()
+                    finally:
+                        self._listener_conn = None
+            except Exception:
+                if self._stop_event.is_set():
+                    break
+                log.warning("command listener error; reconnecting",
+                            exc_info=True)
+                self._stop_event.wait(poll)  # brief backoff before retry
+
+    def _interrupt_listener(self) -> None:
+        """Close the listener's LISTEN connection (if any) to break it out of a
+        blocking notifies() wait at once. Best-effort and idempotent: the
+        connection may already be gone (None) or mid-reconnect, and closing it
+        cross-thread races the listener's own `with` cleanup — either order ends
+        with a closed connection, and the listener's `except Exception` swallows
+        the resulting error while `_stop_event` is set."""
+        conn = self._listener_conn
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            pass
+
     def reconcile(self) -> None:
         """Converge the running per-account threads on the DB's syncable set.
 
@@ -230,6 +339,9 @@ class Daemon:
         existing threads keep running and the next tick retries. Apply order is
         teardown -> respawn -> spawn so freed pool slots are reused first.
         """
+        self._drain_commands()
+        if self._stop_event.is_set():
+            return  # drain-stop fired; run_forever handles shutdown
         try:
             with self._connect() as conn:
                 desired_rows = list_syncable_accounts(conn)
@@ -332,6 +444,8 @@ class Daemon:
     def stop(self) -> None:
         """Signal every thread to stop (master event + all per-account events)."""
         self._stop_event.set()
+        self._reconcile_wake.set()
+        self._interrupt_listener()
         # Snapshot: reconcile() may mutate _account_threads on the daemon
         # thread while stop() runs from another thread (signal / supervisor).
         for bundle in list(self._account_threads.values()):
@@ -350,16 +464,34 @@ class Daemon:
             signal.signal(signal.SIGTERM, self._handle_signal)
             signal.signal(signal.SIGINT, self._handle_signal)
         self.start_workers()  # initial account spawn + embed/extract workers
-        log.info("daemon running; reconciling every %ds",
+        listener: threading.Thread | None = None
+        if self.cfg.daemon.command_listen_enabled:
+            listener = threading.Thread(
+                target=self._run_command_listener,
+                name="command_listener", daemon=True,
+            )
+            listener.start()
+            log.info("started command listener thread")
+        log.info("daemon running; reconciling every %ds (wake on NOTIFY)",
                  self.cfg.daemon.reload_seconds)
         try:
-            while not self._stop_event.wait(self.cfg.daemon.reload_seconds):
+            while True:
+                # Wake on a NOTIFY (listener) or stop (signal/drain-stop), else
+                # fall through after reload_seconds for the authoritative poll.
+                self._reconcile_wake.wait(self.cfg.daemon.reload_seconds)
+                self._reconcile_wake.clear()
+                if self._stop_event.is_set():
+                    break
                 self.reconcile()
+                if self._stop_event.is_set():
+                    break  # drain-stop fired inside reconcile
         finally:
             log.info("waiting for worker threads to finish")
             for account_id in list(self._account_threads):
                 self._teardown_account(account_id)
             for t in self._worker_threads:
                 t.join(timeout=self.cfg.daemon.shutdown_grace_seconds)
+            if listener is not None:
+                listener.join(timeout=self.cfg.daemon.shutdown_grace_seconds)
             self.pool.close()
             log.info("daemon stopped")

@@ -58,6 +58,17 @@ db_tcp_user_timeout_ms = 30000
 # state_signing_key   = "..."
 # oauth_callback_url  = "https://localmail.example.com/admin/oauth/callback"
 
+# Daemon supervision (2B.4). When true (default) `localmail serve` owns
+# `localmail run` as a child process and binds a Unix control socket the
+# `localmail daemon {start,stop,restart}` CLI talks to. Set false for the
+# systemd deployment where the supervisor owns `localmail run` independently —
+# DB-mediated control (`daemon reload` / `restart-account`) and read-only
+# `daemon status` still work; lifecycle ops report `external`.
+# supervise_daemon = true
+# Directory for the supervisor control socket (localmail-supervisor.sock, 0600).
+# Empty = resolve from $XDG_RUNTIME_DIR, falling back to the platform temp dir.
+# runtime_dir = "/run/localmail"
+
 [auth]
 # Login rate-limit thresholds (all Postgres-backed; survive
 # uvicorn --workers N and serve restarts).

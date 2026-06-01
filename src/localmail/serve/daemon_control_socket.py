@@ -155,6 +155,15 @@ class ControlSocketServer:
         conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
     def close(self) -> None:
+        """Stop accepting and remove the socket file.
+
+        Joins only the accept thread; in-flight per-connection handler threads
+        are daemon threads and are intentionally not joined — a handler mid
+        lifecycle op (a stop() up to shutdown_grace_seconds) is allowed to run
+        to completion in the background. That converges safely with the
+        lifespan's own supervisor.close(): both call the idempotent, lock-guarded
+        stop(), so a concurrent teardown can't double-act on the child.
+        """
         self._stop.set()
         if self._sock is not None:
             self._sock.close()

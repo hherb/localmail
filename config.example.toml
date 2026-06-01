@@ -67,6 +67,11 @@ db_tcp_user_timeout_ms = 30000
 # supervise_daemon = true
 # Directory for the supervisor control socket (localmail-supervisor.sock, 0600).
 # Empty = resolve from $XDG_RUNTIME_DIR, falling back to the platform temp dir.
+# Security: the socket is the daemon control plane — anyone who can connect to
+# it can start/stop/restart the daemon. The socket file is mode 0600, but its
+# parent directory must not be world-writable; point runtime_dir at a per-user
+# dir ($XDG_RUNTIME_DIR is 0700 and ideal). Do NOT use a shared/world-writable
+# location like a bare /tmp on a multi-user host.
 # runtime_dir = "/run/localmail"
 
 [auth]

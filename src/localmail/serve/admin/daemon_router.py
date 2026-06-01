@@ -63,6 +63,9 @@ def get_daemon(
         status = daemon_svc.get_daemon_status(
             conn, stale_seconds=daemon_cfg.heartbeat_stale_seconds
         )
+    # Process state, heartbeats, and log are sampled independently (no global
+    # snapshot lock). This is a read-only monitoring view; momentary skew
+    # between the three is acceptable and not worth serialising the supervisor.
     return {
         **proc,
         "supervise_daemon_externally": proc["state"] == SupervisorState.EXTERNAL,

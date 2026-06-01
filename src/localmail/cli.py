@@ -17,6 +17,7 @@ from . import secrets
 from .config import AccountConfig, Config, default_config_path, load_config
 from .daemon import Daemon
 from .daemon_accounts import account_config_from_row
+from .daemon_cli import daemon_group
 from .account_seed import account_create_kwargs, seed_accounts
 from .api.admin.accounts import (
     Account,
@@ -136,6 +137,9 @@ def main(ctx: click.Context, config_path: Path | None) -> None:
     """Local PostgreSQL archive of one or more IMAP accounts."""
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path or default_config_path()
+
+
+main.add_command(daemon_group)
 
 
 @main.command("init-db")
@@ -1228,18 +1232,20 @@ def serve_cmd(
             "--no-tls is only valid when --bind resolves to a loopback address"
         )
 
-    from localmail.config import AuthConfig, ServeConfig
+    from localmail.config import AuthConfig, DaemonConfig, ServeConfig
     override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
     if override:
         dsn = override
         serve_cfg = ServeConfig()
         auth_cfg = AuthConfig()
+        daemon_cfg = DaemonConfig()
         gmail_secrets = None
     else:
         cfg = load_config(ctx.obj["config_path"])
         dsn = cfg.database.dsn
         serve_cfg = cfg.serve
         auth_cfg = cfg.auth
+        daemon_cfg = cfg.daemon
         gmail_secrets = (
             cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
         )
@@ -1273,6 +1279,9 @@ def serve_cmd(
         serve_config=serve_cfg,
         auth_config=auth_cfg,
         gmail_client_secrets_file=gmail_secrets,
+        daemon_config=daemon_cfg,
+        daemon_config_path=ctx.obj["config_path"],
+        enable_control_socket=serve_cfg.supervise_daemon,
     )
 
     if no_tls:

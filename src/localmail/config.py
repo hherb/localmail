@@ -138,6 +138,19 @@ class ServeConfig(BaseModel):
     # must set this to False or the browser will reject the cookie.
     cookie_secure: bool = True
 
+    # 2B.4 daemon supervision. When True (default) the serve process owns
+    # `localmail run` as a child subprocess (Plane B: start/stop/restart) and
+    # binds a Unix control socket the CLI can talk to. Set False for the
+    # systemd deployment where the supervisor owns `localmail run`
+    # independently — Plane A (reload / restart-account via the command queue)
+    # and read-only status still work; lifecycle ops report `external`.
+    supervise_daemon: bool = True
+    # Directory for the supervisor's Unix control socket
+    # (`localmail-supervisor.sock`, mode 0600). Empty default = resolve at run
+    # time from $XDG_RUNTIME_DIR, falling back to the platform temp dir. Set
+    # explicitly to pin the socket location (e.g. `/run/localmail`).
+    runtime_dir: str = ""
+
     @field_validator("session_signing_key", "state_signing_key")
     @classmethod
     def _validate_signing_key(cls, v: str) -> str:

@@ -30,3 +30,23 @@ def test_short_keys_rejected(field: str) -> None:
     kwargs = {field: "tooshort"}
     with pytest.raises(ValueError):
         ServeConfig(**kwargs)
+
+
+def test_supervise_daemon_defaults_true() -> None:
+    """The serve process supervises `localmail run` by default (2B.4)."""
+    assert ServeConfig().supervise_daemon is True
+
+
+def test_supervise_daemon_can_be_disabled() -> None:
+    """Externally-supervised deployments (systemd) set this false."""
+    assert ServeConfig(supervise_daemon=False).supervise_daemon is False
+
+
+def test_runtime_dir_defaults_empty() -> None:
+    """Empty runtime_dir means 'resolve from $XDG_RUNTIME_DIR / tmp at run time'."""
+    assert ServeConfig().runtime_dir == ""
+
+
+def test_runtime_dir_is_kept() -> None:
+    cfg = ServeConfig(runtime_dir="/run/localmail")
+    assert cfg.runtime_dir == "/run/localmail"

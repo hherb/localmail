@@ -56,3 +56,10 @@ body {
   cursor: pointer;
 }
 .admin-login-card { max-width: 360px; margin: 60px auto; }
+.daemon-controls { margin: 0.75rem 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.daemon-note { color: #8a6d00; font-style: italic; }
+.daemon-heartbeats { border-collapse: collapse; width: 100%; }
+.daemon-heartbeats th, .daemon-heartbeats td { padding: 0.25rem 0.5rem; text-align: left; border-bottom: 1px solid #ddd; }
+.daemon-stale td { color: #b00020; }
+.daemon-stale-tag { color: #b00020; font-weight: bold; }
+.daemon-log pre { background: #f4f4f4; padding: 0.5rem; overflow-x: auto; max-height: 16rem; }

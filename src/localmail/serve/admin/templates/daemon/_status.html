@@ -1,0 +1,70 @@
+<div id="daemon-status"
+     hx-get="/admin/_partials/daemon-status"
+     hx-trigger="every {{ poll_seconds }}s"
+     hx-swap="outerHTML">
+  <section class="daemon-process">
+    <h2>Process</h2>
+    <p>State: <strong>{{ view.state }}</strong>
+      {% if view.pid %}(pid {{ view.pid }}){% endif %}
+      {% if view.started_at %}— started {{ view.started_at }}{% endif %}
+    </p>
+    <div class="daemon-controls">
+      {% if view.supervise_daemon_externally %}
+        <p class="daemon-note">Daemon is supervised externally; start / stop /
+          restart are managed by your init system, not here.</p>
+        <button type="button" disabled>Start</button>
+        <button type="button" disabled>Stop</button>
+        <button type="button" disabled>Restart</button>
+      {% else %}
+        <button type="button" hx-post="/v1/admin/daemon/start" hx-swap="none"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/v1/admin/daemon/start") }}"}'>Start</button>
+        <button type="button" hx-post="/v1/admin/daemon/stop" hx-swap="none"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/v1/admin/daemon/stop") }}"}'>Stop</button>
+        <button type="button" hx-post="/v1/admin/daemon/restart" hx-swap="none"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/v1/admin/daemon/restart") }}"}'>Restart</button>
+      {% endif %}
+      <button type="button" hx-post="/v1/admin/daemon/reload" hx-swap="none"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/v1/admin/daemon/reload") }}"}'>Reload now</button>
+    </div>
+  </section>
+
+  <section class="daemon-workers">
+    <h2>Workers</h2>
+    {% if view.heartbeats %}
+    <table class="daemon-heartbeats">
+      <thead>
+        <tr><th>Worker</th><th>Account</th><th>State</th><th>Folder</th>
+            <th>Last heartbeat</th><th>Error</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for hb in view.heartbeats %}
+        <tr class="{% if hb.stale %}daemon-stale{% endif %}">
+          <td>{{ hb.worker_kind }}</td>
+          <td>{{ hb.account_id or "—" }}</td>
+          <td>{{ hb.state }}</td>
+          <td>{{ hb.current_folder or "—" }}</td>
+          <td>{{ hb.last_heartbeat_at }}{% if hb.stale %} <span class="daemon-stale-tag">stale</span>{% endif %}</td>
+          <td>{{ hb.last_error_msg or "" }}</td>
+          <td>
+            {% if hb.account_id %}
+            <button type="button"
+              hx-post="/v1/admin/accounts/{{ hb.account_id }}/restart-sync"
+              hx-swap="none"
+              hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/v1/admin/accounts/" ~ hb.account_id ~ "/restart-sync") }}"}'>Restart sync</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No heartbeats recorded.</p>
+    {% endif %}
+  </section>
+
+  <section class="daemon-log">
+    <h2>Recent log</h2>
+    <pre>{% for line in view.recent_log %}{{ line }}
+{% endfor %}</pre>
+  </section>
+</div>

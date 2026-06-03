@@ -2,7 +2,11 @@
 {% block title %}Daemon — localmail admin{% endblock %}
 {% block content %}
 <h1>Daemon control</h1>
+{# Toast lives outside the self-swapping #daemon-status fragment so the 2s
+   `outerHTML` poll can't wipe an in-flight error message (#148). #}
+<div id="daemon-toast" class="daemon-toast" role="status" aria-live="polite" hidden></div>
 <div class="admin-card">
   {% include "daemon/_status.html" %}
 </div>
+<script src="/admin/static/daemon-panel.js" defer></script>
 {% endblock %}

@@ -101,7 +101,9 @@ live via an HTMX poll. The lifecycle buttons are disabled with a note when the
 daemon is supervised externally. The HTTP lifecycle routes
 (`POST /v1/admin/daemon/{start,stop,restart}`) return **202 Accepted** with the
 transitional status — the panel and CLI poll `GET /v1/admin/daemon` to observe
-the daemon settling.
+the daemon settling. A rejected control action (a busy-guard **409** while
+another lifecycle op is in flight, or a stale-token **400**) surfaces a brief
+toast on the panel rather than leaving the button looking inert.
 
 ### Search backfill & status
 

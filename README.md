@@ -252,6 +252,10 @@ a perfectly fine PDF as failed):
   or `MemoryError` anywhere in the cause chain. Rolled back to the per-blob
   SAVEPOINT, logged as a WARNING, **no** `failed_extractions` row written.
   The blob remains eligible for the next sweep with `retry_count` untouched.
+  docling's third-party network failures (`requests` / `httpx` / `urllib3` /
+  `huggingface_hub`, e.g. a model-fetch blip) aren't builtin `ConnectionError`
+  subclasses, so `DoclingExtractor` opts them into `TransientExtractorError`
+  at the wrapper — they retry instead of being recorded as poison-pills.
 - **Poison-pill** — corrupt PDF, encrypted, parser raise, anything else.
   Recorded in `failed_extractions` with `retry_count += 1`, permanently
   skipped once `retry_count >= search.extract_worker_max_retries` (default 3).

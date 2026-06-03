@@ -434,6 +434,20 @@ for the Phase 2 plan.
 - `_extract_xlsx` blob-path workaround: openpyxl detects format by file extension,
   so the worker passes `io.BytesIO(path.read_bytes())` instead of the
   extension-free blob path. No other Office extractor has this issue.
+- **Transient classification of third-party docling failures (#47)**:
+  `extract_worker._is_transient` recognises only the narrow builtin
+  `_TRANSIENT_EXC_TYPES` (`ConnectionError`/`TimeoutError`/`MemoryError`) plus
+  `TransientExtractorError` — broadening it (e.g. `OSError`) would mis-classify
+  permanent `ENOENT`/`EACCES`. docling's network errors are *third-party*
+  classes (`requests`/`httpx`/`urllib3`/`huggingface_hub`) outside that
+  hierarchy, so `DoclingExtractor.extract` opts them in **at the wrapper**:
+  a `convert()` failure whose cause/context chain contains a package in
+  `extractor._TRANSIENT_THIRD_PARTY_MODULES` is re-raised as
+  `TransientExtractorError` (retried next sweep, not poison-pilled). The
+  chain walk is the shared pure `extractor.iter_exc_chain` generator, reused
+  by both `_is_transient` and `_exc_chain_has_transient_module`. To add a
+  newly-observed transient package, extend the frozenset — never widen the
+  builtin `_TRANSIENT_EXC_TYPES`.
 
 **`bm25_field_boosts` weight normalization**: `arms.py` normalises the raw
 boost values by `max(raw)` to satisfy `ts_rank_cd`'s `[0, 1]` weight

@@ -283,3 +283,63 @@ def test_external_stub_refuses_request_lifecycle(method: str) -> None:
     s = ExternalDaemonSupervisor()
     with pytest.raises(SupervisorUnavailable):
         getattr(s, method)()
+
+
+# --- close() during an in-flight async restart (#149) ---------------------
+
+class _BarrierRestartSupervisor(DaemonSupervisor):
+    """Pauses `restart()` exactly between its stop() and start() halves so a
+    test can land close() in that window deterministically. close() uses the
+    real (unhooked) stop(), so it is not blocked by the barrier."""
+
+    def __init__(self, *args, between, proceed, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._between = between
+        self._proceed = proceed
+
+    def restart(self) -> None:
+        self.stop()
+        self._between.set()
+        assert self._proceed.wait(timeout=5.0)
+        self.start()
+
+
+def test_close_during_async_restart_does_not_respawn() -> None:
+    """#149: if close() lands between an async restart's stop() and start(),
+    the start() half must NOT re-spawn an orphaned child."""
+    import threading
+
+    between = threading.Event()
+    proceed = threading.Event()
+    s = _BarrierRestartSupervisor(
+        argv=_SLEEPER, grace_seconds=2.0, between=between, proceed=proceed
+    )
+    s.start()
+    _wait_state(s, SupervisorState.RUNNING)
+
+    s.request_restart()  # lifecycle thread: stop() … [barrier] … start()
+    assert between.wait(timeout=5.0)  # restart's stop() half has completed
+
+    s.close()  # serve shutdown lands in the gap; sets the closing flag
+    proceed.set()  # release the restart to attempt its start() half
+
+    lifecycle = s._lifecycle_thread
+    assert lifecycle is not None
+    lifecycle.join(timeout=5.0)
+    assert not lifecycle.is_alive()
+
+    st = s.status()
+    assert st.state == SupervisorState.STOPPED
+    assert st.pid is None
+    assert s._proc is None or s._proc.poll() is not None
+
+
+def test_start_after_close_is_a_noop() -> None:
+    """The closing flag makes start() inert after close(), independent of the
+    restart path — no child is spawned once the supervisor is closing."""
+    s = DaemonSupervisor(argv=_SLEEPER, grace_seconds=2.0)
+    s.close()
+    s.start()
+    st = s.status()
+    assert st.state == SupervisorState.STOPPED
+    assert st.pid is None

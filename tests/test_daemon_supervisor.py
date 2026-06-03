@@ -193,3 +193,93 @@ def test_external_stub_refuses_lifecycle(method: str) -> None:
     s = ExternalDaemonSupervisor()
     with pytest.raises(SupervisorUnavailable):
         getattr(s, method)()
+
+
+# --- async lifecycle (request_*) -----------------------------------------
+
+# A child that ignores SIGTERM so stop() blocks the full grace window,
+# giving a deterministic interval to observe STOPPING / hit the busy-guard.
+_DEAF_SLEEPER = [
+    sys.executable, "-c",
+    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "print('up', flush=True); time.sleep(60)",
+]
+
+
+def _wait_state(sup: DaemonSupervisor, target: str, timeout: float = 6.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if sup.status().state == target:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"never reached {target}; now {sup.status().state}")
+
+
+def test_request_start_settles_to_running() -> None:
+    s = DaemonSupervisor(argv=_SLEEPER, grace_seconds=2.0)
+    try:
+        s.request_start()
+        _wait_state(s, SupervisorState.RUNNING)
+        assert s.status().pid is not None
+    finally:
+        s.stop()
+
+
+def test_request_stop_sets_transitional_then_stopped() -> None:
+    s = DaemonSupervisor(argv=_DEAF_SLEEPER, grace_seconds=1.0)
+    try:
+        s.request_start()
+        _wait_state(s, SupervisorState.RUNNING)
+        s.request_stop()
+        # Transitional state is visible immediately, before the grace wait ends.
+        assert s.status().state == SupervisorState.STOPPING
+        _wait_state(s, SupervisorState.STOPPED)
+    finally:
+        s.stop()
+
+
+def test_busy_guard_rejects_second_lifecycle_op() -> None:
+    s = DaemonSupervisor(argv=_DEAF_SLEEPER, grace_seconds=1.0)
+    try:
+        s.request_start()
+        _wait_state(s, SupervisorState.RUNNING)
+        s.request_stop()  # now in flight, blocking on the 1s grace wait
+        assert s.status().state == SupervisorState.STOPPING
+        with pytest.raises(SupervisorUnavailable):
+            s.request_stop()
+        _wait_state(s, SupervisorState.STOPPED)
+    finally:
+        s.stop()
+
+
+def test_request_start_idempotent_when_running() -> None:
+    s = DaemonSupervisor(argv=_SLEEPER, grace_seconds=2.0)
+    try:
+        s.request_start()
+        _wait_state(s, SupervisorState.RUNNING)
+        pid1 = s.status().pid
+        s.request_start()  # no-op, not a busy error
+        assert s.status().state == SupervisorState.RUNNING
+        assert s.status().pid == pid1
+    finally:
+        s.stop()
+
+
+def test_request_restart_settles_to_running_new_pid() -> None:
+    s = DaemonSupervisor(argv=_SLEEPER, grace_seconds=2.0)
+    try:
+        s.request_start()
+        _wait_state(s, SupervisorState.RUNNING)
+        pid1 = s.status().pid
+        s.request_restart()
+        _wait_state(s, SupervisorState.RUNNING)
+        assert s.status().pid != pid1
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("method", ["request_start", "request_stop", "request_restart"])
+def test_external_stub_refuses_request_lifecycle(method: str) -> None:
+    s = ExternalDaemonSupervisor()
+    with pytest.raises(SupervisorUnavailable):
+        getattr(s, method)()

@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 
 from localmail.api.admin.auth import AdminUser
-from localmail.api.admin.csrf import CSRFError, verify_csrf_token
+from localmail.api.admin.csrf import CSRFError, make_csrf_token, verify_csrf_token
 
 
 def session_signing_key(request: Request) -> bytes:
@@ -32,6 +32,34 @@ def csrf_action(method: str, action_path: str) -> str:
     token-mint side (UI / tests) and the verify side derive the same string.
     """
     return f"{method.upper()}:{action_path}"
+
+
+def csrf_token_context(*, user_id: int, key: bytes) -> dict:
+    """Jinja context helpers for minting CSRF tokens for one admin user.
+
+    Returns two callables:
+      * ``csrf_token_for(action)`` — legacy single-arg (non-method-bound), used
+        by ``base.html``'s body-wide htmx header and the logout form.
+      * ``csrf_token_for_method(method, action)`` — method-bound (#122/#125):
+        the form HTML UIs MUST use this for any route guarded by ``check_csrf``,
+        which binds the action to the request method via ``csrf_action``.
+
+    Sharing the mint here keeps every admin HTML template deriving the identical
+    bound string the verify side expects (reused by the daemon panel + future
+    account screens, 2A.3).
+    """
+    def csrf_token_for(action: str) -> str:
+        return make_csrf_token(user_id=user_id, action=action, key=key)
+
+    def csrf_token_for_method(method: str, action: str) -> str:
+        return make_csrf_token(
+            user_id=user_id, action=csrf_action(method, action), key=key
+        )
+
+    return {
+        "csrf_token_for": csrf_token_for,
+        "csrf_token_for_method": csrf_token_for_method,
+    }
 
 
 def check_csrf(

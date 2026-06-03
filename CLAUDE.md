@@ -105,7 +105,7 @@ migrations/         # 0001_init.sql … 0024_daemon_commands.sql (0023_daemon_he
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
-                    # run_browse_explain.py)
+                    # run_browse_explain.py, run_chunk_insert_bench.py)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
   _eml.py           # MIME fixture builders (no .eml files on disk)
   _fake_imap.py     # in-memory IMAP fake with IDLE support
@@ -471,6 +471,22 @@ synthetic corpora are insensitive to `rrf_k` across [1, 1000] — fusion is
 dominated by a single arm — so the default `rrf_k=60` is fine until
 production data or an adversarial corpus exposes the bias hypothesised in
 #35.
+
+**Chunk-insert benchmark (#5, closed not-fixed)**:
+`tests/acceptance/run_chunk_insert_bench.py` seeds N multi-chunk messages and
+times the chunking loop's per-chunk `cur.execute` (production) against a batched
+`cur.executemany` candidate, both inside the same per-message SAVEPOINT. #5
+hypothesised that row-by-row chunk INSERTs were a backfill bottleneck. The
+measurement (localhost Postgres, 1500 msgs × ~12 chunks) showed the loop is
+**tokenization-bound** — ~880 chunks/s regardless of INSERT strategy, because
+`chunk_message` spends its time in tiktoken `encode`, not INSERT round-trips. On
+localhost `executemany` is ~4% *slower* (per-call batching overhead with no
+round-trip latency to amortise). localmail is **single-host**, so Postgres is
+always local — the remote-DB scenario where `executemany` would win never
+applies. The production loop **stays row-by-row**; #5 is closed on this evidence.
+Per-message poison isolation at the INSERT layer is pinned by
+`test_embed_worker.py::test_insert_failure_isolates_poison_message_per_savepoint`
+(NUL-byte chunk text → INSERT rejected → only that message rolls back).
 
 ## GUI server (Phase 1 of GUI)
 

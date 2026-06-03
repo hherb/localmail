@@ -439,15 +439,21 @@ for the Phase 2 plan.
   `_TRANSIENT_EXC_TYPES` (`ConnectionError`/`TimeoutError`/`MemoryError`) plus
   `TransientExtractorError` — broadening it (e.g. `OSError`) would mis-classify
   permanent `ENOENT`/`EACCES`. docling's network errors are *third-party*
-  classes (`requests`/`httpx`/`urllib3`/`huggingface_hub`) outside that
-  hierarchy, so `DoclingExtractor.extract` opts them in **at the wrapper**:
+  classes (`requests`/`httpx`/`urllib3`/`huggingface_hub`/`aiohttp`) outside
+  that hierarchy, so `DoclingExtractor.extract` opts them in **at the wrapper**:
   a `convert()` failure whose cause/context chain contains a package in
   `extractor._TRANSIENT_THIRD_PARTY_MODULES` is re-raised as
   `TransientExtractorError` (retried next sweep, not poison-pilled). The
   chain walk is the shared pure `extractor.iter_exc_chain` generator, reused
   by both `_is_transient` and `_exc_chain_has_transient_module`. To add a
   newly-observed transient package, extend the frozenset — never widen the
-  builtin `_TRANSIENT_EXC_TYPES`.
+  builtin `_TRANSIENT_EXC_TYPES`. **Known trade-off (#153)**: the transient
+  path never increments `retry_count`, so a *permanently* failing third-party
+  network error (`huggingface_hub` 401/403 from a misconfigured token, 404 for
+  a removed model) re-attempts every sweep indefinitely instead of capping at
+  `extract_worker_max_retries`. Bounded to docling-eligible PDFs; surfaces as
+  repeated WARNINGs. A future fix would cap transient re-attempts with state
+  independent of `retry_count`.
 
 **`bm25_field_boosts` weight normalization**: `arms.py` normalises the raw
 boost values by `max(raw)` to satisfy `ts_rank_cd`'s `[0, 1]` weight

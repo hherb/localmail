@@ -120,7 +120,7 @@ def _is_transient(exc: BaseException) -> bool:
     ``iter_exc_chain``.
     """
     return any(
-        isinstance(e, TransientExtractorError) or isinstance(e, _TRANSIENT_EXC_TYPES)
+        isinstance(e, (TransientExtractorError, *_TRANSIENT_EXC_TYPES))
         for e in iter_exc_chain(exc)
     )
 

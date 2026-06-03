@@ -253,9 +253,15 @@ a perfectly fine PDF as failed):
   SAVEPOINT, logged as a WARNING, **no** `failed_extractions` row written.
   The blob remains eligible for the next sweep with `retry_count` untouched.
   docling's third-party network failures (`requests` / `httpx` / `urllib3` /
-  `huggingface_hub`, e.g. a model-fetch blip) aren't builtin `ConnectionError`
-  subclasses, so `DoclingExtractor` opts them into `TransientExtractorError`
-  at the wrapper — they retry instead of being recorded as poison-pills.
+  `huggingface_hub` / `aiohttp`, e.g. a model-fetch blip) aren't builtin
+  `ConnectionError` subclasses, so `DoclingExtractor` opts them into
+  `TransientExtractorError` at the wrapper — they retry instead of being
+  recorded as poison-pills. **Trade-off:** the transient path never increments
+  `retry_count`, so a *permanently* failing third-party network error (e.g. a
+  `huggingface_hub` 401/403 from a misconfigured token, or a 404 for a removed
+  model) is re-attempted on every sweep indefinitely rather than capped after
+  `extract_worker_max_retries`. The blast radius is bounded to docling-eligible
+  PDFs and surfaces as repeated WARNING logs (see #153).
 - **Poison-pill** — corrupt PDF, encrypted, parser raise, anything else.
   Recorded in `failed_extractions` with `retry_count += 1`, permanently
   skipped once `retry_count >= search.extract_worker_max_retries` (default 3).

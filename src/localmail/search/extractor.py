@@ -16,6 +16,7 @@ Exports:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, cast, runtime_checkable
@@ -534,6 +535,55 @@ def warn_docling_missing() -> None:
     )
 
 
+_TRANSIENT_THIRD_PARTY_MODULES: frozenset[str] = frozenset(
+    {"requests", "httpx", "huggingface_hub", "urllib3", "aiohttp"}
+)
+"""Top-level package names whose exceptions signal a *transient* docling
+failure (network blip, model-download hiccup) rather than a poison-pill blob.
+
+These third-party classes are NOT in the builtin ``ConnectionError`` /
+``TimeoutError`` hierarchy, so ``extract_worker._is_transient`` cannot
+recognise them on its own. ``DoclingExtractor.extract`` opts them into
+``TransientExtractorError`` here — keeping the wrapper-specific knowledge in
+the wrapper and ``_TRANSIENT_EXC_TYPES`` narrow (its builtin guarantee).
+Deliberately excludes broad packages (``os``, ``builtins``) that carry both
+transient and permanent failures."""
+
+
+def iter_exc_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Yield ``exc`` and each exception in its cause/context chain, in order.
+
+    Follows ``__cause__`` first (explicit ``raise X from Y``) and falls back to
+    ``__context__`` only when ``__suppress_context__`` is False — so
+    ``raise X from None`` stops the walk, matching Python's own
+    traceback-printing behaviour. A ``seen`` set guards against pathological
+    reference cycles. Pure: no IO, reusable by any chain-inspecting caller
+    (``_exc_chain_has_transient_module`` here, ``extract_worker._is_transient``).
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        yield cur
+        nxt = cur.__cause__
+        if nxt is None and not cur.__suppress_context__:
+            nxt = cur.__context__
+        cur = nxt
+
+
+def _exc_chain_has_transient_module(
+    exc: BaseException,
+    modules: frozenset[str] = _TRANSIENT_THIRD_PARTY_MODULES,
+) -> bool:
+    """True iff ``exc`` or any exception in its cause/context chain belongs to
+    a top-level package in ``modules`` (``requests.exceptions`` → ``requests``).
+    """
+    return any(
+        type(e).__module__.split(".", 1)[0] in modules
+        for e in iter_exc_chain(exc)
+    )
+
+
 class DoclingExtractor:
     """PDF-only extractor using docling for OCR + complex-PDF layout.
 
@@ -625,6 +675,10 @@ class DoclingExtractor:
         try:
             result = converter.convert(str(blob_path))
         except Exception as exc:
+            if _exc_chain_has_transient_module(exc):
+                raise TransientExtractorError(
+                    f"docling.convert transient failure: {exc}"
+                ) from exc
             raise ExtractorError(f"docling.convert failed: {exc}") from exc
 
         try:

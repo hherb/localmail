@@ -339,3 +339,205 @@ def test_docling_extractor_accepts_config() -> None:
     de2 = DoclingExtractor(custom)
     assert de2._cfg.extractor_docling_max_pages == 50
     assert de2._cfg.extractor_ocr_languages == ["en", "de", "ja"]
+
+
+def test_iter_exc_chain_yields_self_then_cause() -> None:
+    """The chain walk yields the exception, then its __cause__, in order."""
+    from localmail.search.extractor import iter_exc_chain
+
+    try:
+        try:
+            raise ValueError("root")
+        except ValueError as inner:
+            raise RuntimeError("wrap") from inner
+    except RuntimeError as exc:
+        chain = list(iter_exc_chain(exc))
+    assert [type(e) for e in chain] == [RuntimeError, ValueError]
+
+
+def test_iter_exc_chain_falls_back_to_context() -> None:
+    """When __cause__ is None, the walk follows the implicit __context__."""
+    from localmail.search.extractor import iter_exc_chain
+
+    try:
+        try:
+            raise ValueError("root")
+        except ValueError:
+            raise RuntimeError("during handling")
+    except RuntimeError as exc:
+        chain = list(iter_exc_chain(exc))
+    assert [type(e) for e in chain] == [RuntimeError, ValueError]
+
+
+def test_iter_exc_chain_stops_on_suppress_context() -> None:
+    """``raise X from None`` sets __suppress_context__ — the walk stops at X."""
+    from localmail.search.extractor import iter_exc_chain
+
+    try:
+        try:
+            raise ValueError("root")
+        except ValueError:
+            raise RuntimeError("masked") from None
+    except RuntimeError as exc:
+        chain = list(iter_exc_chain(exc))
+    assert [type(e) for e in chain] == [RuntimeError]
+
+
+# --- Third-party transient classification (#47) ------------------------------
+#
+# docling pulls models over the network (huggingface_hub) and raises
+# third-party exception classes (requests / httpx / urllib3 / huggingface_hub)
+# that are NOT in the builtin ConnectionError/TimeoutError hierarchy, so
+# extract_worker._is_transient cannot recognise them. DoclingExtractor.extract
+# opts these into TransientExtractorError so a model-download blip retries on
+# the next sweep instead of poison-pilling a perfectly good PDF.
+
+
+def _fake_converter_raising(exc_factory):
+    """Build a fake docling ``DocumentConverter`` class whose ``convert()``
+    raises ``exc_factory()``. Used to drive DoclingExtractor.extract without
+    docling installed."""
+
+    class _FakeConverter:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def convert(self, source):
+            raise exc_factory()
+
+    return _FakeConverter
+
+
+def _exc_class(name: str, module: str) -> type[Exception]:
+    """Create a fresh Exception subclass whose ``__module__`` mimics a
+    third-party package (e.g. ``requests.exceptions``)."""
+    cls = type(name, (Exception,), {})
+    cls.__module__ = module
+    return cls
+
+
+def test_exc_chain_has_transient_module_detects_top_level_package() -> None:
+    """The pure helper matches on the top-level package, ignoring submodules."""
+    from localmail.search.extractor import _exc_chain_has_transient_module
+
+    httpx_err = _exc_class("ConnectError", "httpx._exceptions")
+    assert _exc_chain_has_transient_module(httpx_err("refused"))
+
+
+def test_exc_chain_has_transient_module_walks_cause_chain() -> None:
+    """A transient third-party class anywhere in the cause chain matches."""
+    from localmail.search.extractor import _exc_chain_has_transient_module
+
+    hf_err = _exc_class("HfHubHTTPError", "huggingface_hub.errors")
+    try:
+        try:
+            raise hf_err("502 fetching model")
+        except Exception as inner:
+            raise RuntimeError("docling pipeline failed") from inner
+    except RuntimeError as exc:
+        assert _exc_chain_has_transient_module(exc)
+
+
+def test_exc_chain_has_transient_module_rejects_unknown_module() -> None:
+    """A builtin / unknown-module exception is not opted in here (the builtin
+    transient classes are extract_worker._is_transient's job)."""
+    from localmail.search.extractor import _exc_chain_has_transient_module
+
+    assert not _exc_chain_has_transient_module(ValueError("malformed bytes"))
+
+
+def test_exc_chain_has_transient_module_respects_suppress_context() -> None:
+    """``raise X from None`` stops the walk, matching _is_transient."""
+    from localmail.search.extractor import _exc_chain_has_transient_module
+
+    req_err = _exc_class("ConnectionError", "requests.exceptions")
+    try:
+        try:
+            raise req_err("would otherwise be transient")
+        except Exception:
+            raise RuntimeError("deliberately masked") from None
+    except RuntimeError as exc:
+        assert not _exc_chain_has_transient_module(exc)
+
+
+def test_docling_extract_classifies_requests_connection_error_transient(
+    monkeypatch, tmp_path
+) -> None:
+    """A requests.exceptions.ConnectionError from docling.convert (model
+    download blip) is raised as TransientExtractorError, not ExtractorError."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import (
+        DoclingExtractor,
+        TransientExtractorError,
+    )
+
+    req_err = _exc_class("ConnectionError", "requests.exceptions")
+    monkeypatch.setattr(
+        ext_mod,
+        "_try_import_docling",
+        lambda: _fake_converter_raising(lambda: req_err("max retries exceeded")),
+    )
+    p = tmp_path / "x.pdf"
+    p.write_bytes(b"%PDF-1.4 dummy")
+
+    de = DoclingExtractor()
+    with pytest.raises(TransientExtractorError):
+        de.extract(p, "application/pdf")
+
+
+def test_docling_extract_classifies_transient_in_cause_chain(
+    monkeypatch, tmp_path
+) -> None:
+    """A generic docling exception whose __cause__ is a huggingface_hub error
+    is still classified transient via the cause-chain walk."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import (
+        DoclingExtractor,
+        TransientExtractorError,
+    )
+
+    hf_err = _exc_class("HfHubHTTPError", "huggingface_hub.errors")
+
+    def _raise_wrapped():
+        try:
+            raise hf_err("502 fetching model")
+        except Exception as inner:
+            raise RuntimeError("docling pipeline failed") from inner
+
+    monkeypatch.setattr(
+        ext_mod,
+        "_try_import_docling",
+        lambda: _fake_converter_raising(_raise_wrapped),
+    )
+    p = tmp_path / "x.pdf"
+    p.write_bytes(b"%PDF-1.4 dummy")
+
+    de = DoclingExtractor()
+    with pytest.raises(TransientExtractorError):
+        de.extract(p, "application/pdf")
+
+
+def test_docling_extract_keeps_value_error_as_permanent(
+    monkeypatch, tmp_path
+) -> None:
+    """A genuine parse failure (ValueError, no transient module in the chain)
+    stays a permanent ExtractorError — NOT TransientExtractorError — so a
+    corrupt PDF is poison-pilled after retries."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import (
+        DoclingExtractor,
+        TransientExtractorError,
+    )
+
+    monkeypatch.setattr(
+        ext_mod,
+        "_try_import_docling",
+        lambda: _fake_converter_raising(lambda: ValueError("corrupt PDF")),
+    )
+    p = tmp_path / "x.pdf"
+    p.write_bytes(b"%PDF-1.4 dummy")
+
+    de = DoclingExtractor()
+    with pytest.raises(ExtractorError) as excinfo:
+        de.extract(p, "application/pdf")
+    assert not isinstance(excinfo.value, TransientExtractorError)

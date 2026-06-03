@@ -33,14 +33,23 @@ SAVEPOINT discipline (mirrors embed_worker.py)
   so a logging failure can't abort the outer transaction.
 - ``conn.commit()`` is called once at the end of the batch (not per-blob).
 
-Transient vs poison-pill classification (#36)
----------------------------------------------
+Transient vs poison-pill classification (#36, #47)
+--------------------------------------------------
 - ``TransientExtractorError`` and built-in ``ConnectionError`` /
   ``TimeoutError`` / ``MemoryError`` (anywhere in the cause chain) are
   treated as *transient*: ROLLBACK to ``extract_blob``, WARNING log, no
   ``failed_extractions`` row. The blob stays eligible for the next sweep
   with retry_count untouched — so a docling model-download blip or a
   one-off OOM doesn't permanently poison a perfectly fine PDF.
+- ``_TRANSIENT_EXC_TYPES`` stays deliberately narrow (builtin classes
+  only) — a broader allowlist like plain ``OSError`` would mis-classify
+  permanent ``ENOENT``/``EACCES`` as transient. docling's *third-party*
+  network classes (``requests`` / ``httpx`` / ``urllib3`` /
+  ``huggingface_hub``) are NOT in the builtin hierarchy, so they can't be
+  recognised here. Instead ``DoclingExtractor.extract`` opts them in at the
+  wrapper (#47): a ``convert()`` failure whose chain contains a
+  ``extractor._TRANSIENT_THIRD_PARTY_MODULES`` package is re-raised as
+  ``TransientExtractorError``, which ``_is_transient`` then recognises.
 - Everything else (corrupt PDF, encrypted file, parser raise, unexpected
   RuntimeError from a poison blob) is treated as a *poison pill*: ROLLBACK,
   upsert ``failed_extractions`` with retry_count += 1, permanently skipped
@@ -79,6 +88,7 @@ from localmail.search.extractor import (
     LightweightExtractor,
     TransientExtractorError,
     _try_import_docling,
+    iter_exc_chain,
     warn_docling_missing,
 )
 
@@ -102,25 +112,17 @@ def _is_transient(exc: BaseException) -> bool:
     """True iff ``exc`` (or any cause/context in its chain) signals a
     transient extraction failure.
 
-    Walks ``__cause__`` first (explicit ``raise X from Y``) and falls back
-    to ``__context__`` (implicit during-handling chain) only when
-    ``__suppress_context__`` is False — so ``raise X from None`` correctly
-    stops the walk, matching Python's own traceback-printing behaviour.
-    A small ``seen`` set prevents infinite loops on pathological cycles.
+    Recognises ``TransientExtractorError`` (extractors opt in directly,
+    including docling's third-party network classes — see
+    ``extractor._TRANSIENT_THIRD_PARTY_MODULES``) and the narrow builtin
+    ``_TRANSIENT_EXC_TYPES``. The chain walk (``__cause__`` then
+    ``__context__`` unless suppressed) is shared with the extractor via
+    ``iter_exc_chain``.
     """
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if isinstance(cur, TransientExtractorError):
-            return True
-        if isinstance(cur, _TRANSIENT_EXC_TYPES):
-            return True
-        nxt = cur.__cause__
-        if nxt is None and not cur.__suppress_context__:
-            nxt = cur.__context__
-        cur = nxt
-    return False
+    return any(
+        isinstance(e, (TransientExtractorError, *_TRANSIENT_EXC_TYPES))
+        for e in iter_exc_chain(exc)
+    )
 
 
 def _is_allowlisted(mime_type: str | None, path: str, cfg: SearchConfig) -> bool:

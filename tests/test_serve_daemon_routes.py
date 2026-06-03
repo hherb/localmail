@@ -226,6 +226,8 @@ def test_build_daemon_view_matches_get_route_shape(app, db_conn) -> None:
     assert view["supervise_daemon_externally"] is True
     assert view["heartbeats"] == []
     assert view["recent_log"] == []
+    assert "pid" in view
+    assert "started_at" in view
 
 
 def test_start_on_external_is_409(admin_client, app) -> None:

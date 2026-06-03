@@ -17,6 +17,7 @@ admin gate here is the boundary.
 """
 from __future__ import annotations
 
+import psycopg
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -28,6 +29,7 @@ from localmail.api.ids import parse_int_id
 from localmail.serve.admin.csrf import check_csrf
 from localmail.serve.admin.dependencies import require_admin_session
 from localmail.serve.daemon_supervisor import (
+    DaemonSupervisorT,
     SupervisorState,
     SupervisorUnavailable,
     status_to_dict,
@@ -51,7 +53,12 @@ def _heartbeat_dict(hb: daemon_svc.HeartbeatRow) -> dict:
     }
 
 
-def build_daemon_view(supervisor, conn, *, stale_seconds: int) -> dict:
+def build_daemon_view(
+    supervisor: DaemonSupervisorT,
+    conn: psycopg.Connection,
+    *,
+    stale_seconds: int,
+) -> dict:
     """Fuse supervisor process state + heartbeats + recent log into one view
     dict. Single source of truth shared by the JSON route and the HTML panel.
 

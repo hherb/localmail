@@ -340,3 +340,6 @@ class ExternalDaemonSupervisor:
 
     def recent_log_lines(self) -> list[str]:
         return []
+
+
+DaemonSupervisorT = DaemonSupervisor | ExternalDaemonSupervisor

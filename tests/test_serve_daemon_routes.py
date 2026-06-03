@@ -188,7 +188,10 @@ def _poll_log_contains(sup: DaemonSupervisor, fragment: str, timeout: float = 6.
 
 
 def test_second_lifecycle_op_while_busy_is_409(admin_client, app) -> None:
-    sup = DaemonSupervisor(argv=_DEAF_SLEEPER, grace_seconds=1.0)
+    # Generous grace so the first stop stays in-flight (busy) well past the
+    # poll+POST round trip even on a loaded CI runner — the window must not
+    # close before the second POST lands, or the busy-guard would admit it.
+    sup = DaemonSupervisor(argv=_DEAF_SLEEPER, grace_seconds=3.0)
     app.state.daemon_supervisor = sup
     try:
         admin_client.post(

@@ -716,6 +716,23 @@ for the full design.
   Restart-sync buttons are deduped per account (idle+poll workers share one).
   The `/v1/admin/*` endpoints stay pure machine-JSON (no HTMX content
   negotiation); the panel polls the dedicated HTML partial. **No new migration.**
+  **2B.5 follow-ups resolved (#148, #149):** the panel's mutating buttons use
+  `hx-swap="none"`, so a rejected control (busy-guard **409**, CSRF **400**)
+  used to look inert; the served static
+  [admin/static/daemon-panel.js](src/localmail/serve/admin/static/daemon-panel.js)
+  now binds an `htmx:afterRequest` listener (filtered to `verb === "post"` so
+  the 2s status poll doesn't toast) that surfaces a transient toast in the
+  `#daemon-toast` region. That region lives in `daemon/panel.html` **outside**
+  the self-swapping `#daemon-status` fragment so the poll's `outerHTML` swap
+  can't wipe an in-flight message. The JS is a served file (not inline / not an
+  htmx `hx-on::`) because the `/admin` CSP is `script-src 'self'` with no
+  `unsafe-inline`/`unsafe-eval`. **#149:** `DaemonSupervisor.close()` sets a
+  `_closing` flag under `_lock` before its blocking `stop()`, and `start()`
+  checks it under `_lock` as the single spawn chokepoint — so an async
+  `request_restart` caught between its `stop()` and `start()` halves at serve
+  shutdown can no longer re-spawn an orphaned child. The flag-set and the spawn
+  are serialised by `_lock`: start() either sees the flag and skips, or spawned
+  first and close's stop() reaps it.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.

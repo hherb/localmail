@@ -153,6 +153,12 @@ class DaemonSupervisor:
         self._log: deque[str] = deque(maxlen=log_max_lines)
         self._state = SupervisorState.STOPPED
         self._started_at: datetime | None = None
+        # Set once by close() (serve shutdown). Checked under _lock at the top
+        # of start() so an async restart that lands between its stop() and
+        # start() halves can never re-spawn an orphaned child after teardown
+        # (#149). start() is the single spawn chokepoint, so guarding it there
+        # also neutralises any request_* issued after close().
+        self._closing = False
 
     # -- public API --
 
@@ -160,6 +166,8 @@ class DaemonSupervisor:
         """Spawn the child if not already running. Idempotent: a no-op when a
         live child already exists."""
         with self._lock:
+            if self._closing:
+                return
             if self._proc is not None and self._proc.poll() is None:
                 return
             self._state = SupervisorState.STARTING
@@ -288,7 +296,18 @@ class DaemonSupervisor:
 
     def close(self) -> None:
         """Stop the child on serve shutdown — the supervisor owns it, so an
-        orphan would outlive its parent."""
+        orphan would outlive its parent.
+
+        Sets `_closing` under `_lock` *before* stopping, so a concurrent async
+        restart that has finished its stop() half but not yet started its
+        start() half finds the flag set and no-ops the start() — never
+        re-spawning a child that would outlive teardown (#149). start() holds
+        `_lock` across its whole spawn decision, so the flag-set and the spawn
+        are serialised: either start() sees the flag and skips, or it spawned
+        first and the stop() below reaps it.
+        """
+        with self._lock:
+            self._closing = True
         self.stop()
 
     # -- internals --

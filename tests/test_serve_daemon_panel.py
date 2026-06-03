@@ -150,6 +150,39 @@ def test_partial_escapes_error_message(admin_client, db_conn) -> None:
     assert "&lt;script&gt;" in r.text
 
 
+def test_panel_has_toast_region_and_script(admin_client) -> None:
+    """#148: the full page carries the toast region + the error-feedback
+    script so a 409/400 from a lifecycle button is surfaced immediately."""
+    r = admin_client.get("/admin/daemon")
+    assert r.status_code == 200
+    assert 'id="daemon-toast"' in r.text
+    assert 'aria-live="polite"' in r.text
+    assert "/admin/static/daemon-panel.js" in r.text
+
+
+def test_toast_region_lives_outside_polling_partial(admin_client) -> None:
+    """The toast must NOT be inside the self-swapping #daemon-status fragment,
+    or the 2s `outerHTML` poll would wipe an in-flight error message. The
+    partial (what the poll replaces) must not contain it."""
+    r = admin_client.get("/admin/_partials/daemon-status")
+    assert r.status_code == 200
+    assert "daemon-toast" not in r.text
+
+
+def test_daemon_panel_js_handles_error_statuses(app) -> None:
+    """The served script binds an htmx:afterRequest listener and maps the
+    busy-guard (409) / CSRF (400) statuses to operator messages. Served from
+    'self' so it satisfies the /admin `script-src 'self'` CSP."""
+    client = TestClient(app, follow_redirects=False)
+    r = client.get("/admin/static/daemon-panel.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "htmx:afterRequest" in body
+    assert "daemon-toast" in body
+    assert "409" in body
+    assert "400" in body
+
+
 def test_stop_button_carries_method_bound_csrf(admin_client, admin_user_id) -> None:
     r = admin_client.get("/admin/_partials/daemon-status")
     m = re.search(

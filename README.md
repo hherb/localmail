@@ -570,3 +570,8 @@ the corpus once and re-evaluates the query suite for each candidate
 attachment` to exercise arm 4. The current default (`rrf_k=60`) was
 verified against both synthetic corpora in #35 — see that issue for
 the full table.
+
+`tests/acceptance/run_chunk_insert_bench.py` times the chunking loop's
+row-by-row vs batched-`executemany` chunk INSERTs. The #5 measurement
+showed the loop is tokenization-bound (not INSERT-bound), so the
+production loop stays row-by-row — see that issue for the full table.

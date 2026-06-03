@@ -14,7 +14,9 @@ from pathlib import Path
 import psycopg
 from click.testing import CliRunner
 
+import localmail.serve.daemon_control_socket as ctl
 from localmail.cli import main
+from localmail.serve.daemon_supervisor import SupervisorState
 
 
 def _make_cfg(tmp_path: Path, dsn: str, *, supervise: bool = True) -> Path:
@@ -126,3 +128,54 @@ def test_start_no_serve_exits_nonzero(db_conn, db_dsn, tmp_path) -> None:
     cfg = _make_cfg(tmp_path, db_dsn, supervise=True)
     res = CliRunner().invoke(main, ["--config", str(cfg), "daemon", "start"])
     assert res.exit_code != 0
+
+
+# --- Plane B lifecycle polling -------------------------------------------
+
+
+def test_stop_polls_until_settled(db_conn, db_dsn, tmp_path, monkeypatch) -> None:
+    cfg = _make_cfg(tmp_path, db_dsn, supervise=True)
+    seq = iter([
+        {"ok": True, "status": {"state": SupervisorState.STOPPING, "pid": 1, "started_at": None}},
+        {"ok": True, "status": {"state": SupervisorState.STOPPING, "pid": 1, "started_at": None}},
+        {"ok": True, "status": {"state": SupervisorState.STOPPED, "pid": None, "started_at": None}},
+    ])
+
+    def fake_send(path, request, *, timeout):
+        if request["cmd"] == "stop":
+            return {"ok": True, "status": {"state": SupervisorState.STOPPING, "pid": 1, "started_at": None}}
+        return next(seq)
+
+    monkeypatch.setattr(ctl, "send_control_request", fake_send)
+    res = CliRunner().invoke(main, ["--config", str(cfg), "daemon", "stop"])
+    assert res.exit_code == 0, res.output
+    assert SupervisorState.STOPPED in res.output
+
+
+def test_stop_no_wait_does_not_poll(db_conn, db_dsn, tmp_path, monkeypatch) -> None:
+    cfg = _make_cfg(tmp_path, db_dsn, supervise=True)
+    calls: list[str] = []
+
+    def fake_send(path, request, *, timeout):
+        calls.append(request["cmd"])
+        return {"ok": True, "status": {"state": SupervisorState.STOPPING, "pid": 1, "started_at": None}}
+
+    monkeypatch.setattr(ctl, "send_control_request", fake_send)
+    res = CliRunner().invoke(main, ["--config", str(cfg), "daemon", "stop", "--no-wait"])
+    assert res.exit_code == 0, res.output
+    assert calls == ["stop"]  # no follow-up status polls
+    assert SupervisorState.STOPPING in res.output
+
+
+def test_stop_crashed_during_poll_exits_nonzero(db_conn, db_dsn, tmp_path, monkeypatch) -> None:
+    cfg = _make_cfg(tmp_path, db_dsn, supervise=True)
+
+    def fake_send(path, request, *, timeout):
+        if request["cmd"] == "stop":
+            return {"ok": True, "status": {"state": SupervisorState.STOPPING, "pid": 1, "started_at": None}}
+        return {"ok": True, "status": {"state": SupervisorState.CRASHED, "pid": None, "started_at": None}}
+
+    monkeypatch.setattr(ctl, "send_control_request", fake_send)
+    res = CliRunner().invoke(main, ["--config", str(cfg), "daemon", "stop"])
+    assert res.exit_code != 0
+    assert "crashed" in res.output.lower()

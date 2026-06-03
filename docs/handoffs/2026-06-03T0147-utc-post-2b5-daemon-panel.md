@@ -151,11 +151,7 @@ the HTML UI on top.
   alert GitHub flags on push), **#47** (extract_worker transient opt-in),
   **#25** (websockets.legacy depwarn), **#5** (search batch INSERT), **#134**
   (oauth_state flake — environmental).
-- 2B.5 review follow-ups (deferred, tracked): **#148** (panel buttons swallow
-  409/400 — endpoint-pure `hx-on::after-request` toast), **#149** (`close()`
-  during async `request_restart` can orphan a re-spawned child).
-- **Open issues after #147 merges + #146 closes: 7** (#5, #25, #47, #90, #125,
-  #148, #149).
+- **Open issues after #147 merges + #146 closes: 5** (#5, #25, #47, #90, #125).
 
 ## Open decisions & risks
 
@@ -174,8 +170,7 @@ the HTML UI on top.
    worker is exactly between its `stop()` and `start()` halves when
    `supervisor.close()` runs, the restart's `start()` can re-spawn a child after
    close. Mitigated by systemd `KillMode=control-group`; a bare `kill <serve>`
-   could orphan it. Not worth a "closing flag" today — tracked in **#149** if it
-   ever bites a non-systemd deploy.
+   could orphan it. Not worth a "closing flag" today — note if it ever bites.
 4. **202, not 200, for lifecycle routes** — the contract is "accepted, poll to
    settle". The panel polls `GET /v1/admin/daemon` every
    `DAEMON_PANEL_POLL_SECONDS` (2s); the CLI polls the socket. Don't revert to
@@ -183,9 +178,9 @@ the HTML UI on top.
 5. **Panel buttons use `hx-swap="none"`**, so a busy-guard **409** or CSRF
    **400** is currently only reflected on the next poll tick (no toast). This is
    the documented optional follow-up from the spec (endpoint-pure
-   `hx-on::after-request` event refresh), tracked in **#148** — add it if
-   operators find the silent rejection confusing. `/v1/admin/*` must stay pure
-   machine-JSON; don't content-negotiate HTML into them.
+   `hx-on::after-request` event refresh) — add it if operators find the silent
+   rejection confusing. `/v1/admin/*` must stay pure machine-JSON; don't
+   content-negotiate HTML into them.
 6. **`build_daemon_view` is the only fusion** — both the JSON route and the HTML
    partial go through it. Keep it that way; don't inline a second copy.
 7. **Method-bound CSRF mint is `csrf_token_context` in

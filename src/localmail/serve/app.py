@@ -14,6 +14,7 @@ from localmail.api.errors import APIError, RateLimited
 from localmail.config import AuthConfig, DaemonConfig, ServeConfig
 from localmail.serve.admin import accounts_router as admin_accounts_router
 from localmail.serve.admin import auth_router as admin_auth_router
+from localmail.serve.admin import daemon_panel_router as admin_daemon_panel_router
 from localmail.serve.admin import daemon_router as admin_daemon_router
 from localmail.serve.admin import dashboard_router as admin_dashboard_router
 from localmail.serve.admin import oauth_router as admin_oauth_router
@@ -178,6 +179,7 @@ def create_app(
         install_admin_redirect_handler(app)
         app.include_router(admin_auth_router.router, prefix="/admin")
         app.include_router(admin_dashboard_router.router, prefix="/admin")
+        app.include_router(admin_daemon_panel_router.router, prefix="/admin")
         app.include_router(admin_accounts_router.router, prefix="/v1/admin")
         app.include_router(admin_daemon_router.router, prefix="/v1/admin")
         app.include_router(admin_oauth_router.router_v1, prefix="/v1/admin")

@@ -32,7 +32,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 _SOCKET_FILENAME = "localmail-supervisor.sock"
 # Default ring-buffer depth for captured child log lines (spec: last 200).
@@ -146,6 +146,7 @@ class DaemonSupervisor:
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
         self._reader: threading.Thread | None = None
+        self._lifecycle_thread: threading.Thread | None = None
         # A fresh deque is bound per start() and handed to that run's reader
         # thread, so a crashed child's still-draining reader can never leak
         # stale lines into the next run's buffer.
@@ -207,6 +208,64 @@ class DaemonSupervisor:
         self.stop()
         self.start()
 
+    # -- async lifecycle (request_*): return immediately, run on one thread --
+
+    def _lifecycle_in_flight(self) -> bool:
+        t = self._lifecycle_thread
+        return t is not None and t.is_alive()
+
+    def _spawn_lifecycle(self, body: Callable[[], None]) -> None:
+        t = threading.Thread(
+            target=body, name="daemon-supervisor-lifecycle", daemon=True
+        )
+        self._lifecycle_thread = t
+        t.start()
+
+    def request_start(self) -> None:
+        """Start the child on a background thread; return at once.
+
+        Idempotent no-op if already running. Raises SupervisorUnavailable if a
+        lifecycle op is already in flight (the busy-guard)."""
+        with self._lock:
+            if self._lifecycle_in_flight():
+                raise SupervisorUnavailable(
+                    "a lifecycle operation is already in progress"
+                )
+            if self._proc is not None and self._proc.poll() is None:
+                return
+            self._state = SupervisorState.STARTING
+            self._spawn_lifecycle(self.start)
+
+    def request_stop(self) -> None:
+        """Stop the child on a background thread; return at once.
+
+        Idempotent no-op if already stopped. Sets STOPPING synchronously so a
+        clean shutdown is never misread as a crash. Busy-guarded."""
+        with self._lock:
+            if self._lifecycle_in_flight():
+                raise SupervisorUnavailable(
+                    "a lifecycle operation is already in progress"
+                )
+            if self._proc is None or self._proc.poll() is not None:
+                self._proc = None
+                self._started_at = None
+                self._state = SupervisorState.STOPPED
+                return
+            self._state = SupervisorState.STOPPING
+            self._spawn_lifecycle(self.stop)
+
+    def request_restart(self) -> None:
+        """Restart the child on a background thread; return at once. Busy-guarded.
+
+        Settle target is RUNNING; a transient STOPPED mid-restart is expected."""
+        with self._lock:
+            if self._lifecycle_in_flight():
+                raise SupervisorUnavailable(
+                    "a lifecycle operation is already in progress"
+                )
+            self._state = SupervisorState.STOPPING
+            self._spawn_lifecycle(self.restart)
+
     def status(self) -> SupervisorStatus:
         """Current state, refreshing crash detection defensively (in case the
         reader thread hasn't yet observed the EOF)."""
@@ -265,6 +324,15 @@ class ExternalDaemonSupervisor:
     def restart(self) -> None:
         raise SupervisorUnavailable("daemon is supervised externally")
 
+    def request_start(self) -> None:
+        raise SupervisorUnavailable("daemon is supervised externally")
+
+    def request_stop(self) -> None:
+        raise SupervisorUnavailable("daemon is supervised externally")
+
+    def request_restart(self) -> None:
+        raise SupervisorUnavailable("daemon is supervised externally")
+
     def status(self) -> SupervisorStatus:
         return SupervisorStatus(
             state=SupervisorState.EXTERNAL, pid=None, started_at=None
@@ -272,3 +340,6 @@ class ExternalDaemonSupervisor:
 
     def recent_log_lines(self) -> list[str]:
         return []
+
+
+DaemonSupervisorT = DaemonSupervisor | ExternalDaemonSupervisor

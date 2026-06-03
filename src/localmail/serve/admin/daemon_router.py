@@ -17,7 +17,9 @@ admin gate here is the boundary.
 """
 from __future__ import annotations
 
+import psycopg
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from localmail.api.admin import accounts as accounts_svc
 from localmail.api.admin import daemon as daemon_svc
@@ -27,6 +29,7 @@ from localmail.api.ids import parse_int_id
 from localmail.serve.admin.csrf import check_csrf
 from localmail.serve.admin.dependencies import require_admin_session
 from localmail.serve.daemon_supervisor import (
+    DaemonSupervisorT,
     SupervisorState,
     SupervisorUnavailable,
     status_to_dict,
@@ -50,22 +53,20 @@ def _heartbeat_dict(hb: daemon_svc.HeartbeatRow) -> dict:
     }
 
 
-@router.get("/daemon")
-def get_daemon(
-    request: Request,
-    admin: AdminUser = require_admin_session(),
+def build_daemon_view(
+    supervisor: DaemonSupervisorT,
+    conn: psycopg.Connection,
+    *,
+    stale_seconds: int,
 ) -> dict:
-    supervisor = request.app.state.daemon_supervisor
-    daemon_cfg = request.app.state.daemon_config
+    """Fuse supervisor process state + heartbeats + recent log into one view
+    dict. Single source of truth shared by the JSON route and the HTML panel.
+
+    Process state, heartbeats, and log are sampled independently (no global
+    snapshot lock) — a read-only monitoring view; momentary skew is acceptable.
+    """
     proc = status_to_dict(supervisor.status())
-    pool = request.app.state.pool
-    with pool.connection() as conn:
-        status = daemon_svc.get_daemon_status(
-            conn, stale_seconds=daemon_cfg.heartbeat_stale_seconds
-        )
-    # Process state, heartbeats, and log are sampled independently (no global
-    # snapshot lock). This is a read-only monitoring view; momentary skew
-    # between the three is acceptable and not worth serialising the supervisor.
+    status = daemon_svc.get_daemon_status(conn, stale_seconds=stale_seconds)
     return {
         **proc,
         "supervise_daemon_externally": proc["state"] == SupervisorState.EXTERNAL,
@@ -74,14 +75,30 @@ def get_daemon(
     }
 
 
-def _lifecycle(request: Request, admin: AdminUser, csrf_token: str, op: str) -> dict:
+@router.get("/daemon")
+def get_daemon(
+    request: Request,
+    admin: AdminUser = require_admin_session(),
+) -> dict:
+    supervisor = request.app.state.daemon_supervisor
+    daemon_cfg = request.app.state.daemon_config
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        return build_daemon_view(
+            supervisor, conn, stale_seconds=daemon_cfg.heartbeat_stale_seconds
+        )
+
+
+def _lifecycle(
+    request: Request, admin: AdminUser, csrf_token: str, op: str
+) -> JSONResponse:
     check_csrf(request, admin, csrf_token, f"/v1/admin/daemon/{op}")
     supervisor = request.app.state.daemon_supervisor
     try:
-        getattr(supervisor, op)()
+        getattr(supervisor, f"request_{op}")()
     except SupervisorUnavailable as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return status_to_dict(supervisor.status())
+    return JSONResponse(status_to_dict(supervisor.status()), status_code=202)
 
 
 @router.post("/daemon/start")
@@ -89,7 +106,7 @@ def start_daemon(
     request: Request,
     admin: AdminUser = require_admin_session(),
     x_csrf_token: str = _CSRF_HEADER,
-) -> dict:
+) -> JSONResponse:
     return _lifecycle(request, admin, x_csrf_token, "start")
 
 
@@ -98,7 +115,7 @@ def stop_daemon(
     request: Request,
     admin: AdminUser = require_admin_session(),
     x_csrf_token: str = _CSRF_HEADER,
-) -> dict:
+) -> JSONResponse:
     return _lifecycle(request, admin, x_csrf_token, "stop")
 
 
@@ -107,7 +124,7 @@ def restart_daemon(
     request: Request,
     admin: AdminUser = require_admin_session(),
     x_csrf_token: str = _CSRF_HEADER,
-) -> dict:
+) -> JSONResponse:
     return _lifecycle(request, admin, x_csrf_token, "restart")
 
 

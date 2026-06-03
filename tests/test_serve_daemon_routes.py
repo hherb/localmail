@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 
 import psycopg
 import pytest
@@ -18,6 +19,7 @@ from localmail.api.admin.csrf import make_csrf_token
 from localmail.api.auth import hash_password
 from localmail.config import ServeConfig
 from localmail.serve.admin.csrf import csrf_action
+from localmail.serve.admin.daemon_router import build_daemon_view
 from localmail.serve.app import create_app
 from localmail.serve.daemon_supervisor import (
     DaemonSupervisor,
@@ -134,7 +136,18 @@ def test_get_status_shape(admin_client, app) -> None:
 
 # --- Plane B lifecycle ----------------------------------------------------
 
-def test_start_then_stop(admin_client, app) -> None:
+def _poll_state(client, target: str, timeout: float = 6.0) -> str:
+    deadline = time.monotonic() + timeout
+    st = None
+    while time.monotonic() < deadline:
+        st = client.get("/v1/admin/daemon").json()["state"]
+        if st == target:
+            return st
+        time.sleep(0.05)
+    raise AssertionError(f"never reached {target}; last {st}")
+
+
+def test_start_returns_202_and_settles_running(admin_client, app) -> None:
     sup = DaemonSupervisor(argv=_SLEEPER, grace_seconds=2.0)
     app.state.daemon_supervisor = sup
     try:
@@ -142,16 +155,82 @@ def test_start_then_stop(admin_client, app) -> None:
             "/v1/admin/daemon/start",
             headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/daemon/start")},
         )
-        assert r.status_code == 200, r.text
-        assert r.json()["state"] == SupervisorState.RUNNING
+        assert r.status_code == 202, r.text
+        assert r.json()["state"] in (
+            SupervisorState.STARTING, SupervisorState.RUNNING
+        )
+        assert _poll_state(admin_client, SupervisorState.RUNNING)
         r = admin_client.post(
             "/v1/admin/daemon/stop",
             headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/daemon/stop")},
         )
-        assert r.status_code == 200
-        assert r.json()["state"] == SupervisorState.STOPPED
+        assert r.status_code == 202
+        assert _poll_state(admin_client, SupervisorState.STOPPED)
     finally:
         sup.stop()
+
+
+_DEAF_SLEEPER = [
+    sys.executable, "-c",
+    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "print('up', flush=True); time.sleep(60)",
+]
+
+
+def _poll_log_contains(sup: DaemonSupervisor, fragment: str, timeout: float = 6.0) -> bool:
+    """Spin until the supervisor's ring buffer contains `fragment`."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(fragment in line for line in sup.recent_log_lines()):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_second_lifecycle_op_while_busy_is_409(admin_client, app) -> None:
+    # Generous grace so the first stop stays in-flight (busy) well past the
+    # poll+POST round trip even on a loaded CI runner — the window must not
+    # close before the second POST lands, or the busy-guard would admit it.
+    sup = DaemonSupervisor(argv=_DEAF_SLEEPER, grace_seconds=3.0)
+    app.state.daemon_supervisor = sup
+    try:
+        admin_client.post(
+            "/v1/admin/daemon/start",
+            headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/daemon/start")},
+        )
+        # Wait for the child to print "up" so its SIGTERM handler is installed.
+        assert _poll_log_contains(sup, "up"), "deaf sleeper never printed 'up'"
+        # First stop — will block on the grace-period wait because the child
+        # ignores SIGTERM. Poll for STOPPING to confirm the lifecycle thread is
+        # in the grace wait before firing the second request.
+        admin_client.post(
+            "/v1/admin/daemon/stop",
+            headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/daemon/stop")},
+        )
+        _poll_state(admin_client, SupervisorState.STOPPING)
+        r = admin_client.post(
+            "/v1/admin/daemon/stop",
+            headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/daemon/stop")},
+        )
+        assert r.status_code == 409
+        assert _poll_state(admin_client, SupervisorState.STOPPED)
+    finally:
+        sup.stop()
+
+
+def test_build_daemon_view_matches_get_route_shape(app, db_conn) -> None:
+    daemon_cfg = app.state.daemon_config
+    with app.state.pool.connection() as conn:
+        view = build_daemon_view(
+            ExternalDaemonSupervisor(), conn,
+            stale_seconds=daemon_cfg.heartbeat_stale_seconds,
+        )
+    assert view["state"] == SupervisorState.EXTERNAL
+    assert view["supervise_daemon_externally"] is True
+    assert view["heartbeats"] == []
+    assert view["recent_log"] == []
+    assert "pid" in view
+    assert "started_at" in view
 
 
 def test_start_on_external_is_409(admin_client, app) -> None:

@@ -679,6 +679,43 @@ for the full design.
   not running). `status` always prints heartbeats; an unreachable socket is
   reported, not a failure. **No new migration** (reuses 0023 heartbeats + 0024
   commands).
+- **Async lifecycle + admin panel (Sub-plan 2B.5, shipped — closes the 2B arc):**
+  lifecycle ops no longer block a request/socket worker (#146). `DaemonSupervisor`
+  grows `request_start()`/`request_stop()`/`request_restart()` that set the
+  **transitional** state synchronously (`starting`/`stopping`) under `_lock`,
+  then run the existing blocking `start()`/`stop()`/`restart()` body on **one
+  dedicated lifecycle thread**; a second lifecycle op while one is in flight
+  raises `SupervisorUnavailable` (the **busy-guard**, keyed on
+  `_lifecycle_thread.is_alive()`, not state). The blocking variants stay (used by
+  `close()` on serve shutdown — teardown must block — and by tests).
+  `ExternalDaemonSupervisor` has matching `request_*` stubs that raise.
+  `DaemonSupervisorT = DaemonSupervisor | ExternalDaemonSupervisor` is the shared
+  param type. HTTP `POST /v1/admin/daemon/{start,stop,restart}` now call
+  `request_*` and return **202** with the transitional status; the busy-guard /
+  external stub both surface as **409**. The control socket dispatcher and the
+  `localmail daemon {start,stop,restart}` CLI likewise use `request_*`; the CLI
+  **polls `status` until the op settles** (`running`/`stopped`) — `--no-wait`
+  skips the poll. CLI poll constants live in `daemon_cli.py`
+  (`_LIFECYCLE_POLL_INTERVAL_S`, `_START_SETTLE_TIMEOUT_S`, reuses
+  `_LIFECYCLE_TIMEOUT_BUFFER_S` + `_STATUS_TIMEOUT_S`). The GET-route fusion is
+  extracted into `daemon_router.build_daemon_view(supervisor, conn, *,
+  stale_seconds)` — the single source shared by the JSON route and the HTML
+  panel. **Admin panel** at `/admin/daemon`
+  ([src/localmail/serve/admin/daemon_panel_router.py](src/localmail/serve/admin/daemon_panel_router.py),
+  mounted at `/admin`): a full page + a self-polling HTMX partial at
+  `/admin/_partials/daemon-status` (the `#daemon-status` div re-carries its
+  `hx-get`/`hx-trigger="every {{DAEMON_PANEL_POLL_SECONDS}}s"` after each
+  `outerHTML` swap). Status table is red past `heartbeat_stale_seconds` (server
+  `stale` flag, no client clock); lifecycle buttons are **disabled when
+  `supervise_daemon_externally`**; Plane-A reload + per-account restart-sync
+  buttons stay enabled. Each mutating control carries its own **method-bound**
+  CSRF token via the reusable
+  [serve/admin/csrf.py](src/localmail/serve/admin/csrf.py)`::csrf_token_context`
+  helper (returns `csrf_token_for` legacy single-arg + `csrf_token_for_method`
+  — the latter is the shared #125 mint for future admin HTML, e.g. 2A.3).
+  Restart-sync buttons are deduped per account (idle+poll workers share one).
+  The `/v1/admin/*` endpoints stay pure machine-JSON (no HTMX content
+  negotiation); the panel polls the dedicated HTML partial. **No new migration.**
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.
@@ -859,8 +896,9 @@ for the full design.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
   Latest is `0024_daemon_commands.sql`; next would be `0025_*.sql`.
-  (2B.4 added no migration — the supervisor + routes + CLI are stateless
-  and reuse `0023_daemon_heartbeats.sql` + `0024_daemon_commands.sql`.)
+  (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
+  panel are stateless and reuse `0023_daemon_heartbeats.sql` +
+  `0024_daemon_commands.sql`.)
 
 ## Testing notes
 

@@ -77,7 +77,7 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | `localmail list-failed [--account NAME] [--limit K]` | Show messages that sync skipped due to errors. |
 | `localmail retry-failed [--account NAME]` | Re-attempt every failed message. Successful retries move from `failed_messages` to `messages`. |
 
-### Daemon control (2B.4)
+### Daemon control (2B.4 / 2B.5)
 
 Two control planes. **Plane A** (DB-mediated) works whether the daemon is
 supervised by `localmail serve` or by an init system; **Plane B** (process
@@ -91,7 +91,17 @@ a child and binds a Unix control socket at
 | `localmail daemon status` | Show daemon process state (from the supervisor socket when supervised, `external` otherwise) plus per-thread liveness from `daemon_heartbeats`. Heartbeats always print; an unreachable socket is reported, not an error. |
 | `localmail daemon reload` | **Plane A.** Enqueue `reload-now` so the running daemon re-reads its account set immediately instead of waiting out `reload_seconds`. |
 | `localmail daemon restart-account NAME` | **Plane A.** Enqueue `restart-account` to tear down and respawn one account's IDLE + poll threads (e.g. a wedged connection). |
-| `localmail daemon start` / `stop` / `restart` | **Plane B.** Drive the supervised child over the control socket. Exits non-zero with a clear note when the daemon is supervised externally (`supervise_daemon = false`) or when `localmail serve` is not running. |
+| `localmail daemon start` / `stop` / `restart` [`--no-wait`] | **Plane B.** Drive the supervised child over the control socket. The supervisor runs the lifecycle op on its own thread and returns at once, so the command **polls status until the daemon settles** (running / stopped) — `--no-wait` skips the poll and prints the transitional state. Exits non-zero with a clear note when the daemon is supervised externally (`supervise_daemon = false`) or when `localmail serve` is not running. |
+
+The admin UI (`localmail serve`) also exposes a **daemon-control panel** at
+`/admin/daemon`: a status table (per-thread state, current folder, heartbeat
+age — red when stale — and last error), the same start / stop / restart /
+reload / per-account restart-sync controls, and a recent-log tail, refreshed
+live via an HTMX poll. The lifecycle buttons are disabled with a note when the
+daemon is supervised externally. The HTTP lifecycle routes
+(`POST /v1/admin/daemon/{start,stop,restart}`) return **202 Accepted** with the
+transitional status — the panel and CLI poll `GET /v1/admin/daemon` to observe
+the daemon settling.
 
 ### Search backfill & status
 

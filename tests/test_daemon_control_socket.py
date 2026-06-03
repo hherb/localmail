@@ -65,17 +65,60 @@ def test_dispatch_recent_log() -> None:
     assert resp["lines"] == []
 
 
+def _wait_state(sup, target, timeout=6.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if sup.status().state == target:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"never reached {target}; now {sup.status().state}")
+
+
 def test_dispatch_start_stop_real_child() -> None:
     sup = DaemonSupervisor(argv=_SLEEPER, grace_seconds=2.0)
     try:
         r1 = handle_control_request(sup, {"cmd": "start"})
         assert r1["ok"] is True
-        assert sup.status().state == SupervisorState.RUNNING
+        assert r1["status"]["state"] in (
+            SupervisorState.STARTING, SupervisorState.RUNNING
+        )
+        _wait_state(sup, SupervisorState.RUNNING)
         r2 = handle_control_request(sup, {"cmd": "status"})
         assert r2["status"]["state"] == SupervisorState.RUNNING
     finally:
         handle_control_request(sup, {"cmd": "stop"})
+        _wait_state(sup, SupervisorState.STOPPED)
     assert sup.status().state == SupervisorState.STOPPED
+
+
+_DEAF_SLEEPER = [
+    sys.executable, "-c",
+    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "print('up', flush=True); time.sleep(60)",
+]
+
+
+def test_dispatch_stop_returns_before_grace_elapses() -> None:
+    sup = DaemonSupervisor(argv=_DEAF_SLEEPER, grace_seconds=3.0)
+    try:
+        handle_control_request(sup, {"cmd": "start"})
+        _wait_state(sup, SupervisorState.RUNNING)
+        # Wait for the child's SIGTERM handler to be installed (avoids macOS race
+        # where SIGTERM arrives before the handler is registered, causing an
+        # immediate exit that completes stop() instantly, skipping STOPPING).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if any(line == "up" for line in sup.recent_log_lines()):
+                break
+            time.sleep(0.02)
+        started = time.monotonic()
+        resp = handle_control_request(sup, {"cmd": "stop"})
+        # Returned promptly (async), not after the 3s grace wait.
+        assert time.monotonic() - started < 1.0
+        assert resp["status"]["state"] == SupervisorState.STOPPING
+        _wait_state(sup, SupervisorState.STOPPED)
+    finally:
+        sup.stop()
 
 
 # --- end-to-end socket round trip -----------------------------------------

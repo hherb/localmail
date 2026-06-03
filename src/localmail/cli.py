@@ -1357,11 +1357,13 @@ def list_failed_extractions(limit: int, fmt: str) -> None:
     help="Restrict to one blob (full hex sha256); clears all rows when omitted.",
 )
 def retry_failed_extractions(sha256_hex: str | None) -> None:
-    """Clear failed_extractions rows so the extract worker re-attempts them.
+    """Clear failed-extraction state so the extract worker re-attempts blobs.
 
-    Without ``--sha256`` every failed_extractions row is removed so the
-    extract worker will attempt all previously-failed blobs on its next
-    sweep.  With ``--sha256 HEX`` only the single matching row is removed.
+    Removes both ``failed_extractions`` (poison-pill) rows and
+    ``transient_extractions`` (stuck-transient, #153) counter rows so a blob
+    that exhausted either budget becomes eligible again — e.g. after fixing a
+    parser bug or a misconfigured HF token. Without ``--sha256`` every row in
+    both tables is removed; with ``--sha256 HEX`` only the single matching blob.
     """
     from localmail.db import open_pool
     pool = open_pool(_dsn())
@@ -1373,13 +1375,25 @@ def retry_failed_extractions(sha256_hex: str | None) -> None:
                     "WHERE sha256 = decode(%s,'hex')",
                     (sha256_hex,),
                 )
+                n = cur.rowcount
+                cur.execute(
+                    "DELETE FROM transient_extractions "
+                    "WHERE sha256 = decode(%s,'hex')",
+                    (sha256_hex,),
+                )
+                n_transient = cur.rowcount
             else:
                 cur.execute("DELETE FROM failed_extractions")
-            n = cur.rowcount
+                n = cur.rowcount
+                cur.execute("DELETE FROM transient_extractions")
+                n_transient = cur.rowcount
         conn.commit()
     finally:
         pool.close()
-    click.echo(f"cleared {n} failed_extractions rows")
+    click.echo(
+        f"cleared {n} failed_extractions rows, "
+        f"{n_transient} transient_extractions rows"
+    )
 
 
 @main.command("grant-admin")

@@ -152,3 +152,71 @@ def test_cli_retry_failed_extractions_single_sha(monkeypatch, db_dsn, db_conn) -
         row = cur.fetchone()
         assert row is not None
         assert row[0] == 1  # only sha_b's row remains
+
+
+def test_cli_retry_failed_extractions_clears_transient(
+    monkeypatch, db_dsn, db_conn
+) -> None:
+    """retry-failed-extractions also clears transient_extractions rows so a
+    stuck-transient blob (#153) becomes eligible again after the operator
+    fixes the underlying issue (e.g. a bad HF token)."""
+    sha = hashlib.sha256(b"stuck_transient").digest()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, "/p", "application/pdf", 10),
+        )
+        cur.execute(
+            "INSERT INTO transient_extractions "
+            "(sha256, transient_count, error_class, error_message) "
+            "VALUES (%s, 5, 'HfHubHTTPError', '401') ",
+            (sha,),
+        )
+    db_conn.commit()
+
+    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["retry-failed-extractions"])
+    assert result.exit_code == 0, result.output
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM transient_extractions WHERE sha256 = %s",
+                    (sha,))
+        row = cur.fetchone()
+        assert row is not None and row[0] == 0
+
+
+def test_cli_retry_failed_extractions_single_sha_clears_transient(
+    monkeypatch, db_dsn, db_conn
+) -> None:
+    """--sha256 HEX also restricts the transient_extractions clear to that blob."""
+    sha_a = hashlib.sha256(b"alpha_tr").digest()
+    sha_b = hashlib.sha256(b"beta_tr").digest()
+    with db_conn.cursor() as cur:
+        for sha in (sha_a, sha_b):
+            cur.execute(
+                "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+                "VALUES (%s, %s, %s, %s)",
+                (sha, "/p", "application/pdf", 10),
+            )
+            cur.execute(
+                "INSERT INTO transient_extractions "
+                "(sha256, transient_count) VALUES (%s, 5)",
+                (sha,),
+            )
+    db_conn.commit()
+
+    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["retry-failed-extractions", "--sha256", sha_a.hex()]
+    )
+    assert result.exit_code == 0, result.output
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM transient_extractions")
+        row = cur.fetchone()
+        assert row is not None and row[0] == 1  # only sha_b's transient row remains

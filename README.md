@@ -117,7 +117,7 @@ toast on the panel rather than leaving the button looking inert.
 | `localmail list-failed-embeddings` | Show recent `failed_embeddings` rows. |
 | `localmail retry-failed-embeddings` | Clear `failed_embeddings` so the embed worker re-picks them up. |
 | `localmail list-failed-extractions` | Show recent `failed_extractions` rows. |
-| `localmail retry-failed-extractions` | Clear `failed_extractions` so the extract worker re-picks them up. |
+| `localmail retry-failed-extractions` | Clear `failed_extractions` + `transient_extractions` so the extract worker re-picks them up. |
 
 ### GUI server (HTTPS API)
 
@@ -256,19 +256,21 @@ a perfectly fine PDF as failed):
   `huggingface_hub` / `aiohttp`, e.g. a model-fetch blip) aren't builtin
   `ConnectionError` subclasses, so `DoclingExtractor` opts them into
   `TransientExtractorError` at the wrapper — they retry instead of being
-  recorded as poison-pills. **Trade-off:** the transient path never increments
-  `retry_count`, so a *permanently* failing third-party network error (e.g. a
-  `huggingface_hub` 401/403 from a misconfigured token, or a 404 for a removed
-  model) is re-attempted on every sweep indefinitely rather than capped after
-  `extract_worker_max_retries`. The blast radius is bounded to docling-eligible
-  PDFs and surfaces as repeated WARNING logs (see #153).
+  recorded as poison-pills. So that a *permanently* failing third-party network
+  error (e.g. a `huggingface_hub` 401/403 from a misconfigured token, or a 404
+  for a removed model) can't loop the worker forever, transient failures are
+  counted in a separate `transient_extractions` table — independent of
+  `retry_count`. After `search.extract_worker_max_transient_retries` (default 5)
+  **consecutive** transient failures the blob stops being re-attempted and one
+  distinct *"giving up"* WARNING is logged; a successful extraction resets the
+  counter (#153, resolved).
 - **Poison-pill** — corrupt PDF, encrypted, parser raise, anything else.
   Recorded in `failed_extractions` with `retry_count += 1`, permanently
   skipped once `retry_count >= search.extract_worker_max_retries` (default 3).
 
 ```bash
 uv run localmail list-failed-extractions      # show recorded poison-pills
-uv run localmail retry-failed-extractions     # clear the table so they re-queue
+uv run localmail retry-failed-extractions     # clear failed + stuck-transient state so they re-queue
 ```
 
 ## GUI server

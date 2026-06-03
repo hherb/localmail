@@ -101,7 +101,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0024_daemon_commands.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0025_transient_extractions.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -122,7 +122,8 @@ User-facing config lives at `~/.config/localmail/config.toml` (override with
 
 Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
 `attachment_blobs`, `attachment_text`, `attachment_chunks`,
-`failed_messages`, `failed_extractions`, `api_users`, `api_tokens`,
+`failed_messages`, `failed_extractions`, `transient_extractions`,
+`api_users`, `api_tokens`,
 `user_accounts`, `schema_migrations`. Migration `0020_accounts_canonical.sql`
 extended `accounts` with `folder_allow`, `folder_deny`, `folder_deny_flags`,
 `sync_enabled`, `updated_at`, lifted the `NOT NULL` constraint from
@@ -447,13 +448,27 @@ for the Phase 2 plan.
   chain walk is the shared pure `extractor.iter_exc_chain` generator, reused
   by both `_is_transient` and `_exc_chain_has_transient_module`. To add a
   newly-observed transient package, extend the frozenset — never widen the
-  builtin `_TRANSIENT_EXC_TYPES`. **Known trade-off (#153)**: the transient
-  path never increments `retry_count`, so a *permanently* failing third-party
-  network error (`huggingface_hub` 401/403 from a misconfigured token, 404 for
-  a removed model) re-attempts every sweep indefinitely instead of capping at
-  `extract_worker_max_retries`. Bounded to docling-eligible PDFs; surfaces as
-  repeated WARNINGs. A future fix would cap transient re-attempts with state
-  independent of `retry_count`.
+  builtin `_TRANSIENT_EXC_TYPES`. **Transient retry cap (#153, resolved)**: the
+  transient path deliberately never touches `retry_count` (reserved for
+  poison-pill semantics), so a *permanently* failing third-party network error
+  (`huggingface_hub` 401/403 from a misconfigured token, 404 for a removed
+  model) used to re-attempt every sweep forever. The fix adds a **separate**
+  counter table `transient_extractions` (migration `0025`, keyed on `sha256`,
+  independent of `failed_extractions`): `extract_worker` bumps
+  `transient_count` on each transient classification via
+  `_record_transient_safely` (nested SAVEPOINT, like `_record_failure_safely`),
+  the `_claim_batch` query excludes a blob once `transient_count >=
+  cfg.extract_worker_max_transient_retries` (default 5 — larger than the
+  poison-pill cap of 3 because transients are often genuinely recoverable, but
+  now bounded), and a successful extraction calls `_clear_transient` so the cap
+  measures **consecutive** failures only (the claim returns the prior
+  `transient_count` as a 5th column so the reset DELETE is skipped on the common
+  no-history path). At the cap the worker logs one distinct *"giving up"*
+  WARNING instead of repeating the per-sweep retry line. Recovery: `localmail
+  retry-failed-extractions` now clears **both** `failed_extractions` and
+  `transient_extractions` rows (per-blob with `--sha256`, else all). The pure
+  boundary `transient_budget_exhausted(count, cap)` (`count >= cap`) matches the
+  SQL `transient_count < cap` filter.
 
 **`bm25_field_boosts` weight normalization**: `arms.py` normalises the raw
 boost values by `max(raw)` to satisfy `ts_rank_cd`'s `[0, 1]` weight
@@ -948,7 +963,7 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0024_daemon_commands.sql`; next would be `0025_*.sql`.
+  Latest is `0025_transient_extractions.sql` (#153); next would be `0026_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

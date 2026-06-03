@@ -54,7 +54,13 @@
       showToast("Request accepted.", "ok");
       return;
     }
-    var message = MESSAGES[status] || "Request failed (HTTP " + status + ").";
+    // status === 0 means the request never got an HTTP response (network drop,
+    // abort, TLS failure) — "HTTP 0" would be meaningless to an operator.
+    var message =
+      MESSAGES[status] ||
+      (status === 0
+        ? "Could not reach the server. Check your connection and try again."
+        : "Request failed (HTTP " + status + ").");
     showToast(message, "error");
   });
 })();

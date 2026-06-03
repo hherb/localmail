@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from localmail.api.admin.auth import AdminUser
-from localmail.serve.admin.csrf import csrf_token_context
+from localmail.serve.admin.csrf import csrf_token_context, session_signing_key
 from localmail.serve.admin.daemon_router import build_daemon_view
 from localmail.serve.admin.dependencies import require_admin_session
 
@@ -27,7 +27,7 @@ router = APIRouter()
 
 
 def _render(name: str, request: Request, admin: AdminUser) -> HTMLResponse:
-    s_key = request.app.state.serve_config.session_signing_key.encode("ascii")
+    s_key = session_signing_key(request)
     supervisor = request.app.state.daemon_supervisor
     daemon_cfg = request.app.state.daemon_config
     pool = request.app.state.pool

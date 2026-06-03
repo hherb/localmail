@@ -37,6 +37,7 @@
             <th>Last heartbeat</th><th>Error</th><th></th></tr>
       </thead>
       <tbody>
+        {% set seen_accounts = namespace(ids=[]) %}
         {% for hb in view.heartbeats %}
         <tr class="{% if hb.stale %}daemon-stale{% endif %}">
           <td>{{ hb.worker_kind }}</td>
@@ -46,7 +47,8 @@
           <td>{{ hb.last_heartbeat_at }}{% if hb.stale %} <span class="daemon-stale-tag">stale</span>{% endif %}</td>
           <td>{{ hb.last_error_msg or "" }}</td>
           <td>
-            {% if hb.account_id %}
+            {% if hb.account_id and hb.account_id not in seen_accounts.ids %}
+            {% set seen_accounts.ids = seen_accounts.ids + [hb.account_id] %}
             <button type="button"
               hx-post="/v1/admin/accounts/{{ hb.account_id }}/restart-sync"
               hx-swap="none"

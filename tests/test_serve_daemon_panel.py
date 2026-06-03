@@ -120,6 +120,36 @@ def test_partial_shows_last_error(admin_client, db_conn) -> None:
     assert "boom: connection reset" in r.text
 
 
+def test_restart_sync_button_carries_method_bound_csrf(admin_client, db_conn, admin_user_id) -> None:
+    aid = _seed_heartbeat(db_conn, stale=False)
+    r = admin_client.get("/admin/_partials/daemon-status")
+    action = f"/v1/admin/accounts/{aid}/restart-sync"
+    m = re.search(
+        r'hx-post="' + re.escape(action) + r'"[^>]*hx-headers=\'[^\']*'
+        r'"X-CSRF-Token":\s*"([^"]+)"',
+        r.text,
+    )
+    assert m, r.text
+    token = m.group(1)
+    key = _SIGNING_KEY.encode("ascii")
+    verify_csrf_token(
+        token, user_id=admin_user_id,
+        action=csrf_action("POST", action), key=key,
+    )
+    with pytest.raises(CSRFError):
+        verify_csrf_token(
+            token, user_id=admin_user_id,
+            action=csrf_action("GET", action), key=key,
+        )
+
+
+def test_partial_escapes_error_message(admin_client, db_conn) -> None:
+    _seed_heartbeat(db_conn, stale=False, error="<script>alert(1)</script>")
+    r = admin_client.get("/admin/_partials/daemon-status")
+    assert "<script>alert(1)</script>" not in r.text
+    assert "&lt;script&gt;" in r.text
+
+
 def test_stop_button_carries_method_bound_csrf(admin_client, admin_user_id) -> None:
     r = admin_client.get("/admin/_partials/daemon-status")
     m = re.search(

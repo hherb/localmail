@@ -192,6 +192,65 @@ def test_chunking_failure_records_failed_chunking_and_skips_message(db_conn, mon
     assert calls["n"] == calls_before
 
 
+def test_insert_failure_isolates_poison_message_per_savepoint(db_conn, monkeypatch):
+    """A DB-level INSERT failure in one message rolls back only that message;
+    a sibling message in the same sweep still gets chunks.
+
+    Existing tests cover chunk_message() *raising*; this covers the chunk
+    INSERT itself failing inside the per-message SAVEPOINT. A NUL byte in chunk
+    text makes Postgres reject the INSERT (TEXT can't hold NUL), exercising the
+    failure path at the INSERT layer. (Added while investigating #5 — guards the
+    per-message poison isolation that any future INSERT-batching change must
+    preserve.)
+    """
+    from localmail.search import embed_worker as ew
+    from localmail.search.chunking import ChunkSpec
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES ('iso', 'iso@x', 'h', 'password') RETURNING id"
+        )
+        acct = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " from_addr, body_text, headers, raw_bytes, size_bytes)"
+            " VALUES (%s, '<good@x>', %s, 'g', 'x@y', 'good body', '{}'::jsonb, 'r', 3)"
+            " RETURNING id",
+            (acct, b"\x02" * 32),
+        )
+        good_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " from_addr, body_text, headers, raw_bytes, size_bytes)"
+            " VALUES (%s, '<bad@x>', %s, 'b', 'x@y', 'bad body', '{}'::jsonb, 'r', 3)"
+            " RETURNING id",
+            (acct, b"\x03" * 32),
+        )
+        bad_id = cur.fetchone()[0]
+    db_conn.commit()
+
+    def chunk_message_with_poison(msg, cfg):
+        text = "\x00" if msg.id == bad_id else "ok"
+        return [ChunkSpec(kind="body", chunk_idx=0, text=text, token_count=1)]
+
+    monkeypatch.setattr(ew, "chunk_message", chunk_message_with_poison)
+
+    cfg = SearchConfig(embed_worker_max_chunk_retries=3)
+    run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM message_chunks WHERE message_id = %s", (good_id,))
+        assert cur.fetchone()[0] == 1
+        cur.execute(
+            "SELECT count(*) FROM message_chunks WHERE message_id = %s", (bad_id,))
+        assert cur.fetchone()[0] == 0
+        cur.execute(
+            "SELECT count(*) FROM failed_chunkings WHERE message_id = %s", (bad_id,))
+        assert cur.fetchone()[0] == 1
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: attachment_text chunking + embedding
 # ---------------------------------------------------------------------------

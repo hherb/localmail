@@ -14,7 +14,9 @@ from pathlib import Path
 import psycopg
 from click.testing import CliRunner
 
+import localmail.serve.daemon_control_socket as ctl
 from localmail.cli import main
+from localmail.serve.daemon_supervisor import SupervisorState
 
 
 def _make_cfg(tmp_path: Path, dsn: str, *, supervise: bool = True) -> Path:
@@ -129,9 +131,6 @@ def test_start_no_serve_exits_nonzero(db_conn, db_dsn, tmp_path) -> None:
 
 
 # --- Plane B lifecycle polling -------------------------------------------
-
-import localmail.serve.daemon_control_socket as ctl
-from localmail.serve.daemon_supervisor import SupervisorState
 
 
 def test_stop_polls_until_settled(db_conn, db_dsn, tmp_path, monkeypatch) -> None:

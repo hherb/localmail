@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import click
 
@@ -52,7 +53,9 @@ def _socket_path(cfg) -> Path:
     return socket_path(resolve_runtime_dir(cfg.serve.runtime_dir, env=os.environ))
 
 
-def _lifecycle(ctx: click.Context, op: str, *, no_wait: bool) -> None:
+def _lifecycle(
+    ctx: click.Context, op: Literal["start", "stop", "restart"], *, no_wait: bool
+) -> None:
     """Drive a Plane B op over the control socket. After the (non-blocking)
     command, poll status until the op settles, unless --no-wait."""
     import time

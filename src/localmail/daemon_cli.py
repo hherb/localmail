@@ -19,11 +19,25 @@ from pathlib import Path
 
 import click
 
+from localmail.serve.daemon_supervisor import SupervisorState
+
 # Control-socket read timeouts (seconds). `status` is a cheap query; lifecycle
 # ops must outlast a stop() that itself waits up to shutdown_grace_seconds for
 # SIGTERM before SIGKILL, hence the grace + buffer below.
 _STATUS_TIMEOUT_S = 5.0
 _LIFECYCLE_TIMEOUT_BUFFER_S = 5.0
+
+# Gap between status polls while waiting for a lifecycle op to settle.
+_LIFECYCLE_POLL_INTERVAL_S = 0.25
+# Settle timeout for `start` (it never waits on the SIGTERM grace).
+_START_SETTLE_TIMEOUT_S = 10.0
+
+# Terminal state each op settles to.
+_SETTLE_TARGET = {
+    "start": SupervisorState.RUNNING,
+    "restart": SupervisorState.RUNNING,
+    "stop": SupervisorState.STOPPED,
+}
 
 
 def _load(ctx: click.Context):
@@ -38,9 +52,11 @@ def _socket_path(cfg) -> Path:
     return socket_path(resolve_runtime_dir(cfg.serve.runtime_dir, env=os.environ))
 
 
-def _lifecycle(ctx: click.Context, op: str) -> None:
-    """Drive a Plane B op over the control socket, mapping the two failure
-    modes (externally supervised / serve not running) to a clean exit."""
+def _lifecycle(ctx: click.Context, op: str, *, no_wait: bool) -> None:
+    """Drive a Plane B op over the control socket. After the (non-blocking)
+    command, poll status until the op settles, unless --no-wait."""
+    import time
+
     from localmail.serve.daemon_control_socket import (
         ControlSocketError,
         send_control_request,
@@ -54,19 +70,38 @@ def _lifecycle(ctx: click.Context, op: str) -> None:
             "(systemctl/launchctl), or `localmail daemon reload` / "
             "`restart-account` for DB-mediated control."
         )
+    sock = _socket_path(cfg)
+    settle_timeout = (
+        _START_SETTLE_TIMEOUT_S
+        if op == "start"
+        else cfg.daemon.shutdown_grace_seconds + _LIFECYCLE_TIMEOUT_BUFFER_S
+    )
     try:
-        resp = send_control_request(
-            _socket_path(cfg),
-            {"cmd": op},
-            timeout=cfg.daemon.shutdown_grace_seconds + _LIFECYCLE_TIMEOUT_BUFFER_S,
-        )
+        resp = send_control_request(sock, {"cmd": op}, timeout=settle_timeout)
+        if not resp.get("ok"):
+            raise click.ClickException(f"{op} failed: {resp.get('error')}")
+        state = resp.get("status", {}).get("state", "?")
+        if no_wait:
+            click.echo(f"daemon {op}: {state} (not waiting)")
+            return
+        target = _SETTLE_TARGET[op]
+        deadline = time.monotonic() + settle_timeout
+        while state != target:
+            if state == SupervisorState.CRASHED:
+                raise click.ClickException(f"{op} failed: daemon crashed")
+            if time.monotonic() >= deadline:
+                raise click.ClickException(
+                    f"{op} did not settle to {target} (last state: {state})"
+                )
+            time.sleep(_LIFECYCLE_POLL_INTERVAL_S)
+            st = send_control_request(
+                sock, {"cmd": "status"}, timeout=_STATUS_TIMEOUT_S
+            )
+            state = st.get("status", {}).get("state", "?")
     except ControlSocketError as e:
         raise click.ClickException(
             f"cannot {op} the daemon: {e}. Is `localmail serve` running?"
         )
-    if not resp.get("ok"):
-        raise click.ClickException(f"{op} failed: {resp.get('error')}")
-    state = resp.get("status", {}).get("state", "?")
     click.echo(f"daemon {op}: {state}")
 
 
@@ -162,21 +197,24 @@ def daemon_restart_account(ctx: click.Context, name: str) -> None:
 
 
 @daemon_group.command("start")
+@click.option("--no-wait", is_flag=True, help="Return without waiting to settle.")
 @click.pass_context
-def daemon_start(ctx: click.Context) -> None:
+def daemon_start(ctx: click.Context, no_wait: bool) -> None:
     """Start the supervised daemon process (Plane B)."""
-    _lifecycle(ctx, "start")
+    _lifecycle(ctx, "start", no_wait=no_wait)
 
 
 @daemon_group.command("stop")
+@click.option("--no-wait", is_flag=True, help="Return without waiting to settle.")
 @click.pass_context
-def daemon_stop(ctx: click.Context) -> None:
+def daemon_stop(ctx: click.Context, no_wait: bool) -> None:
     """Stop the supervised daemon process (Plane B)."""
-    _lifecycle(ctx, "stop")
+    _lifecycle(ctx, "stop", no_wait=no_wait)
 
 
 @daemon_group.command("restart")
+@click.option("--no-wait", is_flag=True, help="Return without waiting to settle.")
 @click.pass_context
-def daemon_restart(ctx: click.Context) -> None:
+def daemon_restart(ctx: click.Context, no_wait: bool) -> None:
     """Restart the supervised daemon process (Plane B)."""
-    _lifecycle(ctx, "restart")
+    _lifecycle(ctx, "restart", no_wait=no_wait)

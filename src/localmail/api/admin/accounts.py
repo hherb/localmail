@@ -7,12 +7,14 @@ the AccountConfig model in localmail.config.
 
 from __future__ import annotations
 
+import imaplib
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
 
+import imapclient.exceptions
 import psycopg
 from imapclient import IMAPClient
 from psycopg.rows import class_row
@@ -367,6 +369,26 @@ def _open_imap_connection(
         oauth_provider=account.oauth_provider,  # type: ignore[arg-type]
     )
     return _imap.open_connection(cfg, gmail_client_secrets=gmail_client_secrets)
+
+
+# Exception types a *genuine* IMAP connect failure raises — wrong host/port
+# (socket.gaierror / ConnectionRefusedError → OSError), TLS handshake error
+# (ssl.SSLError → OSError), low-level protocol error (imaplib.IMAP4.error), and
+# bad credentials (imapclient LoginError → IMAPClientError). probe_connection
+# deliberately does NOT catch these — its contract is to raise on connect
+# failure. Transport routes catch this tuple to render a friendly error
+# (#158); the broadening lives at the route, never in the service.
+# Note: OSError is deliberately broad. Any OSError raised after the DB read
+# inside probe_connection takes this path — including a missing/unreadable
+# gmail_client_secrets file (FileNotFoundError → OSError), which surfaces as
+# an inline connect-config error rather than a 500. That framing is correct
+# (it is a connection-config problem); psycopg DB errors are NOT OSError
+# subclasses, so a Postgres blip still propagates as a 500.
+CONNECT_FAILURE_EXC_TYPES: tuple[type[Exception], ...] = (
+    OSError,
+    imaplib.IMAP4.error,
+    imapclient.exceptions.IMAPClientError,
+)
 
 
 def probe_connection(

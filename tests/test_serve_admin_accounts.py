@@ -388,6 +388,50 @@ def test_test_connection_oauth2_returns_400_not_500(admin_client):
     assert r.status_code == 400, r.text
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ConnectionRefusedError("connection refused"),
+        OSError("dns lookup failed"),
+        __import__("ssl").SSLError("tls handshake failed"),
+        __import__("imaplib").IMAP4.error("login failed"),
+        __import__("imapclient").exceptions.LoginError("authentication failed"),
+    ],
+)
+def test_test_connection_hard_failure_returns_400_not_500(
+    admin_client, monkeypatch, exc
+):
+    """A genuine connect failure surfaces as a clean 400 on the JSON route,
+    mirroring the HTML route — never an opaque 500 (#158)."""
+    create = admin_client.post(
+        "/v1/admin/accounts",
+        json={
+            "name": "tc-hard",
+            "email_address": "x@y.test",
+            "auth_method": "password",
+            "imap_host": "imap.example",
+            "imap_port": 993,
+        },
+        headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/accounts")},
+    )
+    aid = create.json()["id"]
+
+    def boom(conn, account_id, *, gmail_client_secrets=None):
+        raise exc
+
+    monkeypatch.setattr("localmail.serve.admin.accounts_router.svc.probe_connection", boom)
+    r = admin_client.post(
+        f"/v1/admin/accounts/{aid}/test-connection",
+        headers={
+            "X-CSRF-Token": admin_client.csrf_for(
+                f"/v1/admin/accounts/{aid}/test-connection"
+            ),
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert str(exc) in r.json()["detail"]
+
+
 # ---------- unauthenticated ----------
 
 def test_unauthenticated_request_redirects(client_no_auth):

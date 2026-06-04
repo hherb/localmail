@@ -108,7 +108,9 @@ toast on the panel rather than leaving the button looking inert.
 The **account management panel** at `/admin/accounts` provides server-rendered
 HTMX screens to list, create, edit, and delete IMAP accounts; store passwords
 in the keyring; run test-connection (lists live IMAP folders, including Gmail
-OAuth2 accounts); and enable/disable per-account sync. The Gmail "Connect"
+OAuth2 accounts, and reports a genuine connect failure — wrong host/port/password,
+DNS, TLS — as a friendly inline error rather than a server error); and
+enable/disable per-account sync. The Gmail "Connect"
 button starts the OAuth2 consent flow; on completion the browser lands on the
 edit page (`/admin/accounts/{id}?oauth=success`). All mutating actions carry
 method-bound CSRF tokens (`X-CSRF-Token` header).

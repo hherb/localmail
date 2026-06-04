@@ -214,6 +214,31 @@ def test_connection(
     )
 
 
+@router.post("/accounts/{account_id}/sync-toggle", response_class=HTMLResponse)
+def sync_toggle(
+    account_id: int, request: Request,
+    admin: AdminUser = require_admin_session(),
+    x_csrf_token: str = Header("", alias="X-CSRF-Token"),
+) -> HTMLResponse:
+    check_csrf(request, admin, x_csrf_token,
+               f"/admin/accounts/{account_id}/sync-toggle")
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        try:
+            acct = svc.get_account(conn, account_id)
+        except NotFound:
+            raise HTTPException(status_code=404, detail="account not found")
+        if acct.auth_method == "archive":
+            raise HTTPException(status_code=400, detail="archive accounts do not sync")
+        svc.update_account(conn, account_id, sync_enabled=not acct.sync_enabled)
+        summaries = {s.id: s for s in svc.list_accounts(conn)}
+    ctx = _base_context(request, admin)
+    ctx["acct"] = summaries[account_id]
+    return templates.TemplateResponse(
+        request=request, name="accounts/_row.html", context=ctx
+    )
+
+
 @router.post("/accounts/{account_id}")
 async def update_account(
     account_id: int, request: Request,

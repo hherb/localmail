@@ -286,3 +286,32 @@ def test_test_connection_error_renders_inline(admin_client, db_conn, monkeypatch
     )
     assert r.status_code == 200
     assert "no password stored" in r.text
+
+
+def _post_with_token(admin_client, path):
+    from localmail.api.admin.csrf import make_csrf_token
+    from localmail.serve.admin.csrf import csrf_action
+    tok = make_csrf_token(
+        user_id=admin_client.app_state_admin_id,
+        action=csrf_action("POST", path),
+        key=_SIGNING_KEY.encode("ascii"),
+    )
+    return admin_client.post(path, headers={"X-CSRF-Token": tok})
+
+
+def test_sync_toggle_disables_then_enables(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail")  # sync_enabled defaults TRUE
+    r = _post_with_token(admin_client, f"/admin/accounts/{aid}/sync-toggle")
+    assert r.status_code == 200
+    assert f'id="account-row-{aid}"' in r.text
+    assert "Enable" in r.text  # now paused → button offers Enable
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT sync_enabled FROM accounts WHERE id = %s", (aid,))
+        assert cur.fetchone()[0] is False
+    r2 = _post_with_token(admin_client, f"/admin/accounts/{aid}/sync-toggle")
+    assert "Disable" in r2.text
+
+
+def test_sync_toggle_unknown_404(admin_client):
+    r = _post_with_token(admin_client, "/admin/accounts/999999/sync-toggle")
+    assert r.status_code == 404

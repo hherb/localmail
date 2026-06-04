@@ -22,6 +22,7 @@ from datetime import datetime
 import psycopg
 from psycopg.rows import class_row
 
+from localmail.api import acl
 from localmail.api.admin.auth import UserNotFound
 from localmail.api.auth import hash_password
 
@@ -238,3 +239,53 @@ def delete_user(conn: psycopg.Connection, user_id: int) -> None:
         cur.execute("DELETE FROM api_users WHERE id = %s", (user_id,))
         if cur.rowcount == 0:
             raise UserNotFound(f"no user with id={user_id}")
+
+
+def set_grant(
+    conn: psycopg.Connection, user_id: int, account_id: int, granted: bool,
+) -> None:
+    """Grant or revoke `user_id`'s ACL on `account_id`. Idempotent.
+
+    Confirms the user exists first (clean UserNotFound → 404). A bad
+    account_id surfaces as UserFieldError (the grant checklist only offers
+    existing accounts, so this is a defensive mapping).
+    """
+    _user_state(conn, user_id)  # existence check → UserNotFound
+    if granted:
+        try:
+            acl.grant_account(conn, user_id, account_id)
+        except psycopg.errors.ForeignKeyViolation as e:
+            raise UserFieldError(f"unknown account {account_id}") from e
+    else:
+        acl.revoke_account(conn, user_id, account_id)
+
+
+def revoke_sessions(conn: psycopg.Connection, user_id: int) -> None:
+    """Invalidate the user's outstanding admin cookies. Raises UserNotFound."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_users SET sessions_invalidated_at = now() WHERE id = %s",
+            (user_id,),
+        )
+        if cur.rowcount == 0:
+            raise UserNotFound(f"no user with id={user_id}")
+
+
+def action_flags(
+    *, target_is_active_admin: bool, active_admin_count: int, is_self: bool,
+) -> dict[str, bool]:
+    """Which edit-screen controls to render disabled (UX only; not enforcement).
+
+    `block_demote` / `block_delete` fire for the logged-in admin's own row
+    (self-action) or when the action would orphan the last admin.
+    `block_disable` fires only on the orphan rule (self-disable is permitted).
+    """
+    orphan = would_orphan_last_admin(
+        target_is_active_admin=target_is_active_admin,
+        active_admin_count=active_admin_count,
+    )
+    return {
+        "block_demote": is_self or orphan,
+        "block_disable": orphan,
+        "block_delete": is_self or orphan,
+    }

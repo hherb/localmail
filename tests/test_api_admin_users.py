@@ -206,3 +206,53 @@ def test_delete_user_cascades_grants_and_tokens(db_conn):
 def test_delete_unknown_user_raises(db_conn):
     with pytest.raises(UserNotFound):
         svc.delete_user(db_conn, 999999)
+
+
+def test_set_grant_grant_then_revoke_idempotent(db_conn):
+    uid = _insert_user(db_conn, "amy")
+    a1 = _insert_account(db_conn, "alpha")
+    svc.set_grant(db_conn, uid, a1, True)
+    svc.set_grant(db_conn, uid, a1, True)  # idempotent
+    assert {g.account_id: g.granted for g in svc.get_user(db_conn, uid).account_grants}[a1] is True
+    svc.set_grant(db_conn, uid, a1, False)
+    svc.set_grant(db_conn, uid, a1, False)  # idempotent
+    assert {g.account_id: g.granted for g in svc.get_user(db_conn, uid).account_grants}[a1] is False
+
+
+def test_set_grant_unknown_user_raises(db_conn):
+    a1 = _insert_account(db_conn, "alpha")
+    with pytest.raises(UserNotFound):
+        svc.set_grant(db_conn, 999999, a1, True)
+
+
+def test_revoke_sessions_bumps_timestamp(db_conn):
+    uid = _insert_user(db_conn, "amy")
+    svc.revoke_sessions(db_conn, uid)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT sessions_invalidated_at FROM api_users WHERE id = %s", (uid,))
+        row = cur.fetchone()
+    assert row is not None and row[0] is not None
+
+
+def test_revoke_sessions_unknown_user_raises(db_conn):
+    with pytest.raises(UserNotFound):
+        svc.revoke_sessions(db_conn, 999999)
+
+
+@pytest.mark.parametrize(
+    "is_admin,disabled,count,is_self,expect",
+    [
+        (True, False, 1, False, {"block_demote": True,  "block_disable": True,  "block_delete": True}),
+        (True, False, 2, False, {"block_demote": False, "block_disable": False, "block_delete": False}),
+        (True, False, 2, True,  {"block_demote": True,  "block_disable": False, "block_delete": True}),
+        (False, False, 5, False, {"block_demote": False, "block_disable": False, "block_delete": False}),
+        (False, False, 5, True,  {"block_demote": True,  "block_disable": False, "block_delete": True}),
+    ],
+)
+def test_action_flags(is_admin, disabled, count, is_self, expect):
+    flags = svc.action_flags(
+        target_is_active_admin=(is_admin and not disabled),
+        active_admin_count=count,
+        is_self=is_self,
+    )
+    assert flags == expect

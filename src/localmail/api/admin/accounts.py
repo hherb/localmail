@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, cast
 
 import psycopg
@@ -350,7 +351,9 @@ class FolderInfo:
     flags: tuple[str, ...]
 
 
-def _open_imap_connection(account: Account) -> AbstractContextManager[IMAPClient]:
+def _open_imap_connection(
+    account: Account, *, gmail_client_secrets: Path | None = None
+) -> AbstractContextManager[IMAPClient]:
     """Indirection point so tests can monkeypatch without touching real IMAP."""
     # Account.auth_method's Literal includes 'archive' but AccountConfig's
     # doesn't (the daemon's config has no archive concept). The caller
@@ -363,28 +366,37 @@ def _open_imap_connection(account: Account) -> AbstractContextManager[IMAPClient
         auth_method=account.auth_method,  # type: ignore[arg-type]
         oauth_provider=account.oauth_provider,  # type: ignore[arg-type]
     )
-    return _imap.open_connection(cfg)
+    return _imap.open_connection(cfg, gmail_client_secrets=gmail_client_secrets)
 
 
-def probe_connection(conn: psycopg.Connection, account_id: int) -> list[FolderInfo]:
+def probe_connection(
+    conn: psycopg.Connection,
+    account_id: int,
+    *,
+    gmail_client_secrets: Path | None = None,
+) -> list[FolderInfo]:
     """Open IMAP, list folders, return summary. Raises on connect failure.
 
-    Archive accounts raise AccountFieldError. OAuth2 accounts also raise
-    AccountFieldError until Sub-plan 2A.2 routes the Gmail client secrets
-    through `_open_imap_connection` — without that wiring the underlying
-    `imap_client.open_connection` cannot mint an XOAUTH2 access token, so
-    invoking it would surface as an opaque 500.
+    Archive accounts raise AccountFieldError (no host to probe). oauth2 accounts
+    require ``gmail_client_secrets`` (threaded in by the caller from
+    app.state.gmail_client_secrets_file); a missing refresh token surfaces as a
+    clean AccountFieldError rather than an opaque 500.
     """
     account = get_account(conn, account_id)
     if account.auth_method == 'archive':
         raise AccountFieldError(
             "probe_connection not applicable to archive accounts"
         )
-    if account.auth_method == 'oauth2':
+    if account.auth_method == 'oauth2' and gmail_client_secrets is None:
         raise AccountFieldError(
-            "probe_connection not yet supported for oauth2 accounts "
-            "(Sub-plan 2A.2 will wire Gmail credentials through)"
+            "Gmail OAuth is not configured on this server "
+            "([gmail_oauth] client_secrets_file)"
         )
-    with _open_imap_connection(account) as client:
-        listing = client.list_folders()
+    try:
+        with _open_imap_connection(
+            account, gmail_client_secrets=gmail_client_secrets
+        ) as client:
+            listing = client.list_folders()
+    except RuntimeError as e:
+        raise AccountFieldError(str(e)) from e
     return [FolderInfo(name=name, flags=tuple(flags)) for flags, _delim, name in listing]

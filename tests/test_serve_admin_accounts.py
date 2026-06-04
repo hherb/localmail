@@ -338,7 +338,7 @@ def test_test_connection_returns_folders(admin_client, monkeypatch):
     fake = FakeIMAPClient.with_folders(["INBOX", "Sent", "[Gmail]/All Mail"])
 
     @contextmanager
-    def fake_open_connection(account):
+    def fake_open_connection(account, *, gmail_client_secrets=None):
         yield fake
 
     monkeypatch.setattr(

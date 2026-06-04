@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Accounts — localmail admin{% endblock %}
+{% block content %}
+<div class="admin-card">
+  <div class="accounts-header">
+    <h1>Accounts</h1>
+    <a href="/admin/accounts/new" class="admin-button">+ New account</a>
+  </div>
+  <table class="accounts-table">
+    <thead>
+      <tr><th>Name</th><th>Email</th><th>Auth</th><th>Sync</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for acct in accounts %}
+        {% include "accounts/_row.html" %}
+      {% else %}
+      <tr><td colspan="5">No accounts configured.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

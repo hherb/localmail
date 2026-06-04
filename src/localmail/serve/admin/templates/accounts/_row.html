@@ -1,0 +1,23 @@
+<tr id="account-row-{{ acct.id }}">
+  <td><a href="/admin/accounts/{{ acct.id }}">{{ acct.name }}</a></td>
+  <td>{{ acct.email_address }}</td>
+  <td>{{ acct.auth_method }}</td>
+  <td>{% if acct.auth_method == "archive" %}—
+      {% elif acct.sync_enabled %}<span class="sync-on">enabled</span>
+      {% else %}<span class="sync-off">paused</span>{% endif %}</td>
+  <td class="account-row-actions">
+    <a href="/admin/accounts/{{ acct.id }}">Edit</a>
+    {% if acct.auth_method != "archive" %}
+    <button type="button" class="link-button"
+      hx-post="/admin/accounts/{{ acct.id }}/sync-toggle"
+      hx-target="#account-row-{{ acct.id }}" hx-swap="outerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/accounts/" ~ acct.id ~ "/sync-toggle") }}"}'>
+      {% if acct.sync_enabled %}Disable{% else %}Enable{% endif %}</button>
+    {% endif %}
+    <button type="button" class="link-button danger"
+      hx-post="/admin/accounts/{{ acct.id }}/delete"
+      hx-target="#account-row-{{ acct.id }}" hx-swap="outerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/accounts/" ~ acct.id ~ "/delete") }}"}'>
+      Delete</button>
+  </td>
+</tr>

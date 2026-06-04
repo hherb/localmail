@@ -10,10 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from localmail.api.admin import accounts as svc
+from localmail.api.admin import oauth as oauth_svc
 from localmail.api.admin.auth import AdminUser
 from localmail.api.errors import NotFound
 from localmail.serve.admin import account_forms as forms
@@ -238,6 +239,40 @@ def sync_toggle(
     return templates.TemplateResponse(
         request=request, name="accounts/_row.html", context=ctx
     )
+
+
+_HTTP_SEE_OTHER = 303
+
+
+@router.post("/accounts/{account_id}/oauth/start")
+def oauth_start(
+    account_id: int, request: Request,
+    admin: AdminUser = require_admin_session(),
+    x_csrf_token: str = Header("", alias="X-CSRF-Token"),
+) -> RedirectResponse:
+    check_csrf(request, admin, x_csrf_token,
+               f"/admin/accounts/{account_id}/oauth/start")
+    cfg = request.app.state.serve_config
+    signing_key = cfg.state_signing_key
+    signing_key = signing_key.encode("ascii") if isinstance(signing_key, str) else signing_key
+    secrets_path = getattr(request.app.state, "gmail_client_secrets_file", None)
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        try:
+            url = oauth_svc.start_oauth(
+                conn, account_id,
+                admin_user_id=admin.id,
+                signing_key=signing_key,
+                redirect_uri=cfg.oauth_callback_url,
+                client_secrets_file=secrets_path,
+            )
+        except NotFound:
+            raise HTTPException(status_code=404, detail="account not found")
+        except svc.AccountFieldError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except oauth_svc.OAuthNotConfigured as e:
+            raise HTTPException(status_code=503, detail=str(e))
+    return RedirectResponse(url, status_code=_HTTP_SEE_OTHER)
 
 
 @router.post("/accounts/{account_id}/delete", response_class=HTMLResponse)

@@ -369,3 +369,29 @@ def test_delete_force_removes_in_use_account(admin_client, db_conn):
     with db_conn.cursor() as cur:
         cur.execute("SELECT 1 FROM accounts WHERE id = %s", (aid,))
         assert cur.fetchone() is None
+
+
+def test_oauth_start_redirects_to_google(admin_client, db_conn, monkeypatch):
+    aid = _seed_account(db_conn, name="g", email_address="g@gmail.com",
+                        auth_method="oauth2", imap_host="imap.gmail.com",
+                        oauth_provider="gmail")
+    from localmail.api.admin import oauth as oauth_svc
+    monkeypatch.setattr(
+        oauth_svc, "start_oauth",
+        lambda conn, account_id, **kw: "https://accounts.google.com/o/oauth2/auth?x=1",
+    )
+    r = _post_with_token(admin_client, f"/admin/accounts/{aid}/oauth/start")
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("https://accounts.google.com/")
+
+
+def test_oauth_start_not_configured_is_503(admin_client, db_conn, monkeypatch):
+    aid = _seed_account(db_conn, name="g", email_address="g@gmail.com",
+                        auth_method="oauth2", imap_host="imap.gmail.com",
+                        oauth_provider="gmail")
+    from localmail.api.admin import oauth as oauth_svc
+    def boom(conn, account_id, **kw):
+        raise oauth_svc.OAuthNotConfigured("Gmail OAuth is not configured")
+    monkeypatch.setattr(oauth_svc, "start_oauth", boom)
+    r = _post_with_token(admin_client, f"/admin/accounts/{aid}/oauth/start")
+    assert r.status_code == 503

@@ -1,8 +1,12 @@
 """Service-layer tests for localmail.api.admin.accounts."""
 
+from contextlib import contextmanager
+from pathlib import Path
+
 import keyring
 import pytest
 
+from localmail.api.admin import accounts as svc
 from localmail.api.admin.accounts import (
     Account, AccountSummary,
     AccountFieldError, AccountInUse,
@@ -222,8 +226,6 @@ def test_clear_secret_tolerates_missing_keyring_entries(db_conn):
 
 
 def test_probe_connection_returns_folder_list(db_conn, monkeypatch):
-    from contextlib import contextmanager
-
     aid = _insert_account(db_conn, name='tc')
 
     fake = FakeIMAPClient.with_folders(['INBOX', '[Gmail]/All Mail', 'Sent'])
@@ -364,11 +366,6 @@ def test_touch_account_updated_at_unknown_id_raises(db_conn):
 
 
 # ---------- probe_connection oauth2 tests ----------
-
-from pathlib import Path
-from contextlib import contextmanager
-
-from localmail.api.admin import accounts as svc
 
 
 def _make_oauth_account(db_conn) -> int:

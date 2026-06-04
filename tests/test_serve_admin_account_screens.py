@@ -206,6 +206,21 @@ def test_store_password_rejected_for_oauth_account(admin_client, db_conn):
     assert r.status_code == 400
 
 
+def test_store_password_blank_rejected(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail")
+    page = admin_client.get(f"/admin/accounts/{aid}").text
+    m = re.search(r'data-password-csrf="([^"]+)"', page)
+    assert m
+    r = admin_client.post(
+        f"/admin/accounts/{aid}/password",
+        data={"password": ""}, headers={"X-CSRF-Token": m.group(1)},
+    )
+    assert r.status_code == 400
+    # nothing stored in the keyring
+    from localmail import secrets as _secrets
+    assert _secrets.get_password("fastmail") is None
+
+
 def test_update_account_changes_field(admin_client, db_conn):
     aid = _seed_account(db_conn, name="fastmail")
     path = f"/admin/accounts/{aid}"

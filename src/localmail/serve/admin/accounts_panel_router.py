@@ -168,6 +168,8 @@ async def store_password(
                f"/admin/accounts/{account_id}/password")
     raw = await request.form()
     password = str(raw.get("password", ""))
+    if not password:
+        raise HTTPException(status_code=400, detail="password must not be blank")
     pool = request.app.state.pool
     with pool.connection() as conn:
         try:

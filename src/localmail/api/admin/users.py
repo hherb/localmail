@@ -23,7 +23,6 @@ import psycopg
 from psycopg.rows import class_row
 
 from localmail.api.admin.auth import UserNotFound
-from localmail.api.auth import hash_password
 
 
 class UserFieldError(ValueError):
@@ -81,16 +80,17 @@ def list_users(conn: psycopg.Connection) -> list[UserSummary]:
 
 def get_user(conn: psycopg.Connection, user_id: int) -> UserDetail:
     """One user plus a grant flag for EVERY account. Raises UserNotFound."""
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=class_row(UserSummary)) as cur:
         cur.execute(
-            "SELECT username, (is_admin IS TRUE), (disabled_at IS NOT NULL), created_at "
+            "SELECT id, username, (is_admin IS TRUE) AS is_admin, "
+            "       (disabled_at IS NOT NULL) AS disabled, created_at "
             "  FROM api_users WHERE id = %s",
             (user_id,),
         )
-        row = cur.fetchone()
-        if row is None:
+        user = cur.fetchone()
+        if user is None:
             raise UserNotFound(f"no user with id={user_id}")
-        username, is_admin, disabled, created_at = row
+    with conn.cursor() as cur:
         cur.execute(
             "SELECT a.id, a.name, (ua.user_id IS NOT NULL) AS granted "
             "  FROM accounts a "
@@ -104,6 +104,6 @@ def get_user(conn: psycopg.Connection, user_id: int) -> UserDetail:
             for aid, name, granted in cur.fetchall()
         ]
     return UserDetail(
-        id=user_id, username=username, is_admin=bool(is_admin),
-        disabled=bool(disabled), created_at=created_at, account_grants=grants,
+        id=user.id, username=user.username, is_admin=user.is_admin,
+        disabled=user.disabled, created_at=user.created_at, account_grants=grants,
     )

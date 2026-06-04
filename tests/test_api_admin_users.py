@@ -76,3 +76,9 @@ def test_get_user_includes_grant_for_every_account(db_conn):
 def test_get_user_unknown_raises(db_conn):
     with pytest.raises(UserNotFound):
         svc.get_user(db_conn, 999999)
+
+
+def test_get_user_with_no_accounts_has_empty_grants(db_conn):
+    uid = _insert_user(db_conn, "solo")
+    detail = svc.get_user(db_conn, uid)
+    assert detail.account_grants == []

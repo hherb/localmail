@@ -685,6 +685,31 @@ for the full design.
   is a no-op that leaves `updated_at` untouched. Both commands share the
   `cli._apply_sync_toggle` helper, which only calls `update_account` on the
   `apply` branch. No new migration (`sync_enabled` ships in `0020`).
+- **Account CRUD admin screens (Sub-plan 2A.3, shipped — closes #125):**
+  server-rendered HTMX screens at `/admin/accounts` for list, create, edit,
+  delete, store-password, test-connection, enable/disable sync, and Gmail OAuth
+  "Connect". Code: thin HTML router
+  [`serve/admin/accounts_panel_router.py`](src/localmail/serve/admin/accounts_panel_router.py)
+  (~330 lines) + pure form logic
+  [`serve/admin/account_forms.py`](src/localmail/serve/admin/account_forms.py)
+  (unit-tested in isolation via `tests/test_account_forms.py`). Templates under
+  `serve/admin/templates/accounts/` (`list.html`, `form.html`,
+  `_form_fields.html`, `_row.html`, `_test_result.html`, `_secret_status.html`);
+  auth-method field toggle in the served static file
+  [`serve/admin/static/accounts-panel.js`](src/localmail/serve/admin/static/accounts-panel.js)
+  (CSP `script-src 'self'`, no inline JS). Each mutating action carries a
+  **method-bound** CSRF token via `csrf_token_for_method` — the explicit closure
+  of #125 (the shared mint from 2B.5 now has its first non-daemon consumer).
+  Backend change: `probe_connection` now supports `oauth2` accounts — threads
+  `gmail_client_secrets_file` into the existing XOAUTH2 path; a missing refresh
+  token surfaces as `AccountFieldError` ("Connect Gmail first"), never a 500.
+  Validation errors render **inline beside the offending field** (`_form_fields.html`,
+  HTTP 400 + HTMX swap); successful create/update returns `HX-Redirect` to the
+  edit page. On OAuth completion the callback redirects to
+  `/admin/accounts/{id}?oauth=success`. Archive accounts are rejected by
+  test-connection (same as before). **No new migration** (reuses `sync_enabled`
+  from `0020`). Known follow-up: a genuine connect failure (wrong host/password)
+  surfaces as a 500 rather than a friendly inline error — scoped out of 2A.3.
 - **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
   planes for the sync daemon. **Plane B** (process lifecycle) lives in
   [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):
@@ -763,7 +788,7 @@ for the full design.
   CSRF token via the reusable
   [serve/admin/csrf.py](src/localmail/serve/admin/csrf.py)`::csrf_token_context`
   helper (returns `csrf_token_for` legacy single-arg + `csrf_token_for_method`
-  — the latter is the shared #125 mint for future admin HTML, e.g. 2A.3).
+  — the latter is the shared #125 mint, consumed by the account screens in 2A.3).
   Restart-sync buttons are deduped per account (idle+poll workers share one).
   The `/v1/admin/*` endpoints stay pure machine-JSON (no HTMX content
   negotiation); the panel polls the dedicated HTML partial. **No new migration.**

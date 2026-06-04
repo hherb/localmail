@@ -410,3 +410,21 @@ def test_accounts_panel_js_is_served(admin_client):
     r = admin_client.get("/admin/static/accounts-panel.js")
     assert r.status_code == 200
     assert "data-auth-select" in r.text
+
+
+@pytest.fixture
+def nonadmin_client(app, db_conn):
+    pwh = hash_password("pw")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash, is_admin) "
+            "VALUES ('bob', %s, FALSE)", (pwh,))
+    db_conn.commit()
+    return TestClient(app, follow_redirects=False)
+
+
+def test_nonadmin_cannot_reach_accounts(nonadmin_client):
+    # No admin session cookie at all → redirect to login.
+    r = nonadmin_client.get("/admin/accounts")
+    assert r.status_code in (302, 303)
+    assert "/admin/login" in r.headers["location"]

@@ -105,6 +105,14 @@ the daemon settling. A rejected control action (a busy-guard **409** while
 another lifecycle op is in flight, or a stale-token **400**) surfaces a brief
 toast on the panel rather than leaving the button looking inert.
 
+The **account management panel** at `/admin/accounts` provides server-rendered
+HTMX screens to list, create, edit, and delete IMAP accounts; store passwords
+in the keyring; run test-connection (lists live IMAP folders, including Gmail
+OAuth2 accounts); and enable/disable per-account sync. The Gmail "Connect"
+button starts the OAuth2 consent flow; on completion the browser lands on the
+edit page (`/admin/accounts/{id}?oauth=success`). All mutating actions carry
+method-bound CSRF tokens (`X-CSRF-Token` header).
+
 ### Search backfill & status
 
 | Command | Purpose |

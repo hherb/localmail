@@ -233,10 +233,13 @@ def test_connection(
         request, admin, x_csrf_token,
         f"/v1/admin/accounts/{aid}/test-connection",
     )
+    secrets_path = getattr(request.app.state, "gmail_client_secrets_file", None)
     pool = request.app.state.pool
     with pool.connection() as conn:
         try:
-            folders = svc.probe_connection(conn, aid)
+            folders = svc.probe_connection(
+                conn, aid, gmail_client_secrets=secrets_path
+            )
         except NotFound:
             raise HTTPException(status_code=404, detail="account not found")
         except svc.AccountFieldError as e:

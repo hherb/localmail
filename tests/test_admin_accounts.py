@@ -229,7 +229,7 @@ def test_probe_connection_returns_folder_list(db_conn, monkeypatch):
     fake = FakeIMAPClient.with_folders(['INBOX', '[Gmail]/All Mail', 'Sent'])
 
     @contextmanager
-    def fake_open_connection(account):
+    def fake_open_connection(account, *, gmail_client_secrets=None):
         yield fake
 
     monkeypatch.setattr(
@@ -361,3 +361,69 @@ def test_touch_account_updated_at_unknown_id_raises(db_conn):
     from localmail.api.errors import NotFound
     with pytest.raises(NotFound):
         touch_account_updated_at(db_conn, 999999)
+
+
+# ---------- probe_connection oauth2 tests ----------
+
+from pathlib import Path
+from contextlib import contextmanager
+
+from localmail.api.admin import accounts as svc
+
+
+def _make_oauth_account(db_conn) -> int:
+    acct = svc.create_account(
+        db_conn,
+        name="g", email_address="g@gmail.com", auth_method="oauth2",
+        imap_host="imap.gmail.com", imap_port=993, oauth_provider="gmail",
+        folder_allow=None, folder_deny=None, folder_deny_flags=None,
+    )
+    return acct.id
+
+
+class _FakeClient:
+    def list_folders(self):
+        return [((rb"\HasNoChildren",), b"/", "INBOX"),
+                ((rb"\Junk",), b"/", "[Gmail]/Spam")]
+
+
+def test_probe_connection_oauth2_lists_folders(db_conn, monkeypatch):
+    aid = _make_oauth_account(db_conn)
+
+    @contextmanager
+    def fake_open(account, *, gmail_client_secrets=None):
+        assert account.auth_method == "oauth2"
+        assert gmail_client_secrets == Path("/tmp/secrets.json")
+        yield _FakeClient()
+
+    monkeypatch.setattr(svc, "_open_imap_connection", fake_open)
+    folders = svc.probe_connection(
+        db_conn, aid, gmail_client_secrets=Path("/tmp/secrets.json")
+    )
+    names = [f.name for f in folders]
+    assert names == ["INBOX", "[Gmail]/Spam"]
+
+
+def test_probe_connection_oauth2_missing_token_is_field_error(db_conn, monkeypatch):
+    aid = _make_oauth_account(db_conn)
+
+    @contextmanager
+    def fake_open(account, *, gmail_client_secrets=None):
+        raise RuntimeError("no OAuth refresh token stored for 'g'; run oauth-login")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(svc, "_open_imap_connection", fake_open)
+    with pytest.raises(svc.AccountFieldError):
+        svc.probe_connection(
+            db_conn, aid, gmail_client_secrets=Path("/tmp/secrets.json")
+        )
+
+
+def test_probe_connection_archive_still_refused(db_conn):
+    acct = svc.create_account(
+        db_conn, name="arch", email_address="a@x.org", auth_method="archive",
+        imap_host=None, imap_port=None, oauth_provider=None,
+        folder_allow=None, folder_deny=None, folder_deny_flags=None,
+    )
+    with pytest.raises(svc.AccountFieldError):
+        svc.probe_connection(db_conn, acct.id)

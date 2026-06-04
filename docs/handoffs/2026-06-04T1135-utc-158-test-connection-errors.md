@@ -1,10 +1,12 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-06-04T1135-utc (#158 — friendly test-connection failures, committed on a branch).**
+> **Status as of 2026-06-04T1135-utc (#158 — friendly test-connection failures, PR open).**
 > This session fixed **#158** (genuine IMAP connect failures surfaced as 500
 > instead of a friendly inline error). TDD, 10 new parametrized tests. Work is on
-> branch `admin-2a3-test-connection-errors` (1 commit `bf5b6ab`), **not yet pushed
-> or PR'd** — `main` is at `50754c6`. **Local: 1295 passed, mypy clean.**
+> branch `admin-2a3-test-connection-errors` (fix `bf5b6ab`, handoff `f20dcc8`),
+> pushed and open as **PR #159** (https://github.com/hherb/localmail/pull/159,
+> "Closes #158"), CI pending at handoff time. `main` is at `50754c6` (not yet
+> merged). **Local: 1295 passed, mypy clean.**
 >
 > **Also at session start:** confirmed the prior handoff's "immediate" task was
 > already done — **PR #157 (2A.3 account admin screens) was already merged** into
@@ -63,13 +65,12 @@ pre-existing and unrelated.
 
 ## What's next
 
-### 0. **Push branch + open PR for #158** *(immediate)*
-The fix is committed locally only — not pushed, no PR yet.
+### 0. **Merge PR #159 for #158** *(immediate)*
+The fix is pushed and open as **PR #159** ("Closes #158"); CI was pending at
+handoff time.
 ```bash
-git push -u origin admin-2a3-test-connection-errors
-gh pr create --fill   # body should say "Closes #158"
-gh pr checks <N>      # let CI finish
-gh pr merge <N> --squash --delete-branch
+gh pr checks 159                          # let CI finish
+gh pr merge 159 --squash --delete-branch  # closes #158
 git checkout main && git pull
 ```
 After merge, **open issues: 2** — #90, #25 (both blocked, see below). #158 closes with this PR.
@@ -90,9 +91,9 @@ The other two admin nav links still 404:
   upstream release on `websockets.asyncio`; only a `filterwarnings` band-aid now.
 
 ## Open decisions & risks
-1. **#158 branch not pushed / no PR yet** — `main` is at `50754c6`. Commit
-   `bf5b6ab` lives only on local branch `admin-2a3-test-connection-errors`.
-   First action next session: push + PR (see "What's next §0").
+1. **PR #159 open, not yet merged** — `main` is at `50754c6`. The branch is
+   pushed (`bf5b6ab` fix, `f20dcc8` handoff) and CI was pending at handoff time.
+   First action next session: confirm CI green + merge (see "What's next §0").
 2. **JSON `/v1` route mirrors the 400** — the explicit decision #158 asked for.
    Rationale: uniform contract across both transports; structured error beats an
    opaque 500. If a downstream machine consumer ever needs to distinguish a
@@ -125,8 +126,9 @@ git fetch --prune origin                 # ALWAYS first
 git status                               # on admin-2a3-test-connection-errors, clean
 git branch -vv                           # main (50754c6) + admin-2a3-test-connection-errors (bf5b6ab)
 git --no-pager log --oneline -6
-gh pr list --state open                  # none yet — push + PR #158 first
-gh issue list --state open --limit 40    # #158 (this work), #90, #25
+gh pr list --state open                  # #159 (#158 fix)
+gh pr checks 159                          # CI status before merging
+gh issue list --state open --limit 40    # #158 (closes on #159 merge), #90, #25
 
 # Confirm the suite (the live, canonical signal this session):
 unset VIRTUAL_ENV && uv run pytest -q tests/    # expect 1295 passed
@@ -160,5 +162,5 @@ CLAUDE.md                                                   # 2A.3 follow-up -> 
 ```
 
 `main` at `50754c6` (== `origin/main`). Branch `admin-2a3-test-connection-errors`
-committed locally (HEAD `bf5b6ab`), **not pushed**. Working tree clean (only
+pushed (HEAD `f20dcc8`), open as **PR #159**. Working tree clean (only
 `.claude/` + `.superpowers/` local files). **No migration added this session.**

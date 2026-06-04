@@ -230,10 +230,11 @@ def sync_toggle(
             raise HTTPException(status_code=404, detail="account not found")
         if acct.auth_method == "archive":
             raise HTTPException(status_code=400, detail="archive accounts do not sync")
-        svc.update_account(conn, account_id, sync_enabled=not acct.sync_enabled)
-        summaries = {s.id: s for s in svc.list_accounts(conn)}
+        updated = svc.update_account(
+            conn, account_id, sync_enabled=not acct.sync_enabled
+        )
     ctx = _base_context(request, admin)
-    ctx["acct"] = summaries[account_id]
+    ctx["acct"] = updated
     return templates.TemplateResponse(
         request=request, name="accounts/_row.html", context=ctx
     )

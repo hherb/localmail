@@ -32,6 +32,14 @@
       <input name="imap_port" value="{{ values.imap_port }}">
       {% if field_errors.imap_port %}<span class="field-error">{{ field_errors.imap_port }}</span>{% endif %}
     </label>
+    {% if account_id %}
+    <button type="button" class="admin-button"
+      hx-post="/admin/accounts/{{ account_id }}/test-connection"
+      hx-target="#test-result" hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/accounts/" ~ account_id ~ "/test-connection") }}"}'>
+      Test connection</button>
+    <div id="test-result"></div>
+    {% endif %}
   </div>
 
   <div data-auth-group="oauth2">

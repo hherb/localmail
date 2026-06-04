@@ -244,3 +244,45 @@ def test_update_account_changes_field(admin_client, db_conn):
         row = cur.fetchone()
         assert row is not None
         assert row[0] == "new@fastmail.com"
+
+
+def test_test_connection_lists_folders(admin_client, db_conn, monkeypatch):
+    aid = _seed_account(db_conn, name="fastmail")
+    monkeypatch.setattr(
+        svc, "probe_connection",
+        lambda conn, account_id, gmail_client_secrets=None: [
+            svc.FolderInfo(name="INBOX", flags=(r"\HasNoChildren",)),
+            svc.FolderInfo(name="Spam", flags=(r"\Junk",)),
+        ],
+    )
+    from localmail.api.admin.csrf import make_csrf_token
+    from localmail.serve.admin.csrf import csrf_action
+    tok = make_csrf_token(
+        user_id=admin_client.app_state_admin_id,
+        action=csrf_action("POST", f"/admin/accounts/{aid}/test-connection"),
+        key=_SIGNING_KEY.encode("ascii"),
+    )
+    r = admin_client.post(
+        f"/admin/accounts/{aid}/test-connection", headers={"X-CSRF-Token": tok}
+    )
+    assert r.status_code == 200
+    assert "INBOX" in r.text and "Spam" in r.text
+
+
+def test_test_connection_error_renders_inline(admin_client, db_conn, monkeypatch):
+    aid = _seed_account(db_conn, name="fastmail")
+    def boom(conn, account_id, gmail_client_secrets=None):
+        raise svc.AccountFieldError("no password stored")
+    monkeypatch.setattr(svc, "probe_connection", boom)
+    from localmail.api.admin.csrf import make_csrf_token
+    from localmail.serve.admin.csrf import csrf_action
+    tok = make_csrf_token(
+        user_id=admin_client.app_state_admin_id,
+        action=csrf_action("POST", f"/admin/accounts/{aid}/test-connection"),
+        key=_SIGNING_KEY.encode("ascii"),
+    )
+    r = admin_client.post(
+        f"/admin/accounts/{aid}/test-connection", headers={"X-CSRF-Token": tok}
+    )
+    assert r.status_code == 200
+    assert "no password stored" in r.text

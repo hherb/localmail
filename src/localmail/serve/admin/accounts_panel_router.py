@@ -188,6 +188,32 @@ async def store_password(
     )
 
 
+@router.post("/accounts/{account_id}/test-connection", response_class=HTMLResponse)
+def test_connection(
+    account_id: int, request: Request,
+    admin: AdminUser = require_admin_session(),
+    x_csrf_token: str = Header("", alias="X-CSRF-Token"),
+) -> HTMLResponse:
+    check_csrf(request, admin, x_csrf_token,
+               f"/admin/accounts/{account_id}/test-connection")
+    secrets_path = getattr(request.app.state, "gmail_client_secrets_file", None)
+    ctx = _base_context(request, admin)
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        try:
+            folders = svc.probe_connection(
+                conn, account_id, gmail_client_secrets=secrets_path
+            )
+            ctx["folders"] = folders
+        except NotFound:
+            raise HTTPException(status_code=404, detail="account not found")
+        except svc.AccountFieldError as e:
+            ctx["error"] = str(e)
+    return templates.TemplateResponse(
+        request=request, name="accounts/_test_result.html", context=ctx
+    )
+
+
 @router.post("/accounts/{account_id}")
 async def update_account(
     account_id: int, request: Request,

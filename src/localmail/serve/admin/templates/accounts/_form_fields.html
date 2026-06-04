@@ -1,0 +1,71 @@
+<div id="account-form-fields" data-auth="{{ values.auth_method }}">
+  {% if field_errors._form %}<p class="admin-flash admin-flash-error">{{ field_errors._form }}</p>{% endif %}
+
+  <label>Name
+    {% if account_id %}
+      <input name="name" value="{{ values.name }}" readonly>
+    {% else %}
+      <input name="name" value="{{ values.name }}" required>
+    {% endif %}
+    {% if field_errors.name %}<span class="field-error">{{ field_errors.name }}</span>{% endif %}
+  </label>
+
+  <label>Email
+    <input name="email_address" value="{{ values.email_address }}" required>
+    {% if field_errors.email_address %}<span class="field-error">{{ field_errors.email_address }}</span>{% endif %}
+  </label>
+
+  <label>Auth method
+    <select name="auth_method" data-auth-select>
+      {% for m in ["password", "oauth2", "archive"] %}
+      <option value="{{ m }}" {% if values.auth_method == m %}selected{% endif %}>{{ m }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <div data-auth-group="password oauth2">
+    <label>IMAP host
+      <input name="imap_host" value="{{ values.imap_host }}">
+      {% if field_errors.imap_host %}<span class="field-error">{{ field_errors.imap_host }}</span>{% endif %}
+    </label>
+    <label>IMAP port
+      <input name="imap_port" value="{{ values.imap_port }}">
+      {% if field_errors.imap_port %}<span class="field-error">{{ field_errors.imap_port }}</span>{% endif %}
+    </label>
+  </div>
+
+  <div data-auth-group="oauth2">
+    <label>OAuth provider
+      <select name="oauth_provider">
+        <option value="" {% if not values.oauth_provider %}selected{% endif %}>—</option>
+        <option value="gmail" {% if values.oauth_provider == "gmail" %}selected{% endif %}>gmail</option>
+      </select>
+    </label>
+    {% if account_id %}
+    <button type="button" class="admin-button"
+      hx-post="/admin/accounts/{{ account_id }}/oauth/start"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/accounts/" ~ account_id ~ "/oauth/start") }}"}'>
+      Connect Gmail</button>
+    {% endif %}
+  </div>
+
+  <fieldset>
+    <legend>Folder filters</legend>
+    <label>Allow (one per line, blank = all)
+      <textarea name="folder_allow" rows="3">{{ values.folder_allow }}</textarea>
+    </label>
+    <label>Deny (one per line)
+      <textarea name="folder_deny" rows="2">{{ values.folder_deny }}</textarea>
+    </label>
+    <div class="deny-flags">
+      {% for flag in deny_flags %}
+      <label><input type="checkbox" name="deny_flags" value="{{ flag }}"
+        {% if flag in deny_flags_checked %}checked{% endif %}> {{ flag }}</label>
+      {% endfor %}
+    </div>
+  </fieldset>
+
+  <div class="form-actions">
+    <button type="submit" class="admin-button">Save</button>
+  </div>
+</div>

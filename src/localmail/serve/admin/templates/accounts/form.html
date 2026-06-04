@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{% if account_id %}Edit account{% else %}New account{% endif %} — localmail admin{% endblock %}
+{% block content %}
+<div class="admin-card">
+  <h1>{% if account_id %}Edit account{% else %}New account{% endif %}</h1>
+  {% if oauth == "success" %}<p class="admin-flash admin-flash-success">Gmail connected.</p>{% endif %}
+  {% if oauth == "failed" %}<p class="admin-flash admin-flash-error">Gmail authorization failed.</p>{% endif %}
+
+  {% if account_id %}
+    {% set post_url = "/admin/accounts/" ~ account_id %}
+  {% else %}
+    {% set post_url = "/admin/accounts" %}
+  {% endif %}
+
+  <form id="account-form" class="account-form"
+        hx-post="{{ post_url }}" hx-target="#account-form-fields" hx-swap="outerHTML"
+        data-create-csrf="{{ csrf_token_for_method('POST', post_url) }}"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", post_url) }}"}'>
+    {% include "accounts/_form_fields.html" %}
+  </form>
+</div>
+<script src="/admin/static/accounts-panel.js" defer></script>
+{% endblock %}

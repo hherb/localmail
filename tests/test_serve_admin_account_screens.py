@@ -88,3 +88,64 @@ def test_list_renders_accounts(admin_client, db_conn):
     assert "fastmail" in r.text
     assert "work-gmail" in r.text
     assert "New account" in r.text
+
+
+def _csrf_header(client, path: str) -> dict:
+    """Mint a method-bound POST token by scraping it from a rendered form/page.
+
+    The new-account form embeds the create token in a hx-headers attribute on
+    the <form>; we read it from there so the test exercises the real mint.
+    """
+    page = client.get("/admin/accounts/new").text
+    m = re.search(r'data-create-csrf="([^"]+)"', page)
+    assert m, "create CSRF token not found in new-account form"
+    return {"X-CSRF-Token": m.group(1)}
+
+
+def test_new_account_form_renders(admin_client):
+    r = admin_client.get("/admin/accounts/new")
+    assert r.status_code == 200
+    assert 'name="auth_method"' in r.text
+    assert "/admin/static/accounts-panel.js" in r.text
+
+
+def test_create_account_happy_path(admin_client, db_conn):
+    headers = _csrf_header(admin_client, "/admin/accounts")
+    r = admin_client.post(
+        "/admin/accounts",
+        data={
+            "name": "fastmail", "email_address": "me@fastmail.com",
+            "auth_method": "password", "imap_host": "imap.fastmail.com",
+            "imap_port": "993", "oauth_provider": "",
+            "folder_allow": "INBOX", "folder_deny": "",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200
+    assert r.headers.get("HX-Redirect", "").startswith("/admin/accounts/")
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT name FROM accounts WHERE name = 'fastmail'")
+        assert cur.fetchone() is not None
+
+
+def test_create_account_validation_error_inline(admin_client):
+    headers = _csrf_header(admin_client, "/admin/accounts")
+    r = admin_client.post(
+        "/admin/accounts",
+        data={
+            "name": "x", "email_address": "x@x.com", "auth_method": "password",
+            "imap_host": "h", "imap_port": "70000", "oauth_provider": "",
+            "folder_allow": "", "folder_deny": "",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 400
+    assert "imap_port" in r.text
+
+
+def test_create_account_missing_csrf_rejected(admin_client):
+    r = admin_client.post(
+        "/admin/accounts",
+        data={"name": "y", "email_address": "y@y.com", "auth_method": "archive"},
+    )
+    assert r.status_code == 400

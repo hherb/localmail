@@ -365,6 +365,14 @@ class SearchConfig(BaseModel):
     extract_worker_poll_interval_s: float = 30.0
     extract_worker_batch_size: int = 20
     extract_worker_max_retries: int = 3
+    # Cap on *consecutive* transient extraction failures (docling third-party
+    # network errors, OOM blips) before a blob stops being re-attempted (#153).
+    # Independent of extract_worker_max_retries, which stays reserved for
+    # poison-pill (failed_extractions) semantics. Larger than the poison cap
+    # because transients are often genuinely recoverable, but now bounded so a
+    # permanently-failing network error can't loop the worker forever. Reset to
+    # 0 on the first successful extraction of the blob.
+    extract_worker_max_transient_retries: int = 5
 
     # --- Phase 2: extractor policy ---
     # Allowlists control which blobs are eligible for text extraction; blobs

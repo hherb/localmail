@@ -553,3 +553,201 @@ def test_extract_worker_transient_blob_eligible_next_sweep(
     assert row is not None
     assert "will recover" in row[0]
     assert calls["n"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# #153 — cap *consecutive* transient re-attempts so a permanently-failing
+# third-party docling network error stops looping the worker forever, while
+# keeping retry_count's poison-pill semantics untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_transient_budget_exhausted_is_pure_boundary() -> None:
+    """transient_budget_exhausted is True iff count >= cap (inclusive)."""
+    from localmail.search.extract_worker import transient_budget_exhausted
+
+    assert not transient_budget_exhausted(0, 3)
+    assert not transient_budget_exhausted(2, 3)
+    assert transient_budget_exhausted(3, 3)
+    assert transient_budget_exhausted(4, 3)
+
+
+def _transient_count(db_conn, sha: bytes) -> int | None:
+    """Return the transient_count for a blob, or None when no row exists."""
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT transient_count FROM transient_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+    return None if row is None else row[0]
+
+
+def test_transient_failure_increments_counter(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """A transient failure bumps transient_extractions.transient_count and
+    writes the error details — but still NO failed_extractions row."""
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha = _seed_blob(db_conn, b"flaky", "text/plain", tmp_path, "a.txt")
+
+    def _fail_transient(self, blob_path, mime_type):
+        raise TransientExtractorError("simulated network blip")
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    assert _transient_count(db_conn, sha) == 1
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT error_class FROM transient_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        klass = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM failed_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        failed = cur.fetchone()
+    assert klass is not None and klass[0] == "TransientExtractorError"
+    assert failed is not None and failed[0] == 0
+
+
+def test_transient_failures_accumulate_then_blob_excluded(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """After max_transient_retries consecutive transient failures the blob is
+    excluded from the claim batch and stops being re-attempted — with NO
+    failed_extractions row (retry_count semantics untouched)."""
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha = _seed_blob(db_conn, b"permanently flaky", "text/plain", tmp_path, "a.txt")
+    cfg = SearchConfig(extract_worker_max_transient_retries=2)
+
+    calls = {"n": 0}
+
+    def _always_transient(self, blob_path, mime_type):
+        calls["n"] += 1
+        raise TransientExtractorError("HF 401 forever")
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _always_transient)
+
+    run_extract_worker_once(db_conn, cfg)  # count -> 1
+    run_extract_worker_once(db_conn, cfg)  # count -> 2 (== cap)
+    run_extract_worker_once(db_conn, cfg)  # excluded; extractor not called
+
+    assert calls["n"] == 2  # third sweep did not re-attempt the blob
+    assert _transient_count(db_conn, sha) == 2
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM failed_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        failed = cur.fetchone()
+    assert failed is not None and failed[0] == 0
+
+
+def test_transient_cap_logs_giving_up_warning(
+    db_conn, tmp_path, monkeypatch, caplog
+) -> None:
+    """Reaching the cap emits exactly one distinct 'giving up' WARNING so the
+    operator gets a single clear signal instead of an infinite repeat."""
+    import logging
+
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha = _seed_blob(db_conn, b"flaky", "text/plain", tmp_path, "a.txt")
+    cfg = SearchConfig(extract_worker_max_transient_retries=1)
+
+    def _fail_transient(self, blob_path, mime_type):
+        raise TransientExtractorError("blip")
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)
+
+    with caplog.at_level(logging.WARNING, logger="localmail.search.extract_worker"):
+        run_extract_worker_once(db_conn, cfg)
+
+    giving_up = [
+        r for r in caplog.records
+        if "giving up" in r.getMessage() and sha.hex() in r.getMessage()
+    ]
+    assert len(giving_up) == 1
+
+
+def test_transient_counter_reset_on_success(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """A blob that transient-fails then succeeds has its transient_extractions
+    row cleared, so the cap counts *consecutive* failures only."""
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha = _seed_blob(db_conn, b"recovers eventually", "text/plain", tmp_path, "a.txt")
+
+    real_extract = LightweightExtractor.extract
+    calls = {"n": 0}
+
+    def _flaky(self, blob_path, mime_type):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientExtractorError("first blip")
+        return real_extract(self, blob_path, mime_type)
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _flaky)
+
+    run_extract_worker_once(db_conn, SearchConfig())  # transient -> count 1
+    assert _transient_count(db_conn, sha) == 1
+    run_extract_worker_once(db_conn, SearchConfig())  # success -> row cleared
+
+    assert _transient_count(db_conn, sha) is None
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+    assert row is not None and "recovers eventually" in row[0]
+
+
+def test_transient_failure_with_nul_in_message_still_increments(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """A transient exception whose message carries a NUL byte must still bump
+    the counter. Postgres TEXT rejects NUL, so an unsanitized INSERT would
+    abort — leaving the counter at 0 and looping the blob forever, defeating
+    the #153 cap. The message is stored NUL-stripped."""
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha = _seed_blob(db_conn, b"nul flaky", "text/plain", tmp_path, "a.txt")
+
+    def _fail_transient(self, blob_path, mime_type):
+        raise TransientExtractorError("bad\x00payload")
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    assert _transient_count(db_conn, sha) == 1
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT error_message FROM transient_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+    assert row is not None and row[0] == "badpayload"  # NUL stripped

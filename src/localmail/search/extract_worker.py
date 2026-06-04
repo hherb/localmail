@@ -125,6 +125,29 @@ def _is_transient(exc: BaseException) -> bool:
     )
 
 
+def transient_budget_exhausted(transient_count: int, max_transient_retries: int) -> bool:
+    """True iff a blob's accumulated *consecutive* transient extraction
+    failures have reached the configured cap, so it should no longer be
+    re-attempted (#153).
+
+    Inclusive on the cap: ``count >= max`` — matches the SQL claim filter
+    ``transient_count < max`` (a blob at the cap is excluded). Independent of
+    ``failed_extractions.retry_count``, which stays reserved for poison-pills.
+    """
+    return transient_count >= max_transient_retries
+
+
+def _no_nul(s: str) -> str:
+    """Strip NUL bytes so the string is safe for a Postgres TEXT column.
+
+    A third-party/docling exception message can carry a NUL byte (mangled
+    remote payload); Postgres TEXT rejects it, which would abort the failure
+    INSERT. On the transient path that abort means the counter never
+    increments — the blob would loop forever, defeating the #153 cap.
+    """
+    return s.replace("\x00", "") if "\x00" in s else s
+
+
 def _is_allowlisted(mime_type: str | None, path: str, cfg: SearchConfig) -> bool:
     """Return True iff the blob's MIME type or filename extension is allowlisted.
 
@@ -152,6 +175,14 @@ def _claim_batch(conn: psycopg.Connection, cfg: SearchConfig) -> list[tuple]:
     - No ``attachment_text`` row exists yet (not yet processed).
     - Either no ``failed_extractions`` row, OR
       ``failed_extractions.retry_count < cfg.extract_worker_max_retries``.
+    - Either no ``transient_extractions`` row, OR
+      ``transient_extractions.transient_count <
+      cfg.extract_worker_max_transient_retries`` (#153) — a blob that has
+      exhausted its *consecutive* transient budget stops being re-attempted.
+
+    Returns ``(sha256, path, mime_type, size_bytes, transient_count)`` tuples;
+    ``transient_count`` is ``None`` when the blob has no transient history (used
+    by the caller to skip the reset DELETE on the common no-history path).
 
     Rows are ordered by ``attachment_blobs.first_seen_at`` so oldest blobs
     are processed first (FIFO, consistent with email archive sync order).
@@ -159,17 +190,23 @@ def _claim_batch(conn: psycopg.Connection, cfg: SearchConfig) -> list[tuple]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT b.sha256, b.path, b.mime_type, b.size_bytes
+            SELECT b.sha256, b.path, b.mime_type, b.size_bytes, tr.transient_count
             FROM attachment_blobs b
-            LEFT JOIN attachment_text  t USING (sha256)
-            LEFT JOIN failed_extractions f USING (sha256)
+            LEFT JOIN attachment_text     t  USING (sha256)
+            LEFT JOIN failed_extractions  f  USING (sha256)
+            LEFT JOIN transient_extractions tr USING (sha256)
             WHERE t.sha256 IS NULL
               AND (f.sha256 IS NULL OR f.retry_count < %s)
+              AND (tr.sha256 IS NULL OR tr.transient_count < %s)
             ORDER BY b.first_seen_at
             LIMIT %s
             FOR UPDATE OF b SKIP LOCKED
             """,
-            (cfg.extract_worker_max_retries, cfg.extract_worker_batch_size),
+            (
+                cfg.extract_worker_max_retries,
+                cfg.extract_worker_max_transient_retries,
+                cfg.extract_worker_batch_size,
+            ),
         )
         return list(cur.fetchall())
 
@@ -219,9 +256,11 @@ def _record_failure(
                 sha256,
                 extractor_name,
                 type(exc).__name__,
-                str(exc),
-                "".join(
-                    tb_mod.format_exception(type(exc), exc, exc.__traceback__)
+                _no_nul(str(exc)),
+                _no_nul(
+                    "".join(
+                        tb_mod.format_exception(type(exc), exc, exc.__traceback__)
+                    )
                 ),
             ),
         )
@@ -253,6 +292,84 @@ def _record_failure_safely(
             "failed to record extraction failure for blob %s", sha256.hex()
         )
         return False
+
+
+def _record_transient(
+    conn: psycopg.Connection,
+    sha256: bytes,
+    exc: BaseException,
+) -> int:
+    """Upsert a ``transient_extractions`` row, bumping ``transient_count``.
+
+    Returns the new (post-increment) ``transient_count``. On first failure the
+    row is inserted with count 1; on conflict the count is incremented. Counts
+    *consecutive* transient failures — ``_clear_transient`` resets it on a
+    successful extraction. Independent of ``failed_extractions.retry_count``.
+
+    Must be called inside a nested SAVEPOINT (see ``_record_transient_safely``).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO transient_extractions
+                (sha256, transient_count, error_class, error_message,
+                 first_transient_at, last_transient_at)
+            VALUES (%s, 1, %s, %s, now(), now())
+            ON CONFLICT (sha256) DO UPDATE
+                SET transient_count   = transient_extractions.transient_count + 1,
+                    error_class       = EXCLUDED.error_class,
+                    error_message     = EXCLUDED.error_message,
+                    last_transient_at = now()
+            RETURNING transient_count
+            """,
+            (sha256, type(exc).__name__, _no_nul(str(exc))),
+        )
+        row = cur.fetchone()
+    assert row is not None  # RETURNING on an upsert always yields a row
+    return int(row[0])
+
+
+def _record_transient_safely(
+    conn: psycopg.Connection,
+    sha256: bytes,
+    exc: BaseException,
+) -> int | None:
+    """Wrap ``_record_transient`` in a nested SAVEPOINT.
+
+    Returns the new ``transient_count`` on success, or ``None`` if the
+    counter write itself failed (a single ``_LOG.exception`` line is then the
+    only evidence). The outer transaction is never aborted by a logging
+    failure — mirrors ``_record_failure_safely``.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT extract_transient_log")
+    try:
+        count = _record_transient(conn, sha256, exc)
+        with conn.cursor() as cur:
+            cur.execute("RELEASE SAVEPOINT extract_transient_log")
+        return count
+    except Exception:  # noqa: BLE001
+        with conn.cursor() as cur:
+            cur.execute("ROLLBACK TO SAVEPOINT extract_transient_log")
+        _LOG.exception(
+            "failed to record transient extraction failure for blob %s",
+            sha256.hex(),
+        )
+        return None
+
+
+def _clear_transient(conn: psycopg.Connection, sha256: bytes) -> None:
+    """Delete any ``transient_extractions`` row for the blob.
+
+    Called after a successful extraction so the cap counts only *consecutive*
+    transient failures. A no-op when no row exists; the caller gates this on
+    the blob having transient history so the common path pays nothing.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM transient_extractions WHERE sha256 = %s",
+            (sha256,),
+        )
 
 
 def _insert_attachment_text(
@@ -435,7 +552,7 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
     dl = DoclingExtractor(cfg)
     touched = 0
 
-    for sha256, path, mime_type, size_bytes in batch:
+    for sha256, path, mime_type, size_bytes, transient_count in batch:
         if not _is_allowlisted(mime_type, path, cfg):
             # Silently skip; not counted in touched.
             continue
@@ -447,6 +564,10 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
             wrote = _process_blob(
                 conn, sha256, path, mime_type, size_bytes, cfg, lw, dl
             )
+            if wrote and transient_count is not None:
+                # A prior transient streak recovered — reset the counter so
+                # the cap measures *consecutive* failures (#153).
+                _clear_transient(conn, sha256)
             with conn.cursor() as cur:
                 cur.execute("RELEASE SAVEPOINT extract_blob")
             # Count both successful writes and planned failures recorded
@@ -456,15 +577,29 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT extract_blob")
             if _is_transient(exc):
-                # Transient: blob stays un-touched (no failed_extractions
-                # row) so the next sweep re-attempts it without bumping
-                # retry_count toward extract_worker_max_retries.
-                _LOG.warning(
-                    "transient extractor error for blob %s "
-                    "(will retry next sweep): %s",
-                    sha256.hex(),
-                    exc,
-                )
+                # Transient: no failed_extractions row (retry_count untouched),
+                # but bump the independent transient counter so a *permanently*
+                # failing third-party network error (#153) eventually stops
+                # being re-attempted instead of looping every sweep forever.
+                new_count = _record_transient_safely(conn, sha256, exc)
+                if new_count is not None and transient_budget_exhausted(
+                    new_count, cfg.extract_worker_max_transient_retries
+                ):
+                    _LOG.warning(
+                        "transient extractor budget exhausted for blob %s "
+                        "after %d consecutive failures — giving up "
+                        "(clear via retry-failed-extractions): %s",
+                        sha256.hex(),
+                        new_count,
+                        exc,
+                    )
+                else:
+                    _LOG.warning(
+                        "transient extractor error for blob %s "
+                        "(will retry next sweep): %s",
+                        sha256.hex(),
+                        exc,
+                    )
             elif _record_failure_safely(conn, sha256, "unexpected", exc):
                 touched += 1
 

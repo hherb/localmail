@@ -315,3 +315,57 @@ def test_sync_toggle_disables_then_enables(admin_client, db_conn):
 def test_sync_toggle_unknown_404(admin_client):
     r = _post_with_token(admin_client, "/admin/accounts/999999/sync-toggle")
     assert r.status_code == 404
+
+
+def _seed_message_for(db_conn, account_id):
+    """Insert one minimal messages row for the account (enough to make
+    delete_account refuse without force). Mirrors tests/test_api_accounts.py."""
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_bytes, raw_sha256, "
+            "                       size_bytes, headers, attachments) "
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)",
+            (account_id, "<x@test>", b"raw", b"\x00" * 32, 3, "{}", "[]"),
+        )
+    db_conn.commit()
+
+
+def test_delete_empty_account_removes_row(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail")
+    r = _post_with_token(admin_client, f"/admin/accounts/{aid}/delete")
+    assert r.status_code == 200
+    assert r.headers.get("HX-Redirect") == "/admin/accounts"
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM accounts WHERE id = %s", (aid,))
+        assert cur.fetchone() is None
+
+
+def test_delete_in_use_offers_force_confirm(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail")
+    _seed_message_for(db_conn, aid)
+    r = _post_with_token(admin_client, f"/admin/accounts/{aid}/delete")
+    assert r.status_code == 409
+    assert "force" in r.text.lower()
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM accounts WHERE id = %s", (aid,))
+        assert cur.fetchone() is not None
+
+
+def test_delete_force_removes_in_use_account(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail")
+    _seed_message_for(db_conn, aid)
+    from localmail.api.admin.csrf import make_csrf_token
+    from localmail.serve.admin.csrf import csrf_action
+    tok = make_csrf_token(
+        user_id=admin_client.app_state_admin_id,
+        action=csrf_action("POST", f"/admin/accounts/{aid}/delete"),
+        key=_SIGNING_KEY.encode("ascii"),
+    )
+    r = admin_client.post(
+        f"/admin/accounts/{aid}/delete?force=1", headers={"X-CSRF-Token": tok}
+    )
+    assert r.status_code == 200
+    assert r.headers.get("HX-Redirect") == "/admin/accounts"
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM accounts WHERE id = %s", (aid,))
+        assert cur.fetchone() is None

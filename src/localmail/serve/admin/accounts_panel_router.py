@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -238,6 +238,33 @@ def sync_toggle(
     return templates.TemplateResponse(
         request=request, name="accounts/_row.html", context=ctx
     )
+
+
+@router.post("/accounts/{account_id}/delete", response_class=HTMLResponse)
+def delete_account(
+    account_id: int, request: Request,
+    force: bool = Query(False),
+    admin: AdminUser = require_admin_session(),
+    x_csrf_token: str = Header("", alias="X-CSRF-Token"),
+) -> Response:
+    check_csrf(request, admin, x_csrf_token,
+               f"/admin/accounts/{account_id}/delete")
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        try:
+            svc.delete_account(conn, account_id, force=force)
+        except NotFound:
+            raise HTTPException(status_code=404, detail="account not found")
+        except svc.AccountInUse:
+            ctx = _base_context(request, admin)
+            ctx["account_id"] = account_id
+            return templates.TemplateResponse(
+                request=request, name="accounts/_delete_confirm.html",
+                context=ctx, status_code=409,
+            )
+    resp = Response(status_code=200)
+    resp.headers["HX-Redirect"] = "/admin/accounts"
+    return resp  # type: ignore[return-value]
 
 
 @router.post("/accounts/{account_id}")

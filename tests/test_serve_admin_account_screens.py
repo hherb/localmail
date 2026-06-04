@@ -149,3 +149,50 @@ def test_create_account_missing_csrf_rejected(admin_client):
         data={"name": "y", "email_address": "y@y.com", "auth_method": "archive"},
     )
     assert r.status_code == 400
+
+
+def test_edit_form_prefills(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail", folder_allow=["INBOX"])
+    r = admin_client.get(f"/admin/accounts/{aid}")
+    assert r.status_code == 200
+    assert "fastmail" in r.text
+    assert "INBOX" in r.text
+
+
+def test_edit_unknown_account_404(admin_client):
+    r = admin_client.get("/admin/accounts/999999")
+    assert r.status_code == 404
+
+
+def test_edit_form_shows_oauth_success_flash(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="g", email_address="g@gmail.com",
+                        auth_method="oauth2", imap_host="imap.gmail.com",
+                        oauth_provider="gmail")
+    r = admin_client.get(f"/admin/accounts/{aid}?oauth=success")
+    assert r.status_code == 200
+    assert "Gmail connected" in r.text
+
+
+def test_update_account_changes_field(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail")
+    path = f"/admin/accounts/{aid}"
+    page = admin_client.get(path).text
+    m = re.search(r'data-create-csrf="([^"]+)"', page)
+    assert m
+    r = admin_client.post(
+        path,
+        data={
+            "name": "fastmail", "email_address": "new@fastmail.com",
+            "auth_method": "password", "imap_host": "imap.fastmail.com",
+            "imap_port": "993", "oauth_provider": "",
+            "folder_allow": "", "folder_deny": "",
+        },
+        headers={"X-CSRF-Token": m.group(1)},
+    )
+    assert r.status_code == 200
+    assert r.headers.get("HX-Redirect") == path
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT email_address FROM accounts WHERE id = %s", (aid,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "new@fastmail.com"

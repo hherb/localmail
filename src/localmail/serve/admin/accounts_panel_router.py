@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from localmail.api.admin import accounts as svc
 from localmail.api.admin.auth import AdminUser
+from localmail.api.errors import NotFound
 from localmail.serve.admin import account_forms as forms
 from localmail.serve.admin.csrf import check_csrf, csrf_token_context, session_signing_key
 from localmail.serve.admin.dependencies import require_admin_session
@@ -134,4 +135,53 @@ async def create_account(
             return _rerender_form_error(request, admin, raw_dict, deny, e, account_id=None)
     resp = Response(status_code=200)
     resp.headers["HX-Redirect"] = f"/admin/accounts/{acct.id}"
+    return resp
+
+
+@router.get("/accounts/{account_id}", response_class=HTMLResponse)
+def edit_account_form(
+    account_id: int, request: Request,
+    oauth: str | None = None,
+    admin: AdminUser = require_admin_session(),
+) -> HTMLResponse:
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        try:
+            acct = svc.get_account(conn, account_id)
+        except NotFound:
+            raise HTTPException(status_code=404, detail="account not found")
+    values = forms.account_to_form_values(acct)
+    ctx = _form_context(request, admin, values=values, account_id=account_id,
+                        oauth=oauth)
+    return templates.TemplateResponse(
+        request=request, name="accounts/form.html", context=ctx
+    )
+
+
+@router.post("/accounts/{account_id}")
+async def update_account(
+    account_id: int, request: Request,
+    admin: AdminUser = require_admin_session(),
+    x_csrf_token: str = Header("", alias="X-CSRF-Token"),
+) -> Response:
+    check_csrf(request, admin, x_csrf_token, f"/admin/accounts/{account_id}")
+    raw = await request.form()
+    deny: list[str] = [v for v in raw.getlist("deny_flags") if isinstance(v, str)]
+    raw_dict = dict(raw)
+    try:
+        fields = forms.form_to_patch_fields(raw_dict, deny_flags_selected=deny)
+    except forms.FormError as e:
+        return _rerender_form_error(request, admin, raw_dict, deny, e,
+                                    account_id=account_id)
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        try:
+            svc.update_account(conn, account_id, **fields)
+        except NotFound:
+            raise HTTPException(status_code=404, detail="account not found")
+        except svc.AccountFieldError as e:
+            return _rerender_form_error(request, admin, raw_dict, deny, e,
+                                        account_id=account_id)
+    resp = Response(status_code=200)
+    resp.headers["HX-Redirect"] = f"/admin/accounts/{account_id}"
     return resp

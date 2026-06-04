@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from localmail.api.admin import accounts as svc
 from localmail.api.admin import oauth as oauth_svc
@@ -50,12 +51,15 @@ def list_accounts(
     )
 
 
-_BLANK_VALUES: dict = {
-    "name": "", "email_address": "", "auth_method": "password",
-    "oauth_provider": "", "imap_host": "", "imap_port": "",
-    "folder_allow": "", "folder_deny": "", "deny_flags_checked": set(),
-    "sync_enabled": True,
-}
+def _blank_form_values() -> dict:
+    """Fresh blank values for the create form (own `set()` per call — never a
+    shared mutable)."""
+    return {
+        "name": "", "email_address": "", "auth_method": "password",
+        "oauth_provider": "", "imap_host": "", "imap_port": "",
+        "folder_allow": "", "folder_deny": "", "deny_flags_checked": set(),
+        "sync_enabled": True,
+    }
 
 
 def _form_context(
@@ -108,7 +112,7 @@ def _rerender_form_error(
 def new_account_form(
     request: Request, admin: AdminUser = require_admin_session()
 ) -> HTMLResponse:
-    ctx = _form_context(request, admin, values=dict(_BLANK_VALUES), account_id=None)
+    ctx = _form_context(request, admin, values=_blank_form_values(), account_id=None)
     return templates.TemplateResponse(
         request=request, name="accounts/form.html", context=ctx,
     )
@@ -129,11 +133,15 @@ async def create_account(
     except forms.FormError as e:
         return _rerender_form_error(request, admin, raw_dict, deny, e, account_id=None)
     pool = request.app.state.pool
-    with pool.connection() as conn:
-        try:
-            acct = svc.create_account(conn, **kwargs)
-        except svc.AccountFieldError as e:
-            return _rerender_form_error(request, admin, raw_dict, deny, e, account_id=None)
+
+    def _create() -> svc.Account:
+        with pool.connection() as conn:
+            return svc.create_account(conn, **kwargs)
+
+    try:
+        acct = await run_in_threadpool(_create)
+    except svc.AccountFieldError as e:
+        return _rerender_form_error(request, admin, raw_dict, deny, e, account_id=None)
     resp = Response(status_code=200)
     resp.headers["HX-Redirect"] = f"/admin/accounts/{acct.id}"
     return resp
@@ -172,17 +180,20 @@ async def store_password(
     if not password:
         raise HTTPException(status_code=400, detail="password must not be blank")
     pool = request.app.state.pool
-    with pool.connection() as conn:
-        try:
+
+    def _store() -> None:
+        with pool.connection() as conn:
             account = svc.get_account(conn, account_id)
-        except NotFound:
-            raise HTTPException(status_code=404, detail="account not found")
-    try:
         svc.store_password(account, password)
+        with pool.connection() as conn:
+            svc.touch_account_updated_at(conn, account_id)
+
+    try:
+        await run_in_threadpool(_store)
+    except NotFound:
+        raise HTTPException(status_code=404, detail="account not found")
     except svc.AccountFieldError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    with pool.connection() as conn:
-        svc.touch_account_updated_at(conn, account_id)
     return templates.TemplateResponse(
         request=request, name="accounts/_secret_status.html",
         context=_base_context(request, admin),
@@ -318,14 +329,18 @@ async def update_account(
         return _rerender_form_error(request, admin, raw_dict, deny, e,
                                     account_id=account_id)
     pool = request.app.state.pool
-    with pool.connection() as conn:
-        try:
+
+    def _update() -> None:
+        with pool.connection() as conn:
             svc.update_account(conn, account_id, **fields)
-        except NotFound:
-            raise HTTPException(status_code=404, detail="account not found")
-        except svc.AccountFieldError as e:
-            return _rerender_form_error(request, admin, raw_dict, deny, e,
-                                        account_id=account_id)
+
+    try:
+        await run_in_threadpool(_update)
+    except NotFound:
+        raise HTTPException(status_code=404, detail="account not found")
+    except svc.AccountFieldError as e:
+        return _rerender_form_error(request, admin, raw_dict, deny, e,
+                                    account_id=account_id)
     resp = Response(status_code=200)
     resp.headers["HX-Redirect"] = f"/admin/accounts/{account_id}"
     return resp

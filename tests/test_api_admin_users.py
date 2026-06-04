@@ -12,13 +12,20 @@ def _insert_user(conn: psycopg.Connection, username: str, *,
                  is_admin: bool = False, disabled: bool = False) -> int:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO api_users (username, password_hash, is_admin, disabled_at) "
-            "VALUES (%s, 'x', %s, %s) RETURNING id",
-            (username, is_admin, "now()" if disabled else None),
+            "INSERT INTO api_users (username, password_hash, is_admin) "
+            "VALUES (%s, 'x', %s) RETURNING id",
+            (username, is_admin),
         )
         row = cur.fetchone()
     assert row is not None
-    return int(row[0])
+    uid = int(row[0])
+    if disabled:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE api_users SET disabled_at = now() WHERE id = %s",
+                (uid,),
+            )
+    return uid
 
 
 def _insert_account(conn: psycopg.Connection, name: str) -> int:

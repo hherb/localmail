@@ -244,6 +244,10 @@ def test_connection(
             raise HTTPException(status_code=404, detail="account not found")
         except svc.AccountFieldError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except svc.CONNECT_FAILURE_EXC_TYPES as e:
+            # Mirror the HTML route: a genuine connect failure is a clean 400
+            # with the error detail, never an opaque 500 (#158).
+            raise HTTPException(status_code=400, detail=str(e))
     return {
         'folders': [
             {'name': f.name, 'flags': list(f.flags)} for f in folders

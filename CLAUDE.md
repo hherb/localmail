@@ -709,8 +709,22 @@ for the full design.
   edit page. On OAuth completion the callback redirects to
   `/admin/accounts/{id}?oauth=success`. Archive accounts are rejected by
   test-connection (same as before). **No new migration** (reuses `sync_enabled`
-  from `0020`). Known follow-up: a genuine connect failure (wrong host/password)
-  surfaces as a 500 rather than a friendly inline error — scoped out of 2A.3.
+  from `0020`).
+- **Friendly test-connection failures (#158, resolved):** a *genuine* connect
+  failure (wrong host/port/password, DNS, TLS) raises `OSError` /
+  `imaplib.IMAP4.error` / `imapclient.exceptions.IMAPClientError`, which used to
+  escape both `probe_connection`'s narrow `except RuntimeError` and the routes'
+  `except AccountFieldError` as a **500**. The classification tuple
+  `accounts.CONNECT_FAILURE_EXC_TYPES` names exactly those types and lives next
+  to `probe_connection`; the service still does **not** catch it (its contract is
+  to raise on connect failure — the broadening is deliberately **at the
+  transport routes**). The HTML route
+  (`accounts_panel_router.py::test_connection`) renders the `_test_result.html`
+  error fragment (HTTP 200, `ctx["error"]`); the JSON `/v1` route
+  (`accounts_router.py::test_connection`) mirrors it as a clean **400** with the
+  error detail (uniform with the existing `AccountFieldError → 400` mapping).
+  Both paths keep `probe_connection`'s builtin transient-classification
+  narrowness intact.
 - **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
   planes for the sync daemon. **Plane B** (process lifecycle) lives in
   [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):

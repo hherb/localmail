@@ -221,6 +221,10 @@ def test_connection(
             raise HTTPException(status_code=404, detail="account not found")
         except svc.AccountFieldError as e:
             ctx["error"] = str(e)
+        except svc.CONNECT_FAILURE_EXC_TYPES as e:
+            # Genuine connect failure (wrong host/port/password, DNS, TLS) — the
+            # whole point of "Test connection" is to report it inline, not 500 (#158).
+            ctx["error"] = str(e)
     return templates.TemplateResponse(
         request=request, name="accounts/_test_result.html", context=ctx
     )

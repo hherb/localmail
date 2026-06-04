@@ -288,6 +288,45 @@ def test_test_connection_error_renders_inline(admin_client, db_conn, monkeypatch
     assert "no password stored" in r.text
 
 
+@pytest.mark.parametrize(
+    "exc, needle",
+    [
+        (ConnectionRefusedError("connection refused"), "connection refused"),
+        (OSError("dns lookup failed"), "dns lookup failed"),
+        (__import__("ssl").SSLError("tls handshake failed"), "tls handshake failed"),
+        (__import__("imaplib").IMAP4.error("imap login failed"), "imap login failed"),
+        (
+            __import__("imapclient").exceptions.LoginError("authentication failed"),
+            "authentication failed",
+        ),
+    ],
+)
+def test_test_connection_hard_failure_renders_inline_not_500(
+    admin_client, db_conn, monkeypatch, exc, needle
+):
+    """A genuine connect failure (wrong host/port/password, DNS, TLS) renders the
+    error fragment (200), never a 500 — #158."""
+    aid = _seed_account(db_conn, name="fastmail")
+
+    def boom(conn, account_id, gmail_client_secrets=None):
+        raise exc
+
+    monkeypatch.setattr(svc, "probe_connection", boom)
+    from localmail.api.admin.csrf import make_csrf_token
+    from localmail.serve.admin.csrf import csrf_action
+    tok = make_csrf_token(
+        user_id=admin_client.app_state_admin_id,
+        action=csrf_action("POST", f"/admin/accounts/{aid}/test-connection"),
+        key=_SIGNING_KEY.encode("ascii"),
+    )
+    r = admin_client.post(
+        f"/admin/accounts/{aid}/test-connection", headers={"X-CSRF-Token": tok}
+    )
+    assert r.status_code == 200
+    assert "admin-flash-error" in r.text
+    assert needle in r.text
+
+
 def _post_with_token(admin_client, path):
     from localmail.api.admin.csrf import make_csrf_token
     from localmail.serve.admin.csrf import csrf_action

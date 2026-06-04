@@ -66,3 +66,15 @@ body {
 .daemon-toast { margin: 0.75rem 0; padding: 0.5rem 0.75rem; border-radius: 4px; }
 .daemon-toast[data-kind="error"] { background: #fdecea; color: #b00020; border: 1px solid #b00020; }
 .daemon-toast[data-kind="ok"] { background: #e7f4e8; color: #1b5e20; border: 1px solid #1b5e20; }
+.accounts-header { display: flex; justify-content: space-between; align-items: center; }
+.accounts-table { width: 100%; border-collapse: collapse; }
+.accounts-table th, .accounts-table td { padding: .4rem; text-align: left; border-bottom: 1px solid #e2e2e2; }
+.account-row-actions { white-space: nowrap; }
+.link-button { background: none; border: none; color: #2563eb; cursor: pointer; padding: 0 .3rem; }
+.link-button.danger { color: #b91c1c; }
+.field-error { color: #b91c1c; display: block; font-size: .85rem; }
+.sync-on { color: #15803d; }
+.sync-off { color: #92400e; }
+.folder-list { margin: .4rem 0; }
+.folder-flags { color: #6b7280; font-size: .85rem; }
+[data-auth-group][hidden] { display: none; }

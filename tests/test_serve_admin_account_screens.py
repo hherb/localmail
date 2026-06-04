@@ -395,3 +395,18 @@ def test_oauth_start_not_configured_is_503(admin_client, db_conn, monkeypatch):
     monkeypatch.setattr(oauth_svc, "start_oauth", boom)
     r = _post_with_token(admin_client, f"/admin/accounts/{aid}/oauth/start")
     assert r.status_code == 503
+
+
+def test_form_references_static_js_not_inline(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail")
+    r = admin_client.get(f"/admin/accounts/{aid}")
+    assert "/admin/static/accounts-panel.js" in r.text
+    # No inline event handlers / inline <script> bodies (CSP script-src 'self')
+    assert "onclick=" not in r.text
+    assert "hx-on:" not in r.text
+
+
+def test_accounts_panel_js_is_served(admin_client):
+    r = admin_client.get("/admin/static/accounts-panel.js")
+    assert r.status_code == 200
+    assert "data-auth-select" in r.text

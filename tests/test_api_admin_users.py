@@ -133,3 +133,76 @@ def test_set_password_blank_raises(db_conn):
 def test_set_password_unknown_user_raises(db_conn):
     with pytest.raises(UserNotFound):
         svc.set_password(db_conn, 999999, "whatever1")
+
+
+def test_set_admin_grant_and_revoke(db_conn):
+    keep = _insert_user(db_conn, "keeper", is_admin=True)  # second admin so guard passes
+    uid = _insert_user(db_conn, "amy")
+    svc.set_admin(db_conn, uid, True)
+    assert svc.get_user(db_conn, uid).is_admin is True
+    svc.set_admin(db_conn, uid, False)
+    assert svc.get_user(db_conn, uid).is_admin is False
+    assert svc.get_user(db_conn, keep).is_admin is True
+
+
+def test_set_admin_revoke_last_admin_blocked(db_conn):
+    uid = _insert_user(db_conn, "solo", is_admin=True)
+    with pytest.raises(svc.LastAdminError):
+        svc.set_admin(db_conn, uid, False)
+
+
+def test_set_admin_revoke_allowed_with_second_active_admin(db_conn):
+    _insert_user(db_conn, "other", is_admin=True)
+    uid = _insert_user(db_conn, "amy", is_admin=True)
+    svc.set_admin(db_conn, uid, False)  # no raise
+    assert svc.get_user(db_conn, uid).is_admin is False
+
+
+def test_disabled_admin_does_not_count_as_active(db_conn):
+    _insert_user(db_conn, "ghost", is_admin=True, disabled=True)  # disabled → not protective
+    uid = _insert_user(db_conn, "solo", is_admin=True)
+    with pytest.raises(svc.LastAdminError):
+        svc.set_admin(db_conn, uid, False)
+
+
+def test_set_disabled_last_admin_blocked(db_conn):
+    uid = _insert_user(db_conn, "solo", is_admin=True)
+    with pytest.raises(svc.LastAdminError):
+        svc.set_disabled(db_conn, uid, True)
+
+
+def test_set_disabled_toggle(db_conn):
+    _insert_user(db_conn, "other", is_admin=True)
+    uid = _insert_user(db_conn, "amy", is_admin=True)
+    svc.set_disabled(db_conn, uid, True)
+    assert svc.get_user(db_conn, uid).disabled is True
+    svc.set_disabled(db_conn, uid, False)
+    assert svc.get_user(db_conn, uid).disabled is False
+
+
+def test_delete_last_admin_blocked(db_conn):
+    uid = _insert_user(db_conn, "solo", is_admin=True)
+    with pytest.raises(svc.LastAdminError):
+        svc.delete_user(db_conn, uid)
+
+
+def test_delete_user_cascades_grants_and_tokens(db_conn):
+    _insert_user(db_conn, "other", is_admin=True)
+    uid = _insert_user(db_conn, "amy")
+    a1 = _insert_account(db_conn, "alpha")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_accounts (user_id, account_id) VALUES (%s, %s)",
+            (uid, a1),
+        )
+    svc.delete_user(db_conn, uid)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM api_users WHERE id = %s", (uid,))
+        assert cur.fetchone() is None
+        cur.execute("SELECT 1 FROM user_accounts WHERE user_id = %s", (uid,))
+        assert cur.fetchone() is None
+
+
+def test_delete_unknown_user_raises(db_conn):
+    with pytest.raises(UserNotFound):
+        svc.delete_user(db_conn, 999999)

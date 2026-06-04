@@ -153,3 +153,88 @@ def set_password(conn: psycopg.Connection, user_id: int, new_password: str) -> N
         )
         if cur.rowcount == 0:
             raise UserNotFound(f"no user with id={user_id}")
+
+
+def would_orphan_last_admin(
+    *, target_is_active_admin: bool, active_admin_count: int,
+) -> bool:
+    """True iff removing the target's active-admin status drops the count to 0.
+
+    Pure. `active_admin_count` is the count of users with `is_admin IS TRUE AND
+    disabled_at IS NULL`, INCLUDING the target when it currently qualifies.
+    """
+    return target_is_active_admin and active_admin_count <= 1
+
+
+def active_admin_count(conn: psycopg.Connection) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM api_users "
+            "WHERE is_admin IS TRUE AND disabled_at IS NULL"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+def _user_state(conn: psycopg.Connection, user_id: int) -> tuple[bool, bool]:
+    """Return (is_admin, disabled) for user_id. Raises UserNotFound."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT (is_admin IS TRUE), (disabled_at IS NOT NULL) "
+            "FROM api_users WHERE id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise UserNotFound(f"no user with id={user_id}")
+    return bool(row[0]), bool(row[1])
+
+
+def _guard_not_last_admin(conn: psycopg.Connection, user_id: int, action: str) -> None:
+    """Raise LastAdminError if `user_id` is the sole active admin."""
+    is_admin, disabled = _user_state(conn, user_id)
+    target_is_active_admin = is_admin and not disabled
+    if would_orphan_last_admin(
+        target_is_active_admin=target_is_active_admin,
+        active_admin_count=active_admin_count(conn),
+    ):
+        raise LastAdminError(f"cannot {action} the last active admin")
+
+
+def set_admin(conn: psycopg.Connection, user_id: int, is_admin: bool) -> None:
+    """Grant/revoke admin. Revoking the last active admin raises LastAdminError."""
+    if not is_admin:
+        _guard_not_last_admin(conn, user_id, "demote")
+    else:
+        _user_state(conn, user_id)  # existence check → UserNotFound
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_users SET is_admin = %s WHERE id = %s", (is_admin, user_id)
+        )
+
+
+def set_disabled(conn: psycopg.Connection, user_id: int, disabled: bool) -> None:
+    """Enable/disable a user. Disabling the last active admin raises LastAdminError."""
+    if disabled:
+        _guard_not_last_admin(conn, user_id, "disable")
+    else:
+        _user_state(conn, user_id)  # existence check → UserNotFound
+    with conn.cursor() as cur:
+        if disabled:
+            cur.execute(
+                "UPDATE api_users SET disabled_at = now() WHERE id = %s", (user_id,)
+            )
+        else:
+            cur.execute(
+                "UPDATE api_users SET disabled_at = NULL WHERE id = %s", (user_id,)
+            )
+
+
+def delete_user(conn: psycopg.Connection, user_id: int) -> None:
+    """Delete a user (tokens + grants cascade). Last active admin → LastAdminError."""
+    _guard_not_last_admin(conn, user_id, "delete")
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM api_users WHERE id = %s", (user_id,))
+        if cur.rowcount == 0:
+            raise UserNotFound(f"no user with id={user_id}")

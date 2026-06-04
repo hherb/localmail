@@ -158,6 +158,34 @@ def edit_account_form(
     )
 
 
+@router.post("/accounts/{account_id}/password", response_class=HTMLResponse)
+async def store_password(
+    account_id: int, request: Request,
+    admin: AdminUser = require_admin_session(),
+    x_csrf_token: str = Header("", alias="X-CSRF-Token"),
+) -> HTMLResponse:
+    check_csrf(request, admin, x_csrf_token,
+               f"/admin/accounts/{account_id}/password")
+    raw = await request.form()
+    password = str(raw.get("password", ""))
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        try:
+            account = svc.get_account(conn, account_id)
+        except NotFound:
+            raise HTTPException(status_code=404, detail="account not found")
+    try:
+        svc.store_password(account, password)
+    except svc.AccountFieldError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    with pool.connection() as conn:
+        svc.touch_account_updated_at(conn, account_id)
+    return templates.TemplateResponse(
+        request=request, name="accounts/_secret_status.html",
+        context=_base_context(request, admin),
+    )
+
+
 @router.post("/accounts/{account_id}")
 async def update_account(
     account_id: int, request: Request,

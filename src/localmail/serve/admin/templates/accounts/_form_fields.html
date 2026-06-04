@@ -49,6 +49,22 @@
     {% endif %}
   </div>
 
+  {% if account_id %}
+  <div data-auth-group="password" class="password-subform">
+    <label>IMAP password
+      <input type="password" name="password"
+        data-password-csrf="{{ csrf_token_for_method('POST', '/admin/accounts/' ~ account_id ~ '/password') }}">
+    </label>
+    <button type="button" class="admin-button" data-store-password
+      hx-post="/admin/accounts/{{ account_id }}/password"
+      hx-include="[name='password']"
+      hx-target="#secret-status" hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/accounts/" ~ account_id ~ "/password") }}"}'>
+      Store password</button>
+    <span id="secret-status"></span>
+  </div>
+  {% endif %}
+
   <fieldset>
     <legend>Folder filters</legend>
     <label>Allow (one per line, blank = all)

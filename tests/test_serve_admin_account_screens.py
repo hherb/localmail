@@ -173,6 +173,39 @@ def test_edit_form_shows_oauth_success_flash(admin_client, db_conn):
     assert "Gmail connected" in r.text
 
 
+def test_store_password_for_password_account(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="fastmail")
+    path = f"/admin/accounts/{aid}/password"
+    page = admin_client.get(f"/admin/accounts/{aid}").text
+    # the password sub-form embeds its own method-bound token
+    m = re.search(r'data-password-csrf="([^"]+)"', page)
+    assert m
+    r = admin_client.post(
+        path, data={"password": "s3cret"}, headers={"X-CSRF-Token": m.group(1)}
+    )
+    assert r.status_code == 200
+    assert "stored" in r.text.lower()
+
+
+def test_store_password_rejected_for_oauth_account(admin_client, db_conn):
+    aid = _seed_account(db_conn, name="g", email_address="g@gmail.com",
+                        auth_method="oauth2", imap_host="imap.gmail.com",
+                        oauth_provider="gmail")
+    # mint a token via csrf helper directly
+    from localmail.api.admin.csrf import make_csrf_token
+    from localmail.serve.admin.csrf import csrf_action
+    tok = make_csrf_token(
+        user_id=admin_client.app_state_admin_id,
+        action=csrf_action("POST", f"/admin/accounts/{aid}/password"),
+        key=_SIGNING_KEY.encode("ascii"),
+    )
+    r = admin_client.post(
+        f"/admin/accounts/{aid}/password",
+        data={"password": "x"}, headers={"X-CSRF-Token": tok},
+    )
+    assert r.status_code == 400
+
+
 def test_update_account_changes_field(admin_client, db_conn):
     aid = _seed_account(db_conn, name="fastmail")
     path = f"/admin/accounts/{aid}"

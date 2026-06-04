@@ -720,3 +720,34 @@ def test_transient_counter_reset_on_success(
         )
         row = cur.fetchone()
     assert row is not None and "recovers eventually" in row[0]
+
+
+def test_transient_failure_with_nul_in_message_still_increments(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """A transient exception whose message carries a NUL byte must still bump
+    the counter. Postgres TEXT rejects NUL, so an unsanitized INSERT would
+    abort — leaving the counter at 0 and looping the blob forever, defeating
+    the #153 cap. The message is stored NUL-stripped."""
+    from localmail.search.extractor import (
+        LightweightExtractor,
+        TransientExtractorError,
+    )
+
+    sha = _seed_blob(db_conn, b"nul flaky", "text/plain", tmp_path, "a.txt")
+
+    def _fail_transient(self, blob_path, mime_type):
+        raise TransientExtractorError("bad\x00payload")
+
+    monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    assert _transient_count(db_conn, sha) == 1
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT error_message FROM transient_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+    assert row is not None and row[0] == "badpayload"  # NUL stripped

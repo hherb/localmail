@@ -137,6 +137,17 @@ def transient_budget_exhausted(transient_count: int, max_transient_retries: int)
     return transient_count >= max_transient_retries
 
 
+def _no_nul(s: str) -> str:
+    """Strip NUL bytes so the string is safe for a Postgres TEXT column.
+
+    A third-party/docling exception message can carry a NUL byte (mangled
+    remote payload); Postgres TEXT rejects it, which would abort the failure
+    INSERT. On the transient path that abort means the counter never
+    increments — the blob would loop forever, defeating the #153 cap.
+    """
+    return s.replace("\x00", "") if "\x00" in s else s
+
+
 def _is_allowlisted(mime_type: str | None, path: str, cfg: SearchConfig) -> bool:
     """Return True iff the blob's MIME type or filename extension is allowlisted.
 
@@ -245,9 +256,11 @@ def _record_failure(
                 sha256,
                 extractor_name,
                 type(exc).__name__,
-                str(exc),
-                "".join(
-                    tb_mod.format_exception(type(exc), exc, exc.__traceback__)
+                _no_nul(str(exc)),
+                _no_nul(
+                    "".join(
+                        tb_mod.format_exception(type(exc), exc, exc.__traceback__)
+                    )
                 ),
             ),
         )
@@ -309,7 +322,7 @@ def _record_transient(
                     last_transient_at = now()
             RETURNING transient_count
             """,
-            (sha256, type(exc).__name__, str(exc)),
+            (sha256, type(exc).__name__, _no_nul(str(exc))),
         )
         row = cur.fetchone()
     assert row is not None  # RETURNING on an upsert always yields a row

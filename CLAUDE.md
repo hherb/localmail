@@ -694,7 +694,8 @@ for the full design.
   [`serve/admin/account_forms.py`](src/localmail/serve/admin/account_forms.py)
   (unit-tested in isolation via `tests/test_account_forms.py`). Templates under
   `serve/admin/templates/accounts/` (`list.html`, `form.html`,
-  `_form_fields.html`, `_row.html`, `_test_result.html`, `_secret_status.html`);
+  `_form_fields.html`, `_row.html`, `_test_result.html`, `_secret_status.html`,
+  `_delete_confirm.html`);
   auth-method field toggle in the served static file
   [`serve/admin/static/accounts-panel.js`](src/localmail/serve/admin/static/accounts-panel.js)
   (CSP `script-src 'self'`, no inline JS). Each mutating action carries a
@@ -702,7 +703,7 @@ for the full design.
   of #125 (the shared mint from 2B.5 now has its first non-daemon consumer).
   Backend change: `probe_connection` now supports `oauth2` accounts — threads
   `gmail_client_secrets_file` into the existing XOAUTH2 path; a missing refresh
-  token surfaces as `AccountFieldError` ("Connect Gmail first"), never a 500.
+  token surfaces as a clean `AccountFieldError` (→ inline error fragment), never a 500.
   Validation errors render **inline beside the offending field** (`_form_fields.html`,
   HTTP 400 + HTMX swap); successful create/update returns `HX-Redirect` to the
   edit page. On OAuth completion the callback redirects to

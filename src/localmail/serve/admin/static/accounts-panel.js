@@ -22,10 +22,16 @@
     applyAuthVisibility(root);
   }
 
-  document.addEventListener("DOMContentLoaded", function () {
+  function initOnce() {
     var fields = document.getElementById("account-form-fields");
     if (fields) wire(fields);
-  });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initOnce);
+  } else {
+    initOnce();
+  }
 
   // Re-wire after an HTMX swap replaces #account-form-fields (validation error).
   document.body.addEventListener("htmx:afterSwap", function (evt) {

@@ -6,6 +6,7 @@ import pytest
 
 from localmail.api.admin import users as svc
 from localmail.api.admin.auth import UserNotFound
+from localmail.api.auth import verify_password
 
 
 def _insert_user(conn: psycopg.Connection, username: str, *,
@@ -82,3 +83,53 @@ def test_get_user_with_no_accounts_has_empty_grants(db_conn):
     uid = _insert_user(db_conn, "solo")
     detail = svc.get_user(db_conn, uid)
     assert detail.account_grants == []
+
+
+def test_create_user_basic(db_conn):
+    uid = svc.create_user(db_conn, username="newbie", password="pw12345")
+    detail = svc.get_user(db_conn, uid)
+    assert detail.username == "newbie"
+    assert detail.is_admin is False
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT password_hash FROM api_users WHERE id = %s", (uid,))
+        row = cur.fetchone()
+    assert row is not None and verify_password("pw12345", row[0])
+
+
+def test_create_user_admin_flag(db_conn):
+    uid = svc.create_user(db_conn, username="boss", password="pw12345", is_admin=True)
+    assert svc.get_user(db_conn, uid).is_admin is True
+
+
+def test_create_user_duplicate_username_raises_field_error(db_conn):
+    svc.create_user(db_conn, username="dup", password="pw12345")
+    db_conn.commit()
+    with pytest.raises(svc.UserFieldError):
+        svc.create_user(db_conn, username="dup", password="pw12345")
+    db_conn.rollback()
+
+
+@pytest.mark.parametrize("username,password", [("", "pw12345"), ("ok", "")])
+def test_create_user_blank_fields_raise(db_conn, username, password):
+    with pytest.raises(svc.UserFieldError):
+        svc.create_user(db_conn, username=username, password=password)
+
+
+def test_set_password_resets_without_old(db_conn):
+    uid = _insert_user(db_conn, "amy")
+    svc.set_password(db_conn, uid, "brandnew1")
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT password_hash FROM api_users WHERE id = %s", (uid,))
+        row = cur.fetchone()
+    assert row is not None and verify_password("brandnew1", row[0])
+
+
+def test_set_password_blank_raises(db_conn):
+    uid = _insert_user(db_conn, "amy")
+    with pytest.raises(svc.UserFieldError):
+        svc.set_password(db_conn, uid, "")
+
+
+def test_set_password_unknown_user_raises(db_conn):
+    with pytest.raises(UserNotFound):
+        svc.set_password(db_conn, 999999, "whatever1")

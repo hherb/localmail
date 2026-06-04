@@ -264,7 +264,7 @@ def delete_account(
             )
     resp = Response(status_code=200)
     resp.headers["HX-Redirect"] = "/admin/accounts"
-    return resp  # type: ignore[return-value]
+    return resp
 
 
 @router.post("/accounts/{account_id}")

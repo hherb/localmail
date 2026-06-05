@@ -130,8 +130,9 @@ import pytest
 def _archive_account(conn) -> int:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO accounts (name, email_address, auth_method, config) "
-            "VALUES ('arch', 'a@b.test', 'archive', '{}') RETURNING id"
+            "INSERT INTO accounts (name, email_address, auth_method, imap_host, "
+            "imap_port, config) "
+            "VALUES ('arch', 'a@b.test', 'archive', NULL, NULL, '{}') RETURNING id"
         )
         row = cur.fetchone()
     assert row is not None
@@ -1000,8 +1001,9 @@ def _conn_factory():
 def _archive(conn) -> int:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO accounts (name, email_address, auth_method, config) "
-            "VALUES ('arch', 'a@b.test', 'archive', '{}') RETURNING id"
+            "INSERT INTO accounts (name, email_address, auth_method, imap_host, "
+            "imap_port, config) "
+            "VALUES ('arch', 'a@b.test', 'archive', NULL, NULL, '{}') RETURNING id"
         )
         row = cur.fetchone()
     conn.commit()
@@ -1586,8 +1588,9 @@ def client(app, admin_id):
 def _archive(db_conn) -> int:
     with db_conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO accounts (name, email_address, auth_method, config) "
-            "VALUES ('arch', 'a@b.test', 'archive', '{}') RETURNING id")
+            "INSERT INTO accounts (name, email_address, auth_method, imap_host, "
+            "imap_port, config) "
+            "VALUES ('arch', 'a@b.test', 'archive', NULL, NULL, '{}') RETURNING id")
         row = cur.fetchone()
     db_conn.commit()
     return int(row[0])
@@ -1966,8 +1969,9 @@ def test_panel_lists_with_roots(db_dsn, serve_cfg, admin_id, tmp_path):
 def test_progress_partial_renders(db_dsn, serve_cfg, admin_id, db_conn, tmp_path):
     with db_conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO accounts (name, email_address, auth_method, config) "
-            "VALUES ('arch', 'a@b.test', 'archive', '{}') RETURNING id")
+            "INSERT INTO accounts (name, email_address, auth_method, imap_host, "
+            "imap_port, config) "
+            "VALUES ('arch', 'a@b.test', 'archive', NULL, NULL, '{}') RETURNING id")
         aid = int(cur.fetchone()[0])
         cur.execute(
             "INSERT INTO import_jobs (account_id, source_kind, source_path, status) "
@@ -2333,8 +2337,9 @@ from tests.conftest import TEST_DSN
 def test_cli_import_mbox(db_conn, tmp_path, cli_config, monkeypatch):
     with db_conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO accounts (name, email_address, auth_method, config) "
-            "VALUES ('arch', 'a@b.test', 'archive', '{}') RETURNING id")
+            "INSERT INTO accounts (name, email_address, auth_method, imap_host, "
+            "imap_port, config) "
+            "VALUES ('arch', 'a@b.test', 'archive', NULL, NULL, '{}') RETURNING id")
         db_conn.commit()
     p = tmp_path / "a.mbox"
     box = _mailbox.mbox(str(p))

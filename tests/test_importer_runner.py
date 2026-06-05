@@ -70,7 +70,7 @@ def test_run_import_inserts_messages_with_received_date(db_conn, tmp_path):
     jid = _job(db_conn, aid, path)
 
     runner.run_import(
-        _conn_factory, jid, attachments_root=tmp_path / "blobs", checkpoint_every=50)
+        _conn_factory, jid, attachments_root=tmp_path / "blobs", checkpoint_every=50, checkpoint_seconds=3600)
 
     job = _read_job(db_conn, jid)
     assert job["status"] == "completed"
@@ -85,12 +85,12 @@ def test_run_import_reimport_is_idempotent(db_conn, tmp_path):
     aid = _archive(db_conn)
     path = _make_mbox(tmp_path, _eml.plain())
     jid1 = _job(db_conn, aid, path)
-    runner.run_import(_conn_factory, jid1, attachments_root=tmp_path / "b", checkpoint_every=50)
+    runner.run_import(_conn_factory, jid1, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600)
     with db_conn.cursor() as cur:
         cur.execute("UPDATE import_jobs SET status='completed' WHERE id=%s", (jid1,))
     db_conn.commit()
     jid2 = _job(db_conn, aid, path)
-    runner.run_import(_conn_factory, jid2, attachments_root=tmp_path / "b", checkpoint_every=50)
+    runner.run_import(_conn_factory, jid2, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600)
     job = _read_job(db_conn, jid2)
     assert job["inserted"] == 0
     assert job["skipped_dup"] == 1
@@ -100,7 +100,7 @@ def test_run_import_two_messages_both_insert(db_conn, tmp_path):
     aid = _archive(db_conn)
     path = _make_mbox(tmp_path, _eml.plain(), _eml.multipart_alt())
     jid = _job(db_conn, aid, path)
-    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600)
     job = _read_job(db_conn, jid)
     assert job["inserted"] == 2
     assert job["failed"] == 0
@@ -113,17 +113,86 @@ def test_run_import_cancel_stops(db_conn, tmp_path):
     with db_conn.cursor() as cur:
         cur.execute("UPDATE import_jobs SET cancel_requested=TRUE WHERE id=%s", (jid,))
     db_conn.commit()
-    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600)
     assert _read_job(db_conn, jid)["status"] == "cancelled"
 
 
 def test_run_import_fatal_error_marks_failed(db_conn, tmp_path):
     aid = _archive(db_conn)
     jid = _job(db_conn, aid, tmp_path / "does-not-exist.mbox")
-    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=50)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600)
     job = _read_job(db_conn, jid)
     assert job["status"] == "failed"
     assert job["error_msg"]
+
+
+def test_run_import_flushes_after_first_message(db_conn, tmp_path, monkeypatch):
+    # A small import (< checkpoint_every) must flush at least once before the
+    # terminal write, so the panel shows progress instead of 0/0/0/0 (issue #163).
+    aid = _archive(db_conn)
+    path = _make_mbox(tmp_path, _eml.plain())  # one message, well under checkpoint_every
+    jid = _job(db_conn, aid, path)
+
+    flushes = {"n": 0}
+    real_flush = runner._flush
+
+    def counting_flush(*a, **k):
+        flushes["n"] += 1
+        return real_flush(*a, **k)
+
+    monkeypatch.setattr(runner, "_flush", counting_flush)
+    runner.run_import(
+        _conn_factory, jid, attachments_root=tmp_path / "b",
+        checkpoint_every=50, checkpoint_seconds=3600)
+
+    assert flushes["n"] >= 1  # the first-message flush fired despite count < 50
+    assert _read_job(db_conn, jid)["status"] == "completed"
+
+
+def test_run_import_small_import_is_cancellable(db_conn, tmp_path):
+    # Cancel must be honoured even for an import smaller than checkpoint_every:
+    # the first-message poll picks up the request (issue #163).
+    aid = _archive(db_conn)
+    path = _make_mbox(tmp_path, _eml.plain())  # one message, checkpoint_every=50
+    jid = _job(db_conn, aid, path)
+    with db_conn.cursor() as cur:
+        cur.execute("UPDATE import_jobs SET cancel_requested=TRUE WHERE id=%s", (jid,))
+    db_conn.commit()
+
+    runner.run_import(
+        _conn_factory, jid, attachments_root=tmp_path / "b",
+        checkpoint_every=50, checkpoint_seconds=3600)
+
+    assert _read_job(db_conn, jid)["status"] == "cancelled"
+
+
+def test_run_import_time_cadence_flushes_between_count_boundaries(db_conn, tmp_path, monkeypatch):
+    # Count cadence never fires (checkpoint_every huge), but an injected clock
+    # makes each message exceed checkpoint_seconds, so every message flushes.
+    aid = _archive(db_conn)
+    path = _make_mbox(tmp_path, _eml.plain(), _eml.multipart_alt(), _eml.utf8_subject())
+    jid = _job(db_conn, aid, path)
+
+    ticks = iter(range(0, 100, 5))  # 0, 5, 10, ... — +5s per clock() call
+
+    def fake_clock() -> float:
+        return float(next(ticks))
+
+    flushes = {"n": 0}
+    real_flush = runner._flush
+
+    def counting_flush(*a, **k):
+        flushes["n"] += 1
+        return real_flush(*a, **k)
+
+    monkeypatch.setattr(runner, "_flush", counting_flush)
+    runner.run_import(
+        _conn_factory, jid, attachments_root=tmp_path / "b",
+        checkpoint_every=10_000, checkpoint_seconds=2, clock=fake_clock)
+
+    # First message (first-message rule) + two more by the 5s>2s time cadence.
+    assert flushes["n"] == 3
+    assert _read_job(db_conn, jid)["status"] == "completed"
 
 
 def test_run_import_poison_message_isolated(db_conn, tmp_path, monkeypatch):
@@ -141,7 +210,7 @@ def test_run_import_poison_message_isolated(db_conn, tmp_path, monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(runner, "process_one_message", flaky)
-    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600)
 
     job = _read_job(db_conn, jid)
     assert job["status"] == "completed"

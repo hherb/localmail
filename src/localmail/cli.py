@@ -497,7 +497,9 @@ def import_cmd(
 
     runner.run_import(
         lambda: psycopg.connect(cfg.database.dsn, autocommit=False), jid,
-        attachments_root=cfg.attachments.root, checkpoint_every=cfg.imports.checkpoint_every)
+        attachments_root=cfg.attachments.root,
+        checkpoint_every=cfg.imports.checkpoint_every,
+        checkpoint_seconds=cfg.imports.checkpoint_seconds)
 
     with psycopg.connect(cfg.database.dsn) as conn:
         job = imports_svc.get_job(conn, jid)

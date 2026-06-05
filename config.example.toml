@@ -107,6 +107,9 @@ client_secrets_file = "~/.config/localmail/gmail_client_secret.json"
 roots = []
 # How often (in messages) the import worker flushes progress counters.
 checkpoint_every = 50
+# Also flush progress + poll for cancel at least this often (seconds), so a
+# small-count but slow import (large attachments) stays responsive (issue #163).
+checkpoint_seconds = 2
 # A running job idle longer than this is shown stalled (red) in the panel.
 stale_seconds = 60
 

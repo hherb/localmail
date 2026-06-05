@@ -114,7 +114,7 @@ def test_start_job_runs_to_completion(db_conn, tmp_path):
 
     t = svc.start_job(
         lambda: psycopg.connect(TEST_DSN, autocommit=False), jid,
-        attachments_root=tmp_path / "blobs", checkpoint_every=50)
+        attachments_root=tmp_path / "blobs", checkpoint_every=50, checkpoint_seconds=3600)
     t.join(timeout=30)
     assert not t.is_alive()
     assert svc.get_job(db_conn, jid).status == "completed"

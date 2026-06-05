@@ -9,12 +9,14 @@ guaranteed terminal status (completed / cancelled / failed+error_msg). Takes a
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
 import psycopg
 
+from localmail.importer.job_state import should_checkpoint
 from localmail.importer.sources import ImportedMessage, iter_maildir, iter_mbox
 from localmail.sync import process_one_message, record_failed_message, upsert_mailbox
 
@@ -108,9 +110,16 @@ def _source_iter(job: _Job) -> Iterator[ImportedMessage]:
 
 def run_import(
     conn_factory: ConnFactory, job_id: int, *,
-    attachments_root: Path, checkpoint_every: int,
+    attachments_root: Path, checkpoint_every: int, checkpoint_seconds: float,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Execute one import job end-to-end. Always writes a terminal status."""
+    """Execute one import job end-to-end. Always writes a terminal status.
+
+    Progress is flushed and cancel is polled on a count cadence
+    (`checkpoint_every`) AND a time cadence (`checkpoint_seconds`), plus once
+    after the first message — so a small or slow import stays responsive and
+    cancellable (issue #163). `clock` is injectable for deterministic tests.
+    """
     c = _Counters()
     try:
         conn = conn_factory()
@@ -126,6 +135,8 @@ def run_import(
         mailbox_ids: dict[str, int] = {}
         uid_counters: dict[str, int] = {}
         cancelled = False
+        processed_at_last_checkpoint = 0
+        last_checkpoint_at = clock()
         for msg in _source_iter(job):
             if msg.mailbox_name not in mailbox_ids:
                 mb = upsert_mailbox(
@@ -160,8 +171,17 @@ def run_import(
                     raw=msg.raw, exc=exc)
                 c.failed += 1
             c.processed += 1
-            if c.processed % checkpoint_every == 0:
+            now = clock()
+            if should_checkpoint(
+                processed=c.processed,
+                processed_at_last_checkpoint=processed_at_last_checkpoint,
+                seconds_since_checkpoint=now - last_checkpoint_at,
+                checkpoint_every=checkpoint_every,
+                checkpoint_seconds=checkpoint_seconds,
+            ):
                 _flush(conn, job_id, c)
+                processed_at_last_checkpoint = c.processed
+                last_checkpoint_at = now
                 if _cancel_requested(conn, job_id):
                     cancelled = True
                     break

@@ -469,6 +469,7 @@ def test_imports_config_defaults():
     cfg = ImportsConfig()
     assert cfg.roots == []
     assert cfg.checkpoint_every == 50
+    assert cfg.checkpoint_seconds == 2
     assert cfg.stale_seconds == 60
 
 

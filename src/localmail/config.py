@@ -49,6 +49,8 @@ class ImportsConfig(BaseModel):
     """
     roots: list[Path] = Field(default_factory=list)
     checkpoint_every: int = 50  # flush progress + commit to DB every N messages
+    checkpoint_seconds: int = 2  # also flush + poll cancel every N seconds (decouples
+    #                              responsiveness from per-message cost; see issue #163)
     stale_seconds: int = 60  # a running job idle longer than this is shown stalled in the panel
 
     @field_validator("roots", mode="after")

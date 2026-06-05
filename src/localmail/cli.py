@@ -1276,13 +1276,14 @@ def serve_cmd(
             "--no-tls is only valid when --bind resolves to a loopback address"
         )
 
-    from localmail.config import AuthConfig, DaemonConfig, ServeConfig
+    from localmail.config import AuthConfig, DaemonConfig, McpConfig, ServeConfig
     override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
     if override:
         dsn = override
         serve_cfg = ServeConfig()
         auth_cfg = AuthConfig()
         daemon_cfg = DaemonConfig()
+        mcp_cfg = McpConfig()
         gmail_secrets = None
         imports_cfg = None
         attachments_root = None
@@ -1292,6 +1293,7 @@ def serve_cmd(
         serve_cfg = cfg.serve
         auth_cfg = cfg.auth
         daemon_cfg = cfg.daemon
+        mcp_cfg = cfg.mcp
         gmail_secrets = (
             cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
         )
@@ -1332,6 +1334,8 @@ def serve_cmd(
         enable_control_socket=serve_cfg.supervise_daemon,
         imports_config=imports_cfg,
         attachments_root=attachments_root,
+        enable_mcp=mcp_cfg.enabled,
+        mcp_config=mcp_cfg,
     )
 
     if no_tls:

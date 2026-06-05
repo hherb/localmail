@@ -85,3 +85,62 @@ def test_tool_search_empty_grants_returns_empty(db_dsn, db_conn):
         searcher._pool.close()
     assert page == {"results": [], "next_cursor": None,
                     "total_estimate": 0, "took_ms": 0.0}
+
+
+def test_tool_get_message_granted(db_conn):
+    uid = create_user(db_conn, "carol", "hunter2")
+    acct = _insert_account(db_conn, "carol-acct")
+    grant_account(db_conn, uid, acct)
+    mid = _insert_message(db_conn, acct, "hello", "world")
+    db_conn.commit()
+    msg = tools.tool_get_message(
+        db_conn, message_id=mid,
+        allowed_account_ids=allowed_account_ids(db_conn, uid),
+    )
+    assert msg["id"] == str(mid)
+    assert msg["account"]["id"] == str(acct)
+
+
+def test_tool_get_message_denied_raises_notfound(db_conn):
+    import pytest
+    from localmail.api.errors import NotFound
+    uid = create_user(db_conn, "dave", "hunter2")
+    granted = _insert_account(db_conn, "dave-granted")
+    other = _insert_account(db_conn, "dave-other")
+    grant_account(db_conn, uid, granted)
+    mid_other = _insert_message(db_conn, other, "secret", "not yours")
+    db_conn.commit()
+    with pytest.raises(NotFound):
+        tools.tool_get_message(
+            db_conn, message_id=mid_other,
+            allowed_account_ids=allowed_account_ids(db_conn, uid),
+        )
+
+
+def test_tool_list_messages_scopes(db_conn):
+    uid = create_user(db_conn, "erin", "hunter2")
+    granted = _insert_account(db_conn, "erin-granted")
+    other = _insert_account(db_conn, "erin-other")
+    grant_account(db_conn, uid, granted)
+    _insert_message(db_conn, granted, "g1", "body")
+    _insert_message(db_conn, other, "o1", "body")
+    db_conn.commit()
+    page = tools.tool_list_messages(
+        db_conn, allowed_account_ids=allowed_account_ids(db_conn, uid),
+    )
+    assert "messages" in page and "next_cursor" in page
+    assert page["messages"], "expected the granted account's message"
+    for m in page["messages"]:
+        assert m["account"]["id"] == str(granted)
+
+
+def test_tool_list_accounts_returns_only_granted(db_conn):
+    uid = create_user(db_conn, "frank", "hunter2")
+    granted = _insert_account(db_conn, "frank-granted")
+    _insert_account(db_conn, "frank-other")
+    grant_account(db_conn, uid, granted)
+    db_conn.commit()
+    accounts = tools.tool_list_accounts(
+        db_conn, allowed_account_ids=allowed_account_ids(db_conn, uid),
+    )
+    assert {a["id"] for a in accounts} == {str(granted)}

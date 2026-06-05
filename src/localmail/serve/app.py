@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -136,10 +136,12 @@ def create_app(
             if n:
                 logging.getLogger("localmail.serve").warning(
                     "reconciled %d orphaned import job(s) at startup", n)
-            if mcp_server is not None:
-                async with mcp_server.session_manager.run():
-                    yield
-            else:
+            mcp_ctx = (
+                mcp_server.session_manager.run()
+                if mcp_server is not None
+                else nullcontext()
+            )
+            async with mcp_ctx:
                 yield
         finally:
             if css is not None:

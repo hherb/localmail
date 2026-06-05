@@ -13,9 +13,15 @@ def _has_mcp_mount(app) -> bool:
 
 def test_mcp_not_mounted_by_default(db_dsn):
     app = create_app(db_dsn=db_dsn)
-    assert not _has_mcp_mount(app)
+    try:
+        assert not _has_mcp_mount(app)
+    finally:
+        app.state.pool.close()
 
 
 def test_mcp_mounted_when_enabled(db_dsn):
     app = create_app(db_dsn=db_dsn, enable_mcp=True, mcp_config=McpConfig(enabled=True))
-    assert _has_mcp_mount(app)
+    try:
+        assert _has_mcp_mount(app)
+    finally:
+        app.state.pool.close()

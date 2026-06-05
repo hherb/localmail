@@ -88,6 +88,7 @@ def build_mcp_server(
         SERVER_NAME,
         stateless_http=True,
         json_response=True,
+        streamable_http_path="/",
         token_verifier=LocalmailTokenVerifier(pool),
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(config.issuer_url),

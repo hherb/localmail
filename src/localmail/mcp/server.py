@@ -8,14 +8,14 @@ instead of a stack trace.
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from psycopg_pool import ConnectionPool
-from pydantic import AnyHttpUrl
+from pydantic import AnyHttpUrl, Field
 
 from localmail.api.acl import allowed_account_ids
 from localmail.api.errors import NotFound, SearchCursorExpired, ValidationFailed
@@ -36,7 +36,10 @@ def _current_user_id() -> int:
     access_token = get_access_token()
     if access_token is None:
         raise ToolError("not authenticated")
-    return user_id_from_access_token(access_token)
+    try:
+        return user_id_from_access_token(access_token)
+    except ValueError as exc:
+        raise ToolError("not authenticated") from exc
 
 
 def _build_filters(
@@ -97,7 +100,7 @@ def build_mcp_server(
     def search(
         query: str,
         sort: Literal["rank", "date"] = "rank",
-        limit: int = 50,
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
         cursor: str | None = None,
         account_ids: list[str] | None = None,
         folder_ids: list[str] | None = None,
@@ -174,7 +177,7 @@ def build_mcp_server(
     @server.tool()
     def get_attachment(
         sha256: str,
-        mode: str = "text",
+        mode: Literal["text", "metadata"] = "text",
     ) -> dict[str, Any]:
         """Extracted attachment text (`mode="text"`) or blob metadata
         (`mode="metadata"`), ACL-scoped. Never raw bytes.
@@ -200,7 +203,7 @@ def build_mcp_server(
     def list_messages(
         account_ids: list[str] | None = None,
         folder_ids: list[str] | None = None,
-        limit: int = 50,
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         """Keyset date-ordered browse page, ACL-scoped."""

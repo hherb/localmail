@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,6 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg_pool import ConnectionPool
 
+from localmail.api.admin import imports as _imports_svc
 from localmail.api.errors import APIError, RateLimited
 from localmail.config import AuthConfig, DaemonConfig, ImportsConfig, ServeConfig
 from localmail.serve.admin import accounts_panel_router as admin_accounts_panel_router
@@ -101,6 +103,12 @@ def create_app(
             css.start()
             app_.state.control_socket_server = css
         try:
+            with pool.connection() as conn:
+                n = _imports_svc.reconcile_orphaned_jobs(conn)
+                conn.commit()
+            if n:
+                logging.getLogger("localmail.serve").warning(
+                    "reconciled %d orphaned import job(s) at startup", n)
             yield
         finally:
             if css is not None:

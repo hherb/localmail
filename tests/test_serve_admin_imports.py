@@ -131,3 +131,27 @@ def test_create_happy_path_201_and_completes(client, db_conn, tmp_path):
             break
         time.sleep(0.1)
     assert status == "completed"
+
+
+def test_startup_reconciles_orphaned_running_job(db_dsn, db_conn, serve_cfg, tmp_path):
+    aid = _archive(db_conn)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO import_jobs (account_id, source_kind, source_path, status) "
+            "VALUES (%s, 'mbox', '/x', 'running') RETURNING id", (aid,))
+        jid = int(cur.fetchone()[0])
+    db_conn.commit()
+
+    root = tmp_path / "imports"
+    root.mkdir()
+    app = create_app(
+        db_dsn=db_dsn, serve_config=serve_cfg,
+        imports_config=ImportsConfig(roots=[root]), attachments_root=tmp_path / "b")
+    with TestClient(app):  # enters lifespan -> reconcile runs
+        pass
+    with db_conn.cursor() as cur:
+        db_conn.rollback()
+        cur.execute("SELECT status, error_msg FROM import_jobs WHERE id=%s", (jid,))
+        status, err = cur.fetchone()
+    assert status == "failed"
+    assert "interrupted" in err

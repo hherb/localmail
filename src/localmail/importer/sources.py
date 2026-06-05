@@ -7,9 +7,12 @@ and becomes `messages.internal_date` on import.
 """
 from __future__ import annotations
 
+import mailbox
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator
 
 
 @dataclass(frozen=True)
@@ -43,3 +46,48 @@ def parse_mbox_from_date(from_line: str) -> datetime | None:
     except ValueError:
         return None
     return datetime(*st[:6], tzinfo=timezone.utc)
+
+
+def iter_mbox(path: Path, *, mailbox_name: str) -> Iterator[ImportedMessage]:
+    """Yield each message in an mbox file as an ImportedMessage.
+
+    The whole file is one logical folder named `mailbox_name`. The received
+    date comes from each message's envelope `From ` line.
+    """
+    box = mailbox.mbox(str(path), create=False)
+    for key in box.iterkeys():
+        msg = box.get_message(key)
+        raw = msg.as_bytes()
+        received = parse_mbox_from_date(msg.get_from() or "")
+        yield ImportedMessage(mailbox_name=mailbox_name, raw=raw, received_date=received)
+
+
+def _maildir_received(msg: mailbox.MaildirMessage) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(msg.get_date(), tz=timezone.utc)
+    except (OSError, ValueError):
+        return None
+
+
+def _iter_one_maildir(
+    box: mailbox.Maildir,
+    name: str,
+) -> Iterator[ImportedMessage]:
+    for key in box.iterkeys():
+        msg = box.get_message(key)
+        yield ImportedMessage(
+            mailbox_name=name, raw=msg.as_bytes(), received_date=_maildir_received(msg),
+        )
+
+
+def iter_maildir(path: Path) -> Iterator[ImportedMessage]:
+    """Yield every message across a maildir and its subfolders.
+
+    The root maildir maps to a mailbox named after its directory; each
+    subfolder (`mailbox.Maildir.list_folders()`) maps to a mailbox preserving
+    the folder name. The received date is each message file's delivery time.
+    """
+    root = mailbox.Maildir(str(path), create=False)
+    yield from _iter_one_maildir(root, path.name)
+    for folder_name in root.list_folders():
+        yield from _iter_one_maildir(root.get_folder(folder_name), folder_name)

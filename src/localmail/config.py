@@ -487,11 +487,18 @@ class McpConfig(BaseModel):
     """Model Context Protocol server settings.
 
     The MCP server is mounted into `localmail serve` at `/mcp` only when
-    `enabled` is true AND the optional `mcp` extra is installed. Opt-in by
-    default, mirroring `search.reranker_enabled`.
+    `enabled` is true AND the optional `mcp` extra is installed. Disabled by
+    default; set `enabled = true` to opt in, mirroring `search.reranker_enabled`.
+
+    `issuer_url` / `resource_server_url` are advertised in the MCP OAuth
+    resource-metadata the SDK exposes. Opaque-bearer clients (the v1 model)
+    configure their token directly and ignore these; set them to the public
+    serve URL for spec-strict MCP clients.
     """
 
     enabled: bool = False
+    issuer_url: str = "http://localhost:8443"
+    resource_server_url: str = "http://localhost:8443"
 
 
 class Config(BaseModel):

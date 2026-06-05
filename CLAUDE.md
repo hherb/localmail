@@ -1048,6 +1048,67 @@ for the full design.
     scoping mirrors `continue_page` / `grow_pool` exactly. Tests in
     `tests/test_searcher_pool_metadata.py` enforce.
 
+## MCP server (search Phase 3)
+
+Remote, multi-user MCP server exposing the archive's read surface to AI
+agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
+**Streamable HTTP** — no new listener; TLS and the `--no-tls`/`--bind
+127.0.0.1` rules inherit from `serve` unchanged. Endpoint URL:
+`https://<host>:<port>/mcp`. Operator/agent guide:
+[docs/mcp-usage.md](docs/mcp-usage.md). No new migration (reuses
+`api_users` / `api_tokens` / `user_accounts`).
+
+- **Auth = opaque bearer reusing `api_tokens`.** `LocalmailTokenVerifier`
+  ([src/localmail/mcp/auth.py](src/localmail/mcp/auth.py)) wraps the existing
+  `api.auth.verify_token` and carries the user id in `AccessToken.subject`. The
+  sync DB lookup is offloaded via `anyio.to_thread.run_sync` so the verifier
+  never blocks the event loop. Agents get a token from `POST /v1/auth/login`
+  (refresh: `/v1/auth/refresh`) and pass `Authorization: Bearer <token>` to
+  `/mcp` — there is **no** OAuth authorization-server flow; clients configure the
+  token directly.
+- **Five ACL-scoped read tools** in
+  [src/localmail/mcp/{server,tools,auth}.py](src/localmail/mcp/server.py), each
+  calling `localmail.api` accessors directly (no HTTP hop, **no `wire.py`** — the
+  api/ layer already returns the wire-shaped dicts, so HTTP routes and MCP tools
+  share that serialization). Per-user ACL applies to every tool (results scoped
+  to the token user's granted accounts).
+  - `search(query, sort="rank"|"date", limit, cursor, account_ids, folder_ids,
+    date_from, date_to, from_addr, to, subject, has_attachment, lang)` — hybrid
+    search; page by re-calling with `next_cursor`; a cursor-expired error means
+    re-run without a cursor.
+  - `get_message(message_id, full_headers=False)`.
+  - `get_attachment(sha256, mode="text"|"metadata")` — extracted text or
+    metadata, **never raw bytes** (raw download stays the HTTP
+    `/v1/attachments/{sha256}` route).
+  - `list_messages(account_ids, folder_ids, limit, cursor)` — keyset
+    date-ordered browse, newest first.
+  - `list_accounts()`.
+- **Wiring**: `FastMCP(token_verifier=…, auth=AuthSettings(issuer_url,
+  resource_server_url, required_scopes=[]), stateless_http=True,
+  json_response=True, streamable_http_path="/")`, mounted at `/mcp` in
+  `create_app` (gated by `enable_mcp` **and** the importable `[mcp]` extra; if
+  the extra is absent, `serve` runs and logs an INFO skip line). The session
+  manager is started in the app lifespan (`async with
+  mcp_server.session_manager.run()`).
+- **Config** `McpConfig` (`localmail.config`, `[mcp]`): `enabled` (default
+  false), `issuer_url` / `resource_server_url` (default
+  `http://localhost:8443`; advertised in the SDK's OAuth resource-metadata —
+  opaque-bearer clients ignore them). `serve` CLI forwards `cfg.mcp`.
+- **Three design reconciliations vs the spec**: (1) no `wire.py` (shaping
+  already lives in api/); (2) ONE `search` tool, not three — `run_search` takes a
+  single optional `cursor` and auto-grows the pool, paging = re-call with
+  `next_cursor`; (3) `get_message(full_headers=…)`, not
+  `include_body`/`include_attachments`.
+- Tools return structured content; `SearchCursorExpired` / `NotFound` /
+  `ValidationFailed` map to clean `ToolError`s. Raw attachment bytes are
+  intentionally NOT exposed over MCP (HTTP `/v1/attachments` only). **Deferred
+  follow-ups**: full OAuth 2.1 discovery (Approach B); richer per-tool
+  docstrings; `McpConfig` URL fields as `AnyHttpUrl`.
+- **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
+  runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
+  the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`
+  client isn't installed).
+
 ## Conventions
 
 - **No comments unless the WHY is non-obvious.** Don't restate the SQL or the

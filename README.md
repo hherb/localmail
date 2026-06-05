@@ -115,6 +115,14 @@ button starts the OAuth2 consent flow; on completion the browser lands on the
 edit page (`/admin/accounts/{id}?oauth=success`). All mutating actions carry
 method-bound CSRF tokens (`X-CSRF-Token` header).
 
+The **user management panel** at `/admin/users` provides server-rendered HTMX
+screens to create and delete API users, grant or revoke per-account access (a
+checklist over every account on the user's edit screen), toggle admin rights,
+reset passwords, enable/disable accounts, and revoke a user's outstanding
+sessions. The UI refuses any action that would remove the last remaining admin
+or lock out your own account, and renders such controls disabled. The same
+operations are exposed as a JSON API under `/v1/admin/users`.
+
 ### Search backfill & status
 
 | Command | Purpose |

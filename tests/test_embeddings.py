@@ -112,8 +112,8 @@ def test_fastembed_backend_raises_when_query_embed_missing():
 
 
 @pytest.mark.slow
-def test_fastembed_backend_real_model_smoke():
-    """Real model load. Opt-in: pytest -m slow."""
+def test_fastembed_backend_real_model_smoke(require_real_embedding_model):
+    """Real model load. Opt-in: pytest -m slow. Skips if the model can't download."""
     cfg = SearchConfig()  # embeddinggemma default
     be = FastEmbedBackend(cfg=cfg)
     be.health_check()

@@ -64,6 +64,53 @@ def db_dsn():
     return TEST_DSN
 
 
+_EMBEDDING_PROBE: tuple[bool, str] | None = None
+
+
+def _embedding_model_available() -> tuple[bool, str]:
+    """Lazily probe (once per session) whether the real embedding model loads.
+
+    Unlike the cheap DB probe, this can trigger a ~1.2 GB download, so it runs
+    only when a test actually requests `require_real_embedding_model` — never at
+    import/collection time. A HuggingFace download failure (a 429 on shared CI
+    IPs, an offline runner, a CDN hiccup — fastembed raises a bare
+    ``ValueError: Could not load model … from any source.``) is reported as
+    *unavailable* so the dependent tests SKIP rather than fail on infrastructure
+    we don't control. Any other error (misconfig, wrong dimension, a missing
+    ``query_embed``) propagates as a genuine failure. A successful probe also
+    warms the model cache for the test that follows.
+    """
+    global _EMBEDDING_PROBE
+    if _EMBEDDING_PROBE is None:
+        from localmail.config import SearchConfig
+        from localmail.search.embeddings import FastEmbedBackend
+        try:
+            FastEmbedBackend(cfg=SearchConfig())
+        except ValueError as e:
+            if "from any source" in str(e):
+                _EMBEDDING_PROBE = (False, f"embedding model unavailable (download failed): {e}")
+            else:
+                raise
+        except OSError as e:
+            _EMBEDDING_PROBE = (False, f"embedding model unavailable (network/IO error): {e}")
+        else:
+            _EMBEDDING_PROBE = (True, "")
+    return _EMBEDDING_PROBE
+
+
+@pytest.fixture
+def require_real_embedding_model():
+    """Skip a real-model test when the model can't be downloaded/loaded.
+
+    Turns a transient HuggingFace outage (notably the 429s GitHub Actions'
+    shared IPs draw) into a SKIP instead of a flaky red. Pair with
+    ``@pytest.mark.slow`` — every real-model test is opt-in and resilient.
+    """
+    available, reason = _embedding_model_available()
+    if not available:
+        pytest.skip(reason)
+
+
 @pytest.fixture
 def db_conn(db_dsn):
     """Yield a clean connection. Truncates all data tables before each test."""

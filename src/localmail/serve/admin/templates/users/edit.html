@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Edit user — localmail admin{% endblock %}
+{% block content %}
+<div class="admin-card">
+  <h1>{{ detail.username }}</h1>
+
+  <div id="user-status">
+    {% include "users/_status.html" %}
+  </div>
+
+  <fieldset>
+    <legend>Reset password</legend>
+    <input type="password" name="password" form="_none">
+    <button type="button" class="admin-button"
+      hx-post="/admin/users/{{ detail.id }}/password"
+      hx-include="[name='password']" hx-target="#user-message" hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users/" ~ detail.id ~ "/password") }}"}'>
+      Set password</button>
+    <button type="button" class="admin-button"
+      hx-post="/admin/users/{{ detail.id }}/revoke-sessions"
+      hx-target="#user-message" hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users/" ~ detail.id ~ "/revoke-sessions") }}"}'>
+      Revoke sessions</button>
+    <span id="user-message"></span>
+  </fieldset>
+
+  <fieldset id="user-grants">
+    {% include "users/_grants.html" %}
+  </fieldset>
+
+  <div id="user-danger">
+    <button type="button" class="admin-button danger"
+      {% if flags.block_delete %}disabled title="cannot delete the last admin / your own account"{% endif %}
+      hx-post="/admin/users/{{ detail.id }}/delete"
+      hx-confirm="Delete user {{ detail.username }}?"
+      hx-target="#user-danger" hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users/" ~ detail.id ~ "/delete") }}"}'>
+      Delete user</button>
+  </div>
+</div>
+<script src="/admin/static/users-panel.js" defer></script>
+{% endblock %}

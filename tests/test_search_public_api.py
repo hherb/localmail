@@ -93,7 +93,8 @@ def test_create_searcher_returns_searcher(db_dsn):
     searcher._pool.close()
 
 
-def test_searcher_returns_attachment_snippet(db_conn) -> None:
+@pytest.mark.slow
+def test_searcher_returns_attachment_snippet(db_conn, require_real_embedding_model) -> None:
     """When a query is best answered by attachment content, Searcher returns
     a SearchResult with snippet_source='attachment' and attachment_filename
     populated from the carrying message's JSONB attachments."""

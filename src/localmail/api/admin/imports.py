@@ -49,6 +49,10 @@ class ImportJob:
     finished_at: datetime | None
 
 
+# Selected column NAMES must match the ImportJob dataclass field names — both
+# reads use psycopg `class_row`, which maps result columns to constructor
+# kwargs by name, so column ORDER is irrelevant and a rename fails loudly at
+# fetch time rather than silently shifting positions.
 _SELECT = """
     SELECT id, account_id, source_kind, source_path, status, total_messages,
            processed, inserted, skipped_dup, failed, error_msg, cancel_requested,
@@ -82,7 +86,10 @@ def create_job(
     Validates the target is an existing archive account and the source kind is
     known. The single-active busy-guard is enforced both by a pre-check and by
     the DB unique index (a concurrent racer surfaces as ImportBusyError).
-    Caller commits.
+    On ImportBusyError from the racing-insert path the transaction is left
+    aborted (psycopg3 semantics); the caller commits on success or rolls back
+    on error. The pool-connection context in the routers does this rollback
+    automatically.
     """
     if source_kind not in _VALID_KINDS:
         raise ImportFieldError(f"source_kind must be one of {_VALID_KINDS}")

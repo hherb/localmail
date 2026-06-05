@@ -13,7 +13,7 @@ def form_to_create_kwargs(form: dict) -> dict:
     account_raw = str(form.get("account_id", "")).strip()
     source_kind = str(form.get("source_kind", "")).strip()
     source_path = str(form.get("source_path", "")).strip()
-    if not account_raw.isdigit():
+    if not account_raw.isdecimal():
         raise FormError("select an archive account")
     if source_kind not in ("mbox", "maildir"):
         raise FormError("choose a source kind (mbox or maildir)")
@@ -31,6 +31,6 @@ def field_errors_from(
 ) -> dict[str, str]:
     """Map a validation/guard error to {field: message}; default to '_form'."""
     msg = str(err)
-    if "source_path" in msg or "path" in msg:
+    if "source_path" in msg:
         return {"source_path": msg}
     return {"_form": msg}

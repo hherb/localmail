@@ -104,6 +104,7 @@ def test_mcp_end_to_end_acl_scoped(db_dsn, db_conn):
 
     page = _payload(search_res)
     results = page["results"] if isinstance(page, dict) else page
+    assert results, "search returned no results; the granted 'invoice' message must match"
     for r in results:
         assert r["account"]["id"] == str(granted)
 

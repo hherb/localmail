@@ -725,6 +725,27 @@ for the full design.
   error detail (uniform with the existing `AccountFieldError → 400` mapping).
   Both paths keep `probe_connection`'s builtin transient-classification
   narrowness intact.
+- **User-management admin screens (Sub-plan 2A.4, shipped):** server-rendered
+  HTMX screens at `/admin/users` + a JSON `/v1/admin/users` router, sharing one
+  service layer
+  [`src/localmail/api/admin/users.py`](src/localmail/api/admin/users.py):
+  list/create/delete users, per-account ACL grant/revoke (a checklist over every
+  account on the edit screen), `is_admin` toggle, admin session revocation,
+  admin password reset (no old password), and enable/disable (`disabled_at`).
+  Two lock-out guards: the **count-based last-admin** rule lives in the service
+  (the pure `would_orphan_last_admin` predicate + an IO wrapper reading
+  `count(*) WHERE is_admin IS TRUE AND disabled_at IS NULL`; raises
+  `LastAdminError`), and the **identity-based self-action** rule (no self-demote,
+  no self-delete) lives in the routers (compared `uid == admin.id`, returns
+  **409**). Both guards map to **409** (mirroring the accounts cascade-refuse
+  409); validation maps to **400**. The edit screen also renders unsafe controls
+  `disabled` server-side via `action_flags` — UX only; a hand-crafted POST still
+  hits the guards. Pure form logic in
+  [`serve/admin/user_forms.py`](src/localmail/serve/admin/user_forms.py)
+  (unit-tested in `tests/test_user_forms.py`). Method-bound CSRF throughout (a
+  PATCH token can't replay on DELETE). **No new migration** — reuses
+  `is_admin`/`disabled_at`/`sessions_invalidated_at` + `user_accounts` (0016).
+  Closes the `/admin/users` 404.
 - **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
   planes for the sync daemon. **Plane B** (process lifecycle) lives in
   [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):

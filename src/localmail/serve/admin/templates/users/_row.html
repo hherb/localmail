@@ -1,0 +1,6 @@
+<tr id="user-row-{{ u.id }}">
+  <td><a href="/admin/users/{{ u.id }}">{{ u.username }}</a></td>
+  <td>{% if u.is_admin %}<span class="sync-on">admin</span>{% else %}—{% endif %}</td>
+  <td>{% if u.disabled %}<span class="sync-off">disabled</span>{% else %}<span class="sync-on">active</span>{% endif %}</td>
+  <td class="account-row-actions"><a href="/admin/users/{{ u.id }}">Edit</a></td>
+</tr>

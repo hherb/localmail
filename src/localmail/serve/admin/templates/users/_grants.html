@@ -1,0 +1,12 @@
+<legend>Account access</legend>
+{% if not detail.account_grants %}<p>No accounts configured.</p>{% endif %}
+{% for g in detail.account_grants %}
+<label>
+  <input type="checkbox" {% if g.granted %}checked{% endif %}
+    hx-post="/admin/users/{{ detail.id }}/grants"
+    hx-vals='{"account_id": "{{ g.account_id }}", "granted": "{{ "false" if g.granted else "true" }}"}'
+    hx-target="#user-grants" hx-swap="innerHTML"
+    hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users/" ~ detail.id ~ "/grants") }}"}'>
+  {{ g.account_name }}
+</label>
+{% endfor %}

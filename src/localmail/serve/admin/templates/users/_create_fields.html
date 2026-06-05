@@ -1,0 +1,13 @@
+<div id="user-form-fields">
+  {% if field_errors._form %}<p class="admin-flash admin-flash-error">{{ field_errors._form }}</p>{% endif %}
+  <label>Username
+    <input name="username" value="{{ values.username }}" required>
+    {% if field_errors.username %}<span class="field-error">{{ field_errors.username }}</span>{% endif %}
+  </label>
+  <label>Password
+    <input type="password" name="password" required>
+    {% if field_errors.password %}<span class="field-error">{{ field_errors.password }}</span>{% endif %}
+  </label>
+  <label><input type="checkbox" name="is_admin" {% if values.is_admin %}checked{% endif %}> Admin</label>
+  <div class="form-actions"><button type="submit" class="admin-button">Create</button></div>
+</div>

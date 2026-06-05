@@ -1,0 +1,19 @@
+{% if error %}<p class="admin-flash admin-flash-error">{{ error }}</p>{% endif %}
+<p>Admin:
+  {% if detail.is_admin %}<span class="sync-on">yes</span>{% else %}<span class="sync-off">no</span>{% endif %}
+  <button type="button" class="link-button"
+    {% if detail.is_admin and flags.block_demote %}disabled title="cannot demote the last admin / yourself"{% endif %}
+    hx-post="/admin/users/{{ detail.id }}/admin-toggle"
+    hx-target="#user-status" hx-swap="innerHTML"
+    hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users/" ~ detail.id ~ "/admin-toggle") }}"}'>
+    {% if detail.is_admin %}Revoke admin{% else %}Grant admin{% endif %}</button>
+</p>
+<p>Status:
+  {% if detail.disabled %}<span class="sync-off">disabled</span>{% else %}<span class="sync-on">active</span>{% endif %}
+  <button type="button" class="link-button"
+    {% if not detail.disabled and flags.block_disable %}disabled title="cannot disable the last admin"{% endif %}
+    hx-post="/admin/users/{{ detail.id }}/disable-toggle"
+    hx-target="#user-status" hx-swap="innerHTML"
+    hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users/" ~ detail.id ~ "/disable-toggle") }}"}'>
+    {% if detail.disabled %}Enable{% else %}Disable{% endif %}</button>
+</p>

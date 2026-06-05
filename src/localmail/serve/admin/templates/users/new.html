@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}New user — localmail admin{% endblock %}
+{% block content %}
+<div class="admin-card">
+  <h1>New user</h1>
+  <form id="user-form" class="account-form"
+        hx-post="/admin/users" hx-target="#user-form-fields" hx-swap="outerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users") }}"}'>
+    {% include "users/_create_fields.html" %}
+  </form>
+</div>
+{% endblock %}

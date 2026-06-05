@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Users — localmail admin{% endblock %}
+{% block content %}
+<div class="admin-card">
+  <div class="accounts-header">
+    <h1>Users</h1>
+    <a href="/admin/users/new" class="admin-button">+ New user</a>
+  </div>
+  <table class="accounts-table">
+    <thead>
+      <tr><th>Username</th><th>Admin</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+        {% include "users/_row.html" %}
+      {% else %}
+      <tr><td colspan="4">No users.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

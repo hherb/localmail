@@ -1,8 +1,11 @@
 """Mailbox-source reader tests (pure, no DB)."""
 from __future__ import annotations
 
+import dataclasses
 import mailbox as _mailbox
 from datetime import datetime, timezone
+
+import pytest
 
 from localmail.importer.sources import ImportedMessage, iter_maildir, iter_mbox, parse_mbox_from_date
 from tests import _eml
@@ -30,6 +33,9 @@ def test_imported_message_is_frozen():
     assert m.mailbox_name == "INBOX"
     assert m.raw == b"x"
     assert m.received_date is None
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        m.mailbox_name = "other"  # type: ignore[misc]
 
 
 def test_iter_mbox_yields_messages_with_stem_name(tmp_path):

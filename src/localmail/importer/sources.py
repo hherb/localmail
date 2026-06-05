@@ -35,8 +35,9 @@ def parse_mbox_from_date(from_line: str) -> datetime | None:
     line = from_line.strip()
     if not line:
         return None
-    # The asctime is the last 5 whitespace-separated fields:
-    # "Wed Jan  1 12:00:00 2025" (note the double space before a 1-digit day).
+    # The asctime is the last 5 whitespace-separated fields, e.g.
+    # "Wed Jan  1 12:00:00 2025". str.split() collapses the double space before
+    # a single-digit day; strptime's %d accepts the un-padded day either way.
     parts = line.split()
     if len(parts) < 5:
         return None
@@ -55,17 +56,20 @@ def iter_mbox(path: Path, *, mailbox_name: str) -> Iterator[ImportedMessage]:
     date comes from each message's envelope `From ` line.
     """
     box = mailbox.mbox(str(path), create=False)
-    for key in box.iterkeys():
-        msg = box.get_message(key)
-        raw = msg.as_bytes()
-        received = parse_mbox_from_date(msg.get_from() or "")
-        yield ImportedMessage(mailbox_name=mailbox_name, raw=raw, received_date=received)
+    try:
+        for key in box.iterkeys():
+            msg = box.get_message(key)
+            raw = msg.as_bytes()
+            received = parse_mbox_from_date(msg.get_from() or "")
+            yield ImportedMessage(mailbox_name=mailbox_name, raw=raw, received_date=received)
+    finally:
+        box.close()
 
 
 def _maildir_received(msg: mailbox.MaildirMessage) -> datetime | None:
     try:
         return datetime.fromtimestamp(msg.get_date(), tz=timezone.utc)
-    except (OSError, ValueError):
+    except (OSError, ValueError, OverflowError):
         return None
 
 
@@ -88,6 +92,9 @@ def iter_maildir(path: Path) -> Iterator[ImportedMessage]:
     the folder name. The received date is each message file's delivery time.
     """
     root = mailbox.Maildir(str(path), create=False)
-    yield from _iter_one_maildir(root, path.name)
-    for folder_name in root.list_folders():
-        yield from _iter_one_maildir(root.get_folder(folder_name), folder_name)
+    try:
+        yield from _iter_one_maildir(root, path.name)
+        for folder_name in root.list_folders():
+            yield from _iter_one_maildir(root.get_folder(folder_name), folder_name)
+    finally:
+        root.close()

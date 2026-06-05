@@ -1,6 +1,13 @@
 """MCP tool bodies — thin api/ wrappers, ACL-scoped."""
+import hashlib
+from datetime import datetime, timezone
+
+import psycopg.types.json
+import pytest
+
 from localmail.api.acl import allowed_account_ids, grant_account
 from localmail.api.auth import create_user
+from localmail.api.errors import NotFound
 from localmail.config import SearchConfig
 from localmail.db import open_pool
 from localmail.mcp import tools
@@ -102,8 +109,6 @@ def test_tool_get_message_granted(db_conn):
 
 
 def test_tool_get_message_denied_raises_notfound(db_conn):
-    import pytest
-    from localmail.api.errors import NotFound
     uid = create_user(db_conn, "dave", "hunter2")
     granted = _insert_account(db_conn, "dave-granted")
     other = _insert_account(db_conn, "dave-other")
@@ -144,3 +149,93 @@ def test_tool_list_accounts_returns_only_granted(db_conn):
         db_conn, allowed_account_ids=allowed_account_ids(db_conn, uid),
     )
     assert {a["id"] for a in accounts} == {str(granted)}
+
+
+# ---------------------------------------------------------------------------
+# tool_get_attachment tests
+# ---------------------------------------------------------------------------
+
+_ATT_SHA_HEX = "ab" * 32
+_ATT_TEXT = "Hello world extracted text"
+
+
+def _seed_attachment(db_conn, account_name: str):
+    """Seed account + message referencing a blob + blob + attachment_text.
+
+    Returns (account_id, sha_hex, expected_text). The on-disk blob file is
+    not needed for text/metadata reads, so we don't write one.
+    """
+    sha_hex = _ATT_SHA_HEX
+    sha_bytes = bytes.fromhex(sha_hex)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES (%s, %s, 'imap.example.com', 'password') RETURNING id",
+            (account_name, f"{account_name}@example.com"),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        acct = int(row[0])
+        raw = b"From: x@example.com\r\nSubject: t\r\n\r\nbody"
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_bytes, raw_sha256,"
+            " size_bytes, headers, attachments, date_sent)"
+            " VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, %s::jsonb, %s)",
+            (acct, f"<{account_name}-{sha_hex}@x>", raw, hashlib.sha256(raw).digest(),
+             len(raw),
+             psycopg.types.json.Jsonb([{"filename": "r.pdf", "sha256": sha_hex}]),
+             datetime.now(timezone.utc)),
+        )
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, mime_type, size_bytes, path)"
+            " VALUES (%s, 'application/pdf', 12, %s)",
+            (sha_bytes, f"/nonexistent/{sha_hex}"),
+        )
+        cur.execute(
+            "INSERT INTO attachment_text (sha256, extractor, extracted_text)"
+            " VALUES (%s, 'stub', %s)",
+            (sha_bytes, _ATT_TEXT),
+        )
+    db_conn.commit()
+    return acct, sha_hex, _ATT_TEXT
+
+
+def test_tool_get_attachment_text(db_conn):
+    acct, sha, text = _seed_attachment(db_conn, "att-owner-text")
+    out = tools.tool_get_attachment(
+        db_conn, sha256=sha, mode="text", allowed_account_ids=[acct])
+    assert out == {"mode": "text", "sha256": sha, "text": text}
+
+
+def test_tool_get_attachment_metadata(db_conn):
+    acct, sha, _ = _seed_attachment(db_conn, "att-owner-meta")
+    out = tools.tool_get_attachment(
+        db_conn, sha256=sha, mode="metadata", allowed_account_ids=[acct])
+    assert out["mode"] == "metadata"
+    assert out["sha256"] == sha
+    assert out["metadata"]["mime_type"] == "application/pdf"
+    assert out["metadata"]["size_bytes"] == 12
+
+
+def test_tool_get_attachment_denied_raises_notfound(db_conn):
+    acct, sha, _ = _seed_attachment(db_conn, "att-owner-denied")
+    # An account with no referencing message cannot read the blob.
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES ('att-other', 'o@example.com', 'imap.example.com', 'password')"
+            " RETURNING id")
+        row = cur.fetchone()
+        assert row is not None
+        other = int(row[0])
+    db_conn.commit()
+    with pytest.raises(NotFound):
+        tools.tool_get_attachment(
+            db_conn, sha256=sha, mode="text", allowed_account_ids=[other])
+
+
+def test_tool_get_attachment_bad_mode_raises(db_conn):
+    acct, sha, _ = _seed_attachment(db_conn, "att-owner-badmode")
+    with pytest.raises(ValueError):
+        tools.tool_get_attachment(
+            db_conn, sha256=sha, mode="bytes", allowed_account_ids=[acct])

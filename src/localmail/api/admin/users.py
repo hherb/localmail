@@ -192,8 +192,27 @@ def _user_state(conn: psycopg.Connection, user_id: int) -> tuple[bool, bool]:
     return bool(row[0]), bool(row[1])
 
 
+# Stable advisory-lock key serialising every admin-removing action (demote /
+# disable / delete) so the count-then-mutate guard can't race itself. The lock
+# is transaction-scoped (`pg_advisory_xact_lock`) and so is held until the
+# caller's transaction commits, covering the subsequent UPDATE/DELETE. Without
+# it, two concurrent demotions could each read active_admin_count == 2 and both
+# proceed, orphaning the system with no active admin. The number is arbitrary —
+# chosen for the "adminusr" mnemonic.
+_ADMIN_GUARD_ADVISORY_LOCK_KEY = 0x61_64_6D_69_6E_75_73_72  # "adminusr" in ASCII
+
+
 def _guard_not_last_admin(conn: psycopg.Connection, user_id: int, action: str) -> None:
-    """Raise LastAdminError if `user_id` is the sole active admin."""
+    """Raise LastAdminError if `user_id` is the sole active admin.
+
+    Takes a transaction-scoped advisory lock first so concurrent
+    demote/disable/delete transactions serialise through the count-then-mutate
+    window (the caller's transaction must span this guard and the mutation).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(%s)", (_ADMIN_GUARD_ADVISORY_LOCK_KEY,)
+        )
     is_admin, disabled = _user_state(conn, user_id)
     target_is_active_admin = is_admin and not disabled
     if would_orphan_last_admin(

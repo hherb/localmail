@@ -66,10 +66,9 @@ def _status_fragment(
         request=request, name="users/_status.html", context=ctx, status_code=status)
 
 
-def _grants_fragment(
-    request: Request, admin: AdminUser, conn: psycopg.Connection, user_id: int,
+def _render_grants(
+    request: Request, admin: AdminUser, detail: svc.UserDetail, flags: dict[str, bool],
 ) -> HTMLResponse:
-    detail, flags = _detail_and_flags(conn, user_id, admin.id)
     ctx = _base_context(request, admin)
     ctx.update({"detail": detail, "flags": flags})
     return templates.TemplateResponse(
@@ -247,14 +246,19 @@ async def set_grant(
     account_id = parse_int_id(str(raw.get("account_id", "")), field="account_id")
     granted = str(raw.get("granted", "")).lower() == "true"
     pool = request.app.state.pool
-    with pool.connection() as conn:
-        try:
+
+    def _apply() -> tuple[svc.UserDetail, dict[str, bool]]:
+        with pool.connection() as conn:
             svc.set_grant(conn, user_id, account_id, granted)
-        except UserNotFound:
-            raise HTTPException(status_code=404, detail="user not found")
-        except svc.UserFieldError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        return _grants_fragment(request, admin, conn, user_id)
+            return _detail_and_flags(conn, user_id, admin.id)
+
+    try:
+        detail, flags = await run_in_threadpool(_apply)
+    except UserNotFound:
+        raise HTTPException(status_code=404, detail="user not found")
+    except svc.UserFieldError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _render_grants(request, admin, detail, flags)
 
 
 @router.post("/users/{user_id}/delete")

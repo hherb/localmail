@@ -55,5 +55,19 @@ jobs:
         run: uv python install ${{ matrix.python }}
       - name: Sync dependencies
         run: uv sync --frozen
+      - name: Cache embedding model
+        # The real-model tests download google/embeddinggemma-300m (~1.2 GB) from
+        # HuggingFace. The model is immutable, so a static key persists it across
+        # runs: the first run populates the cache, later runs load from disk and
+        # never call HF (avoiding the 429s GitHub Actions' shared IPs draw). A
+        # cache miss just falls back to a download, which the test layer skips if
+        # HF is unreachable. fastembed resolves via huggingface_hub (~/.cache/
+        # huggingface) and may also stage under /tmp/fastembed_cache.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            /tmp/fastembed_cache
+          key: embedding-model-embeddinggemma-300m-onnx-v1
       - name: Run pytest
         run: uv run pytest -q

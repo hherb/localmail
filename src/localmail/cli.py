@@ -464,6 +464,50 @@ def retry_failed(ctx: click.Context, account_name: str | None) -> None:
     click.echo(f"recovered: {ok}    still failing: {still}")
 
 
+@main.command("import")
+@click.argument("source_path", type=click.Path(exists=True))
+@click.option("--account", "account_name", required=True, help="Target archive account name.")
+@click.option("--kind", type=click.Choice(["mbox", "maildir"]), required=True)
+@click.pass_context
+def import_cmd(
+    ctx: click.Context, source_path: str, account_name: str, kind: str,
+) -> None:
+    """Import an mbox file or maildir directory into an archive account.
+
+    Runs synchronously and prints the final counts. Re-running is idempotent
+    (per-account dedup), so a re-import skips already-imported messages.
+    """
+    from localmail.api.admin import accounts as accounts_svc
+    from localmail.api.admin import imports as imports_svc
+    from localmail.importer import runner
+
+    cfg = load_config(ctx.obj["config_path"])
+    with psycopg.connect(cfg.database.dsn, autocommit=False) as conn:
+        account = accounts_svc.get_account_by_name(conn, account_name)
+        if account is None:
+            raise click.ClickException(f"no such account: {account_name!r}")
+        if account.auth_method != "archive":
+            raise click.ClickException(f"{account_name!r} is not an archive account")
+        try:
+            jid = imports_svc.create_job(
+                conn, account_id=account.id, source_kind=kind, source_path=source_path)
+        except imports_svc.ImportBusyError as e:
+            raise click.ClickException(str(e))
+        conn.commit()
+
+    runner.run_import(
+        lambda: psycopg.connect(cfg.database.dsn, autocommit=False), jid,
+        attachments_root=cfg.attachments.root, checkpoint_every=cfg.imports.checkpoint_every)
+
+    with psycopg.connect(cfg.database.dsn) as conn:
+        job = imports_svc.get_job(conn, jid)
+    click.echo(
+        f"status={job.status} processed={job.processed} inserted={job.inserted} "
+        f"skipped_dup={job.skipped_dup} failed={job.failed}")
+    if job.error_msg:
+        click.echo(f"error: {job.error_msg}", err=True)
+
+
 @main.command("backfill-internal-date")
 @click.option("--account", "account_name", default=None,
               help="Restrict to one account (default: all).")

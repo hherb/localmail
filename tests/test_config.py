@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from localmail.config import AuthConfig, Config, LocalmailConfig, SearchConfig, load_config
+from localmail.config import AuthConfig, Config, ImportsConfig, LocalmailConfig, SearchConfig, load_config
 
 
 def write(path: Path, body: str) -> Path:
@@ -465,9 +465,6 @@ def test_daemon_command_listen_override():
     assert cfg.daemon.command_listen_poll_seconds == 2.5
 
 
-from localmail.config import Config, ImportsConfig
-
-
 def test_imports_config_defaults():
     cfg = ImportsConfig()
     assert cfg.roots == []
@@ -484,4 +481,5 @@ def test_imports_config_resolves_and_expands_roots():
 
 def test_config_has_imports_section_default():
     cfg = Config(database={"dsn": "postgresql://x/y"})
+    assert cfg.imports.roots == []  # empty = imports disabled (security default)
     assert cfg.imports.checkpoint_every == 50

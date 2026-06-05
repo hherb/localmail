@@ -41,8 +41,8 @@ class ImportsConfig(BaseModel):
     realpaths. No magic numbers live in importer code — they live here.
     """
     roots: list[Path] = Field(default_factory=list)
-    checkpoint_every: int = 50
-    stale_seconds: int = 60
+    checkpoint_every: int = 50  # flush progress + commit to DB every N messages
+    stale_seconds: int = 60  # a running job idle longer than this is shown stalled in the panel
 
     @field_validator("roots", mode="after")
     @classmethod

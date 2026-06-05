@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from psycopg_pool import ConnectionPool
 
 from localmail.api.errors import APIError, RateLimited
-from localmail.config import AuthConfig, DaemonConfig, ServeConfig
+from localmail.config import AuthConfig, DaemonConfig, ImportsConfig, ServeConfig
 from localmail.serve.admin import accounts_panel_router as admin_accounts_panel_router
 from localmail.serve.admin import users_panel_router as admin_users_panel_router
 from localmail.serve.admin import accounts_router as admin_accounts_router
@@ -19,6 +19,7 @@ from localmail.serve.admin import users_router as admin_users_router
 from localmail.serve.admin import auth_router as admin_auth_router
 from localmail.serve.admin import daemon_panel_router as admin_daemon_panel_router
 from localmail.serve.admin import daemon_router as admin_daemon_router
+from localmail.serve.admin import imports_router as admin_imports_router
 from localmail.serve.admin import dashboard_router as admin_dashboard_router
 from localmail.serve.admin import oauth_router as admin_oauth_router
 from localmail.serve.admin.dependencies import install_admin_redirect_handler
@@ -51,6 +52,8 @@ def create_app(
     daemon_config: DaemonConfig | None = None,
     daemon_config_path: Path | None = None,
     enable_control_socket: bool = False,
+    imports_config: ImportsConfig | None = None,
+    attachments_root: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a Postgres pool and (optionally) a Searcher.
 
@@ -66,6 +69,7 @@ def create_app(
     cfg = serve_config or ServeConfig()
     auth_cfg = auth_config or AuthConfig()
     daemon_cfg = daemon_config or DaemonConfig()
+    imports_cfg = imports_config or ImportsConfig()
     pool = ConnectionPool(
         db_dsn,
         min_size=cfg.pool_min_size,
@@ -114,6 +118,9 @@ def create_app(
     app.state.daemon_supervisor = supervisor
     app.state.control_socket_server = None
     app.state.gmail_client_secrets_file = gmail_client_secrets_file
+    app.state.db_dsn = db_dsn
+    app.state.imports_config = imports_cfg
+    app.state.attachments_root = attachments_root
 
     # Exception handler for APIError raised inside route handlers / dependencies.
     # FastAPI's DI layer catches these before BaseHTTPMiddleware sees them, so we
@@ -187,6 +194,7 @@ def create_app(
         app.include_router(admin_users_panel_router.router, prefix="/admin")
         app.include_router(admin_accounts_router.router, prefix="/v1/admin")
         app.include_router(admin_users_router.router, prefix="/v1/admin")
+        app.include_router(admin_imports_router.router, prefix="/v1/admin")
         app.include_router(admin_daemon_router.router, prefix="/v1/admin")
         app.include_router(admin_oauth_router.router_v1, prefix="/v1/admin")
         app.include_router(admin_oauth_router.router_admin, prefix="/admin")

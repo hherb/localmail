@@ -1240,6 +1240,8 @@ def serve_cmd(
         auth_cfg = AuthConfig()
         daemon_cfg = DaemonConfig()
         gmail_secrets = None
+        imports_cfg = None
+        attachments_root = None
     else:
         cfg = load_config(ctx.obj["config_path"])
         dsn = cfg.database.dsn
@@ -1249,6 +1251,8 @@ def serve_cmd(
         gmail_secrets = (
             cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
         )
+        imports_cfg = cfg.imports
+        attachments_root = cfg.attachments.root
 
     try:
         pending = pending_migrations(dsn)
@@ -1282,6 +1286,8 @@ def serve_cmd(
         daemon_config=daemon_cfg,
         daemon_config_path=ctx.obj["config_path"],
         enable_control_socket=serve_cfg.supervise_daemon,
+        imports_config=imports_cfg,
+        attachments_root=attachments_root,
     )
 
     if no_tls:

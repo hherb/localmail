@@ -146,6 +146,9 @@ def run_import(
                 c.inserted += 1 if did_insert else 0
                 c.skipped_dup += 0 if did_insert else 1
             except Exception as exc:  # poison pill -- isolate to this message
+                log.warning(
+                    "import job %s: skipping poison message uid=%s mailbox=%s: %s",
+                    job_id, uid, msg.mailbox_name, exc)
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")
                     cur.execute("RELEASE SAVEPOINT msg")

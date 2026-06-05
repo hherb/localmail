@@ -124,3 +124,30 @@ def test_run_import_fatal_error_marks_failed(db_conn, tmp_path):
     job = _read_job(db_conn, jid)
     assert job["status"] == "failed"
     assert job["error_msg"]
+
+
+def test_run_import_poison_message_isolated(db_conn, tmp_path, monkeypatch):
+    aid = _archive(db_conn)
+    path = _make_mbox(tmp_path, _eml.plain(), _eml.multipart_alt(), _eml.utf8_subject())
+    jid = _job(db_conn, aid, path)
+
+    real = runner.process_one_message
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:  # poison the 2nd message only
+            raise ValueError("synthetic poison")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "process_one_message", flaky)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1)
+
+    job = _read_job(db_conn, jid)
+    assert job["status"] == "completed"
+    assert job["inserted"] == 2          # the two good messages survived
+    assert job["failed"] == 1            # the poison was isolated, not fatal
+    # The poison message was recorded for later retry.
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM failed_messages WHERE account_id=%s", (aid,))
+        assert cur.fetchone()[0] == 1

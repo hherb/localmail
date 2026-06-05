@@ -155,7 +155,10 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """One message — headers, body, attachment list — ACL-scoped."""
         user_id = _current_user_id()
-        mid = parse_int_id(message_id, field="message_id")
+        try:
+            mid = parse_int_id(message_id, field="message_id")
+        except ValidationFailed as exc:
+            raise ToolError(str(exc)) from exc
         with pool.connection() as conn:
             allowed = allowed_account_ids(conn, user_id)
             try:
@@ -188,6 +191,8 @@ def build_mcp_server(
                 )
             except NotFound as exc:
                 raise ToolError(f"attachment {sha256} not found") from exc
+            except ValidationFailed as exc:
+                raise ToolError(str(exc)) from exc
             except ValueError as exc:
                 raise ToolError(str(exc)) from exc
 
@@ -211,18 +216,18 @@ def build_mcp_server(
                 if folder_ids is not None
                 else None
             )
+            with pool.connection() as conn:
+                allowed = allowed_account_ids(conn, user_id)
+                return tools.tool_list_messages(
+                    conn,
+                    allowed_account_ids=allowed,
+                    account_ids=account_id_ints,
+                    folder_ids=folder_id_ints,
+                    limit=limit,
+                    cursor=cursor,
+                )
         except ValidationFailed as exc:
             raise ToolError(str(exc)) from exc
-        with pool.connection() as conn:
-            allowed = allowed_account_ids(conn, user_id)
-            return tools.tool_list_messages(
-                conn,
-                allowed_account_ids=allowed,
-                account_ids=account_id_ints,
-                folder_ids=folder_id_ints,
-                limit=limit,
-                cursor=cursor,
-            )
 
     @server.tool()
     def list_accounts() -> list[dict[str, Any]]:

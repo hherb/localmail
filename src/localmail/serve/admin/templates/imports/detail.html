@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Import #{{ job.id }} — localmail admin{% endblock %}
+{% block content %}
+<div class="admin-card">
+  <h1>Import #{{ job.id }}</h1>
+  <p><a href="/admin/imports">&larr; All imports</a></p>
+  {% include "imports/_progress.html" %}
+</div>
+<div id="import-toast" hidden></div>
+<script src="/admin/static/imports-panel.js" defer></script>
+{% endblock %}

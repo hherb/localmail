@@ -101,6 +101,15 @@ login_cleanup_interval_s = 300     # 5m
 [gmail_oauth]
 client_secrets_file = "~/.config/localmail/gmail_client_secret.json"
 
+[imports]
+# Directories the /admin/imports UI may read archives from. Empty = imports
+# disabled. Each path is realpathed; a source must resolve under one of these.
+roots = []
+# How often (in messages) the import worker flushes progress counters.
+checkpoint_every = 50
+# A running job idle longer than this is shown stalled (red) in the panel.
+stale_seconds = 60
+
 # --- accounts -----------------------------------------------------------------
 
 # [[accounts]]

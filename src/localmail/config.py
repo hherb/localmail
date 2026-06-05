@@ -32,6 +32,24 @@ class AttachmentsConfig(BaseModel):
         return Path(os.path.expanduser(str(v))).resolve()
 
 
+class ImportsConfig(BaseModel):
+    """Tunables for the /admin/imports archive-import feature (Sub-plan 2A.5).
+
+    `roots` is the allowlist of directories the import UI may read archives
+    from; an empty list disables imports. Each entry is user-expanded and
+    resolved to an absolute path so the path-allowlist guard compares
+    realpaths. No magic numbers live in importer code — they live here.
+    """
+    roots: list[Path] = Field(default_factory=list)
+    checkpoint_every: int = 50  # flush progress + commit to DB every N messages
+    stale_seconds: int = 60  # a running job idle longer than this is shown stalled in the panel
+
+    @field_validator("roots", mode="after")
+    @classmethod
+    def _resolve_roots(cls, v: list[Path]) -> list[Path]:
+        return [Path(os.path.expanduser(str(p))).resolve() for p in v]
+
+
 class DaemonConfig(BaseModel):
     idle_renew_seconds: int = 1740
     poll_seconds: int = 300
@@ -474,6 +492,7 @@ class Config(BaseModel):
     gmail_oauth: GmailOAuthConfig | None = None
     accounts: list[AccountConfig] = Field(default_factory=list)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    imports: ImportsConfig = Field(default_factory=ImportsConfig)
     upgrade: UpgradeEstimateConfig = Field(default_factory=UpgradeEstimateConfig)
 
     @model_validator(mode="after")

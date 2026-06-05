@@ -123,6 +123,39 @@ sessions. The UI refuses any action that would remove the last remaining admin
 or lock out your own account, and renders such controls disabled. The same
 operations are exposed as a JSON API under `/v1/admin/users`.
 
+### Importing archive mail
+
+localmail can import existing mbox files or maildir directories into an
+`archive` account. The import is idempotent — already-imported messages are
+skipped via the existing per-account Message-Id / raw-SHA256 dedup, so
+re-running is safe.
+
+1. **Create an archive account** at `/admin/accounts` (auth method: `archive`,
+   no IMAP host required), or via the CLI:
+   `localmail add-account NAME` (with `auth_method = "archive"` in `config.toml`).
+
+2. **Allow the source directory** in `config.toml`:
+
+   ```toml
+   [imports]
+   roots = ["/path/to/archives"]   # empty = imports disabled
+   ```
+
+3. **Start an import** from the `/admin/imports` panel (select the archive
+   account, the source kind `mbox` or `maildir`, and the path), or run it
+   directly from the CLI:
+
+   ```bash
+   uv run localmail import /path/to/archives/backup.mbox --account myarchive --kind mbox
+   uv run localmail import /path/to/archives/maildir/    --account myarchive --kind maildir
+   ```
+
+   The path must resolve under one of the configured `roots`; imports are
+   rejected otherwise. The received date from each source message (mbox `From_`
+   envelope line or maildir file mtime) is stored as `messages.internal_date`.
+   Progress and status are visible in the `/admin/imports` panel; a job idle
+   longer than `[imports].stale_seconds` (default 60) is shown in red.
+
 ### Search backfill & status
 
 | Command | Purpose |

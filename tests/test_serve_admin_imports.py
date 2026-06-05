@@ -1,7 +1,9 @@
 """JSON-route tests for /v1/admin/imports (2A.5)."""
 from __future__ import annotations
 
+import mailbox as _mailbox
 import re
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -93,3 +95,39 @@ def test_cancel_unknown_job_404(client):
     r = client.post("/v1/admin/imports/999/cancel",
                     headers={"X-CSRF-Token": client.csrf("/v1/admin/imports/999/cancel")})
     assert r.status_code == 404
+
+
+def test_create_happy_path_201_and_completes(client, db_conn, tmp_path):
+    aid = _archive(db_conn)
+    # The app fixture allowlists tmp_path/"imports"; place the mbox there.
+    root = tmp_path / "imports"
+    box_path = root / "a.mbox"
+    box = _mailbox.mbox(str(box_path))
+    box.lock()
+    box.add(_mailbox.mboxMessage(b"From: a@b.test\r\nSubject: hi\r\n\r\nbody\r\n"))
+    box.flush()
+    box.unlock()
+
+    r = client.post("/v1/admin/imports", json={
+        "account_id": str(aid), "source_kind": "mbox", "source_path": str(box_path)},
+        headers={"X-CSRF-Token": client.csrf("/v1/admin/imports")})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["status"] == "pending"
+    assert body["source_kind"] == "mbox"
+    # full-object wire shape includes the new fields
+    for key in ("total_messages", "last_progress_at", "started_at", "finished_at"):
+        assert key in body
+    jid = body["id"]
+
+    # Poll until the background worker reaches a terminal status.
+    deadline = time.time() + 30
+    status = body["status"]
+    while time.time() < deadline:
+        g = client.get(f"/v1/admin/imports/{jid}")
+        assert g.status_code == 200
+        status = g.json()["status"]
+        if status in ("completed", "failed", "cancelled"):
+            break
+        time.sleep(0.1)
+    assert status == "completed"

@@ -34,20 +34,24 @@ def _job_dict(j: svc.ImportJob) -> dict:
         "source_kind": j.source_kind,
         "source_path": j.source_path,
         "status": j.status,
+        "total_messages": j.total_messages,
         "processed": j.processed,
         "inserted": j.inserted,
         "skipped_dup": j.skipped_dup,
         "failed": j.failed,
         "error_msg": j.error_msg,
         "cancel_requested": j.cancel_requested,
+        "last_progress_at": j.last_progress_at.isoformat() if j.last_progress_at else None,
         "created_at": j.created_at.isoformat(),
+        "started_at": j.started_at.isoformat() if j.started_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
     }
 
 
 @router.get("/imports")
 def list_imports(request: Request, admin: AdminUser = require_admin_session()) -> dict:
-    with request.app.state.pool.connection() as conn:
+    pool = request.app.state.pool
+    with pool.connection() as conn:
         rows = svc.list_jobs(conn)
     return {"imports": [_job_dict(r) for r in rows]}
 
@@ -59,6 +63,8 @@ def create_import(
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     check_csrf(request, admin, x_csrf_token, "/v1/admin/imports")
+    if request.app.state.attachments_root is None:
+        raise HTTPException(status_code=503, detail="attachments_root not configured")
     aid = parse_int_id(body.account_id, field="account_id")
     cfg = request.app.state.imports_config
     try:
@@ -91,7 +97,8 @@ def get_import(
     job_id: str, request: Request, admin: AdminUser = require_admin_session(),
 ) -> dict:
     jid = parse_int_id(job_id, field="job_id")
-    with request.app.state.pool.connection() as conn:
+    pool = request.app.state.pool
+    with pool.connection() as conn:
         try:
             job = svc.get_job(conn, jid)
         except NotFound:
@@ -107,7 +114,8 @@ def cancel_import(
 ) -> Response:
     jid = parse_int_id(job_id, field="job_id")
     check_csrf(request, admin, x_csrf_token, f"/v1/admin/imports/{jid}/cancel")
-    with request.app.state.pool.connection() as conn:
+    pool = request.app.state.pool
+    with pool.connection() as conn:
         try:
             svc.cancel_job(conn, jid)
         except NotFound:

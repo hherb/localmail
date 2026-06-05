@@ -72,12 +72,16 @@ API uses. The agent obtains one by logging in with the user's credentials:
 curl -sk https://localhost:8443/v1/auth/login \
   -H 'content-type: application/json' \
   -d '{"username": "agent", "password": "…"}'
-# → {"access_token": "…", "refresh_token": "…", …}
+# → {"token": "…", "expires_at": "2026-…T…Z"}
 ```
 
-`POST /v1/auth/refresh` mints a fresh access token from a refresh token. There
-is **no OAuth authorization-server flow** for MCP in this model: the client
-configures the token directly. (See the [GUI server](../README.md#gui-server)
+The response is `{"token": "<bearer>", "expires_at": "<iso8601>"}`. Use that
+`token` as `Authorization: Bearer <token>` against `/mcp`. There is **no
+separate refresh-token credential** — `POST /v1/auth/refresh` rotates the
+existing bearer: send the current token in `Authorization: Bearer <token>` and
+receive a new `{"token", "expires_at"}` in return; the old token is revoked.
+There is **no OAuth authorization-server flow** for MCP in this model: the
+client configures the token directly. (See the [GUI server](../README.md#gui-server)
 section of the README for the full auth route reference.)
 
 ### 5. Run the server
@@ -99,7 +103,7 @@ endpoint and pass the bearer token in the `Authorization` header:
 
 ```
 URL:    https://<host>:<port>/mcp
-Header: Authorization: Bearer <access_token>
+Header: Authorization: Bearer <token>
 ```
 
 For a self-signed TLS cert on localhost / LAN, configure your client to trust

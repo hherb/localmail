@@ -4,10 +4,6 @@ import threading
 import time
 
 import pytest
-
-pytest.importorskip("mcp")
-pytestmark = pytest.mark.integration
-
 import uvicorn
 
 from localmail.api.acl import grant_account
@@ -16,6 +12,13 @@ from localmail.config import McpConfig, SearchConfig
 from localmail.db import open_pool
 from localmail.search.searcher import Searcher
 from localmail.serve.app import create_app
+
+# The mcp *client* (imported inside the async helpers below) is only present
+# when the [mcp] extra is installed; skip the whole module otherwise. None of
+# the module-level imports above need it (create_app imports build_mcp_server
+# lazily), so this gate sits after them.
+pytest.importorskip("mcp")
+pytestmark = pytest.mark.integration
 
 
 def _seed(db_conn):

@@ -1,8 +1,13 @@
 """create_app mounts /mcp only when enabled (and the extra is importable)."""
+import pytest
 from starlette.routing import Mount
 
 from localmail.config import McpConfig
 from localmail.serve.app import create_app
+
+# The `enabled` mount needs the mcp SDK to build the server; skip the whole
+# module when the [mcp] extra is absent (the mount is a no-op without it).
+pytest.importorskip("mcp")
 
 
 def _has_mcp_mount(app) -> bool:

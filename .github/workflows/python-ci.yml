@@ -54,7 +54,10 @@ jobs:
       - name: Pin Python via uv
         run: uv python install ${{ matrix.python }}
       - name: Sync dependencies
-        run: uv sync --frozen
+        # --extra mcp installs the (lightweight) MCP SDK so the MCP server
+        # tests actually run in CI. The docling `extraction` extra is left
+        # out deliberately (heavy ML deps); its tests importorskip docling.
+        run: uv sync --frozen --extra mcp
       - name: Cache embedding model
         # The real-model tests download google/embeddinggemma-300m (~1.2 GB) from
         # HuggingFace. The model is immutable, so a static key persists it across

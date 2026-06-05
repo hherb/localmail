@@ -10,8 +10,11 @@ from localmail.api.auth import create_user
 from localmail.api.errors import NotFound
 from localmail.config import SearchConfig
 from localmail.db import open_pool
-from localmail.mcp import tools
 from localmail.search.searcher import Searcher
+
+pytest.importorskip("mcp")  # the [mcp] extra (mcp SDK) gates this module
+
+from localmail.mcp import tools  # noqa: E402
 
 
 def _insert_account(conn, name: str) -> int:

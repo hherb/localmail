@@ -1,9 +1,15 @@
 """LocalmailTokenVerifier bridges api_tokens -> MCP AccessToken."""
 import asyncio
 
+import pytest
 from psycopg_pool import ConnectionPool
 
-from localmail.mcp.auth import LocalmailTokenVerifier, user_id_from_access_token
+pytest.importorskip("mcp")  # the [mcp] extra (mcp SDK) gates this module
+
+from localmail.mcp.auth import (  # noqa: E402
+    LocalmailTokenVerifier,
+    user_id_from_access_token,
+)
 
 
 def _verify(db_dsn, token):

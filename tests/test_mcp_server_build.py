@@ -1,10 +1,14 @@
 """build_mcp_server wires five tools onto a FastMCP instance."""
 import asyncio
 
+import pytest
 from psycopg_pool import ConnectionPool
 
 from localmail.config import McpConfig
-from localmail.mcp import build_mcp_server
+
+pytest.importorskip("mcp")  # the [mcp] extra (mcp SDK) gates this module
+
+from localmail.mcp import build_mcp_server  # noqa: E402
 
 
 def test_build_registers_expected_tools(db_dsn):

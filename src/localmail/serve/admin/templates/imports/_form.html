@@ -1,0 +1,32 @@
+<form hx-post="/admin/imports"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/imports") }}"}'>
+  {% if field_errors._form %}<p class="error">{{ field_errors._form }}</p>{% endif %}
+  <label>Archive account
+    <select name="account_id">
+      <option value="">— choose —</option>
+      {% for a in archive_accounts %}
+        <option value="{{ a.id }}"
+          {% if values.account_id == a.id|string %}selected{% endif %}>{{ a.name }}</option>
+      {% endfor %}
+    </select>
+    {% if field_errors.account_id %}<span class="error">{{ field_errors.account_id }}</span>{% endif %}
+  </label>
+  <label>Source kind
+    <select name="source_kind">
+      <option value="mbox"
+        {% if values.source_kind == "mbox" %}selected{% endif %}>mbox</option>
+      <option value="maildir"
+        {% if values.source_kind == "maildir" %}selected{% endif %}>maildir</option>
+    </select>
+  </label>
+  <label>Source path
+    <input type="text" name="source_path" value="{{ values.source_path }}"
+           placeholder="/srv/localmail/imports/takeout.mbox">
+    {% if field_errors.source_path %}<span class="error">{{ field_errors.source_path }}</span>{% endif %}
+  </label>
+  <button type="submit" {% if not archive_accounts %}disabled{% endif %}>Start import</button>
+  {% if not archive_accounts %}
+    <p class="notice">Create an <em>archive</em> account first under
+    <a href="/admin/accounts">Accounts</a>.</p>
+  {% endif %}
+</form>

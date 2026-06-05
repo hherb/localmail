@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Imports — localmail admin{% endblock %}
+{% block content %}
+<div class="admin-card">
+  <h1>Imports</h1>
+
+  {% if not imports_enabled %}
+    <p class="notice">Imports are <strong>disabled</strong>: no <code>[imports].roots</code>
+    configured. Set an allowlist of directories in <code>config.toml</code> and restart
+    <code>serve</code>.</p>
+  {% else %}
+    <p>Allowed roots:
+    {% for r in roots %}<code>{{ r }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    </p>
+    {% include "imports/_form.html" %}
+  {% endif %}
+
+  <h2>Recent jobs</h2>
+  <table class="accounts-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Account</th>
+        <th>Source</th>
+        <th>Status</th>
+        <th>Processed</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for j in jobs %}
+      <tr>
+        <td><a href="/admin/imports/{{ j.id }}">{{ j.id }}</a></td>
+        <td>{{ j.account_id }}</td>
+        <td>{{ j.source_kind }}: {{ j.source_path }}</td>
+        <td>{{ j.status }}</td>
+        <td>{{ j.processed }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5">No imports yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<script src="/admin/static/imports-panel.js" defer></script>
+{% endblock %}

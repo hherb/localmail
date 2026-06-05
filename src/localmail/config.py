@@ -9,7 +9,14 @@ from ipaddress import ip_network
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 # Imported (not redefined) so client_ip.py is the single source of truth for
 # the TrustedProxies alias. client_ip.py must remain free of any
@@ -497,8 +504,8 @@ class McpConfig(BaseModel):
     """
 
     enabled: bool = False
-    issuer_url: str = "http://localhost:8443"
-    resource_server_url: str = "http://localhost:8443"
+    issuer_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
+    resource_server_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
 
 
 class Config(BaseModel):

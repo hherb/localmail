@@ -15,7 +15,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from psycopg_pool import ConnectionPool
-from pydantic import AnyHttpUrl, Field
+from pydantic import Field
 
 from localmail.api.acl import allowed_account_ids
 from localmail.api.errors import NotFound, SearchCursorExpired, ValidationFailed
@@ -91,8 +91,8 @@ def build_mcp_server(
         streamable_http_path="/",
         token_verifier=LocalmailTokenVerifier(pool),
         auth=AuthSettings(
-            issuer_url=AnyHttpUrl(config.issuer_url),
-            resource_server_url=AnyHttpUrl(config.resource_server_url),
+            issuer_url=config.issuer_url,
+            resource_server_url=config.resource_server_url,
             required_scopes=[],
         ),
     )

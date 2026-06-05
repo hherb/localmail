@@ -85,7 +85,11 @@ def _mark_terminal(
     conn_factory: ConnFactory, job_id: int, status: str, c: _Counters,
     *, error_msg: str | None = None,
 ) -> None:
-    """Write a terminal status on a FRESH connection (the worker conn may be poisoned)."""
+    """Write a terminal status on a FRESH connection (the worker conn may be poisoned).
+
+    The `with psycopg.connect(...)` context commits on clean exit, so no explicit
+    commit is needed here.
+    """
     with conn_factory() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -93,7 +97,6 @@ def _mark_terminal(
                 "skipped_dup=%s, failed=%s, error_msg=%s, finished_at=now() WHERE id=%s",
                 (status, c.processed, c.inserted, c.skipped_dup, c.failed, error_msg, job_id),
             )
-        conn.commit()
 
 
 def _source_iter(job: _Job) -> Iterator[ImportedMessage]:

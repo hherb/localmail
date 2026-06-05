@@ -93,3 +93,28 @@ def test_panel_requires_auth(db_dsn, serve_cfg, tmp_path):
     c = TestClient(app, follow_redirects=False)
     r = c.get("/admin/imports")
     assert r.status_code in (302, 303)
+
+
+def test_detail_has_single_import_status_id(db_dsn, serve_cfg, admin_id, db_conn, tmp_path):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, auth_method, imap_host, "
+            "imap_port, config) "
+            "VALUES ('arch', 'a@b.test', 'archive', NULL, NULL, '{}') RETURNING id")
+        aid = int(cur.fetchone()[0])
+        cur.execute(
+            "INSERT INTO import_jobs (account_id, source_kind, source_path, status) "
+            "VALUES (%s, 'mbox', '/x', 'running') RETURNING id", (aid,))
+        jid = int(cur.fetchone()[0])
+    db_conn.commit()
+    root = tmp_path / "imports"
+    root.mkdir()
+    app = create_app(db_dsn=db_dsn, serve_config=serve_cfg,
+                     imports_config=ImportsConfig(roots=[root]),
+                     attachments_root=tmp_path / "b")
+    c = _client(app, admin_id)
+    r = c.get(f"/admin/imports/{jid}")
+    assert r.status_code == 200
+    assert r.text.count('id="import-status"') == 1
+    # a running job carries the self-poll trigger
+    assert 'hx-trigger="every' in r.text

@@ -4,9 +4,7 @@
 <div class="admin-card">
   <h1>Import #{{ job.id }}</h1>
   <p><a href="/admin/imports">&larr; All imports</a></p>
-  <div id="import-status">
-    {% include "imports/_progress.html" %}
-  </div>
+  {% include "imports/_progress.html" %}
 </div>
 <div id="import-toast" hidden></div>
 <script src="/admin/static/imports-panel.js" defer></script>

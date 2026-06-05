@@ -26,3 +26,10 @@ def test_invalid_token_yields_none(db_dsn, db_conn):
 
 def test_empty_token_yields_none(db_dsn, db_conn):
     assert _verify(db_dsn, "") is None
+
+
+def test_expired_token_yields_none(db_dsn, db_conn, api_user):
+    from localmail.api.auth import issue_token
+    raw, _ = issue_token(db_conn, api_user.id, ttl_days=-1)
+    db_conn.commit()
+    assert _verify(db_dsn, raw) is None

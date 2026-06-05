@@ -179,3 +179,50 @@ def test_grant_round_trip(admin_client, db_conn, admin_user_id):
     assert r.status_code == 200, r.text
     assert any(g["account_id"] == str(aid) and g["granted"] is True
                for g in r.json()["account_grants"])
+
+
+def test_get_unknown_user_404(admin_client):
+    r = admin_client.get("/v1/admin/users/999999")
+    assert r.status_code == 404
+
+
+def test_get_user_non_digit_id_400(admin_client):
+    r = admin_client.get("/v1/admin/users/not-a-number")
+    assert r.status_code == 400
+
+
+def test_patch_unknown_user_404(admin_client):
+    r = admin_client.patch(
+        "/v1/admin/users/999999", json={"disabled": True},
+        headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/users/999999", "PATCH")})
+    assert r.status_code == 404
+
+
+def test_delete_unknown_user_404(admin_client):
+    r = admin_client.request(
+        "DELETE", "/v1/admin/users/999999",
+        headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/users/999999", "DELETE")})
+    assert r.status_code == 404
+
+
+def test_password_reset_then_login(admin_client, db_conn):
+    uid = _make_user(db_conn, "amy")
+    r = admin_client.post(
+        f"/v1/admin/users/{uid}/password", json={"password": "freshpw1"},
+        headers={"X-CSRF-Token": admin_client.csrf_for(f"/v1/admin/users/{uid}/password")})
+    assert r.status_code == 204, r.text
+
+
+def test_password_unknown_user_404(admin_client):
+    r = admin_client.post(
+        "/v1/admin/users/999999/password", json={"password": "freshpw1"},
+        headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/users/999999/password")})
+    assert r.status_code == 404
+
+
+def test_revoke_sessions_ok(admin_client, db_conn):
+    uid = _make_user(db_conn, "amy")
+    r = admin_client.post(
+        f"/v1/admin/users/{uid}/revoke-sessions",
+        headers={"X-CSRF-Token": admin_client.csrf_for(f"/v1/admin/users/{uid}/revoke-sessions")})
+    assert r.status_code == 204

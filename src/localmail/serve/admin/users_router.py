@@ -5,8 +5,9 @@ session; every mutating route validates a method-bound CSRF token from the
 `X-CSRF-Token` header. IDs are strings on the wire (#33).
 
 Guard mapping (mirrors accounts): validation (`UserFieldError`) → 400; absence
-(`UserNotFound`) → 404; lock-out guards (`LastAdminError`, `SelfActionError`)
-→ 409 — a structured, actionable conflict, never an opaque 500.
+(`UserNotFound`) → 404; lock-out guards (`LastAdminError`) → 409; the
+self-action rule (`uid == admin.id`) is enforced inline as a 409 — structured,
+actionable conflicts, never an opaque 500.
 """
 from __future__ import annotations
 
@@ -90,6 +91,7 @@ def create_user(
                 is_admin=body.is_admin)
         except svc.UserFieldError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        # read-your-writes in the same txn; the roster is small so the list scan is fine
         summary = next(r for r in svc.list_users(conn) if r.id == uid)
     return _summary_dict(summary)
 

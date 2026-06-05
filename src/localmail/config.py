@@ -483,6 +483,17 @@ class UpgradeEstimateConfig(BaseModel):
     gin_build_mb_per_sec: float = 30.0
 
 
+class McpConfig(BaseModel):
+    """Model Context Protocol server settings.
+
+    The MCP server is mounted into `localmail serve` at `/mcp` only when
+    `enabled` is true AND the optional `mcp` extra is installed. Opt-in by
+    default, mirroring `search.reranker_enabled`.
+    """
+
+    enabled: bool = False
+
+
 class Config(BaseModel):
     database: DatabaseConfig
     attachments: AttachmentsConfig = AttachmentsConfig()
@@ -494,6 +505,7 @@ class Config(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     imports: ImportsConfig = Field(default_factory=ImportsConfig)
     upgrade: UpgradeEstimateConfig = Field(default_factory=UpgradeEstimateConfig)
+    mcp: McpConfig = Field(default_factory=McpConfig)
 
     @model_validator(mode="after")
     def _reject_duplicate_account_names(self) -> Config:

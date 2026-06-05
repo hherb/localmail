@@ -41,6 +41,9 @@ dependencies = [
 extraction = [
     "docling>=2.94.0",
 ]
+mcp = [
+    "mcp>=1.13.0",
+]
 
 [dependency-groups]
 dev = [

@@ -39,7 +39,8 @@ free. This feature is an **orchestration + UI layer**, not new ingestion logic.
   provenance.
 - Explicit per-folder mapping UI (scan-then-map two-step flow).
 - Pause/resume bookkeeping — **re-running an import is the resume** (§6).
-- Maildir status-flag translation (`flags=[]` in v1).
+- Maildir status-flag translation (`flags=[]` in v1). **Received-date IS in
+  scope** (§5) — only the IMAP seen/answered *flags* are dropped.
 
 ## 3. Architecture
 
@@ -50,9 +51,9 @@ panel router, with pure logic factored into separate unit-tested modules.
 | Layer | File | Purpose |
 |---|---|---|
 | Migration | `migrations/0026_import_jobs.sql` | `import_jobs` table (§4) |
-| Pure mailbox reader | `src/localmail/importer/sources.py` | `iter_mbox(path)`, `iter_maildir(path)` → yield `(mailbox_name, raw_bytes)`. Read-only; no DB. |
+| Pure mailbox reader | `src/localmail/importer/sources.py` | `iter_mbox(path)`, `iter_maildir(path)` → yield `ImportedMessage(mailbox_name, raw_bytes, received_date)`. Read-only; no DB. Includes the pure received-date helpers (§5). |
 | Pure path guard | `src/localmail/importer/paths.py` | `resolve_import_path(raw, roots)` → realpath; reject symlink / `..` escape outside the allowlist |
-| Importer core | `src/localmail/importer/runner.py` | `run_import(conn_factory, job_id, ...)` — streams a source, calls `process_one_message`, updates counters, checkpoints, honours cancel |
+| Importer core | `src/localmail/importer/runner.py` | `run_import(conn_factory, job_id, ...)` — streams a source, calls `process_one_message`, updates counters + `last_progress_at`, checkpoints, honours cancel, and always writes a terminal status (incl. `failed` + `error_msg` on any fatal exception) |
 | Service layer | `src/localmail/api/admin/imports.py` | `list_jobs`, `get_job`, `create_job`, `start_job` (spawns worker thread), `cancel_job`; archive-only validation; ACL-scoped |
 | Pure form logic | `src/localmail/serve/admin/import_forms.py` | form dict → create-kwargs + error→field map |
 | JSON router | `src/localmail/serve/admin/imports_router.py` | `/v1/admin/imports` (machine JSON) |
@@ -86,6 +87,7 @@ CREATE TABLE import_jobs (
     failed           BIGINT       NOT NULL DEFAULT 0,  -- landed in failed_messages
     error_msg        TEXT,                          -- fatal job error (bad path, unreadable source)
     cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE,
+    last_progress_at TIMESTAMPTZ,                  -- heartbeat: bumped each checkpoint while running
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
     started_at       TIMESTAMPTZ,
     finished_at      TIMESTAMPTZ
@@ -115,15 +117,29 @@ running count for display.
 - Per message:
   `process_one_message(conn, account_id=<archive>, mailbox_id=<upserted>,
   uid=<synthetic per-mailbox counter>, raw=<bytes>, flags=[],
-  attachments_root=<cfg.attachments.root>, internal_date=None)`.
-  - `internal_date` is **NULL** for file imports (no IMAP INTERNALDATE).
-    Canonical recency ordering COALESCEs to `date_sent` (the `Date:` header) —
-    consistent with the `retry-failed` path, which also leaves it NULL.
+  attachments_root=<cfg.attachments.root>, internal_date=<received_date>)`.
+  - **`internal_date` carries the archive's received/delivery timestamp.**
+    `internal_date` is exactly the "when this arrived at the mailbox" column,
+    and the canonical recency ordering already COALESCEs it ahead of
+    `date_sent`. Per-format extraction (pure helpers in `sources.py`):
+    - **mbox** — the envelope `From ` line
+      (`mailbox.mboxMessage.get_from()`), whose date is the conventional mbox
+      delivery time. `parse_mbox_from_date(from_line) -> datetime | None`
+      tolerantly parses the asctime form (`Fri Jul  8 12:08:34 2011`); the
+      naive timestamp is treated as **UTC** (asctime carries no zone — a small,
+      documented imprecision). Unparseable / absent → None.
+    - **maildir** — `mailbox.MaildirMessage.get_date()` (the message file's
+      delivery time, from its mtime), converted to a UTC `datetime`.
+    - On a None result the column is left NULL and recency falls back to
+      `date_sent` (the `Date:` header) — identical to the `retry-failed` path.
+    - Refinement (deferred): scrape the topmost `Received:` header for a
+      higher-fidelity delivery time. The `From ` line / file date is the
+      conventional, reliable per-format choice for v1.
   - `uid` is a synthetic per-mailbox sequential counter. Archive accounts never
     sync IMAP, so there is no real UID space to collide with.
-  - `flags=[]` in v1.
+  - `flags=[]` in v1 (IMAP seen/answered state is not translated; the *date* is).
 
-## 6. Concurrency, cancel, idempotency
+## 6. Concurrency, cancel, failure visibility, idempotency
 
 - **One import at a time**, enforced two ways: the partial unique index
   `import_jobs_single_active_uniq` (DB-level guarantee) and a service-level
@@ -134,12 +150,40 @@ running count for display.
   if set, stops and writes `status='cancelled'`, `finished_at=now()`. Already-
   imported rows remain (valid + deduped).
 - **Checkpoint cadence:** the runner updates the counters (`processed`,
-  `inserted`, `skipped_dup`, `failed`) every `checkpoint_every` messages
-  (default 50, matching `sync_mailbox`'s batch) so the polling partial shows
-  live movement and a crash loses at most one batch of *counter* progress (the
-  message rows themselves are committed per batch).
+  `inserted`, `skipped_dup`, `failed`) and bumps `last_progress_at` every
+  `checkpoint_every` messages (default 50, matching `sync_mailbox`'s batch) so
+  the polling partial shows live movement and a crash loses at most one batch of
+  *counter* progress (the message rows themselves are committed per batch).
+
+### Failure visibility (a job that dies mid-import must surface to the operator)
+
+Three independent layers, all in v1:
+
+1. **Runner terminal status (primary).** The entire `run_import` body is wrapped
+   in `try/except`. Any fatal exception — bad/unreadable path, mid-stream source
+   corruption, unexpected error — sets `status='failed'`,
+   `error_msg=<exception class: message>`, `finished_at=now()` in its own
+   committed transaction (separate from the per-message work, so the failure
+   record survives a rolled-back batch). The list + detail screens render
+   `error_msg` for any failed job. This covers every error the worker thread can
+   observe.
+2. **Liveness / stall detection.** Because `last_progress_at` is bumped each
+   checkpoint, the panel flags a `status='running'` job as **stalled** (red, "no
+   progress for Ns") once `now() - last_progress_at > [imports].stale_seconds`
+   — the same server-computed stale flag the daemon panel uses (no client
+   clock). This catches a hard worker-thread death that never reached the
+   `except` (e.g. the process is killed, or a thread is terminated) *before* a
+   restart.
+3. **Startup reconciliation.** On serve startup the lifespan runs
+   `UPDATE import_jobs SET status='failed', error_msg='interrupted: serve
+   process restarted', finished_at=now() WHERE status IN ('pending','running')`.
+   An in-serve worker cannot survive a process restart, so any still-active job
+   at startup is by definition orphaned. This guarantees a crashed import is
+   marked failed (not stuck `running` forever) and clears the busy-guard for the
+   next import.
+
 - **Re-import is idempotent:** per-account `message_id` / `raw_sha256` dedup
-  means re-running a crashed or cancelled import skips already-imported messages
+  means re-running a failed or cancelled import skips already-imported messages
   (counted as `skipped_dup`). This is the resume story — no offset bookkeeping.
 
 ## 7. Security
@@ -177,11 +221,13 @@ HTML (`/admin/imports`, admin-gated):
   with a notice when `[imports].roots` is empty.
 - `POST /admin/imports` — start (HX-Redirect to the job's progress page on
   success; inline field error on 400/409).
-- `GET /admin/imports/{id}` — job detail with the live progress partial.
+- `GET /admin/imports/{id}` — job detail with the live progress partial; shows
+  `error_msg` when the job is `failed`.
 - `GET /admin/_partials/import-status/{id}` — self-polling fragment
   (`hx-get` + `hx-trigger="every 2s"`, re-carried after each swap; stops at a
-  terminal status). Red styling for `failed`; counters for processed / inserted
-  / skipped-dup / failed.
+  terminal status). Red styling for `failed` **and for a stalled `running` job**
+  (server `stale` flag, §6); shows `error_msg` and counters for processed /
+  inserted / skipped-dup / failed.
 - `POST /admin/imports/{id}/cancel` — cancel button (method-bound CSRF).
 
 ## 9. Configuration
@@ -192,8 +238,10 @@ HTML (`/admin/imports`, admin-gated):
 # Each path is realpathed; an import source must resolve to a location under
 # one of these roots (symlink / .. escape rejected).
 roots = ["/srv/localmail/imports"]
-# How often (in messages) the runner flushes progress counters.
+# How often (in messages) the runner flushes progress counters + last_progress_at.
 checkpoint_every = 50
+# A running job whose last_progress_at is older than this is shown stalled (red).
+stale_seconds = 60
 ```
 
 `ImportsConfig` is a new pydantic model on `Config` (`imports: ImportsConfig =
@@ -206,11 +254,16 @@ No magic numbers live in importer code.
 - `sources.py`: mbox + maildir iteration over fixtures built programmatically in
   the test (no mbox/maildir/`.eml` files checked in — repo convention). Includes
   a maildir with a subfolder (asserts per-folder mailbox names) and an empty
-  source.
+  source. Asserts each yielded `ImportedMessage` carries the expected
+  `received_date`.
+- Received-date helpers: `parse_mbox_from_date` over a table of asctime
+  `From ` lines (valid → UTC datetime; malformed/absent → None) and the maildir
+  `get_date()` → UTC conversion.
 - `paths.py`: allowlist table — inside-root accepts; outside-root, `..`
   traversal, symlink-escape, and empty-roots reject.
 - `import_forms.py`: form → kwargs + error→field mapping.
-- The busy-guard predicate + `status` transition helper.
+- The busy-guard predicate, the `status` transition helper, and the `stale`
+  predicate (`now - last_progress_at > stale_seconds` only while `running`).
 
 **Service tests (real `localmail_test` DB):**
 - create/list/get job; archive-only rejection (live account → 400); ACL scoping
@@ -226,11 +279,18 @@ No magic numbers live in importer code.
 
 **Runner end-to-end (real DB):**
 - Small in-memory mbox → message rows land in the archive account, attachments
-  stored, `inserted` count correct, `internal_date IS NULL`.
+  stored, `inserted` count correct, **`internal_date` equals the parsed
+  `From `-line received date** (and NULL when the line is unparseable).
 - A poison message in the stream → lands in `failed_messages`, `failed` count
   increments, surrounding messages still imported (savepoint isolation).
 - Re-run the same source → all `skipped_dup`, no new rows.
-- Cancel mid-run (inject `cancel_requested`) → stops, partial rows valid.
+- Cancel mid-run (inject `cancel_requested`) → stops, `status='cancelled'`,
+  partial rows valid.
+- **Fatal source error** (unreadable path / corrupt source) → `status='failed'`
+  with a non-empty `error_msg`, `finished_at` set, busy-guard cleared.
+- **Startup reconciliation**: seed a `running` job, run the reconcile step →
+  job becomes `failed` with the "interrupted" `error_msg`; a `completed` job is
+  untouched.
 
 ## 11. Open decisions / risks
 
@@ -247,11 +307,14 @@ No magic numbers live in importer code.
    bar) is a clean later follow-up — the column already exists.
 3. **No new migration conflicts:** latest applied is `0025`; this adds `0026`.
    Re-check `ls migrations/` at plan time.
-4. **maildir flag/`internal_date` fidelity** is intentionally dropped in v1
-   (`flags=[]`, `internal_date=NULL`). If operators need read/seen state or
-   true received-time ordering, a later slice can translate maildir `info`
-   flags and parse the `From_`/`Received` envelope date.
-5. **Crash visibility:** if the serve process dies mid-import, the job row is
-   left `status='running'` with stale counters. A startup reconciliation (mark
-   orphaned `running` jobs as `failed` with an explanatory `error_msg`) is a
-   small follow-up; v1 may leave it and rely on re-import idempotency.
+4. **maildir seen/answered flags** are dropped in v1 (`flags=[]`). Received-date
+   *is* carried (§5); only the IMAP flag state is omitted. A later slice can
+   translate maildir `info` flags if operators need read/unread state.
+5. **`internal_date` semantics.** Imports store a parsed archive delivery
+   timestamp in `internal_date` (the "arrived at mailbox" column), treated as
+   UTC when the source carries no zone (mbox `From ` asctime). This is a
+   deliberate, documented minor imprecision; a `Received:`-header parser is the
+   higher-fidelity refinement (deferred, §5).
+6. **Crash visibility is handled in v1** via the three-layer mechanism in §6
+   (runner terminal status + `last_progress_at` stall flag + startup
+   reconciliation). No job can be left silently stuck `running`.

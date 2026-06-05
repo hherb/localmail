@@ -7,14 +7,17 @@ validation and importer.runner for execution.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 import psycopg
 from psycopg.rows import class_row
 
 from localmail.api.admin import accounts as _accounts
 from localmail.api.errors import NotFound
+from localmail.importer import runner as _runner
 from localmail.importer.job_state import ACTIVE_STATUSES
 
 
@@ -146,3 +149,19 @@ def reconcile_orphaned_jobs(conn: psycopg.Connection) -> int:
             (list(ACTIVE_STATUSES),),
         )
         return cur.rowcount
+
+
+def start_job(
+    conn_factory: _runner.ConnFactory, job_id: int, *,
+    attachments_root: Path, checkpoint_every: int,
+) -> threading.Thread:
+    """Spawn a daemon thread running the import. Returns the thread (joinable)."""
+    t = threading.Thread(
+        target=_runner.run_import,
+        args=(conn_factory, job_id),
+        kwargs={"attachments_root": attachments_root, "checkpoint_every": checkpoint_every},
+        name=f"import-job-{job_id}",
+        daemon=True,
+    )
+    t.start()
+    return t

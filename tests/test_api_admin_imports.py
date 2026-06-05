@@ -1,10 +1,15 @@
 """Service-layer tests for admin imports (real DB)."""
 from __future__ import annotations
 
+import mailbox as _mailbox
+
+import psycopg
 import pytest
 
 from localmail.api.admin import imports as svc
 from localmail.api.errors import NotFound
+from tests import _eml
+from tests.conftest import TEST_DSN
 
 
 def _account(conn, name, auth="archive"):
@@ -93,3 +98,23 @@ def test_reconcile_orphaned_marks_active_failed(db_conn):
     job = svc.get_job(db_conn, jid)
     assert job.status == "failed"
     assert "interrupted" in (job.error_msg or "")
+
+
+def test_start_job_runs_to_completion(db_conn, tmp_path):
+    aid = _account(db_conn, "arch")
+    p = tmp_path / "a.mbox"
+    box = _mailbox.mbox(str(p))
+    box.lock()
+    box.add(_mailbox.mboxMessage(_eml.plain()))
+    box.flush()
+    box.unlock()
+    jid = svc.create_job(
+        db_conn, account_id=aid, source_kind="mbox", source_path=str(p))
+    db_conn.commit()
+
+    t = svc.start_job(
+        lambda: psycopg.connect(TEST_DSN, autocommit=False), jid,
+        attachments_root=tmp_path / "blobs", checkpoint_every=50)
+    t.join(timeout=30)
+    assert not t.is_alive()
+    assert svc.get_job(db_conn, jid).status == "completed"

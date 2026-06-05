@@ -101,7 +101,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0025_transient_extractions.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0026_import_jobs.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -746,6 +746,43 @@ for the full design.
   PATCH token can't replay on DELETE). **No new migration** — reuses
   `is_admin`/`disabled_at`/`sessions_invalidated_at` + `user_accounts` (0016).
   Closes the `/admin/users` 404.
+- **Imports admin screens (Sub-plan 2A.5, shipped):** server-rendered HTMX
+  screens at `/admin/imports` + a JSON `/v1/admin/imports` router, sharing the
+  service layer
+  [`src/localmail/api/admin/imports.py`](src/localmail/api/admin/imports.py):
+  list/create/cancel import jobs, per-job status, and `reconcile_orphaned_jobs`
+  (called at serve startup to move any `running` jobs left over from a crash into
+  `failed`). Closes the last 404 admin nav link (`/admin/imports`).
+  The new `src/localmail/importer/` package contains:
+  `paths.py` (`resolve_import_path` — config-allowlist guard using `realpath`;
+  empty `roots` = imports disabled, raises `ImportNotAllowed`),
+  `sources.py` (`iter_mbox`/`iter_maildir` → `ImportedMessage` named-tuples;
+  received-date from the mbox `From_` envelope line for mbox sources, maildir
+  file mtime for maildir sources),
+  `job_state.py` (pure predicates `is_stale`/`is_terminal`),
+  `runner.py` (`run_import` — streams a source through `sync.process_one_message`
+  with per-message SAVEPOINT isolation, checkpoint counter flush every
+  `[imports].checkpoint_every` messages + `last_progress_at` heartbeat, cooperative
+  cancel via a stop event, and guaranteed terminal status write on exit).
+  Migration `0026_import_jobs.sql` adds the `import_jobs` table (columns:
+  `id`, `account_id`, `source_kind`, `source_path`, `status`, `inserted`,
+  `skipped`, `failed`, `error_msg`, `created_at`, `last_progress_at`) plus a
+  partial unique index `ON import_jobs ((TRUE)) WHERE status IN ('pending','running')`
+  — the single-active busy-guard that prevents two concurrent imports.
+  Imports target a pre-created **archive** account (dropdown on the create form);
+  the service layer is admin-global (NOT per-user ACL-scoped, consistent with the
+  accounts and users admin services). Source paths must reside under a directory
+  in `[imports].roots` (empty = imports disabled); paths are resolved server-side
+  only. Received date from the source (mbox envelope / maildir mtime) is stored
+  in `messages.internal_date`. Three-layer mid-import failure visibility: runner
+  sets terminal `failed` + `error_msg` on unhandled errors; `last_progress_at`
+  stall detection (panel shows red past `[imports].stale_seconds`); and
+  `reconcile_orphaned_jobs` at serve startup clears any `running` rows from a
+  prior crash. The import worker runs in-serve as a plain thread started by
+  `start_job`; `localmail import <path> --account NAME --kind {mbox,maildir}`
+  invokes the same `run_import` synchronously from the CLI. Re-import is
+  idempotent — already-imported messages are skipped via the existing per-account
+  Message-Id / raw-SHA256 dedup. **Migration `0026_import_jobs.sql`** (2A.5).
 - **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
   planes for the sync daemon. **Plane B** (process lifecycle) lives in
   [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):
@@ -1024,7 +1061,7 @@ for the full design.
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0025_transient_extractions.sql` (#153); next would be `0026_*.sql`.
+  Latest is `0026_import_jobs.sql` (2A.5); next would be `0027_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

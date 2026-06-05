@@ -9,7 +9,14 @@ from ipaddress import ip_network
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 # Imported (not redefined) so client_ip.py is the single source of truth for
 # the TrustedProxies alias. client_ip.py must remain free of any
@@ -483,6 +490,24 @@ class UpgradeEstimateConfig(BaseModel):
     gin_build_mb_per_sec: float = 30.0
 
 
+class McpConfig(BaseModel):
+    """Model Context Protocol server settings.
+
+    The MCP server is mounted into `localmail serve` at `/mcp` only when
+    `enabled` is true AND the optional `mcp` extra is installed. Disabled by
+    default; set `enabled = true` to opt in, mirroring `search.reranker_enabled`.
+
+    `issuer_url` / `resource_server_url` are advertised in the MCP OAuth
+    resource-metadata the SDK exposes. Opaque-bearer clients (the v1 model)
+    configure their token directly and ignore these; set them to the public
+    serve URL for spec-strict MCP clients.
+    """
+
+    enabled: bool = False
+    issuer_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
+    resource_server_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
+
+
 class Config(BaseModel):
     database: DatabaseConfig
     attachments: AttachmentsConfig = AttachmentsConfig()
@@ -494,6 +519,7 @@ class Config(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     imports: ImportsConfig = Field(default_factory=ImportsConfig)
     upgrade: UpgradeEstimateConfig = Field(default_factory=UpgradeEstimateConfig)
+    mcp: McpConfig = Field(default_factory=McpConfig)
 
     @model_validator(mode="after")
     def _reject_duplicate_account_names(self) -> Config:

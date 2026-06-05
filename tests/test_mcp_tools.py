@@ -1,0 +1,244 @@
+"""MCP tool bodies — thin api/ wrappers, ACL-scoped."""
+import hashlib
+from datetime import datetime, timezone
+
+import psycopg.types.json
+import pytest
+
+from localmail.api.acl import allowed_account_ids, grant_account
+from localmail.api.auth import create_user
+from localmail.api.errors import NotFound
+from localmail.config import SearchConfig
+from localmail.db import open_pool
+from localmail.search.searcher import Searcher
+
+pytest.importorskip("mcp")  # the [mcp] extra (mcp SDK) gates this module
+
+from localmail.mcp import tools  # noqa: E402
+
+
+def _insert_account(conn, name: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES (%s, %s, 'imap.example.com', 'password') RETURNING id",
+            (name, f"{name}@example.com"),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+_msg_counter = 0
+
+
+def _insert_message(conn, account_id: int, subject: str, body_text: str) -> int:
+    global _msg_counter
+    _msg_counter += 1
+    sha = bytes([_msg_counter % 256]) * 32
+    msg_id = f"<msg-{_msg_counter}@example.com>"
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO messages"
+            "  (account_id, message_id, raw_sha256, subject, body_text,"
+            "   headers, raw_bytes, size_bytes)"
+            " VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, 'r', 1) RETURNING id",
+            (account_id, msg_id, sha, subject, body_text),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+def _lexical_searcher(db_dsn):
+    return Searcher(pool=open_pool(db_dsn), cfg=SearchConfig(),
+                    embeddings=None, reranker=None, rewriter=None)
+
+
+def test_tool_search_scopes_to_allowed_accounts(db_dsn, db_conn):
+    uid = create_user(db_conn, "alice", "hunter2")
+    granted = _insert_account(db_conn, "granted")
+    other = _insert_account(db_conn, "other")
+    grant_account(db_conn, uid, granted)
+    gmid = _insert_message(db_conn, granted, "invoice Q1", "the invoice for Q1")
+    _insert_message(db_conn, other, "invoice Q2", "the invoice for Q2")
+    db_conn.commit()
+
+    acl = allowed_account_ids(db_conn, uid)
+    assert acl == [granted]
+    searcher = _lexical_searcher(db_dsn)
+    try:
+        page = tools.tool_search(
+            searcher=searcher, user_id=uid, allowed_account_ids=acl,
+            query="invoice", sort="date", limit=20, cursor=None, filters={},
+        )
+    finally:
+        searcher._pool.close()
+
+    assert page["results"], "expected at least one hit"
+    returned = {int(r["message_id"]) for r in page["results"]}
+    assert gmid in returned
+    for r in page["results"]:
+        assert r["account"]["id"] == str(granted)
+
+
+def test_tool_search_empty_grants_returns_empty(db_dsn, db_conn):
+    uid = create_user(db_conn, "bob", "hunter2")
+    db_conn.commit()
+    searcher = _lexical_searcher(db_dsn)
+    try:
+        page = tools.tool_search(
+            searcher=searcher, user_id=uid, allowed_account_ids=[],
+            query="invoice", sort="date", limit=20, cursor=None, filters={},
+        )
+    finally:
+        searcher._pool.close()
+    assert page == {"results": [], "next_cursor": None,
+                    "total_estimate": 0, "took_ms": 0.0}
+
+
+def test_tool_get_message_granted(db_conn):
+    uid = create_user(db_conn, "carol", "hunter2")
+    acct = _insert_account(db_conn, "carol-acct")
+    grant_account(db_conn, uid, acct)
+    mid = _insert_message(db_conn, acct, "hello", "world")
+    db_conn.commit()
+    msg = tools.tool_get_message(
+        db_conn, message_id=mid,
+        allowed_account_ids=allowed_account_ids(db_conn, uid),
+    )
+    assert msg["id"] == str(mid)
+    assert msg["account"]["id"] == str(acct)
+
+
+def test_tool_get_message_denied_raises_notfound(db_conn):
+    uid = create_user(db_conn, "dave", "hunter2")
+    granted = _insert_account(db_conn, "dave-granted")
+    other = _insert_account(db_conn, "dave-other")
+    grant_account(db_conn, uid, granted)
+    mid_other = _insert_message(db_conn, other, "secret", "not yours")
+    db_conn.commit()
+    with pytest.raises(NotFound):
+        tools.tool_get_message(
+            db_conn, message_id=mid_other,
+            allowed_account_ids=allowed_account_ids(db_conn, uid),
+        )
+
+
+def test_tool_list_messages_scopes(db_conn):
+    uid = create_user(db_conn, "erin", "hunter2")
+    granted = _insert_account(db_conn, "erin-granted")
+    other = _insert_account(db_conn, "erin-other")
+    grant_account(db_conn, uid, granted)
+    _insert_message(db_conn, granted, "g1", "body")
+    _insert_message(db_conn, other, "o1", "body")
+    db_conn.commit()
+    page = tools.tool_list_messages(
+        db_conn, allowed_account_ids=allowed_account_ids(db_conn, uid),
+    )
+    assert "messages" in page and "next_cursor" in page
+    assert page["messages"], "expected the granted account's message"
+    for m in page["messages"]:
+        assert m["account"]["id"] == str(granted)
+
+
+def test_tool_list_accounts_returns_only_granted(db_conn):
+    uid = create_user(db_conn, "frank", "hunter2")
+    granted = _insert_account(db_conn, "frank-granted")
+    _insert_account(db_conn, "frank-other")
+    grant_account(db_conn, uid, granted)
+    db_conn.commit()
+    accounts = tools.tool_list_accounts(
+        db_conn, allowed_account_ids=allowed_account_ids(db_conn, uid),
+    )
+    assert {a["id"] for a in accounts} == {str(granted)}
+
+
+# ---------------------------------------------------------------------------
+# tool_get_attachment tests
+# ---------------------------------------------------------------------------
+
+_ATT_SHA_HEX = "ab" * 32
+_ATT_TEXT = "Hello world extracted text"
+
+
+def _seed_attachment(db_conn, account_name: str):
+    """Seed account + message referencing a blob + blob + attachment_text.
+
+    Returns (account_id, sha_hex, expected_text). The on-disk blob file is
+    not needed for text/metadata reads, so we don't write one.
+    """
+    sha_hex = _ATT_SHA_HEX
+    sha_bytes = bytes.fromhex(sha_hex)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES (%s, %s, 'imap.example.com', 'password') RETURNING id",
+            (account_name, f"{account_name}@example.com"),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        acct = int(row[0])
+        raw = b"From: x@example.com\r\nSubject: t\r\n\r\nbody"
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_bytes, raw_sha256,"
+            " size_bytes, headers, attachments, date_sent)"
+            " VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, %s::jsonb, %s)",
+            (acct, f"<{account_name}-{sha_hex}@x>", raw, hashlib.sha256(raw).digest(),
+             len(raw),
+             psycopg.types.json.Jsonb([{"filename": "r.pdf", "sha256": sha_hex}]),
+             datetime.now(timezone.utc)),
+        )
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, mime_type, size_bytes, path)"
+            " VALUES (%s, 'application/pdf', 12, %s)",
+            (sha_bytes, f"/nonexistent/{sha_hex}"),
+        )
+        cur.execute(
+            "INSERT INTO attachment_text (sha256, extractor, extracted_text)"
+            " VALUES (%s, 'stub', %s)",
+            (sha_bytes, _ATT_TEXT),
+        )
+    db_conn.commit()
+    return acct, sha_hex, _ATT_TEXT
+
+
+def test_tool_get_attachment_text(db_conn):
+    acct, sha, text = _seed_attachment(db_conn, "att-owner-text")
+    out = tools.tool_get_attachment(
+        db_conn, sha256=sha, mode="text", allowed_account_ids=[acct])
+    assert out == {"mode": "text", "sha256": sha, "text": text}
+
+
+def test_tool_get_attachment_metadata(db_conn):
+    acct, sha, _ = _seed_attachment(db_conn, "att-owner-meta")
+    out = tools.tool_get_attachment(
+        db_conn, sha256=sha, mode="metadata", allowed_account_ids=[acct])
+    assert out["mode"] == "metadata"
+    assert out["sha256"] == sha
+    assert out["metadata"]["mime_type"] == "application/pdf"
+    assert out["metadata"]["size_bytes"] == 12
+
+
+def test_tool_get_attachment_denied_raises_notfound(db_conn):
+    acct, sha, _ = _seed_attachment(db_conn, "att-owner-denied")
+    # An account with no referencing message cannot read the blob.
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES ('att-other', 'o@example.com', 'imap.example.com', 'password')"
+            " RETURNING id")
+        row = cur.fetchone()
+        assert row is not None
+        other = int(row[0])
+    db_conn.commit()
+    with pytest.raises(NotFound):
+        tools.tool_get_attachment(
+            db_conn, sha256=sha, mode="text", allowed_account_ids=[other])
+
+
+def test_tool_get_attachment_bad_mode_raises(db_conn):
+    acct, sha, _ = _seed_attachment(db_conn, "att-owner-badmode")
+    with pytest.raises(ValueError):
+        tools.tool_get_attachment(
+            db_conn, sha256=sha, mode="bytes", allowed_account_ids=[acct])

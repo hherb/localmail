@@ -459,6 +459,46 @@ the SQL sorts by — so the displayed ordering always matches the field.
 Legacy archives can backfill IMAP `INTERNALDATE` via
 `localmail backfill-internal-date` once after upgrade.
 
+## MCP server
+
+`localmail serve` can also expose the archive to AI agents over the
+[Model Context Protocol](https://modelcontextprotocol.io/). The MCP server is
+mounted **inside the same `localmail serve` app** at `/mcp` over Streamable HTTP
+(no new listener; same TLS rules as `serve`). It is read-only and gives an agent
+the archive's read surface as MCP tools.
+
+Enable it with the optional extra plus a config flag (both required; default
+off):
+
+```bash
+uv sync --extra mcp           # pulls mcp>=1.13.0
+```
+
+```toml
+[mcp]
+enabled = true
+```
+
+If the extra is absent, `serve` still runs and logs an INFO line skipping the
+mount. The endpoint is `https://<host>:<port>/mcp`.
+
+Auth is an **opaque bearer token** reusing `api_tokens`: an agent obtains a token
+via `POST /v1/auth/login` (refresh via `/v1/auth/refresh`) and passes it as
+`Authorization: Bearer <token>`. Every tool is scoped to the user's per-account
+grants (`localmail grant-account`), so a new user sees no mail until granted.
+
+Five read-only tools:
+
+- `search` — hybrid lexical + vector search; page forward with `next_cursor`.
+- `get_message` — one message's headers, body, and attachment list.
+- `get_attachment` — an attachment's extracted **text** or metadata (never raw
+  bytes; download those from `GET /v1/attachments/{sha256}`).
+- `list_messages` — keyset date-ordered browse, newest first.
+- `list_accounts` — the accounts the agent may read.
+
+See [docs/mcp-usage.md](docs/mcp-usage.md) for the full operator + agent guide
+(setup flow, tool parameters, ACL scoping, and the config block).
+
 ## GUI client
 
 A Tauri 2 + Svelte 5 desktop client lives in [gui/](gui/). It talks to a

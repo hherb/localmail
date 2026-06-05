@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -13,7 +13,13 @@ from psycopg_pool import ConnectionPool
 
 from localmail.api.admin import imports as _imports_svc
 from localmail.api.errors import APIError, RateLimited
-from localmail.config import AuthConfig, DaemonConfig, ImportsConfig, ServeConfig
+from localmail.config import (
+    AuthConfig,
+    DaemonConfig,
+    ImportsConfig,
+    McpConfig,
+    ServeConfig,
+)
 from localmail.serve.admin import accounts_panel_router as admin_accounts_panel_router
 from localmail.serve.admin import users_panel_router as admin_users_panel_router
 from localmail.serve.admin import imports_panel_router as admin_imports_panel_router
@@ -45,6 +51,19 @@ from localmail.serve.routes import search as search_routes
 from localmail.serve.routes import version as version_routes
 
 
+def _try_build_mcp(pool, searcher, mcp_config):
+    """Build the FastMCP server + ASGI app, or (None, None) if the extra is absent."""
+    try:
+        from localmail.mcp import build_mcp_server
+    except ImportError:
+        logging.getLogger("localmail.serve").info(
+            "MCP enabled but the [mcp] extra is not installed; skipping /mcp mount"
+        )
+        return None, None
+    server = build_mcp_server(pool, searcher=searcher, config=mcp_config)
+    return server, server.streamable_http_app()
+
+
 def create_app(
     *,
     db_dsn: str,
@@ -55,6 +74,8 @@ def create_app(
     daemon_config: DaemonConfig | None = None,
     daemon_config_path: Path | None = None,
     enable_control_socket: bool = False,
+    enable_mcp: bool = False,
+    mcp_config: McpConfig | None = None,
     imports_config: ImportsConfig | None = None,
     attachments_root: Path | None = None,
 ) -> FastAPI:
@@ -79,6 +100,11 @@ def create_app(
         max_size=cfg.pool_max_size,
         open=True,
     )
+
+    mcp_server = None
+    mcp_app = None
+    if enable_mcp:
+        mcp_server, mcp_app = _try_build_mcp(pool, searcher, mcp_config or McpConfig())
 
     # Plane B supervisor: a real subprocess owner when we supervise the daemon,
     # else a stub reporting `external`. Constructing it is side-effect-free —
@@ -110,7 +136,13 @@ def create_app(
             if n:
                 logging.getLogger("localmail.serve").warning(
                     "reconciled %d orphaned import job(s) at startup", n)
-            yield
+            mcp_ctx = (
+                mcp_server.session_manager.run()
+                if mcp_server is not None
+                else nullcontext()
+            )
+            async with mcp_ctx:
+                yield
         finally:
             if css is not None:
                 css.close()
@@ -130,6 +162,9 @@ def create_app(
     app.state.db_dsn = db_dsn
     app.state.imports_config = imports_cfg
     app.state.attachments_root = attachments_root
+
+    if mcp_app is not None:
+        app.mount("/mcp", mcp_app)
 
     # Exception handler for APIError raised inside route handlers / dependencies.
     # FastAPI's DI layer catches these before BaseHTTPMiddleware sees them, so we

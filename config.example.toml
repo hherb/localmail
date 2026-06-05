@@ -139,6 +139,19 @@ stale_seconds = 60
 # results on sort=rank queries.
 # reranker_enabled = true
 
+# --- mcp server ---------------------------------------------------------------
+
+# Mount the MCP (Model Context Protocol) server at /mcp inside `localmail serve`,
+# exposing the archive's read surface to AI agents over Streamable HTTP. Off by
+# default; opt in here AND install the optional extra (uv sync --extra mcp).
+# Auth reuses api_tokens (Authorization: Bearer <token> from /v1/auth/login);
+# every tool is scoped to the user's per-account grants. See docs/mcp-usage.md.
+# [mcp]
+# enabled = false              # mount the MCP server at /mcp inside `localmail serve`
+#                              # (requires the optional extra: uv sync --extra mcp)
+# issuer_url = "https://your-host:8443"          # advertised in OAuth resource metadata
+# resource_server_url = "https://your-host:8443" # (opaque-bearer clients ignore these)
+
 # --- upgrade preflight --------------------------------------------------------
 
 # Throughput rates used by `localmail estimate-upgrade` to project how long

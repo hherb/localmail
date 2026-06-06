@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import psycopg
 from psycopg.rows import class_row
@@ -21,6 +22,7 @@ from localmail.api.admin import accounts as _accounts
 from localmail.api.errors import NotFound
 from localmail.importer import runner as _runner
 from localmail.importer.job_state import ACTIVE_STATUSES
+from localmail.importer.ownership import pid_is_alive, should_reap
 
 
 class ImportFieldError(ValueError):
@@ -140,21 +142,47 @@ def cancel_job(conn: psycopg.Connection, job_id: int) -> None:
             raise NotFound(f"import job {job_id} not found")
 
 
-def reconcile_orphaned_jobs(conn: psycopg.Connection) -> int:
-    """Mark every still-active job failed (called at serve startup).
+def reconcile_orphaned_jobs(
+    conn: psycopg.Connection,
+    *,
+    current_host: str | None = None,
+    pid_alive: Callable[[int], bool] = pid_is_alive,
+) -> int:
+    """Mark genuinely-orphaned active jobs failed (called at serve startup).
 
-    An in-serve worker cannot survive a process restart, so any pending/running
-    row at startup is orphaned. Returns the number of jobs reconciled. Caller
-    commits.
+    An active row is reaped only when its owning process is gone -- a dead pid
+    on this host, or a NULL owner (legacy / never-started). A live import (e.g.
+    a `localmail import` running in another process) keeps its row, so the
+    single-active busy-guard stays held and no concurrent panel import can
+    start. Returns the number of jobs reconciled. Caller commits.
+
+    `current_host` / `pid_alive` are injectable for deterministic tests.
     """
+    host = current_host if current_host is not None else socket.gethostname()
     with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, owner_host, owner_pid FROM import_jobs WHERE status = ANY(%s)",
+            (list(ACTIVE_STATUSES),),
+        )
+        reap_ids = [
+            int(jid)
+            for jid, owner_host, owner_pid in cur.fetchall()
+            if should_reap(
+                owner_host=owner_host,
+                owner_pid=owner_pid,
+                current_host=host,
+                pid_alive=pid_alive(int(owner_pid)) if owner_pid is not None else False,
+            )
+        ]
+        if not reap_ids:
+            return 0
         cur.execute(
             "UPDATE import_jobs "
             "   SET status = 'failed', "
             "       error_msg = 'interrupted: serve process restarted', "
             "       finished_at = now() "
-            " WHERE status = ANY(%s)",
-            (list(ACTIVE_STATUSES),),
+            " WHERE id = ANY(%s)",
+            (reap_ids,),
         )
         return cur.rowcount
 

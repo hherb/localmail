@@ -179,12 +179,12 @@ def reconcile_orphaned_jobs(
         cur.execute(
             "UPDATE import_jobs "
             "   SET status = 'failed', "
-            "       error_msg = 'interrupted: serve process restarted', "
+            "       error_msg = 'interrupted: owning process is no longer running', "
             "       finished_at = now() "
             " WHERE id = ANY(%s)",
             (reap_ids,),
         )
-        return cur.rowcount
+        return len(reap_ids)
 
 
 def start_job(

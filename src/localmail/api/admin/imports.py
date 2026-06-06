@@ -7,6 +7,8 @@ validation and importer.runner for execution.
 """
 from __future__ import annotations
 
+import os
+import socket
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -50,6 +52,8 @@ class ImportJob:
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    owner_host: str | None
+    owner_pid: int | None
 
 
 # Selected column NAMES must match the ImportJob dataclass field names — both
@@ -59,7 +63,8 @@ class ImportJob:
 _SELECT = """
     SELECT id, account_id, source_kind, source_path, status, total_messages,
            processed, inserted, skipped_dup, failed, error_msg, cancel_requested,
-           last_progress_at, created_at, started_at, finished_at
+           last_progress_at, created_at, started_at, finished_at,
+           owner_host, owner_pid
       FROM import_jobs
 """
 
@@ -110,9 +115,12 @@ def create_job(
             raise ImportBusyError("an import is already running")
         try:
             cur.execute(
-                "INSERT INTO import_jobs (account_id, source_kind, source_path, status) "
-                "VALUES (%s, %s, %s, 'pending') RETURNING id",
-                (account_id, source_kind, source_path),
+                "INSERT INTO import_jobs "
+                "  (account_id, source_kind, source_path, status, "
+                "   owner_host, owner_pid) "
+                "VALUES (%s, %s, %s, 'pending', %s, %s) RETURNING id",
+                (account_id, source_kind, source_path,
+                 socket.gethostname(), os.getpid()),
             )
         except psycopg.errors.UniqueViolation as e:
             raise ImportBusyError("an import is already running") from e

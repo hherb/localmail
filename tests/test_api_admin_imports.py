@@ -100,6 +100,19 @@ def test_reconcile_orphaned_marks_active_failed(db_conn):
     assert "interrupted" in (job.error_msg or "")
 
 
+def test_create_job_records_owner(db_conn):
+    import os
+    import socket
+
+    aid = _account(db_conn, "arch")
+    jid = svc.create_job(
+        db_conn, account_id=aid, source_kind="mbox", source_path="/a")
+    db_conn.commit()
+    job = svc.get_job(db_conn, jid)
+    assert job.owner_host == socket.gethostname()
+    assert job.owner_pid == os.getpid()
+
+
 def test_start_job_runs_to_completion(db_conn, tmp_path):
     aid = _account(db_conn, "arch")
     p = tmp_path / "a.mbox"

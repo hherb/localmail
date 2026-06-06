@@ -130,7 +130,8 @@ async def create_import(
     svc.start_job(
         lambda: psycopg.connect(dsn, autocommit=False), jid,
         attachments_root=request.app.state.attachments_root,
-        checkpoint_every=cfg.checkpoint_every)
+        checkpoint_every=cfg.checkpoint_every,
+        checkpoint_seconds=cfg.checkpoint_seconds)
     resp = Response(status_code=200)
     resp.headers["HX-Redirect"] = f"/admin/imports/{jid}"
     return resp

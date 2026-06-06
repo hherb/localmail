@@ -153,13 +153,17 @@ def reconcile_orphaned_jobs(conn: psycopg.Connection) -> int:
 
 def start_job(
     conn_factory: _runner.ConnFactory, job_id: int, *,
-    attachments_root: Path, checkpoint_every: int,
+    attachments_root: Path, checkpoint_every: int, checkpoint_seconds: float,
 ) -> threading.Thread:
     """Spawn a daemon thread running the import. Returns the thread (joinable)."""
     t = threading.Thread(
         target=_runner.run_import,
         args=(conn_factory, job_id),
-        kwargs={"attachments_root": attachments_root, "checkpoint_every": checkpoint_every},
+        kwargs={
+            "attachments_root": attachments_root,
+            "checkpoint_every": checkpoint_every,
+            "checkpoint_seconds": checkpoint_seconds,
+        },
         name=f"import-job-{job_id}",
         daemon=True,
     )

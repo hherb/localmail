@@ -154,7 +154,10 @@ re-running is safe.
    rejected otherwise. The received date from each source message (mbox `From_`
    envelope line or maildir file mtime) is stored as `messages.internal_date`.
    Progress and status are visible in the `/admin/imports` panel; a job idle
-   longer than `[imports].stale_seconds` (default 60) is shown in red.
+   longer than `[imports].stale_seconds` (default 60) is shown in red. Progress
+   counters and the Cancel button update at least every
+   `[imports].checkpoint_seconds` (default 2) — and after the first message — so
+   even a small or slow import (a few large attachments) stays responsive.
 
 ### Search backfill & status
 

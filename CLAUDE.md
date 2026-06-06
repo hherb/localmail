@@ -759,11 +759,11 @@ for the full design.
   `sources.py` (`iter_mbox`/`iter_maildir` → `ImportedMessage` named-tuples;
   received-date from the mbox `From_` envelope line for mbox sources, maildir
   file mtime for maildir sources),
-  `job_state.py` (pure predicates `is_stale`/`is_terminal`),
+  `job_state.py` (pure predicates `is_stale`/`is_terminal`/`should_checkpoint`),
   `runner.py` (`run_import` — streams a source through `sync.process_one_message`
-  with per-message SAVEPOINT isolation, checkpoint counter flush every
-  `[imports].checkpoint_every` messages + `last_progress_at` heartbeat, cooperative
-  cancel via a stop event, and guaranteed terminal status write on exit).
+  with per-message SAVEPOINT isolation, periodic progress flush +
+  `last_progress_at` heartbeat, cooperative cancel via the `cancel_requested`
+  column, and guaranteed terminal status write on exit).
   Migration `0026_import_jobs.sql` adds the `import_jobs` table (columns:
   `id`, `account_id`, `source_kind`, `source_path`, `status`, `inserted`,
   `skipped`, `failed`, `error_msg`, `created_at`, `last_progress_at`) plus a
@@ -783,6 +783,22 @@ for the full design.
   invokes the same `run_import` synchronously from the CLI. Re-import is
   idempotent — already-imported messages are skipped via the existing per-account
   Message-Id / raw-SHA256 dedup. **Migration `0026_import_jobs.sql`** (2A.5).
+  **Checkpoint cadence (#163, resolved):** the runner used to flush progress +
+  poll cancel only on `c.processed % checkpoint_every == 0`, so a sub-`checkpoint_every`
+  import showed `0/0/0/0` until the terminal write and its Cancel button was inert,
+  and a small-count-but-slow import (few huge attachments) was unresponsive for a
+  long time. The flush/poll decision now lives in the pure predicate
+  `job_state.should_checkpoint(processed, processed_at_last_checkpoint,
+  seconds_since_checkpoint, checkpoint_every, checkpoint_seconds)`, which fires on
+  three independent triggers: the **first** processed message (immediate progress +
+  cancellability), the **count** cadence (`checkpoint_every`, unchanged), and a new
+  **time** cadence (`[imports].checkpoint_seconds`, default 2 — decouples
+  responsiveness from per-message cost). `<= 0` disables a cadence; the first-message
+  flush always fires. `run_import` tracks `processed_at_last_checkpoint` +
+  `last_checkpoint_at` and takes an injectable `clock` (default `time.monotonic`)
+  so the time branch is deterministically unit-tested. `checkpoint_seconds` threads
+  from config through `start_job` and all three callers (CLI, JSON router, HTML panel
+  router). No new migration.
 - **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
   planes for the sync daemon. **Plane B** (process lifecycle) lives in
   [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):

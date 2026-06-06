@@ -56,3 +56,18 @@ def test_busy_guard_allows_active_after_terminal(db_conn):
         cur.execute("UPDATE import_jobs SET status='completed' WHERE id=%s", (jid,))
     # A new active job is now permitted.
     _insert_job(db_conn, aid, status="pending")
+
+
+def test_import_jobs_has_owner_columns(db_conn):
+    aid = _archive_account(db_conn)
+    jid = _insert_job(db_conn, aid)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE import_jobs SET owner_host = 'h', owner_pid = 42 WHERE id = %s",
+            (jid,),
+        )
+        cur.execute(
+            "SELECT owner_host, owner_pid FROM import_jobs WHERE id = %s", (jid,)
+        )
+        row = cur.fetchone()
+    assert row == ("h", 42)

@@ -157,7 +157,10 @@ re-running is safe.
    longer than `[imports].stale_seconds` (default 60) is shown in red. Progress
    counters and the Cancel button update at least every
    `[imports].checkpoint_seconds` (default 2) — and after the first message — so
-   even a small or slow import (a few large attachments) stays responsive.
+   even a small or slow import (a few large attachments) stays responsive. A CLI
+   import in progress is unaffected by restarting the `serve` process: startup
+   reconciliation only clears import jobs whose owning process is actually gone,
+   so the live CLI job keeps running and still blocks a second concurrent import.
 
 ### Search backfill & status
 

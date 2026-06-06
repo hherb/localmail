@@ -101,7 +101,7 @@ src/localmail/
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0026_import_jobs.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0027_import_jobs_owner.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -799,6 +799,30 @@ for the full design.
   so the time branch is deterministically unit-tested. `checkpoint_seconds` threads
   from config through `start_job` and all three callers (CLI, JSON router, HTML panel
   router). No new migration.
+  **Concurrent-CLI-safe reconcile (#162, resolved):** `reconcile_orphaned_jobs`
+  ran at serve startup and flipped **every** active (`pending`/`running`) row to
+  `failed`, on the assumption that an active row could only be an orphaned
+  in-serve worker thread. But `localmail import` runs the same `run_import`
+  **synchronously in a separate process** with its own `running` row — so a serve
+  restart mid-CLI-import clobbered the live job's status *and* released the
+  single-active busy-guard (`import_jobs_single_active_uniq`), opening a window
+  for a panel-initiated import to run concurrently. Migration
+  `0027_import_jobs_owner.sql` adds nullable `owner_host` / `owner_pid`, recorded
+  at `create_job` time — the creating process is the running process for both the
+  CLI (one process) and the in-serve panel (the worker thread runs in the serve
+  process), so `os.getpid()` at create is the pid whose liveness reconcile must
+  check. `reconcile_orphaned_jobs(conn, *, current_host=None, pid_alive=...)` now
+  selects active rows and reaps one only when its owner is verifiably gone, via
+  the pure predicate `importer/ownership.py::should_reap` (reap iff `owner_pid IS
+  NULL` — legacy/never-started; else keep when `owner_host != current_host`; else
+  reap iff `not pid_alive`). `pid_is_alive` is the single liveness syscall
+  (`os.kill(pid, 0)`), isolated so `should_reap` stays pure and unit-tested;
+  `current_host` / `pid_alive` are injectable for deterministic DB tests. A live
+  CLI import (pid alive) now survives a serve restart, keeping the busy-guard
+  held; orphaned serve **and** CLI jobs (pid dead) are still reaped. **Accepted
+  limitation:** pid reuse can rarely keep a dead job's row until the next restart
+  (self-heals; low probability on single-host). **Migration
+  `0027_import_jobs_owner.sql`** (#162).
 - **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
   planes for the sync daemon. **Plane B** (process lifecycle) lives in
   [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):
@@ -1138,7 +1162,7 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0026_import_jobs.sql` (2A.5); next would be `0027_*.sql`.
+  Latest is `0027_import_jobs_owner.sql` (#162); next would be `0028_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

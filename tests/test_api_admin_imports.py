@@ -86,18 +86,74 @@ def test_cancel_unknown_raises(db_conn):
         svc.cancel_job(db_conn, 4242)
 
 
-def test_reconcile_orphaned_marks_active_failed(db_conn):
+def _set_running(conn, jid):
+    with conn.cursor() as cur:
+        cur.execute("UPDATE import_jobs SET status='running' WHERE id=%s", (jid,))
+    conn.commit()
+
+
+def test_reconcile_reaps_dead_local_owner(db_conn):
     aid = _account(db_conn, "arch")
     jid = svc.create_job(db_conn, account_id=aid, source_kind="mbox", source_path="/a")
-    with db_conn.cursor() as cur:
-        cur.execute("UPDATE import_jobs SET status='running' WHERE id=%s", (jid,))
-    db_conn.commit()
-    n = svc.reconcile_orphaned_jobs(db_conn)
+    _set_running(db_conn, jid)
+    n = svc.reconcile_orphaned_jobs(db_conn, pid_alive=lambda _pid: False)
     db_conn.commit()
     assert n == 1
     job = svc.get_job(db_conn, jid)
     assert job.status == "failed"
     assert "interrupted" in (job.error_msg or "")
+
+
+def test_reconcile_keeps_live_local_owner(db_conn):
+    aid = _account(db_conn, "arch")
+    jid = svc.create_job(db_conn, account_id=aid, source_kind="mbox", source_path="/a")
+    _set_running(db_conn, jid)
+    n = svc.reconcile_orphaned_jobs(db_conn, pid_alive=lambda _pid: True)
+    db_conn.commit()
+    assert n == 0
+    assert svc.get_job(db_conn, jid).status == "running"
+
+
+def test_reconcile_reaps_null_owner(db_conn):
+    aid = _account(db_conn, "arch")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO import_jobs (account_id, source_kind, source_path, status) "
+            "VALUES (%s, 'mbox', '/a', 'running') RETURNING id",
+            (aid,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    jid = int(row[0])
+    db_conn.commit()
+    n = svc.reconcile_orphaned_jobs(db_conn, pid_alive=lambda _pid: True)
+    db_conn.commit()
+    assert n == 1
+    assert svc.get_job(db_conn, jid).status == "failed"
+
+
+def test_reconcile_keeps_foreign_host(db_conn):
+    aid = _account(db_conn, "arch")
+    jid = svc.create_job(db_conn, account_id=aid, source_kind="mbox", source_path="/a")
+    _set_running(db_conn, jid)
+    n = svc.reconcile_orphaned_jobs(
+        db_conn, current_host="some-other-host", pid_alive=lambda _pid: False)
+    db_conn.commit()
+    assert n == 0
+    assert svc.get_job(db_conn, jid).status == "running"
+
+
+def test_create_job_records_owner(db_conn):
+    import os
+    import socket
+
+    aid = _account(db_conn, "arch")
+    jid = svc.create_job(
+        db_conn, account_id=aid, source_kind="mbox", source_path="/a")
+    db_conn.commit()
+    job = svc.get_job(db_conn, jid)
+    assert job.owner_host == socket.gethostname()
+    assert job.owner_pid == os.getpid()
 
 
 def test_start_job_runs_to_completion(db_conn, tmp_path):

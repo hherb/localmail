@@ -352,6 +352,7 @@ class SearchConfig(BaseModel):
     rewriter_backend: Literal["ollama"] = "ollama"
     rewriter_model: str = "qwen2.5:3b"
     rewriter_timeout_s: float = 10.0
+    rewriter_max_expansion_terms: int = 8
 
     # --- Phase 1 embed worker ---
     # Controls the background thread that chunks messages and writes embeddings.

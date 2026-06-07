@@ -484,3 +484,9 @@ def test_config_has_imports_section_default():
     cfg = Config(database={"dsn": "postgresql://x/y"})
     assert cfg.imports.roots == []  # empty = imports disabled (security default)
     assert cfg.imports.checkpoint_every == 50
+
+
+def test_rewriter_max_expansion_terms_default():
+    from localmail.config import SearchConfig
+    cfg = SearchConfig()
+    assert cfg.rewriter_max_expansion_terms == 8

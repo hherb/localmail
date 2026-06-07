@@ -8,9 +8,24 @@ each arm returns the expected hit shape and ordering.
 from __future__ import annotations
 
 from localmail.config import SearchConfig
-from localmail.search.arms import arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
+from localmail.search.arms import arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks, build_lexical_tsquery
 from localmail.search.query import parse_query, ParsedQuery, SearchFilters
 from localmail.search.embed_worker import run_embed_worker_once
+
+
+def test_lexical_tsquery_identity_with_no_expansion():
+    sql, params = build_lexical_tsquery("hello world", [])
+    assert sql == "plainto_tsquery('simple', %s)"
+    assert params == ["hello world"]
+
+
+def test_lexical_tsquery_ors_expansion_terms():
+    sql, params = build_lexical_tsquery("invoice", ["bill", "receipt"])
+    assert sql == (
+        "plainto_tsquery('simple', %s) || plainto_tsquery('simple', %s)"
+        " || plainto_tsquery('simple', %s)"
+    )
+    assert params == ["invoice", "bill", "receipt"]
 
 
 class _SeedEmbedder:

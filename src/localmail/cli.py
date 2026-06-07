@@ -634,7 +634,8 @@ def _print_text_page(page) -> None:
 @click.option("--no-cache", is_flag=True)
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 @click.option("--verbose", is_flag=True)
-def search(query, accounts, folders, after, before, from_substr, to_substr,
+@click.pass_context
+def search(ctx, query, accounts, folders, after, before, from_substr, to_substr,
            subject_substr, has_attachment, label, page_size, candidates_per_arm,
            rerank_pool, no_rerank, smart, no_cache, fmt, verbose):
     """Hybrid BM25 + vector search over the local archive."""
@@ -661,7 +662,7 @@ def search(query, accounts, folders, after, before, from_substr, to_substr,
     if extra:
         text_q = f"{text_q} {' '.join(extra)}".strip()
 
-    searcher = create_searcher()
+    searcher = create_searcher(load_config(ctx.obj["config_path"]))
     try:
         page = searcher.search(
             text_q, page_size=page_size, candidates_per_arm=candidates_per_arm,
@@ -1285,6 +1286,7 @@ def serve_cmd(
     from localmail.config import AuthConfig, DaemonConfig, McpConfig, ServeConfig
     override = os.environ.get("LOCALMAIL_DSN_OVERRIDE")
     if override:
+        cfg = None
         dsn = override
         serve_cfg = ServeConfig()
         auth_cfg = AuthConfig()
@@ -1321,7 +1323,11 @@ def serve_cmd(
 
     try:
         from localmail.search import create_searcher
-        searcher = create_searcher()
+        # Pin the searcher to the same DSN the rest of serve uses. In the
+        # LOCALMAIL_DSN_OVERRIDE branch `cfg` is None (create_searcher loads the
+        # default config for search tunables) but `dsn` is the override, so the
+        # searcher can never query a different database than serve itself.
+        searcher = create_searcher(cfg, dsn=dsn)
     except Exception as exc:
         click.echo(f"warning: search disabled ({exc})", err=True)
         searcher = None

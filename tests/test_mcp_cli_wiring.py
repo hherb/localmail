@@ -20,7 +20,7 @@ def _patch_serve_runtime(monkeypatch, captured):
 
     monkeypatch.setattr(serve_app, "create_app", fake_create_app)
     monkeypatch.setattr(db_mod, "pending_migrations", lambda dsn: [])
-    def _no_search():
+    def _no_search(*a, **k):
         raise RuntimeError("search disabled in test")
     monkeypatch.setattr(search_mod, "create_searcher", _no_search)
     monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
@@ -53,3 +53,36 @@ def test_serve_mcp_disabled_by_default(monkeypatch, tmp_path, db_dsn):
         main, ["--config", str(cfg), "serve", "--no-tls", "--bind", "127.0.0.1"])
     assert result.exit_code == 0, result.output
     assert captured["enable_mcp"] is False
+
+
+def test_serve_searcher_uses_override_dsn(monkeypatch, tmp_path, db_dsn):
+    """The searcher must query the same DB serve does, incl. the DSN override.
+
+    Regression: in the LOCALMAIL_DSN_OVERRIDE branch serve called
+    create_searcher(None), which loaded the *default* config and used its DSN —
+    so the searcher could silently query a different database than serve itself.
+    serve must pass the override DSN through.
+    """
+    import localmail.serve.app as serve_app
+    import localmail.db as db_mod
+    import localmail.search as search_mod
+    import uvicorn
+
+    monkeypatch.setattr(serve_app, "create_app", lambda **k: object())
+    monkeypatch.setattr(db_mod, "pending_migrations", lambda dsn: [])
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setenv("LOCALMAIL_DSN_OVERRIDE", db_dsn)
+
+    seen: dict = {}
+
+    def fake_create(cfg=None, *, dsn=None, **kw):
+        seen["cfg"] = cfg
+        seen["dsn"] = dsn
+        raise RuntimeError("stop after capturing")
+
+    monkeypatch.setattr(search_mod, "create_searcher", fake_create)
+
+    result = CliRunner().invoke(main, ["serve", "--no-tls", "--bind", "127.0.0.1"])
+    assert result.exit_code == 0, result.output
+    assert seen["cfg"] is None, "override branch should pass cfg=None"
+    assert seen["dsn"] == db_dsn, "searcher must receive the override DSN"

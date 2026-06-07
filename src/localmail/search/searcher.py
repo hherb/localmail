@@ -456,16 +456,21 @@ class Searcher:
         cap and the cursor walks the (ts, id) keyspace, so the user can
         scroll back arbitrarily far.
 
-        Uses the same ``messages.fts_v2`` column and ``plainto_tsquery
-        ('simple', ...)`` matcher as ``arm_bm25_messages`` so recall is
-        identical for the lexical case. Structured filters
+        Uses the same ``messages.fts_v2`` column and the shared
+        ``build_lexical_tsquery`` matcher as ``arm_bm25_messages`` so recall is
+        identical for the lexical case — including ``--smart`` expansion terms,
+        which OR into the FTS match here exactly as they do in the hybrid arms.
+        Structured filters
         (account_ids, folder_ids, from/to/subject substrings, date
         ranges, has_attachment, lang) flow through ``_filter_sql``.
         """
-        from localmail.search.arms import _filter_sql
+        from localmail.search.arms import _filter_sql, build_lexical_tsquery
 
         where_extra, where_params = _filter_sql(parsed.filters)
-        params: list[Any] = [parsed.free_text]
+        tsq_sql, tsq_params = build_lexical_tsquery(
+            parsed.free_text, parsed.expansion_terms
+        )
+        params: list[Any] = [*tsq_params]
         keyset_clause = ""
         if keyset is not None:
             if keyset.ts is None:
@@ -490,7 +495,7 @@ class Searcher:
             SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
                    m.date_sent, m.internal_date
               FROM messages m
-             WHERE m.fts_v2 @@ plainto_tsquery('simple', %s)
+             WHERE m.fts_v2 @@ {tsq_sql}
              {keyset_clause}
              {where_extra}
              ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC

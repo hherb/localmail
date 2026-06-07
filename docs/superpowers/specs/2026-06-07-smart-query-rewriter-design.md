@@ -110,10 +110,13 @@ Correctness-critical. Returns a **new** frozen `ParsedQuery`.
   These OR into the lexical arms only; they never touch `free_text`.
 - **`extracted_filters`** — fill empty slots only (explicit operators win):
   - Scalar slots `after`, `before`, `from_substr`, `to_substr`,
-    `subject_substr`, `has_attachment`, `label`: take the LLM value **iff** the
-    user's slot is `None`/empty.
-  - List slots `account_names`, `folders`, `languages`: **never** populated by
-    the LLM in v1 (see non-goals).
+    `subject_substr`, `has_attachment`: take the LLM value **iff** the user's
+    slot is `None`/empty.
+  - `label`, plus the list slots `account_names`, `folders`, `languages`:
+    **never** populated by the LLM in v1. Labels are environment-specific
+    identifiers the model can't reliably know (same rationale as
+    accounts/folders), so the LLM schema (`_FiltersSchema`) omits `label`
+    entirely and the merge leaves the user's `label` untouched.
 
 Exhaustively unit-tested per slot: empty→filled, occupied→preserved,
 LLM-empty→unchanged.

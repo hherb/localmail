@@ -53,6 +53,20 @@ def _seed_one(conn):
     conn.commit()
 
 
+def _seed_subject(conn, subject):
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO accounts (name,email_address,imap_host,auth_method)"
+                    " VALUES ('a','a@x','h','password') RETURNING id")
+        acct = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " body_text, headers, raw_bytes, size_bytes)"
+            " VALUES (%s, '<m1>', %s, %s, 'body', '{}'::jsonb, 'r', 1)",
+            (acct, b"\x01" * 32, subject),
+        )
+    conn.commit()
+
+
 def _smart_result():
     return RewriteResult(rewritten_text="rich", expansion_terms=["syn"],
                          extracted_filters=SearchFilters())
@@ -90,3 +104,25 @@ def test_smart_falls_through_on_rewriter_failure(db_dsn, db_conn, caplog):
     assert page.rewrite_skipped is True
     assert page.query.rewritten_text is None          # un-rewritten
     assert any("rewrite skipped" in r.message for r in caplog.records)
+
+
+def test_smart_expansion_applies_on_sort_date_path(db_dsn, db_conn):
+    """--smart --sort date must OR-in expansion terms too (the lexical-date
+    branch shares build_lexical_tsquery with the hybrid arms)."""
+    _seed_subject(db_conn, subject="receipt for lunch")
+    cfg = SearchConfig()
+    run_embed_worker_once(db_conn, cfg, _E())
+    expand = RewriteResult(rewritten_text="invoice", expansion_terms=["receipt"],
+                           extracted_filters=SearchFilters())
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(),
+                     rewriter=FakeRewriter(expand))
+        # Without expansion, "invoice" matches nothing; with it, the
+        # synonym-only "receipt" message must surface on the date path.
+        plain = s.search("invoice", sort="date", use_cache=False)
+        smart = s.search("invoice", smart=True, sort="date", use_cache=False)
+    finally:
+        pool.close()
+    assert plain.results == []
+    assert len(smart.results) == 1

@@ -112,3 +112,52 @@ def test_apply_llm_empty_filters_leave_user_filters_untouched():
     )
     out = apply_rewrite(parsed, _result(), max_expansion_terms=8)
     assert out.filters.subject_substr == "invoice"
+
+
+import httpx
+
+from localmail.config import SearchConfig
+from localmail.search.rewriter import OllamaLLMRewriter, RewriteParseError
+
+
+def _rewriter_with_handler(handler, **cfg_over):
+    cfg = SearchConfig(**cfg_over)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return OllamaLLMRewriter(cfg, client=client, today_provider=lambda: _date(2026, 6, 7))
+
+
+def test_ollama_happy_path():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/generate"
+        return httpx.Response(
+            200,
+            json={"response": '{"rewritten_text": "x", "expansion_terms": ["y"]}'},
+        )
+
+    r = _rewriter_with_handler(handler).rewrite("orig")
+    assert r.rewritten_text == "x"
+    assert r.expansion_terms == ["y"]
+
+
+def test_ollama_4xx_raises_http_error():
+    def handler(request):
+        return httpx.Response(404, json={"error": "model not found"})
+
+    with pytest.raises(httpx.HTTPStatusError):
+        _rewriter_with_handler(handler).rewrite("orig")
+
+
+def test_ollama_connect_error_propagates():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(httpx.ConnectError):
+        _rewriter_with_handler(handler).rewrite("orig")
+
+
+def test_ollama_bad_inner_json_raises_parse_error():
+    def handler(request):
+        return httpx.Response(200, json={"response": "not json"})
+
+    with pytest.raises(RewriteParseError):
+        _rewriter_with_handler(handler).rewrite("orig")

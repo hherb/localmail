@@ -100,6 +100,7 @@ src/localmail/
     page_cache.py   # in-process LRU cache for paginated result pools
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
+    rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + OllamaLLMRewriter
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
 migrations/         # 0001_init.sql … 0027_import_jobs_owner.sql (0023_daemon_heartbeats.sql also applied)
 tests/
@@ -391,9 +392,9 @@ for the Phase 1 plan, and
 for the Phase 2 plan.
 
 - Code lives under `src/localmail/search/` — `chunking.py`, `embeddings.py`,
-  `reranker.py`, `query.py`, `searcher.py`, `arms.py`, `page_cache.py`,
-  `embed_worker.py`, `extractor.py`, `extract_worker.py`. Public API:
-  `localmail.search.create_searcher`.
+  `reranker.py`, `query.py`, `rewriter.py`, `searcher.py`, `arms.py`,
+  `page_cache.py`, `embed_worker.py`, `extractor.py`, `extract_worker.py`.
+  Public API: `localmail.search.create_searcher`.
 - All numeric tunables in `LocalmailConfig.search` (`SearchConfig`).
   **No magic numbers elsewhere in search code.**
 - Lexical retrieval via PostgreSQL built-in `tsvector` + `ts_rank_cd` with
@@ -421,7 +422,37 @@ for the Phase 2 plan.
 - Phase 2 (attachment search) — **shipped**, see
   [docs/superpowers/specs/2026-05-16-hybrid-search-phase2-design.md] and
   [docs/superpowers/plans/2026-05-16-hybrid-search-phase2.md].
-  Phase 3 (MCP), Phase 4 (--smart), Phase 5 (polish) — separate design + plans.
+  Phase 5 (polish) — separate design + plans.
+
+**Phase 4 (`--smart` query rewriter) — shipped**, see
+[docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md](docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md)
+and [docs/superpowers/plans/2026-06-07-smart-query-rewriter.md](docs/superpowers/plans/2026-06-07-smart-query-rewriter.md).
+Opt-in (`search.rewriter_enabled_by_default` + the per-call `--smart`/`smart=`
+flag). [search/rewriter.py](src/localmail/search/rewriter.py) is pure helpers
+(`build_rewrite_prompt`, `parse_rewrite_response`, `apply_rewrite`) plus one IO
+class `OllamaLLMRewriter` (httpx → Ollama `/api/generate`, `format`-constrained
+JSON, `temperature=0`). The rewriter produces `rewritten_text` (vector arm +
+reranker), `expansion_terms` (OR-ed into the lexical arms — see below), and
+`extracted_filters` (NL → structured). **`apply_rewrite` merge precedence:
+explicit operators win** — the LLM fills only the scalar filter slots
+(`after`/`before`/`from`/`to`/`subject`/`has_attachment`) the user left `None`;
+it never sets account/folder/lang. **Failure policy lives in the Searcher, not
+the rewriter**: `OllamaLLMRewriter` raises typed exceptions
+(`httpx.HTTPError` subclasses, `RewriteParseError` — incl. a 200-with-missing-
+`response`-key); `Searcher.search` catches `(httpx.HTTPError, RewriteParseError)`,
+keeps the un-rewritten query, logs `smart rewrite skipped: …`, and surfaces it
+on **`SearchPage.rewrite_skipped`** (the CLI prints a `note:`). Relative dates
+are resolved LLM-side via an injected `today` (deterministic prompt; testable).
+Expansion terms OR into the lexical arms through
+`arms.build_lexical_tsquery(free_text, expansion_terms)` →
+`plainto_tsquery('simple', %s) [ || … ]`; **with no expansion terms it returns
+the bare single-tsquery form byte-for-byte**, so the non-smart path is
+unchanged. The multi-term fragment is **parenthesised** because `@@` binds
+tighter than `||` in Postgres. `rewriter_max_expansion_terms` (default 8) caps
+the OR fan-out. No new migration, **no new uv extra** (`httpx` is already a dep;
+Ollama is an external HTTP service). `continue_page`/`grow_pool` reuse the
+cached enriched `parsed` and do not re-rewrite (`rewrite_skipped` is a page-1
+signal).
 
 **Phase 2 notes**:
 - `LightweightExtractor` handles 11 formats (PDF, DOCX, XLSX, PPTX, ODT, RTF,

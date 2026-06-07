@@ -16,6 +16,19 @@ from dataclasses import dataclass, field
 from datetime import MINYEAR, datetime, timezone
 from typing import Any, Literal
 
+import httpx
+import psycopg
+from psycopg_pool import ConnectionPool
+
+from localmail.config import SearchConfig
+from localmail.search.embeddings import EmbeddingBackend
+from localmail.search.page_cache import (
+    CacheMissError, PageCache, PageOutOfPoolError,
+)
+from localmail.search.query import ParsedQuery, parse_query
+from localmail.search.reranker import Reranker
+from localmail.search.rewriter import QueryRewriter, RewriteParseError, apply_rewrite
+
 SortMode = Literal["rank", "date"]
 
 # Sentinel for "no usable date" — sorts strictly older than any real
@@ -39,16 +52,6 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
         return (0, _DATE_SORT_NULL_SENTINEL)
     return (1, dt)
 
-import psycopg
-from psycopg_pool import ConnectionPool
-
-from localmail.config import SearchConfig
-from localmail.search.embeddings import EmbeddingBackend
-from localmail.search.page_cache import (
-    CacheMissError, PageCache, PageOutOfPoolError,
-)
-from localmail.search.query import ParsedQuery, parse_query
-from localmail.search.reranker import Reranker
 
 log = logging.getLogger("localmail.search.searcher")
 
@@ -246,6 +249,7 @@ class SearchPage:
     query: ParsedQuery
     timing_ms: dict[str, float]
     next_keyset: KeysetCursor | None = None
+    rewrite_skipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -278,7 +282,7 @@ class Searcher:
         cfg: SearchConfig,
         embeddings: EmbeddingBackend,
         reranker: Reranker | None,
-        rewriter: Any | None = None,  # QueryRewriter type lands Phase 4
+        rewriter: QueryRewriter | None = None,
     ) -> None:
         self._pool = pool
         self._cfg = cfg
@@ -453,16 +457,21 @@ class Searcher:
         cap and the cursor walks the (ts, id) keyspace, so the user can
         scroll back arbitrarily far.
 
-        Uses the same ``messages.fts_v2`` column and ``plainto_tsquery
-        ('simple', ...)`` matcher as ``arm_bm25_messages`` so recall is
-        identical for the lexical case. Structured filters
+        Uses the same ``messages.fts_v2`` column and the shared
+        ``build_lexical_tsquery`` matcher as ``arm_bm25_messages`` so recall is
+        identical for the lexical case — including ``--smart`` expansion terms,
+        which OR into the FTS match here exactly as they do in the hybrid arms.
+        Structured filters
         (account_ids, folder_ids, from/to/subject substrings, date
         ranges, has_attachment, lang) flow through ``_filter_sql``.
         """
-        from localmail.search.arms import _filter_sql
+        from localmail.search.arms import _filter_sql, build_lexical_tsquery
 
         where_extra, where_params = _filter_sql(parsed.filters)
-        params: list[Any] = [parsed.free_text]
+        tsq_sql, tsq_params = build_lexical_tsquery(
+            parsed.free_text, parsed.expansion_terms
+        )
+        params: list[Any] = [*tsq_params]
         keyset_clause = ""
         if keyset is not None:
             if keyset.ts is None:
@@ -487,7 +496,7 @@ class Searcher:
             SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
                    m.date_sent, m.internal_date
               FROM messages m
-             WHERE m.fts_v2 @@ plainto_tsquery('simple', %s)
+             WHERE m.fts_v2 @@ {tsq_sql}
              {keyset_clause}
              {where_extra}
              ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC
@@ -871,6 +880,21 @@ class Searcher:
         parsed = parse_query(query)
         timing["parse"] = (time.monotonic() - t) * 1000
 
+        rewrite_skipped = False
+        if smart and parsed.free_text.strip():
+            t = time.monotonic()
+            try:
+                assert self._rewriter is not None
+                result = self._rewriter.rewrite(parsed.free_text)
+                parsed = apply_rewrite(
+                    parsed, result,
+                    max_expansion_terms=cfg.rewriter_max_expansion_terms,
+                )
+            except (httpx.HTTPError, RewriteParseError) as exc:
+                rewrite_skipped = True
+                log.warning("smart rewrite skipped: %s", exc)
+            timing["rewrite"] = (time.monotonic() - t) * 1000
+
         # sort=date with free_text: lexical+keyset, unbounded. The hybrid
         # path caps at ``rerank_pool_size`` candidates fused by RRF, so a
         # user searching for "e-ticket" (with dozens of matches across
@@ -897,6 +921,7 @@ class Searcher:
                 can_grow_pool=False,
                 search_token=None, query=parsed, timing_ms=timing,
                 next_keyset=next_keyset,
+                rewrite_skipped=rewrite_skipped,
             )
 
         # Empty-query fallback: an empty `free_text` is the canonical
@@ -921,6 +946,7 @@ class Searcher:
                 pool_size=len(results), candidates_per_arm=cpa,
                 has_more_in_pool=False, can_grow_pool=False,
                 search_token=None, query=parsed, timing_ms=timing,
+                rewrite_skipped=rewrite_skipped,
             )
 
         with self._pool.connection() as conn:
@@ -980,4 +1006,5 @@ class Searcher:
             has_more_in_pool=pool_size > effective_page_size,
             can_grow_pool=True,
             search_token=token, query=parsed, timing_ms=timing,
+            rewrite_skipped=rewrite_skipped,
         )

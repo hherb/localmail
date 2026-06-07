@@ -90,6 +90,27 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
     return " AND " + " AND ".join(parts), params
 
 
+def build_lexical_tsquery(
+    free_text: str, expansion_terms: list[str]
+) -> tuple[str, list[str]]:
+    """Build an OR-combined tsquery fragment + its params.
+
+    With no expansion terms this is byte-identical to the single
+    ``plainto_tsquery('simple', %s)`` form, so the non-smart path is
+    unchanged. Each expansion term adds one OR-ed ``plainto_tsquery`` so a
+    message matching only a synonym is still retrieved.
+
+    When expansion terms are present the fragment is wrapped in parentheses
+    so the ``@@`` operator in callers binds to the full OR-chain rather than
+    only the first alternative (operator precedence: ``@@`` > ``||``).
+    """
+    terms = [free_text, *expansion_terms]
+    if len(terms) == 1:
+        return "plainto_tsquery('simple', %s)", terms
+    inner = " || ".join(["plainto_tsquery('simple', %s)"] * len(terms))
+    return f"({inner})", terms
+
+
 def arm_bm25_messages(
     conn: psycopg.Connection,
     parsed: ParsedQuery,
@@ -117,19 +138,22 @@ def arm_bm25_messages(
     max_w = max(raw)
     weights = [1.0] * len(raw) if max_w <= 0 else [w / max_w for w in raw]
     where_extra, where_params = _filter_sql(parsed.filters)
+    tsq_sql, tsq_params = build_lexical_tsquery(
+        parsed.free_text, parsed.expansion_terms
+    )
     sql = f"""
         WITH ranked AS (
             SELECT m.id,
-                   ts_rank_cd(%s::float4[], m.fts_v2, plainto_tsquery('simple', %s)) AS score
+                   ts_rank_cd(%s::float4[], m.fts_v2, {tsq_sql}) AS score
             FROM messages m
-            WHERE m.fts_v2 @@ plainto_tsquery('simple', %s)
+            WHERE m.fts_v2 @@ {tsq_sql}
             {where_extra}
             ORDER BY score DESC
             LIMIT %s
         )
         SELECT id, score, ROW_NUMBER() OVER (ORDER BY score DESC) FROM ranked
     """
-    params: list[Any] = [weights, parsed.free_text, parsed.free_text, *where_params, limit]
+    params: list[Any] = [weights, *tsq_params, *tsq_params, *where_params, limit]
     with conn.cursor() as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -150,12 +174,15 @@ def arm_bm25_chunks(
     if not parsed.free_text.strip():
         return []
     where_extra, where_params = _filter_sql(parsed.filters)
+    tsq_sql, tsq_params = build_lexical_tsquery(
+        parsed.free_text, parsed.expansion_terms
+    )
     sql = f"""
         WITH ranked AS (
             SELECT mc.message_id, mc.id AS chunk_id,
-                   ts_rank_cd(mc.fts, plainto_tsquery('simple', %s)) AS score
+                   ts_rank_cd(mc.fts, {tsq_sql}) AS score
             FROM message_chunks mc JOIN messages m ON m.id = mc.message_id
-            WHERE mc.fts @@ plainto_tsquery('simple', %s)
+            WHERE mc.fts @@ {tsq_sql}
             {where_extra}
             ORDER BY score DESC
             LIMIT %s
@@ -163,7 +190,7 @@ def arm_bm25_chunks(
         SELECT message_id, chunk_id, score,
                ROW_NUMBER() OVER (ORDER BY score DESC) FROM ranked
     """
-    params: list[Any] = [parsed.free_text, parsed.free_text, *where_params, limit]
+    params: list[Any] = [*tsq_params, *tsq_params, *where_params, limit]
     with conn.cursor() as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()

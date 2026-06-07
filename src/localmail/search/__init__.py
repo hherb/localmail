@@ -11,6 +11,7 @@ Usage::
 from __future__ import annotations
 
 from localmail.search.query import ParsedQuery, QueryParseError, SearchFilters
+from localmail.search.rewriter import OllamaLLMRewriter, QueryRewriter, RewriteParseError, RewriteResult
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
 
 __all__ = [
@@ -21,6 +22,10 @@ __all__ = [
     "ParsedQuery",
     "SearchFilters",
     "QueryParseError",
+    "QueryRewriter",
+    "RewriteResult",
+    "OllamaLLMRewriter",
+    "RewriteParseError",
 ]
 
 _UNSET = object()  # sentinel: caller did not provide the argument
@@ -32,6 +37,7 @@ def create_searcher(
     dsn: str | None = None,
     embeddings=_UNSET,
     reranker=_UNSET,
+    rewriter=_UNSET,
 ) -> Searcher:
     """Build and return a ready-to-use :class:`Searcher`.
 
@@ -82,9 +88,23 @@ def create_searcher(
         else:
             reranker = None
 
+    if rewriter is _UNSET:
+        if cfg.search.rewriter_enabled_by_default:
+            try:
+                rewriter = OllamaLLMRewriter(cfg.search)
+            except Exception as exc:
+                logging.getLogger("localmail.search").warning(
+                    "rewriter init failed (%s=%r): %s — continuing without --smart",
+                    "rewriter_model", cfg.search.rewriter_model, exc,
+                )
+                rewriter = None
+        else:
+            rewriter = None
+
     return Searcher(
         pool=pool,
         cfg=cfg.search,
         embeddings=embeddings,
         reranker=reranker,
+        rewriter=rewriter,
     )

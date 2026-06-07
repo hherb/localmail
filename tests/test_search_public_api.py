@@ -93,6 +93,65 @@ def test_create_searcher_returns_searcher(db_dsn):
     searcher._pool.close()
 
 
+def test_create_searcher_builds_rewriter_when_enabled(db_dsn):
+    from localmail.config import LocalmailConfig
+    from localmail.search import Searcher, create_searcher
+
+    class _StubEmbedder:
+        name = "stub"
+        model = "stub"
+        dimension = 768
+
+        def embed_documents(self, texts):
+            return [[0.5] * 768 for _ in texts]
+
+        def embed_query(self, text):
+            return [0.5] * 768
+
+        def health_check(self):
+            pass
+
+    cfg = LocalmailConfig.model_validate({
+        "database": {"dsn": db_dsn}, "accounts": [],
+        "search": {"rewriter_enabled_by_default": True},
+    })
+    searcher = create_searcher(cfg=cfg, embeddings=_StubEmbedder(), reranker=None)
+    try:
+        assert searcher._rewriter is not None
+        assert searcher._rewriter.name == "ollama"
+    finally:
+        searcher._pool.close()
+
+
+def test_create_searcher_no_rewriter_when_disabled(db_dsn):
+    from localmail.config import LocalmailConfig
+    from localmail.search import Searcher, create_searcher
+
+    class _StubEmbedder:
+        name = "stub"
+        model = "stub"
+        dimension = 768
+
+        def embed_documents(self, texts):
+            return [[0.5] * 768 for _ in texts]
+
+        def embed_query(self, text):
+            return [0.5] * 768
+
+        def health_check(self):
+            pass
+
+    cfg = LocalmailConfig.model_validate({
+        "database": {"dsn": db_dsn}, "accounts": [],
+        "search": {"rewriter_enabled_by_default": False},
+    })
+    searcher = create_searcher(cfg=cfg, embeddings=_StubEmbedder(), reranker=None)
+    try:
+        assert searcher._rewriter is None
+    finally:
+        searcher._pool.close()
+
+
 @pytest.mark.slow
 def test_searcher_returns_attachment_snippet(db_conn, require_real_embedding_model) -> None:
     """When a query is best answered by attachment content, Searcher returns

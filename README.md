@@ -595,6 +595,48 @@ accumulate; `lang:en lang:de` matches either). Bodies shorter than
 `search.body_lang_min_confidence` (default 0.65) stay NULL and are excluded
 from `lang:` queries.
 
+### Smart query rewriting (`--smart`, opt-in)
+
+```bash
+uv run localmail search "tax stuff from the accountant last summer" --smart
+```
+
+`--smart` runs the free-text part of your query through a **local** LLM (via
+[Ollama](https://ollama.com)) before searching. The model is asked to produce
+three things:
+
+- a cleaner, semantically richer **rewritten query** for the vector arm,
+- a few **synonym/expansion terms** OR-ed into the lexical (keyword) arms to
+  broaden recall (capped by `search.rewriter_max_expansion_terms`), and
+- **structured filters inferred from natural language** — e.g. "last summer"
+  becomes `after:`/`before:`, "from the accountant" can fill `from:`.
+
+**Explicit operators always win.** A filter you typed yourself (`after:`,
+`from:`, `subject:`, …) is never overwritten by the model — the LLM only fills
+slots you left empty. The model never invents `account:`, `folder:`, or `lang:`
+filters.
+
+Everything stays on the host: the query text is sent only to your local Ollama
+instance, never to a remote service. If Ollama is unreachable, the request
+times out, or the model returns malformed output, the search **falls through to
+the original query** and prints a one-line `note: --smart rewrite skipped …`
+(your search still runs — it's just not rewritten).
+
+Setup: install Ollama and pull the model once
+(`ollama pull qwen2.5:3b`), then enable the feature in `config.toml`:
+
+```toml
+[search]
+rewriter_enabled_by_default = true   # build the rewriter at startup
+rewriter_model = "qwen2.5:3b"        # any Ollama chat model
+rewriter_timeout_s = 10.0            # fall through if the LLM is slower
+rewriter_max_expansion_terms = 8     # cap on synonyms OR-ed into the lexical arms
+ollama_host = "http://localhost:11434"
+```
+
+Without `rewriter_enabled_by_default = true`, passing `--smart` reports that no
+rewriter is configured. Non-`--smart` search is completely unchanged.
+
 ### Search from Python
 
 ```python

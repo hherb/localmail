@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, runtime_checkable
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -30,6 +30,7 @@ class RewriteResult:
     extracted_filters: SearchFilters
 
 
+@runtime_checkable
 class QueryRewriter(Protocol):
     name: str
     model: str
@@ -137,7 +138,6 @@ def apply_rewrite(
         to_substr=_fill(uf.to_substr, lf.to_substr),
         subject_substr=_fill(uf.subject_substr, lf.subject_substr),
         has_attachment=_fill(uf.has_attachment, lf.has_attachment),
-        label=_fill(uf.label, lf.label),
     )
     return replace(
         parsed,
@@ -189,4 +189,11 @@ class OllamaLLMRewriter:
             },
         )
         resp.raise_for_status()
-        return parse_rewrite_response(resp.json()["response"])
+        body = resp.json()
+        try:
+            raw = body["response"]
+        except (KeyError, TypeError) as exc:
+            raise RewriteParseError(
+                f"missing 'response' key in Ollama reply: {body!r}"
+            ) from exc
+        return parse_rewrite_response(raw)

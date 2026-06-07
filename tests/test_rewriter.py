@@ -1,14 +1,29 @@
-import pytest
+import json
 
-from datetime import date
+import httpx
+import pytest
 from datetime import date as _date
 
-from localmail.search.rewriter import build_rewrite_prompt
+from localmail.config import SearchConfig
+from localmail.search.query import ParsedQuery, SearchFilters
+from localmail.search.rewriter import (
+    OllamaLLMRewriter,
+    RewriteParseError,
+    RewriteResult,
+    apply_rewrite,
+    build_rewrite_prompt,
+    parse_rewrite_response,
+)
+
+
+# ---------------------------------------------------------------------------
+# build_rewrite_prompt
+# ---------------------------------------------------------------------------
 
 
 def test_prompt_includes_injected_today_and_free_text():
     prompt = build_rewrite_prompt(
-        "tax return last summer", today=date(2026, 6, 7), max_expansion_terms=8
+        "tax return last summer", today=_date(2026, 6, 7), max_expansion_terms=8
     )
     assert "2026-06-07" in prompt
     assert "tax return last summer" in prompt
@@ -16,12 +31,14 @@ def test_prompt_includes_injected_today_and_free_text():
 
 
 def test_prompt_is_deterministic():
-    a = build_rewrite_prompt("x", today=date(2026, 1, 1), max_expansion_terms=5)
-    b = build_rewrite_prompt("x", today=date(2026, 1, 1), max_expansion_terms=5)
+    a = build_rewrite_prompt("x", today=_date(2026, 1, 1), max_expansion_terms=5)
+    b = build_rewrite_prompt("x", today=_date(2026, 1, 1), max_expansion_terms=5)
     assert a == b
 
 
-from localmail.search.rewriter import RewriteParseError, parse_rewrite_response
+# ---------------------------------------------------------------------------
+# parse_rewrite_response
+# ---------------------------------------------------------------------------
 
 
 def test_parse_full_response():
@@ -60,8 +77,9 @@ def test_parse_missing_required_field_raises():
         parse_rewrite_response('{"expansion_terms": []}')
 
 
-from localmail.search.query import ParsedQuery, SearchFilters
-from localmail.search.rewriter import RewriteResult, apply_rewrite
+# ---------------------------------------------------------------------------
+# apply_rewrite
+# ---------------------------------------------------------------------------
 
 
 def _result(**filter_kw):
@@ -87,23 +105,21 @@ def test_apply_caps_expansion_terms():
 
 
 def test_apply_fills_empty_filter_slot():
-    from datetime import date
     parsed = ParsedQuery(free_text="orig")
     out = apply_rewrite(
-        parsed, _result(after=date(2023, 6, 1)), max_expansion_terms=8
+        parsed, _result(after=_date(2023, 6, 1)), max_expansion_terms=8
     )
-    assert out.filters.after == date(2023, 6, 1)
+    assert out.filters.after == _date(2023, 6, 1)
 
 
 def test_apply_preserves_explicit_operator():
-    from datetime import date
     parsed = ParsedQuery(
-        free_text="orig", filters=SearchFilters(after=date(2024, 1, 1))
+        free_text="orig", filters=SearchFilters(after=_date(2024, 1, 1))
     )
     out = apply_rewrite(
-        parsed, _result(after=date(2023, 6, 1)), max_expansion_terms=8
+        parsed, _result(after=_date(2023, 6, 1)), max_expansion_terms=8
     )
-    assert out.filters.after == date(2024, 1, 1)
+    assert out.filters.after == _date(2024, 1, 1)
 
 
 def test_apply_llm_empty_filters_leave_user_filters_untouched():
@@ -114,10 +130,9 @@ def test_apply_llm_empty_filters_leave_user_filters_untouched():
     assert out.filters.subject_substr == "invoice"
 
 
-import httpx
-
-from localmail.config import SearchConfig
-from localmail.search.rewriter import OllamaLLMRewriter, RewriteParseError
+# ---------------------------------------------------------------------------
+# OllamaLLMRewriter
+# ---------------------------------------------------------------------------
 
 
 def _rewriter_with_handler(handler, **cfg_over):
@@ -129,6 +144,10 @@ def _rewriter_with_handler(handler, **cfg_over):
 def test_ollama_happy_path():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/generate"
+        body = json.loads(request.content)
+        assert body["stream"] is False
+        assert body["model"] == "qwen2.5:3b"
+        assert "format" in body
         return httpx.Response(
             200,
             json={"response": '{"rewritten_text": "x", "expansion_terms": ["y"]}'},
@@ -160,4 +179,20 @@ def test_ollama_bad_inner_json_raises_parse_error():
         return httpx.Response(200, json={"response": "not json"})
 
     with pytest.raises(RewriteParseError):
+        _rewriter_with_handler(handler).rewrite("orig")
+
+
+def test_ollama_missing_response_key_raises_parse_error():
+    def handler(request):
+        return httpx.Response(200, json={"error": "unexpected"})
+
+    with pytest.raises(RewriteParseError):
+        _rewriter_with_handler(handler).rewrite("orig")
+
+
+def test_ollama_read_timeout_propagates():
+    def handler(request):
+        raise httpx.ReadTimeout("timed out")
+
+    with pytest.raises(httpx.TimeoutException):
         _rewriter_with_handler(handler).rewrite("orig")

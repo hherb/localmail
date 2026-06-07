@@ -22,8 +22,8 @@ def test_lexical_tsquery_identity_with_no_expansion():
 def test_lexical_tsquery_ors_expansion_terms():
     sql, params = build_lexical_tsquery("invoice", ["bill", "receipt"])
     assert sql == (
-        "plainto_tsquery('simple', %s) || plainto_tsquery('simple', %s)"
-        " || plainto_tsquery('simple', %s)"
+        "(plainto_tsquery('simple', %s) || plainto_tsquery('simple', %s)"
+        " || plainto_tsquery('simple', %s))"
     )
     assert params == ["invoice", "bill", "receipt"]
 
@@ -287,3 +287,31 @@ def test_arm_vector_attachment_chunks_no_chunks_returns_empty(db_conn) -> None:
         db_conn, parsed, cfg, qvec=unit, limit=10
     )
     assert hits == []
+
+
+def _seed_one(conn, subject, body):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES ('a', 'a@x', 'h', 'password') RETURNING id"
+        )
+        acct = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " body_text, headers, raw_bytes, size_bytes)"
+            " VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, %s, %s)",
+            (acct, "<m1>", b"\x01" * 32, subject, body, b"r", 1),
+        )
+    conn.commit()
+
+
+def test_expansion_term_retrieves_synonym_only_message(db_conn):
+    _seed_one(db_conn, subject="receipt for lunch", body="thanks")
+    cfg = SearchConfig()
+
+    base = ParsedQuery(free_text="invoice")
+    assert arm_bm25_messages(db_conn, base, cfg, limit=10) == []   # no match
+
+    expanded = ParsedQuery(free_text="invoice", expansion_terms=["receipt"])
+    hits = arm_bm25_messages(db_conn, expanded, cfg, limit=10)
+    assert len(hits) == 1                                          # synonym hit

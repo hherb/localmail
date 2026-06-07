@@ -623,14 +623,14 @@ the original query** and prints a one-line `note: --smart rewrite skipped …`
 (your search still runs — it's just not rewritten).
 
 Setup: install Ollama and pull the model once
-(`ollama pull qwen2.5:3b`), then enable the feature in `config.toml`:
+(`ollama pull granite4.1:3b-q8_0`), then enable the feature in `config.toml`:
 
 ```toml
 [search]
-rewriter_enabled_by_default = true   # build the rewriter at startup
-rewriter_model = "qwen2.5:3b"        # any Ollama chat model
-rewriter_timeout_s = 10.0            # fall through if the LLM is slower
-rewriter_max_expansion_terms = 8     # cap on synonyms OR-ed into the lexical arms
+rewriter_enabled_by_default = true       # build the rewriter at startup
+rewriter_model = "granite4.1:3b-q8_0"    # any Ollama chat model
+rewriter_timeout_s = 10.0                # fall through if the LLM is slower
+rewriter_max_expansion_terms = 8         # cap on synonyms OR-ed into the lexical arms
 ollama_host = "http://localhost:11434"
 ```
 

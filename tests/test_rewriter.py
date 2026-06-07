@@ -152,12 +152,18 @@ def _rewriter_with_handler(handler, **cfg_over):
     return OllamaLLMRewriter(cfg, client=client, today_provider=lambda: _date(2026, 6, 7))
 
 
+def test_default_rewriter_model():
+    # The project default must be an Ollama model the maintainer has verified
+    # works for the structured rewrite. Pinned so a silent change is caught.
+    assert SearchConfig().rewriter_model == "granite4.1:3b-q8_0"
+
+
 def test_ollama_happy_path():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/generate"
         body = json.loads(request.content)
         assert body["stream"] is False
-        assert body["model"] == "qwen2.5:3b"
+        assert body["model"] == "granite4.1:3b-q8_0"
         assert "format" in body
         return httpx.Response(
             200,

@@ -89,7 +89,7 @@ FILTER_SEMANTICS: tuple[FilterSemantic, ...] = (
         mcp_param="from_addr",
         filters_kwarg="from_substr",
         sample="alice",
-        required_sql=("ILIKE",),
+        required_sql=("m.from_addr ILIKE %s", "m.from_name ILIKE %s"),
         forbidden_sql=(),
         required_params=("%alice%",),
         prose_keywords=("case-insensitive", "substring"),
@@ -98,7 +98,7 @@ FILTER_SEMANTICS: tuple[FilterSemantic, ...] = (
         mcp_param="to",
         filters_kwarg="to_substr",
         sample="bob",
-        required_sql=("ILIKE",),
+        required_sql=("unnest(m.to_addrs)", "ILIKE"),
         forbidden_sql=(),
         required_params=("%bob%",),
         prose_keywords=("case-insensitive", "substring"),
@@ -107,7 +107,7 @@ FILTER_SEMANTICS: tuple[FilterSemantic, ...] = (
         mcp_param="subject",
         filters_kwarg="subject_substr",
         sample="invoice",
-        required_sql=("ILIKE",),
+        required_sql=("m.subject ILIKE %s",),
         forbidden_sql=(),
         required_params=("%invoice%",),
         prose_keywords=("case-insensitive", "substring"),
@@ -116,9 +116,16 @@ FILTER_SEMANTICS: tuple[FilterSemantic, ...] = (
 
 
 @pytest.fixture
-def search_param_descriptions(db_dsn) -> dict[str, str]:
-    """Lower-cased agent-facing descriptions of every MCP ``search`` param."""
-    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+def search_param_descriptions() -> dict[str, str]:
+    """Lower-cased agent-facing descriptions of every MCP ``search`` param.
+
+    Pure schema introspection — ``list_tools()`` never acquires a connection,
+    so the pool is built unopened with a placeholder DSN. This keeps the prose
+    half independent of a reachable Postgres (it would otherwise skip via the
+    ``db_dsn`` fixture for a reason wholly unrelated to what it asserts).
+    """
+    pool = ConnectionPool(
+        "postgresql://placeholder/localmail", min_size=1, max_size=2, open=False)
     try:
         server = build_mcp_server(
             pool, searcher=None, config=McpConfig(enabled=True))

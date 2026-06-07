@@ -99,24 +99,65 @@ def build_mcp_server(
 
     @server.tool()
     def search(
-        query: str,
-        sort: Literal["rank", "date"] = "rank",
-        limit: Annotated[int, Field(ge=1, le=200)] = 50,
-        cursor: str | None = None,
-        account_ids: list[str] | None = None,
-        folder_ids: list[str] | None = None,
-        date_from: str | None = None,
-        date_to: str | None = None,
-        from_addr: str | None = None,
-        to: str | None = None,
-        subject: str | None = None,
-        has_attachment: bool | None = None,
-        lang: str | None = None,
+        query: Annotated[str, Field(description=(
+            "Free-text query matched against message subjects/bodies and "
+            "extracted attachment text. An empty string lists recent mail "
+            "(date-ordered) — prefer `list_messages` for that intent."))],
+        sort: Annotated[Literal["rank", "date"], Field(description=(
+            'Result ordering: "rank" (hybrid relevance, the default) or '
+            '"date" (strictly newest first).'))] = "rank",
+        limit: Annotated[int, Field(ge=1, le=200, description=(
+            "Maximum results in this page (1–200)."))] = 50,
+        cursor: Annotated[str | None, Field(description=(
+            "Opaque pagination cursor — pass back a previous response's "
+            "`next_cursor` to get the next page; omit for the first page."))]
+            = None,
+        account_ids: Annotated[list[str] | None, Field(description=(
+            "Restrict to these account ids (string integers). Omit to search "
+            "every account you may read; discover ids via `list_accounts`."))]
+            = None,
+        folder_ids: Annotated[list[str] | None, Field(description=(
+            "Restrict to these folder/mailbox ids (string integers)."))]
+            = None,
+        date_from: Annotated[str | None, Field(description=(
+            "Lower bound (inclusive) on the sender's header Date, as "
+            "YYYY-MM-DD. Note this filters the header Date, which may differ "
+            "from the displayed/sort date (newest-first uses the IMAP arrival "
+            "date when present)."))]
+            = None,
+        date_to: Annotated[str | None, Field(description=(
+            "Upper bound (exclusive) on the sender's header Date, as "
+            "YYYY-MM-DD. Filters the header Date — see `date_from`."))]
+            = None,
+        from_addr: Annotated[str | None, Field(description=(
+            "Case-insensitive substring the From address or display name "
+            "must contain."))]
+            = None,
+        to: Annotated[str | None, Field(description=(
+            "Case-insensitive substring any To address must contain."))]
+            = None,
+        subject: Annotated[str | None, Field(description=(
+            "Case-insensitive substring the subject must contain."))]
+            = None,
+        has_attachment: Annotated[bool | None, Field(description=(
+            "True for only messages with attachments, False for only those "
+            "without; omit to match either."))] = None,
+        lang: Annotated[str | None, Field(description=(
+            'Restrict to a detected body language by ISO 639-1 code '
+            '(e.g. "en", "de", "ja").'))] = None,
     ) -> dict[str, Any]:
-        """Hybrid lexical+vector search over messages and attachment text.
+        """Hybrid lexical + vector search over message text and extracted
+        attachment text — the default way to answer "find mail about X".
 
-        ACL-scoped to the caller's accounts. Page forward by passing back
-        `next_cursor`; a `null` next_cursor means the pool is exhausted.
+        Results are ACL-scoped: only the accounts you have been granted are
+        searched. Rank-ordered by default; pass `sort="date"` for strictly
+        newest-first. Page forward by calling again with the returned
+        `next_cursor` in `cursor`; a `null` next_cursor means there are no
+        more results. If the cursor has expired (the result pool was evicted),
+        re-run the same query without a cursor and skip rows you already hold.
+
+        Use `list_messages` when you have no query and just want recent mail;
+        use `get_message` to read a full message once a result surfaces its id.
         """
         if searcher is None:
             raise ToolError("search is unavailable: no searcher configured")
@@ -154,10 +195,21 @@ def build_mcp_server(
 
     @server.tool()
     def get_message(
-        message_id: str,
-        full_headers: bool = False,
+        message_id: Annotated[str, Field(description=(
+            "The message id to fetch (string integer), as returned by "
+            "`search` or `list_messages`."))],
+        full_headers: Annotated[bool, Field(description=(
+            "True to include the complete raw header set; False (default) "
+            "returns the common subset (From/To/Subject/Date/…)."))] = False,
     ) -> dict[str, Any]:
-        """One message — headers, body, attachment list — ACL-scoped."""
+        """Fetch one message — headers, body, and attachment list — by id,
+        ACL-scoped to your granted accounts.
+
+        Call this after `search` or `list_messages` surfaces a message id.
+        Returns not-found if the id doesn't exist *or* isn't in an account you
+        may read (the two are indistinguishable by design). The returned
+        attachment list carries the `sha256` values to pass to `get_attachment`.
+        """
         user_id = _current_user_id()
         try:
             mid = parse_int_id(message_id, field="message_id")
@@ -177,11 +229,21 @@ def build_mcp_server(
 
     @server.tool()
     def get_attachment(
-        sha256: str,
-        mode: Literal["text", "metadata"] = "text",
+        sha256: Annotated[str, Field(description=(
+            "The attachment's content hash (hex sha256), taken from a "
+            "message's attachment list (see `get_message`)."))],
+        mode: Annotated[Literal["text", "metadata"], Field(description=(
+            'What to return: "text" (extracted plain text, the default) or '
+            '"metadata" (filename, mime type, size).'))] = "text",
     ) -> dict[str, Any]:
-        """Extracted attachment text (`mode="text"`) or blob metadata
-        (`mode="metadata"`), ACL-scoped. Never raw bytes.
+        """Read an attachment's extracted text (`mode="text"`) or its blob
+        metadata (`mode="metadata"`), keyed by sha256, ACL-scoped to your
+        granted accounts.
+
+        Never returns raw bytes — raw download is intentionally HTTP-only via
+        `GET /v1/attachments/{sha256}` (stored HTML/SVG blobs are an XSS sink).
+        `mode="text"` is not-found until the extraction worker has processed
+        the blob; retry later or fall back to `mode="metadata"`.
         """
         user_id = _current_user_id()
         with pool.connection() as conn:
@@ -202,12 +264,27 @@ def build_mcp_server(
 
     @server.tool()
     def list_messages(
-        account_ids: list[str] | None = None,
-        folder_ids: list[str] | None = None,
-        limit: Annotated[int, Field(ge=1, le=200)] = 50,
-        cursor: str | None = None,
+        account_ids: Annotated[list[str] | None, Field(description=(
+            "Restrict to these account ids (string integers). Omit for every "
+            "account you may read; discover ids via `list_accounts`."))]
+            = None,
+        folder_ids: Annotated[list[str] | None, Field(description=(
+            "Restrict to these folder/mailbox ids (string integers)."))]
+            = None,
+        limit: Annotated[int, Field(ge=1, le=200, description=(
+            "Maximum messages in this page (1–200)."))] = 50,
+        cursor: Annotated[str | None, Field(description=(
+            "Opaque pagination cursor — pass back a previous response's "
+            "`next_cursor` to get the next page; omit for the first page."))]
+            = None,
     ) -> dict[str, Any]:
-        """Keyset date-ordered browse page, ACL-scoped."""
+        """Browse messages newest-first with no search query — "show me recent
+        mail" — ACL-scoped to your granted accounts.
+
+        Keyset-paginated and date-ordered (most recent first). Narrow with
+        `account_ids` / `folder_ids`, and page forward with `next_cursor`. Use
+        `search` instead whenever you have a query to match against.
+        """
         user_id = _current_user_id()
         try:
             account_id_ints = (
@@ -235,7 +312,12 @@ def build_mcp_server(
 
     @server.tool()
     def list_accounts() -> list[dict[str, Any]]:
-        """The accounts this caller may read."""
+        """List the accounts you are allowed to read (your per-user ACL grants).
+
+        Use this first to discover the `account_ids` you can pass as filters to
+        `search` and `list_messages`. Returns an empty list when you have been
+        granted no accounts.
+        """
         user_id = _current_user_id()
         with pool.connection() as conn:
             allowed = allowed_account_ids(conn, user_id)

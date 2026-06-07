@@ -350,7 +350,7 @@ class SearchConfig(BaseModel):
     # --- query rewriter (Phase 4) ---
     rewriter_enabled_by_default: bool = False
     rewriter_backend: Literal["ollama"] = "ollama"
-    rewriter_model: str = "qwen2.5:3b"
+    rewriter_model: str = "granite4.1:3b-q8_0"
     rewriter_timeout_s: float = 10.0
     rewriter_max_expansion_terms: int = 8
 

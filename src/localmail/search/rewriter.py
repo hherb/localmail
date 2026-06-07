@@ -139,10 +139,11 @@ def apply_rewrite(
         subject_substr=_fill(uf.subject_substr, lf.subject_substr),
         has_attachment=_fill(uf.has_attachment, lf.has_attachment),
     )
+    terms = [t for t in result.expansion_terms if t.strip()]
     return replace(
         parsed,
         rewritten_text=result.rewritten_text or None,
-        expansion_terms=list(result.expansion_terms[:max_expansion_terms]),
+        expansion_terms=terms[:max_expansion_terms],
         filters=merged,
     )
 
@@ -156,6 +157,11 @@ class OllamaLLMRewriter:
     Raises ``httpx.HTTPError`` subclasses (timeout, connect, status) and
     :class:`RewriteParseError` — it does not swallow failures. The Searcher
     decides whether to fall through.
+
+    When no ``client`` is injected the instance owns a long-lived
+    :class:`httpx.Client` for the life of the rewriter (one per ``serve``
+    process). Call :meth:`close` to release it; an injected client is left
+    for the caller to close.
     """
 
     name = "ollama"
@@ -169,8 +175,14 @@ class OllamaLLMRewriter:
     ) -> None:
         self._cfg = cfg
         self.model = cfg.rewriter_model
+        self._owns_client = client is None
         self._client = client or httpx.Client(timeout=cfg.rewriter_timeout_s)
         self._today = today_provider
+
+    def close(self) -> None:
+        """Close the owned httpx client; a no-op for an injected client."""
+        if self._owns_client:
+            self._client.close()
 
     def rewrite(self, free_text: str) -> RewriteResult:
         prompt = build_rewrite_prompt(

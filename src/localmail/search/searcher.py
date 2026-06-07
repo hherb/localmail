@@ -16,6 +16,19 @@ from dataclasses import dataclass, field
 from datetime import MINYEAR, datetime, timezone
 from typing import Any, Literal
 
+import httpx
+import psycopg
+from psycopg_pool import ConnectionPool
+
+from localmail.config import SearchConfig
+from localmail.search.embeddings import EmbeddingBackend
+from localmail.search.page_cache import (
+    CacheMissError, PageCache, PageOutOfPoolError,
+)
+from localmail.search.query import ParsedQuery, parse_query
+from localmail.search.reranker import Reranker
+from localmail.search.rewriter import QueryRewriter, RewriteParseError, apply_rewrite
+
 SortMode = Literal["rank", "date"]
 
 # Sentinel for "no usable date" — sorts strictly older than any real
@@ -39,18 +52,6 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
         return (0, _DATE_SORT_NULL_SENTINEL)
     return (1, dt)
 
-import httpx
-import psycopg
-from psycopg_pool import ConnectionPool
-
-from localmail.config import SearchConfig
-from localmail.search.embeddings import EmbeddingBackend
-from localmail.search.page_cache import (
-    CacheMissError, PageCache, PageOutOfPoolError,
-)
-from localmail.search.query import ParsedQuery, parse_query
-from localmail.search.reranker import Reranker
-from localmail.search.rewriter import RewriteParseError, apply_rewrite
 
 log = logging.getLogger("localmail.search.searcher")
 
@@ -281,7 +282,7 @@ class Searcher:
         cfg: SearchConfig,
         embeddings: EmbeddingBackend,
         reranker: Reranker | None,
-        rewriter: Any | None = None,  # QueryRewriter type lands Phase 4
+        rewriter: QueryRewriter | None = None,
     ) -> None:
         self._pool = pool
         self._cfg = cfg
@@ -891,9 +892,7 @@ class Searcher:
                 )
             except (httpx.HTTPError, RewriteParseError) as exc:
                 rewrite_skipped = True
-                logging.getLogger("localmail.search").warning(
-                    "smart rewrite skipped: %s", exc
-                )
+                log.warning("smart rewrite skipped: %s", exc)
             timing["rewrite"] = (time.monotonic() - t) * 1000
 
         # sort=date with free_text: lexical+keyset, unbounded. The hybrid

@@ -104,6 +104,17 @@ def test_apply_caps_expansion_terms():
     assert out.expansion_terms == ["a", "b"]
 
 
+def test_apply_drops_blank_expansion_terms():
+    parsed = ParsedQuery(free_text="orig")
+    result = RewriteResult(
+        rewritten_text="rich query",
+        expansion_terms=["", "  ", "bill"],
+        extracted_filters=SearchFilters(),
+    )
+    out = apply_rewrite(parsed, result, max_expansion_terms=8)
+    assert out.expansion_terms == ["bill"]
+
+
 def test_apply_fills_empty_filter_slot():
     parsed = ParsedQuery(free_text="orig")
     out = apply_rewrite(

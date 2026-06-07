@@ -79,10 +79,44 @@ def test_search_prints_notice_when_rewrite_skipped(monkeypatch):
         def search(self, *a, **k):
             return page
 
-    monkeypatch.setattr("localmail.cli.create_searcher", lambda: _Stub())
+    monkeypatch.setattr("localmail.cli.create_searcher", lambda *a, **k: _Stub())
     res = CliRunner(capture="fd").invoke(main, ["search", "x", "--smart"])
     assert res.exit_code == 0
     assert "rewrite skipped" in res.stderr.lower()
+
+
+def test_cli_search_honours_config_flag(monkeypatch, tmp_path, db_dsn):
+    """`localmail --config PATH search` must build the searcher from PATH.
+
+    Regression: the `search` command used to call `create_searcher()` with no
+    args, so it ignored the global `--config` flag and always re-read the
+    default config — the only override was the `LOCALMAIL_CONFIG` env var.
+    """
+    cfg_path = tmp_path / "custom.toml"
+    cfg_path.write_text(
+        f'[database]\ndsn = "{db_dsn}"\n\n'
+        "[search]\nrewriter_max_expansion_terms = 3\n"
+    )
+
+    captured: dict[str, object] = {}
+
+    class _Stub:
+        def search(self, *a, **k):
+            raise RuntimeError("stop after capturing cfg")
+
+    def fake_create(cfg=None, **kw):
+        captured["cfg"] = cfg
+        return _Stub()
+
+    monkeypatch.setattr("localmail.cli.create_searcher", fake_create)
+    runner = CliRunner()
+    result = runner.invoke(main, ["--config", str(cfg_path), "search", "hello"])
+
+    assert "cfg" in captured, "create_searcher was never called"
+    assert captured["cfg"] is not None, "search ignored --config (cfg was None)"
+    assert captured["cfg"].search.rewriter_max_expansion_terms == 3
+    # the RuntimeError from the stub maps to the CLI's clean exit(2)
+    assert result.exit_code == 2
 
 
 def test_cli_search_page_and_grow_are_not_registered():

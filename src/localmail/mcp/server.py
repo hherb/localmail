@@ -120,13 +120,18 @@ def build_mcp_server(
             "Restrict to these folder/mailbox ids (string integers)."))]
             = None,
         date_from: Annotated[str | None, Field(description=(
-            "Lower bound (inclusive) on the message Date, as YYYY-MM-DD."))]
+            "Lower bound (inclusive) on the sender's header Date, as "
+            "YYYY-MM-DD. Note this filters the header Date, which may differ "
+            "from the displayed/sort date (newest-first uses the IMAP arrival "
+            "date when present)."))]
             = None,
         date_to: Annotated[str | None, Field(description=(
-            "Upper bound (exclusive) on the message Date, as YYYY-MM-DD."))]
+            "Upper bound (exclusive) on the sender's header Date, as "
+            "YYYY-MM-DD. Filters the header Date — see `date_from`."))]
             = None,
         from_addr: Annotated[str | None, Field(description=(
-            "Case-insensitive substring the From address must contain."))]
+            "Case-insensitive substring the From address or display name "
+            "must contain."))]
             = None,
         to: Annotated[str | None, Field(description=(
             "Case-insensitive substring any To address must contain."))]

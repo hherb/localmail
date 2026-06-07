@@ -1323,9 +1323,11 @@ def serve_cmd(
 
     try:
         from localmail.search import create_searcher
-        # `cfg` is None in the LOCALMAIL_DSN_OVERRIDE branch — create_searcher
-        # then loads the default config itself (unchanged behaviour there).
-        searcher = create_searcher(cfg)
+        # Pin the searcher to the same DSN the rest of serve uses. In the
+        # LOCALMAIL_DSN_OVERRIDE branch `cfg` is None (create_searcher loads the
+        # default config for search tunables) but `dsn` is the override, so the
+        # searcher can never query a different database than serve itself.
+        searcher = create_searcher(cfg, dsn=dsn)
     except Exception as exc:
         click.echo(f"warning: search disabled ({exc})", err=True)
         searcher = None

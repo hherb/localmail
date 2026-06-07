@@ -33,6 +33,11 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
     if filters.account_ids:
         parts.append("m.account_id = ANY(%s)")
         params.append(filters.account_ids)
+    # The date inclusivity (after >=, before <) and the substring ILIKE
+    # operators below are an agent-facing contract documented in the MCP
+    # `search` tool's Field descriptions (mcp/server.py). Changing an operator
+    # here means updating that prose — the coupling is pinned by
+    # tests/test_mcp_filter_semantics.py.
     if filters.from_substr:
         parts.append("(m.from_addr ILIKE %s OR m.from_name ILIKE %s)")
         like = f"%{filters.from_substr}%"

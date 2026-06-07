@@ -63,6 +63,28 @@ def test_cli_search_json_output_is_valid_search_page(monkeypatch, db_dsn, db_con
     assert payload["page"] == 1
 
 
+def test_search_prints_notice_when_rewrite_skipped(monkeypatch):
+    from click.testing import CliRunner
+    from localmail.cli import main
+    from localmail.search.searcher import SearchPage
+    from localmail.search.query import ParsedQuery
+
+    page = SearchPage(
+        results=[], page=1, page_size=10, pool_size=0, candidates_per_arm=50,
+        has_more_in_pool=False, can_grow_pool=False, search_token=None,
+        query=ParsedQuery(free_text="x"), timing_ms={}, rewrite_skipped=True,
+    )
+
+    class _Stub:
+        def search(self, *a, **k):
+            return page
+
+    monkeypatch.setattr("localmail.cli.create_searcher", lambda: _Stub())
+    res = CliRunner(capture="fd").invoke(main, ["search", "x", "--smart"])
+    assert res.exit_code == 0
+    assert "rewrite skipped" in res.stderr.lower()
+
+
 def test_cli_search_page_and_grow_are_not_registered():
     """search-page / search-grow were removed — they were process-local stubs.
 

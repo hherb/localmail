@@ -39,6 +39,7 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
         return (0, _DATE_SORT_NULL_SENTINEL)
     return (1, dt)
 
+import httpx
 import psycopg
 from psycopg_pool import ConnectionPool
 
@@ -49,6 +50,7 @@ from localmail.search.page_cache import (
 )
 from localmail.search.query import ParsedQuery, parse_query
 from localmail.search.reranker import Reranker
+from localmail.search.rewriter import RewriteParseError, apply_rewrite
 
 log = logging.getLogger("localmail.search.searcher")
 
@@ -246,6 +248,7 @@ class SearchPage:
     query: ParsedQuery
     timing_ms: dict[str, float]
     next_keyset: KeysetCursor | None = None
+    rewrite_skipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -871,6 +874,23 @@ class Searcher:
         parsed = parse_query(query)
         timing["parse"] = (time.monotonic() - t) * 1000
 
+        rewrite_skipped = False
+        if smart and parsed.free_text.strip():
+            t = time.monotonic()
+            try:
+                assert self._rewriter is not None
+                result = self._rewriter.rewrite(parsed.free_text)
+                parsed = apply_rewrite(
+                    parsed, result,
+                    max_expansion_terms=cfg.rewriter_max_expansion_terms,
+                )
+            except (httpx.HTTPError, RewriteParseError) as exc:
+                rewrite_skipped = True
+                logging.getLogger("localmail.search").warning(
+                    "smart rewrite skipped: %s", exc
+                )
+            timing["rewrite"] = (time.monotonic() - t) * 1000
+
         # sort=date with free_text: lexical+keyset, unbounded. The hybrid
         # path caps at ``rerank_pool_size`` candidates fused by RRF, so a
         # user searching for "e-ticket" (with dozens of matches across
@@ -897,6 +917,7 @@ class Searcher:
                 can_grow_pool=False,
                 search_token=None, query=parsed, timing_ms=timing,
                 next_keyset=next_keyset,
+                rewrite_skipped=rewrite_skipped,
             )
 
         # Empty-query fallback: an empty `free_text` is the canonical
@@ -921,6 +942,7 @@ class Searcher:
                 pool_size=len(results), candidates_per_arm=cpa,
                 has_more_in_pool=False, can_grow_pool=False,
                 search_token=None, query=parsed, timing_ms=timing,
+                rewrite_skipped=rewrite_skipped,
             )
 
         with self._pool.connection() as conn:
@@ -980,4 +1002,5 @@ class Searcher:
             has_more_in_pool=pool_size > effective_page_size,
             can_grow_pool=True,
             search_token=token, query=parsed, timing_ms=timing,
+            rewrite_skipped=rewrite_skipped,
         )

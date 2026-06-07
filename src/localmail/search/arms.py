@@ -99,10 +99,16 @@ def build_lexical_tsquery(
     ``plainto_tsquery('simple', %s)`` form, so the non-smart path is
     unchanged. Each expansion term adds one OR-ed ``plainto_tsquery`` so a
     message matching only a synonym is still retrieved.
+
+    When expansion terms are present the fragment is wrapped in parentheses
+    so the ``@@`` operator in callers binds to the full OR-chain rather than
+    only the first alternative (operator precedence: ``@@`` > ``||``).
     """
     terms = [free_text, *expansion_terms]
-    fragment = " || ".join(["plainto_tsquery('simple', %s)"] * len(terms))
-    return fragment, terms
+    if len(terms) == 1:
+        return "plainto_tsquery('simple', %s)", terms
+    inner = " || ".join(["plainto_tsquery('simple', %s)"] * len(terms))
+    return f"({inner})", terms
 
 
 def arm_bm25_messages(

@@ -1,4 +1,7 @@
+import pytest
+
 from datetime import date
+from datetime import date as _date
 
 from localmail.search.rewriter import build_rewrite_prompt
 
@@ -16,3 +19,42 @@ def test_prompt_is_deterministic():
     a = build_rewrite_prompt("x", today=date(2026, 1, 1), max_expansion_terms=5)
     b = build_rewrite_prompt("x", today=date(2026, 1, 1), max_expansion_terms=5)
     assert a == b
+
+
+from localmail.search.rewriter import RewriteParseError, parse_rewrite_response
+
+
+def test_parse_full_response():
+    raw = (
+        '{"rewritten_text": "quarterly revenue report",'
+        ' "expansion_terms": ["earnings", "Q3"],'
+        ' "filters": {"after": "2025-06-01", "before": "2025-09-01",'
+        ' "from": "bob", "to": null, "subject": null,'
+        ' "has_attachment": true}}'
+    )
+    r = parse_rewrite_response(raw)
+    assert r.rewritten_text == "quarterly revenue report"
+    assert r.expansion_terms == ["earnings", "Q3"]
+    assert r.extracted_filters.after == _date(2025, 6, 1)
+    assert r.extracted_filters.before == _date(2025, 9, 1)
+    assert r.extracted_filters.from_substr == "bob"
+    assert r.extracted_filters.to_substr is None
+    assert r.extracted_filters.has_attachment is True
+
+
+def test_parse_minimal_response_defaults_empty():
+    r = parse_rewrite_response('{"rewritten_text": "hello"}')
+    assert r.rewritten_text == "hello"
+    assert r.expansion_terms == []
+    assert r.extracted_filters.after is None
+    assert r.extracted_filters.has_attachment is None
+
+
+def test_parse_invalid_json_raises():
+    with pytest.raises(RewriteParseError):
+        parse_rewrite_response("not json at all")
+
+
+def test_parse_missing_required_field_raises():
+    with pytest.raises(RewriteParseError):
+        parse_rewrite_response('{"expansion_terms": []}')

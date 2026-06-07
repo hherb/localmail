@@ -63,7 +63,10 @@ def test_cli_search_json_output_is_valid_search_page(monkeypatch, db_dsn, db_con
     assert payload["page"] == 1
 
 
-def test_search_prints_notice_when_rewrite_skipped(monkeypatch):
+def test_search_prints_notice_when_rewrite_skipped(monkeypatch, cli_config):
+    # `search` now resolves config eagerly (create_searcher(load_config(...))),
+    # so this test needs `cli_config` to make load_config() resolvable on a
+    # clean CI runner (issue #100) even though create_searcher is stubbed.
     from click.testing import CliRunner
     from localmail.cli import main
     from localmail.search.searcher import SearchPage

@@ -114,3 +114,41 @@ def test_lru_evicts_least_recently_used():
     cache.rewrite("a")
     cache.rewrite("b")
     assert inner.calls == ["a", "b", "c", "b"]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [httpx.ConnectError("down"), RewriteParseError("bad json")],
+)
+def test_failures_are_not_cached(exc):
+    inner = FakeRewriter(raises=exc)
+    cache = CachingRewriter(
+        inner, maxsize=128, ttl_s=1200, today_provider=_const_today(), clock=FakeClock()
+    )
+    with pytest.raises(type(exc)):
+        cache.rewrite("q")
+    with pytest.raises(type(exc)):
+        cache.rewrite("q")
+    assert inner.calls == ["q", "q"]
+
+
+def test_maxsize_zero_is_pass_through():
+    inner = FakeRewriter()
+    cache = CachingRewriter(
+        inner, maxsize=0, ttl_s=1200, today_provider=_const_today(), clock=FakeClock()
+    )
+    cache.rewrite("q")
+    cache.rewrite("q")
+    assert inner.calls == ["q", "q"]
+    assert len(cache._data) == 0
+
+
+def test_name_model_and_close_delegate():
+    inner = FakeRewriter()
+    cache = CachingRewriter(
+        inner, maxsize=128, ttl_s=1200, today_provider=_const_today(), clock=FakeClock()
+    )
+    assert cache.name == "fake"
+    assert cache.model == "fake-model"
+    cache.close()
+    assert inner.closed is True

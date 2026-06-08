@@ -454,6 +454,20 @@ Ollama is an external HTTP service). `continue_page`/`grow_pool` reuse the
 cached enriched `parsed` and do not re-rewrite (`rewrite_skipped` is a page-1
 signal).
 
+**`--smart` over the wire (HTTP + MCP):** the rewriter is also exposed on the
+network read surfaces — `POST /v1/search` accepts a `smart` body field and the
+MCP `search` tool a `smart` param; both responses carry `rewrite_skipped`
+(always present, default `false`). `api.search.run_search` gates it via the
+public **`Searcher.smart_available`** property (`self._rewriter is not None`) —
+never reaching into `searcher._rewriter` (#71). It computes `effective_smart =
+smart and searcher.smart_available` so the Searcher's "no rewriter configured"
+`RuntimeError` is never triggered: when `smart` is requested but unavailable,
+the un-rewritten query runs and `rewrite_skipped` is `true` (**graceful
+degradation** — unlike the CLI, which hard-errors, being interactive). `smart`
+applies on the page-1 branch only (`cursor is None`); continuation/keyset pages
+report `rewrite_skipped=false`. See
+[docs/superpowers/specs/2026-06-08-smart-over-mcp-http-design.md](docs/superpowers/specs/2026-06-08-smart-over-mcp-http-design.md).
+
 **Phase 2 notes**:
 - `LightweightExtractor` handles 11 formats (PDF, DOCX, XLSX, PPTX, ODT, RTF,
   TXT, Markdown, HTML, CSV, ICS). `DoclingExtractor` is optional, enabled via the
@@ -1144,9 +1158,10 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   share that serialization). Per-user ACL applies to every tool (results scoped
   to the token user's granted accounts).
   - `search(query, sort="rank"|"date", limit, cursor, account_ids, folder_ids,
-    date_from, date_to, from_addr, to, subject, has_attachment, lang)` — hybrid
-    search; page by re-calling with `next_cursor`; a cursor-expired error means
-    re-run without a cursor.
+    date_from, date_to, from_addr, to, subject, has_attachment, lang, smart)` —
+    hybrid search; `smart=true` runs the Phase-4 LLM rewrite (page 1) and the
+    response `rewrite_skipped` reflects whether it happened; page by re-calling
+    with `next_cursor`; a cursor-expired error means re-run without a cursor.
   - `get_message(message_id, full_headers=False)`.
   - `get_attachment(sha256, mode="text"|"metadata")` — extracted text or
     metadata, **never raw bytes** (raw download stays the HTTP

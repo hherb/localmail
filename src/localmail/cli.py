@@ -673,9 +673,9 @@ def search(ctx, query, accounts, folders, after, before, from_substr, to_substr,
         click.echo(f"error: {exc}", err=True)
         sys.exit(2)
 
-    if page.rewrite_skipped:
-        click.echo("note: --smart rewrite skipped (rewriter unavailable); "
-                   "ran the original query", err=True)
+    if page.rewrite_status in ("unavailable", "failed", "not_attempted"):
+        detail = page.rewrite_note or "ran the original query"
+        click.echo(f"note: --smart {detail}", err=True)
 
     if verbose:
         click.echo(f"timing(ms): {page.timing_ms}", err=True)

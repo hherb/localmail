@@ -195,6 +195,8 @@ def run_search(
         page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)
 
     next_cursor = _next_cursor(page, cfg=cfg)
+    status: str
+    note: str | None
     if cursor is None:
         if smart and not searcher.smart_available:
             status, note = UNAVAILABLE, NOTE_UNAVAILABLE

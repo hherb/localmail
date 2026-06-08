@@ -673,7 +673,12 @@ def search(ctx, query, accounts, folders, after, before, from_substr, to_substr,
         click.echo(f"error: {exc}", err=True)
         sys.exit(2)
 
-    if page.rewrite_status in ("unavailable", "failed", "not_attempted"):
+    # The CLI drives the Searcher directly (single page; hard-errors above when
+    # no rewriter is configured), so FAILED is the only "rewrite didn't take"
+    # status reachable here — unavailable/not_attempted are run_search-only.
+    from localmail.search.rewrite_status import FAILED
+
+    if page.rewrite_status == FAILED:
         detail = page.rewrite_note or "ran the original query"
         click.echo(f"note: --smart {detail}", err=True)
 

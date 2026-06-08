@@ -149,9 +149,13 @@ def build_mcp_server(
             "Opt into an LLM query rewrite of the free-text query before "
             "searching (page 1 only): a richer vector query, synonym expansion "
             "OR-ed into the keyword arms, and natural-language filters. The "
-            "response field `rewrite_skipped` is true when the rewrite did not "
-            "happen (no rewriter configured, or the rewrite call failed) and "
-            "the original query ran instead. Defaults to false."))] = False,
+            "response carries `rewrite_status` (one of `applied`, "
+            "`unavailable`, `failed`, `not_attempted`, `not_requested`) and an "
+            "optional curated `rewrite_note` with an actionable detail; "
+            "`rewrite_skipped` (kept for back-compat) is true only for "
+            "`unavailable` and `failed`. On a continuation page `smart` is "
+            "ignored and the status is `not_attempted`. Defaults to false."))]
+            = False,
     ) -> dict[str, Any]:
         """Hybrid lexical + vector search over message text and extracted
         attachment text — the default way to answer "find mail about X".

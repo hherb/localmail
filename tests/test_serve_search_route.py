@@ -53,8 +53,10 @@ def _fake_searcher_returning_one_hit():
     # Pool-cursor mock — explicit None keeps `_next_cursor` out of the
     # keyset branch (MagicMock's auto-attr would be truthy).
     page.next_keyset = None
-    # Explicit bool so JSON serialization doesn't choke on a MagicMock attr.
-    page.rewrite_skipped = False
+    # Explicit values so JSON serialization doesn't choke on a MagicMock attr
+    # (run_search reads rewrite_status/rewrite_note off the page on page 1).
+    page.rewrite_status = "applied"
+    page.rewrite_note = None
     s.search.return_value = page
     return s
 
@@ -328,7 +330,11 @@ def test_search_smart_param_is_forwarded_to_searcher(
     )
     assert r.status_code == 200
     assert fake.search.call_args.kwargs["smart"] is True
-    assert r.json()["rewrite_skipped"] is False
+    body = r.json()
+    # The structured outcome must reach the wire, not just the derived bool.
+    assert body["rewrite_status"] == "applied"
+    assert body["rewrite_note"] is None
+    assert body["rewrite_skipped"] is False
 
 
 def test_search_smart_defaults_false_and_response_carries_flag(
@@ -364,4 +370,8 @@ def test_search_smart_without_rewriter_degrades(
     )
     assert r.status_code == 200
     assert fake.search.call_args.kwargs["smart"] is False
-    assert r.json()["rewrite_skipped"] is True
+    body = r.json()
+    # The full structured outcome must reach the wire, not just the bool.
+    assert body["rewrite_status"] == "unavailable"
+    assert body["rewrite_note"] == "smart search is not configured on this server"
+    assert body["rewrite_skipped"] is True

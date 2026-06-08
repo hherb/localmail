@@ -31,8 +31,14 @@ def tool_search(
     limit: int = 50,
     cursor: str | None = None,
     filters: dict[str, Any] | None = None,
+    smart: bool = False,
 ) -> dict[str, Any]:
-    """Hybrid search, ACL-scoped. Page forward by passing back `next_cursor`."""
+    """Hybrid search, ACL-scoped. Page forward by passing back `next_cursor`.
+
+    `smart` opts into an LLM query rewrite (page 1 only); the response's
+    `rewrite_skipped` is True when the rewrite did not happen and the
+    un-rewritten query ran instead.
+    """
     return run_search(
         searcher=searcher,
         free_text=query,
@@ -42,6 +48,7 @@ def tool_search(
         user_id=user_id,
         sort=sort,
         cursor=cursor,
+        smart=smart,
     )
 
 

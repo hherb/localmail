@@ -55,6 +55,16 @@ def _lexical_searcher(db_dsn):
                     embeddings=None, reranker=None, rewriter=None)
 
 
+class _FakeRewriter:
+    name = "fake"; model = "fake"
+
+    def __init__(self, result):
+        self._result = result
+
+    def rewrite(self, free_text):
+        return self._result
+
+
 def test_tool_search_scopes_to_allowed_accounts(db_dsn, db_conn):
     uid = create_user(db_conn, "alice", "hunter2")
     granted = _insert_account(db_conn, "granted")
@@ -94,7 +104,7 @@ def test_tool_search_empty_grants_returns_empty(db_dsn, db_conn):
     finally:
         searcher._pool.close()
     assert page == {"results": [], "next_cursor": None,
-                    "total_estimate": 0, "took_ms": 0.0}
+                    "total_estimate": 0, "took_ms": 0.0, "rewrite_skipped": False}
 
 
 def test_tool_get_message_granted(db_conn):
@@ -242,3 +252,60 @@ def test_tool_get_attachment_bad_mode_raises(db_conn):
     with pytest.raises(ValueError):
         tools.tool_get_attachment(
             db_conn, sha256=sha, mode="bytes", allowed_account_ids=[acct])
+
+
+def test_tool_search_smart_without_rewriter_degrades(db_dsn, db_conn):
+    uid = create_user(db_conn, "smartless", "hunter2")
+    acct = _insert_account(db_conn, "smartless-acct")
+    grant_account(db_conn, uid, acct)
+    _insert_message(db_conn, acct, "invoice", "the invoice body")
+    db_conn.commit()
+    acl = allowed_account_ids(db_conn, uid)
+    searcher = _lexical_searcher(db_dsn)
+    try:
+        page = tools.tool_search(
+            searcher=searcher, user_id=uid, allowed_account_ids=acl,
+            query="invoice", sort="date", limit=20, cursor=None, filters={},
+            smart=True,
+        )
+    finally:
+        searcher._pool.close()
+    assert page["rewrite_skipped"] is True
+    assert page["results"]  # search still ran on the un-rewritten query
+
+
+def test_tool_search_smart_with_rewriter_applies_over_the_wire(db_dsn, db_conn):
+    """smart=True with a configured rewriter actually rewrites over the
+    tool_search wire layer: expansion ORs in a synonym the plain query
+    misses, surfacing a message that the un-rewritten query does not, and
+    rewrite_skipped is False (the rewrite happened)."""
+    from localmail.search.query import SearchFilters
+    from localmail.search.rewriter import RewriteResult
+
+    uid = create_user(db_conn, "smartful", "hunter2")
+    acct = _insert_account(db_conn, "smartful-acct")
+    grant_account(db_conn, uid, acct)
+    # subject carries the synonym only; the literal query word never appears.
+    _insert_message(db_conn, acct, "receipt for lunch", "body")
+    db_conn.commit()
+    acl = allowed_account_ids(db_conn, uid)
+    expand = RewriteResult(rewritten_text="invoice", expansion_terms=["receipt"],
+                           extracted_filters=SearchFilters())
+    searcher = Searcher(pool=open_pool(db_dsn), cfg=SearchConfig(),
+                        embeddings=None, reranker=None,
+                        rewriter=_FakeRewriter(expand))
+    try:
+        plain = tools.tool_search(
+            searcher=searcher, user_id=uid, allowed_account_ids=acl,
+            query="invoice", sort="date", limit=20, cursor=None, filters={},
+        )
+        smart = tools.tool_search(
+            searcher=searcher, user_id=uid, allowed_account_ids=acl,
+            query="invoice", sort="date", limit=20, cursor=None, filters={},
+            smart=True,
+        )
+    finally:
+        searcher._pool.close()
+    assert plain["results"] == []  # "invoice" matches nothing un-rewritten
+    assert smart["results"]  # expansion "receipt" surfaces the message
+    assert smart["rewrite_skipped"] is False

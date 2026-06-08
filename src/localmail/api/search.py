@@ -129,6 +129,7 @@ def run_search(
     user_id: int,
     sort: Literal["rank", "date"] = "rank",
     cursor: str | None = None,
+    smart: bool = False,
 ) -> dict[str, Any]:
     """Run a search (or continue an existing one) and return the API-shaped response.
 
@@ -145,15 +146,29 @@ def run_search(
     ``next_cursor`` in the response is ``None`` once the rerank pool is
     exhausted *and* further growth would exceed
     ``searcher.config.candidates_per_arm_max``.
+
+    ``smart`` requests an LLM query rewrite on page 1 (cursor is None) when the
+    searcher has a rewriter configured; the response ``rewrite_skipped`` is
+    True when a requested rewrite did not happen (rewriter unavailable, or the
+    rewrite call failed) and the un-rewritten query ran instead.
     """
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:
-        return {"results": [], "next_cursor": None, "total_estimate": 0, "took_ms": 0.0}
+        return {"results": [], "next_cursor": None, "total_estimate": 0,
+                "took_ms": 0.0, "rewrite_skipped": False}
 
     cfg = searcher.config
+    # smart is a page-1 signal: continuation (cursor present) reuses the
+    # cached enriched parse and never re-rewrites. effective_smart guards the
+    # Searcher's "no rewriter configured" RuntimeError — when smart is asked
+    # for but unavailable, degrade gracefully and report rewrite_skipped.
+    effective_smart = smart and searcher.smart_available
+    rewrite_unavailable = cursor is None and smart and not searcher.smart_available
+
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
-        page = searcher.search(query, page_size=limit, user_id=user_id, sort=sort)
+        page = searcher.search(query, page_size=limit, user_id=user_id,
+                               sort=sort, smart=effective_smart)
     elif is_keyset_cursor(cursor):
         # Keyset cursor → lexical-date continuation. The cursor carries
         # only (ts, id); the query + filters come from the request body
@@ -169,11 +184,13 @@ def run_search(
         page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)
 
     next_cursor = _next_cursor(page, cfg=cfg)
+    rewrite_skipped = rewrite_unavailable or bool(getattr(page, "rewrite_skipped", False))
     return {
         "results": [_to_api_result(r) for r in page.results],
         "next_cursor": next_cursor,
         "total_estimate": None,
         "took_ms": page.timing_ms.get("total", 0.0),
+        "rewrite_skipped": rewrite_skipped,
     }
 
 

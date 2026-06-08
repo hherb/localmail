@@ -126,3 +126,23 @@ def test_smart_expansion_applies_on_sort_date_path(db_dsn, db_conn):
         pool.close()
     assert plain.results == []
     assert len(smart.results) == 1
+
+
+def test_smart_available_true_when_rewriter_configured(db_dsn):
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=_R(),
+                     rewriter=FakeRewriter(_smart_result()))
+        assert s.smart_available is True
+    finally:
+        pool.close()
+
+
+def test_smart_available_false_when_no_rewriter(db_dsn):
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=_R(),
+                     rewriter=None)
+        assert s.smart_available is False
+    finally:
+        pool.close()

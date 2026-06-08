@@ -637,6 +637,13 @@ ollama_host = "http://localhost:11434"
 Without `rewriter_enabled_by_default = true`, passing `--smart` reports that no
 rewriter is configured. Non-`--smart` search is completely unchanged.
 
+The same rewrite is available over the network read surfaces: `POST /v1/search`
+accepts a `smart` boolean in the request body, and the MCP `search` tool a
+`smart` parameter. Both responses carry a `rewrite_skipped` flag (always
+present). Unlike the CLI — which hard-errors when no rewriter is configured —
+the wire endpoints degrade gracefully: an un-rewritten search runs and
+`rewrite_skipped` is `true`.
+
 ### Search from Python
 
 ```python

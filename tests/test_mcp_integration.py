@@ -73,7 +73,9 @@ async def _drive(port, token, granted):
             accounts_res = await session.call_tool("list_accounts", {})
             search_res = await session.call_tool(
                 "search", {"query": "invoice", "sort": "date"})
-            return accounts_res, search_res
+            smart_res = await session.call_tool(
+                "search", {"query": "invoice", "sort": "date", "smart": True})
+            return accounts_res, search_res, smart_res
 
 
 def _payload(call_result):
@@ -93,7 +95,7 @@ def test_mcp_end_to_end_acl_scoped(db_dsn, db_conn):
                      mcp_config=McpConfig(enabled=True))
     server, thread, port = _start(app)
     try:
-        accounts_res, search_res = asyncio.run(_drive(port, token, granted))
+        accounts_res, search_res, smart_res = asyncio.run(_drive(port, token, granted))
     finally:
         server.should_exit = True
         thread.join(timeout=10)
@@ -110,6 +112,13 @@ def test_mcp_end_to_end_acl_scoped(db_dsn, db_conn):
     assert results, "search returned no results; the granted 'invoice' message must match"
     for r in results:
         assert r["account"]["id"] == str(granted)
+
+    # smart=True over the wire: this searcher has rewriter=None, so the rewrite
+    # is unavailable — the search must still run (graceful) and the response
+    # must carry rewrite_skipped=True (the cited MCP acceptance criterion).
+    smart_page = _payload(smart_res)
+    assert smart_page["rewrite_skipped"] is True
+    assert smart_page["results"], "smart search must still return results un-rewritten"
 
 
 def test_mcp_rejects_missing_bearer(db_dsn, db_conn):

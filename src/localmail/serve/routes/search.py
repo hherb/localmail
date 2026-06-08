@@ -43,6 +43,9 @@ class SearchRequest(BaseModel):
     # date-ordered so this is a no-op there.
     sort: Literal["rank", "date"] = "rank"
     cursor: str | None = None
+    # Opt-in LLM query rewrite (Phase 4). Ignored gracefully when the server
+    # has no rewriter configured — the response's rewrite_skipped reflects it.
+    smart: bool = False
 
 
 @router.post("")
@@ -67,4 +70,5 @@ def search_endpoint(
         user_id=user.id,
         sort=req.sort,
         cursor=req.cursor,
+        smart=req.smart,
     )

@@ -303,6 +303,14 @@ class Searcher:
         """
         return self._cfg
 
+    @property
+    def smart_available(self) -> bool:
+        """True when a query rewriter is wired, so ``search(smart=True)`` will
+        run instead of raising. The public boundary the api/ layer uses to
+        decide whether a requested smart rewrite is possible — never reach into
+        ``searcher._rewriter`` (see #71)."""
+        return self._rewriter is not None
+
     def get_pool_metadata(
         self, search_token: str, *, user_id: int | None = None,
     ) -> PoolMetadata | None:

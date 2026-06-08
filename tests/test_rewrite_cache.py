@@ -182,3 +182,36 @@ def test_concurrent_hot_key_does_not_corrupt():
     assert len(results) == 16
     assert all(r == results[0] for r in results)
     assert len(cache._data) == 1
+
+
+from unittest import mock
+
+from localmail.config import LocalmailConfig
+from localmail.search import create_searcher
+from localmail.search.rewriter import OllamaLLMRewriter
+
+
+def _cfg(*, cache_size: int) -> LocalmailConfig:
+    # LocalmailConfig (alias of Config) requires a database dsn; supply a dummy
+    # since open_pool is patched out and never actually connects.
+    cfg = LocalmailConfig(database={"dsn": "postgresql:///localmail_test"})
+    cfg.search.rewriter_enabled_by_default = True
+    cfg.search.rewriter_cache_size = cache_size
+    return cfg
+
+
+def test_create_searcher_wraps_rewriter_when_cache_enabled():
+    cfg = _cfg(cache_size=128)
+    with mock.patch("localmail.db.open_pool"), \
+         mock.patch("localmail.search.embeddings.FastEmbedBackend"):
+        searcher = create_searcher(cfg)
+    assert isinstance(searcher._rewriter, CachingRewriter)
+    assert isinstance(searcher._rewriter._inner, OllamaLLMRewriter)
+
+
+def test_create_searcher_leaves_rewriter_bare_when_cache_disabled():
+    cfg = _cfg(cache_size=0)
+    with mock.patch("localmail.db.open_pool"), \
+         mock.patch("localmail.search.embeddings.FastEmbedBackend"):
+        searcher = create_searcher(cfg)
+    assert isinstance(searcher._rewriter, OllamaLLMRewriter)

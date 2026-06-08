@@ -21,6 +21,14 @@ from localmail.api.search_cursor import (
 )
 from localmail.config import SearchConfig
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
+from localmail.search.rewrite_status import (
+    NOT_ATTEMPTED,
+    NOT_REQUESTED,
+    NOTE_NOT_ATTEMPTED,
+    NOTE_UNAVAILABLE,
+    UNAVAILABLE,
+    rewrite_skipped_for_status,
+)
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
 
 
@@ -154,16 +162,19 @@ def run_search(
     """
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:
-        return {"results": [], "next_cursor": None, "total_estimate": 0,
-                "took_ms": 0.0, "rewrite_skipped": False}
+        # total_estimate is "estimate not computed" — uniformly None across
+        # every branch (#175). No rewrite was performed, so the empty-ACL
+        # short-circuit reports not_requested (#176).
+        return {"results": [], "next_cursor": None, "total_estimate": None,
+                "took_ms": 0.0, "rewrite_skipped": False,
+                "rewrite_status": NOT_REQUESTED, "rewrite_note": None}
 
     cfg = searcher.config
     # smart is a page-1 signal: continuation (cursor present) reuses the
     # cached enriched parse and never re-rewrites. effective_smart guards the
     # Searcher's "no rewriter configured" RuntimeError — when smart is asked
-    # for but unavailable, degrade gracefully and report rewrite_skipped.
+    # for but unavailable, degrade gracefully and report rewrite_status.
     effective_smart = smart and searcher.smart_available
-    rewrite_unavailable = cursor is None and smart and not searcher.smart_available
 
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
@@ -184,13 +195,27 @@ def run_search(
         page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)
 
     next_cursor = _next_cursor(page, cfg=cfg)
-    rewrite_skipped = rewrite_unavailable or bool(getattr(page, "rewrite_skipped", False))
+    status: str
+    note: str | None
+    if cursor is None:
+        if smart and not searcher.smart_available:
+            status, note = UNAVAILABLE, NOTE_UNAVAILABLE
+        else:
+            status = page.rewrite_status
+            note = page.rewrite_note
+    else:
+        if smart:
+            status, note = NOT_ATTEMPTED, NOTE_NOT_ATTEMPTED
+        else:
+            status, note = NOT_REQUESTED, None
     return {
         "results": [_to_api_result(r) for r in page.results],
         "next_cursor": next_cursor,
         "total_estimate": None,
         "took_ms": page.timing_ms.get("total", 0.0),
-        "rewrite_skipped": rewrite_skipped,
+        "rewrite_skipped": rewrite_skipped_for_status(status),
+        "rewrite_status": status,
+        "rewrite_note": note,
     }
 
 

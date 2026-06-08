@@ -209,7 +209,10 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     assert out["next_cursor"] is None
 
 
-def _fake_searcher_for_smart(*, smart_available: bool, page_rewrite_skipped: bool):
+def _fake_searcher_for_smart(
+    *, smart_available: bool, page_status: str = "not_requested",
+    page_note=None,
+):
     s = MagicMock()
     s.smart_available = smart_available
     page = MagicMock()
@@ -221,63 +224,75 @@ def _fake_searcher_for_smart(*, smart_available: bool, page_rewrite_skipped: boo
     page.candidates_per_arm = 50
     page.page = 1
     page.next_keyset = None
-    page.rewrite_skipped = page_rewrite_skipped
+    page.rewrite_status = page_status
+    page.rewrite_note = page_note
     s.search.return_value = page
     return s
 
 
 def test_run_search_forwards_smart_when_available():
-    s = _fake_searcher_for_smart(smart_available=True, page_rewrite_skipped=False)
+    s = _fake_searcher_for_smart(smart_available=True, page_status="applied")
     out = run_search(searcher=s, free_text="q", filters={}, limit=20,
                      allowed_account_ids=[1], user_id=9, smart=True)
     assert s.search.call_args.kwargs["smart"] is True
+    assert out["rewrite_status"] == "applied"
+    assert out["rewrite_note"] is None
     assert out["rewrite_skipped"] is False
 
 
-def test_run_search_smart_surfaces_page_rewrite_skipped():
-    s = _fake_searcher_for_smart(smart_available=True, page_rewrite_skipped=True)
+def test_run_search_smart_surfaces_page_failure():
+    s = _fake_searcher_for_smart(
+        smart_available=True, page_status="failed",
+        page_note="could not reach the rewriter service",
+    )
     out = run_search(searcher=s, free_text="q", filters={}, limit=20,
                      allowed_account_ids=[1], user_id=9, smart=True)
+    assert out["rewrite_status"] == "failed"
+    assert out["rewrite_note"] == "could not reach the rewriter service"
     assert out["rewrite_skipped"] is True
 
 
 def test_run_search_smart_without_rewriter_degrades_gracefully():
     """smart=True on a server with no rewriter: do NOT raise; run un-rewritten,
-    report rewrite_skipped=True, and still return the results dict."""
-    s = _fake_searcher_for_smart(smart_available=False, page_rewrite_skipped=False)
+    report status=unavailable (rewrite_skipped=True), and still return the dict."""
+    s = _fake_searcher_for_smart(smart_available=False)
     out = run_search(searcher=s, free_text="q", filters={}, limit=20,
                      allowed_account_ids=[1], user_id=9, smart=True)
     # effective_smart must be False so the searcher's RuntimeError guard never fires
     assert s.search.call_args.kwargs["smart"] is False
+    assert out["rewrite_status"] == "unavailable"
+    assert out["rewrite_note"] == "smart search is not configured on this server"
     assert out["rewrite_skipped"] is True
     assert "results" in out
 
 
 def test_run_search_default_smart_is_false():
-    s = _fake_searcher_for_smart(smart_available=True, page_rewrite_skipped=False)
+    s = _fake_searcher_for_smart(smart_available=True, page_status="not_requested")
     out = run_search(searcher=s, free_text="q", filters={}, limit=20,
                      allowed_account_ids=[1], user_id=9)
     assert s.search.call_args.kwargs["smart"] is False
+    assert out["rewrite_status"] == "not_requested"
     assert out["rewrite_skipped"] is False
 
 
-def test_run_search_empty_acl_short_circuit_includes_rewrite_skipped():
+def test_run_search_empty_acl_short_circuit_includes_rewrite_status():
     """The ACL short-circuit (no grants) keeps the stable wire shape."""
     s = MagicMock()
     out = run_search(searcher=s, free_text="q", filters={}, limit=20,
                      allowed_account_ids=[], user_id=9, smart=True)
-    assert out == {"results": [], "next_cursor": None,
-                   "total_estimate": 0, "took_ms": 0.0, "rewrite_skipped": False}
+    assert out == {"results": [], "next_cursor": None, "total_estimate": None,
+                   "took_ms": 0.0, "rewrite_skipped": False,
+                   "rewrite_status": "not_requested", "rewrite_note": None}
     s.search.assert_not_called()
 
 
-def test_run_search_smart_on_continuation_cursor_reports_false():
+def test_run_search_smart_on_continuation_cursor_reports_not_attempted():
     """smart is a page-1 signal: a pool-cursor continuation must NOT re-rewrite
-    (the cached enriched parse is reused) and reports rewrite_skipped=False even
-    when the caller re-sends smart=True."""
+    and reports not_attempted (rewrite_skipped stays False) even when the
+    caller re-sends smart=True."""
     from localmail.api.search_cursor import SearchCursor, encode_search_cursor
 
-    s = _fake_searcher_for_smart(smart_available=True, page_rewrite_skipped=False)
+    s = _fake_searcher_for_smart(smart_available=True, page_status="applied")
     # Continuation goes through searcher.continue_page, not searcher.search.
     s.continue_page.return_value = s.search.return_value
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
@@ -285,4 +300,9 @@ def test_run_search_smart_on_continuation_cursor_reports_false():
                      allowed_account_ids=[1], user_id=9, smart=True, cursor=cursor)
     s.search.assert_not_called()
     s.continue_page.assert_called_once()
+    assert out["rewrite_status"] == "not_attempted"
+    assert out["rewrite_note"] == (
+        "smart query rewriting applies to the first page only; "
+        "this is a continuation page"
+    )
     assert out["rewrite_skipped"] is False

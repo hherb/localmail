@@ -62,6 +62,11 @@ export interface SearchResponse {
   next_cursor: string | null;
   total_estimate: number | null;
   took_ms: number;
+  // Phase-4 smart rewrite outcome (#176). The GUI does not consume these;
+  // they are present on every wire response. Optional here so existing
+  // fixtures need no change.
+  rewrite_status?: string;
+  rewrite_note?: string | null;
 }
 
 /**

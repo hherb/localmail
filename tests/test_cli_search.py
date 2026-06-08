@@ -75,7 +75,9 @@ def test_search_prints_notice_when_rewrite_skipped(monkeypatch, cli_config):
     page = SearchPage(
         results=[], page=1, page_size=10, pool_size=0, candidates_per_arm=50,
         has_more_in_pool=False, can_grow_pool=False, search_token=None,
-        query=ParsedQuery(free_text="x"), timing_ms={}, rewrite_skipped=True,
+        query=ParsedQuery(free_text="x"), timing_ms={},
+        rewrite_status="failed",
+        rewrite_note="could not reach the rewriter service",
     )
 
     class _Stub:
@@ -85,7 +87,7 @@ def test_search_prints_notice_when_rewrite_skipped(monkeypatch, cli_config):
     monkeypatch.setattr("localmail.cli.create_searcher", lambda *a, **k: _Stub())
     res = CliRunner(capture="fd").invoke(main, ["search", "x", "--smart"])
     assert res.exit_code == 0
-    assert "rewrite skipped" in res.stderr.lower()
+    assert "could not reach the rewriter service" in res.stderr
 
 
 def test_cli_search_honours_config_flag(monkeypatch, tmp_path, db_dsn):

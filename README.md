@@ -639,10 +639,19 @@ rewriter is configured. Non-`--smart` search is completely unchanged.
 
 The same rewrite is available over the network read surfaces: `POST /v1/search`
 accepts a `smart` boolean in the request body, and the MCP `search` tool a
-`smart` parameter. Both responses carry a `rewrite_skipped` flag (always
-present). Unlike the CLI — which hard-errors when no rewriter is configured —
-the wire endpoints degrade gracefully: an un-rewritten search runs and
-`rewrite_skipped` is `true`.
+`smart` parameter. Unlike the CLI — which hard-errors when no rewriter is
+configured — the wire endpoints degrade gracefully: an un-rewritten search runs
+instead.
+
+Every search response describes what happened to the rewrite via three fields:
+
+- `rewrite_status` — one of `applied`, `unavailable` (smart requested but no
+  rewriter configured), `failed` (the rewrite errored), `not_attempted` (a
+  continuation page — `smart` applies to page 1 only), or `not_requested`.
+- `rewrite_note` — an optional curated, actionable detail (e.g. which
+  `ollama pull` fixes a missing model). `null` when there's nothing to say.
+- `rewrite_skipped` — kept for back-compat; `true` only for `unavailable` and
+  `failed`.
 
 ### Search from Python
 

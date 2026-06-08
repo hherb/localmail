@@ -35,9 +35,12 @@ def tool_search(
 ) -> dict[str, Any]:
     """Hybrid search, ACL-scoped. Page forward by passing back `next_cursor`.
 
-    `smart` opts into an LLM query rewrite (page 1 only); the response's
-    `rewrite_skipped` is True when the rewrite did not happen and the
-    un-rewritten query ran instead.
+    `smart` opts into an LLM query rewrite (page 1 only). The response carries
+    `rewrite_status` (one of `applied`, `unavailable`, `failed`,
+    `not_attempted`, `not_requested`) and an optional curated `rewrite_note`;
+    `rewrite_skipped` (kept for back-compat) is True only for `unavailable`
+    and `failed`. On a continuation page, `smart` is ignored and the status is
+    `not_attempted`.
     """
     return run_search(
         searcher=searcher,

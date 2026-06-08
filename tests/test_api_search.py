@@ -269,3 +269,20 @@ def test_run_search_empty_acl_short_circuit_includes_rewrite_skipped():
     assert out == {"results": [], "next_cursor": None,
                    "total_estimate": 0, "took_ms": 0.0, "rewrite_skipped": False}
     s.search.assert_not_called()
+
+
+def test_run_search_smart_on_continuation_cursor_reports_false():
+    """smart is a page-1 signal: a pool-cursor continuation must NOT re-rewrite
+    (the cached enriched parse is reused) and reports rewrite_skipped=False even
+    when the caller re-sends smart=True."""
+    from localmail.api.search_cursor import SearchCursor, encode_search_cursor
+
+    s = _fake_searcher_for_smart(smart_available=True, page_rewrite_skipped=False)
+    # Continuation goes through searcher.continue_page, not searcher.search.
+    s.continue_page.return_value = s.search.return_value
+    cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
+    out = run_search(searcher=s, free_text="q", filters={}, limit=20,
+                     allowed_account_ids=[1], user_id=9, smart=True, cursor=cursor)
+    s.search.assert_not_called()
+    s.continue_page.assert_called_once()
+    assert out["rewrite_skipped"] is False

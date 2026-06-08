@@ -468,6 +468,25 @@ applies on the page-1 branch only (`cursor is None`); continuation/keyset pages
 report `rewrite_skipped=false`. See
 [docs/superpowers/specs/2026-06-08-smart-over-mcp-http-design.md](docs/superpowers/specs/2026-06-08-smart-over-mcp-http-design.md).
 
+**Structured rewrite outcome (#176, #175):** every search response also carries
+`rewrite_status` — a 5-value enum (`applied` / `unavailable` / `failed` /
+`not_attempted` / `not_requested`) — and an optional curated `rewrite_note`
+(actionable detail, e.g. `rewriter model '…' is not available; pull it with:
+ollama pull …`). `rewrite_skipped` is **kept but now derived**
+(`rewrite_skipped_for_status(status) == status in {unavailable, failed}`). The
+pure module [search/rewrite_status.py](src/localmail/search/rewrite_status.py)
+holds the constants, the `classify_rewrite_failure(exc, *, model)` classifier
+(curated messages only — no raw exception text on the wire; model name is the
+sole interpolated value), and `rewrite_skipped_for_status`. `Searcher.search`
+classifies its own page-1 outcome onto `SearchPage.rewrite_status` /
+`.rewrite_note` (the `rewrite_skipped` *field* is gone from `SearchPage`);
+`api.search.run_search` owns the layer-specific statuses — `unavailable` (smart
+requested, no rewriter), `not_attempted` (continuation page — **the #176 fix**
+for the silent-no-op), and `not_requested` (smart off, or the empty-ACL
+short-circuit). The empty-ACL short-circuit also reports `total_estimate: None`
+(uniform with the normal path — **#175**; never `0`). See
+[docs/superpowers/specs/2026-06-08-rewrite-outcome-status-design.md](docs/superpowers/specs/2026-06-08-rewrite-outcome-status-design.md).
+
 **Phase 2 notes**:
 - `LightweightExtractor` handles 11 formats (PDF, DOCX, XLSX, PPTX, ODT, RTF,
   TXT, Markdown, HTML, CSV, ICS). `DoclingExtractor` is optional, enabled via the

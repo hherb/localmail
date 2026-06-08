@@ -53,6 +53,8 @@ def _fake_searcher_returning_one_hit():
     # Pool-cursor mock — explicit None keeps `_next_cursor` out of the
     # keyset branch (MagicMock's auto-attr would be truthy).
     page.next_keyset = None
+    # Explicit bool so JSON serialization doesn't choke on a MagicMock attr.
+    page.rewrite_skipped = False
     s.search.return_value = page
     return s
 
@@ -309,3 +311,57 @@ def test_search_cursor_forwarded_to_run_search(
     args = fake.continue_page.call_args
     assert args.args[0] == "tok-99"
     assert args.args[1] == 2
+
+
+def test_search_smart_param_is_forwarded_to_searcher(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    fake.smart_available = True
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20, "smart": True},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert fake.search.call_args.kwargs["smart"] is True
+    assert r.json()["rewrite_skipped"] is False
+
+
+def test_search_smart_defaults_false_and_response_carries_flag(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    fake.smart_available = True
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert fake.search.call_args.kwargs["smart"] is False
+    assert r.json()["rewrite_skipped"] is False
+
+
+def test_search_smart_without_rewriter_degrades(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    fake.smart_available = False
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20, "smart": True},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert fake.search.call_args.kwargs["smart"] is False
+    assert r.json()["rewrite_skipped"] is True

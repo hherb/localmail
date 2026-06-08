@@ -152,3 +152,33 @@ def test_name_model_and_close_delegate():
     assert cache.model == "fake-model"
     cache.close()
     assert inner.closed is True
+
+
+def test_concurrent_hot_key_does_not_corrupt():
+    inner = FakeRewriter()
+    cache = CachingRewriter(
+        inner, maxsize=128, ttl_s=1200, today_provider=_const_today(), clock=FakeClock()
+    )
+    results: list[RewriteResult] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            r = cache.rewrite("hot")
+            with lock:
+                results.append(r)
+        except BaseException as exc:  # pragma: no cover - failure path
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert len(results) == 16
+    assert all(r == results[0] for r in results)
+    assert len(cache._data) == 1

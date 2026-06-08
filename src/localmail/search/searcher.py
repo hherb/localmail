@@ -27,6 +27,12 @@ from localmail.search.page_cache import (
 )
 from localmail.search.query import ParsedQuery, parse_query
 from localmail.search.reranker import Reranker
+from localmail.search.rewrite_status import (
+    APPLIED,
+    FAILED,
+    NOT_REQUESTED,
+    classify_rewrite_failure,
+)
 from localmail.search.rewriter import QueryRewriter, RewriteParseError, apply_rewrite
 
 SortMode = Literal["rank", "date"]
@@ -249,7 +255,8 @@ class SearchPage:
     query: ParsedQuery
     timing_ms: dict[str, float]
     next_keyset: KeysetCursor | None = None
-    rewrite_skipped: bool = False
+    rewrite_status: str = NOT_REQUESTED
+    rewrite_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -888,7 +895,8 @@ class Searcher:
         parsed = parse_query(query)
         timing["parse"] = (time.monotonic() - t) * 1000
 
-        rewrite_skipped = False
+        rewrite_status = NOT_REQUESTED
+        rewrite_note: str | None = None
         if smart and parsed.free_text.strip():
             t = time.monotonic()
             try:
@@ -898,8 +906,10 @@ class Searcher:
                     parsed, result,
                     max_expansion_terms=cfg.rewriter_max_expansion_terms,
                 )
+                rewrite_status = APPLIED
             except (httpx.HTTPError, RewriteParseError) as exc:
-                rewrite_skipped = True
+                rewrite_status = FAILED
+                rewrite_note = classify_rewrite_failure(exc, model=cfg.rewriter_model)
                 log.warning("smart rewrite skipped: %s", exc)
             timing["rewrite"] = (time.monotonic() - t) * 1000
 
@@ -929,7 +939,8 @@ class Searcher:
                 can_grow_pool=False,
                 search_token=None, query=parsed, timing_ms=timing,
                 next_keyset=next_keyset,
-                rewrite_skipped=rewrite_skipped,
+                rewrite_status=rewrite_status,
+                rewrite_note=rewrite_note,
             )
 
         # Empty-query fallback: an empty `free_text` is the canonical
@@ -954,7 +965,8 @@ class Searcher:
                 pool_size=len(results), candidates_per_arm=cpa,
                 has_more_in_pool=False, can_grow_pool=False,
                 search_token=None, query=parsed, timing_ms=timing,
-                rewrite_skipped=rewrite_skipped,
+                rewrite_status=rewrite_status,
+                rewrite_note=rewrite_note,
             )
 
         with self._pool.connection() as conn:
@@ -1014,5 +1026,6 @@ class Searcher:
             has_more_in_pool=pool_size > effective_page_size,
             can_grow_pool=True,
             search_token=token, query=parsed, timing_ms=timing,
-            rewrite_skipped=rewrite_skipped,
+            rewrite_status=rewrite_status,
+            rewrite_note=rewrite_note,
         )

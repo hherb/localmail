@@ -38,6 +38,14 @@ class RaisingRewriter:
     def rewrite(self, free_text): raise httpx.ConnectError("down")
 
 
+class Status404Rewriter:
+    name = "missing-model"; model = "granite4.1:3b-q8_0"
+    def rewrite(self, free_text):
+        request = httpx.Request("POST", "http://localhost:11434/api/generate")
+        response = httpx.Response(404, request=request)
+        raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+
 def _seed_one(conn):
     with conn.cursor() as cur:
         cur.execute("INSERT INTO accounts (name,email_address,imap_host,auth_method)"
@@ -86,7 +94,8 @@ def test_smart_enriches_parsed_and_times_rewrite(db_dsn, db_conn):
     assert page.query.rewritten_text == "rich"
     assert page.query.expansion_terms == ["syn"]
     assert "rewrite" in page.timing_ms
-    assert page.rewrite_skipped is False
+    assert page.rewrite_status == "applied"
+    assert page.rewrite_note is None
 
 
 def test_smart_falls_through_on_rewriter_failure(db_dsn, db_conn, caplog):
@@ -101,9 +110,26 @@ def test_smart_falls_through_on_rewriter_failure(db_dsn, db_conn, caplog):
             page = s.search("test", smart=True, use_cache=False)
     finally:
         pool.close()
-    assert page.rewrite_skipped is True
+    assert page.rewrite_status == "failed"
+    assert page.rewrite_note == "could not reach the rewriter service"
     assert page.query.rewritten_text is None          # un-rewritten
     assert any("rewrite skipped" in r.message for r in caplog.records)
+
+
+def test_smart_failed_404_yields_model_pull_note(db_dsn, db_conn):
+    _seed_one(db_conn)
+    cfg = SearchConfig(rewriter_model="granite4.1:3b-q8_0")
+    run_embed_worker_once(db_conn, cfg, _E())
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(),
+                     rewriter=Status404Rewriter())
+        page = s.search("test", smart=True, use_cache=False)
+    finally:
+        pool.close()
+    assert page.rewrite_status == "failed"
+    assert "granite4.1:3b-q8_0" in page.rewrite_note
+    assert "ollama pull granite4.1:3b-q8_0" in page.rewrite_note
 
 
 def test_smart_expansion_applies_on_sort_date_path(db_dsn, db_conn):

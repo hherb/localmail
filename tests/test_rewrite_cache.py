@@ -72,3 +72,45 @@ def test_distinct_queries_each_call_inner():
     cache.rewrite("a")
     cache.rewrite("b")
     assert inner.calls == ["a", "b"]
+
+
+def test_ttl_expiry_recalls_inner():
+    inner = FakeRewriter()
+    clock = FakeClock()
+    cache = CachingRewriter(
+        inner, maxsize=128, ttl_s=100.0, today_provider=_const_today(), clock=clock
+    )
+    cache.rewrite("q")
+    clock.t = 100.5
+    cache.rewrite("q")
+    assert inner.calls == ["q", "q"]
+
+
+def test_date_is_part_of_key():
+    inner = FakeRewriter()
+    today = {"d": _date(2026, 6, 9)}
+    cache = CachingRewriter(
+        inner,
+        maxsize=128,
+        ttl_s=1200,
+        today_provider=lambda: today["d"],
+        clock=FakeClock(),
+    )
+    cache.rewrite("q")
+    today["d"] = _date(2026, 6, 10)
+    cache.rewrite("q")
+    assert inner.calls == ["q", "q"]
+
+
+def test_lru_evicts_least_recently_used():
+    inner = FakeRewriter()
+    cache = CachingRewriter(
+        inner, maxsize=2, ttl_s=1200, today_provider=_const_today(), clock=FakeClock()
+    )
+    cache.rewrite("a")
+    cache.rewrite("b")
+    cache.rewrite("a")
+    cache.rewrite("c")
+    cache.rewrite("a")
+    cache.rewrite("b")
+    assert inner.calls == ["a", "b", "c", "b"]

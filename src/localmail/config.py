@@ -353,6 +353,11 @@ class SearchConfig(BaseModel):
     rewriter_model: str = "granite4.1:3b-q8_0"
     rewriter_timeout_s: float = 10.0
     rewriter_max_expansion_terms: int = 8
+    # Bounded per-process LRU+TTL cache for `--smart` rewrite results, keyed on
+    # (today, free_text). Repeated identical smart queries skip a fresh Ollama
+    # call. Entries are tiny, so the size can exceed page_cache_size. 0 disables.
+    rewriter_cache_size: int = 128
+    rewriter_cache_ttl_s: int = 1200
 
     # --- Phase 1 embed worker ---
     # Controls the background thread that chunks messages and writes embeddings.

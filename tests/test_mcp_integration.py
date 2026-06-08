@@ -3,6 +3,7 @@ import asyncio
 import threading
 import time
 
+import httpx
 import pytest
 import uvicorn
 
@@ -19,6 +20,24 @@ from localmail.serve.app import create_app
 # lazily), so this gate sits after them.
 pytest.importorskip("mcp")
 pytestmark = pytest.mark.integration
+
+# The non-deprecated streamable_http_client takes a caller-built httpx client
+# instead of a headers= kwarg. Mirror the MCP SDK's own client defaults so
+# behaviour is unchanged: connect 30s / SSE read 300s (a default httpx 5s read
+# timeout could prematurely close a server->client stream) and, crucially,
+# follow_redirects=True — the /mcp sub-app redirects to /mcp/ with a 307 that an
+# unconfigured httpx client (follow_redirects=False) would surface as an error.
+_MCP_CONNECT_TIMEOUT_S = 30.0
+_MCP_SSE_READ_TIMEOUT_S = 300.0
+
+
+def _mcp_http_client(headers: dict[str, str] | None = None) -> httpx.AsyncClient:
+    """httpx client configured like the MCP SDK's own streamable-HTTP defaults."""
+    return httpx.AsyncClient(
+        headers=headers,
+        timeout=httpx.Timeout(_MCP_CONNECT_TIMEOUT_S, read=_MCP_SSE_READ_TIMEOUT_S),
+        follow_redirects=True,
+    )
 
 
 def _seed(db_conn):
@@ -60,22 +79,23 @@ def _start(app):
 
 async def _drive(port, token, granted):
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
     url = f"http://127.0.0.1:{port}/mcp"
     headers = {"Authorization": f"Bearer {token}"}
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            names = {t.name for t in tools.tools}
-            assert names == {"search", "get_message", "get_attachment",
-                             "list_messages", "list_accounts"}, names
-            accounts_res = await session.call_tool("list_accounts", {})
-            search_res = await session.call_tool(
-                "search", {"query": "invoice", "sort": "date"})
-            smart_res = await session.call_tool(
-                "search", {"query": "invoice", "sort": "date", "smart": True})
-            return accounts_res, search_res, smart_res
+    async with _mcp_http_client(headers) as client:
+        async with streamable_http_client(url, http_client=client) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                names = {t.name for t in tools.tools}
+                assert names == {"search", "get_message", "get_attachment",
+                                 "list_messages", "list_accounts"}, names
+                accounts_res = await session.call_tool("list_accounts", {})
+                search_res = await session.call_tool(
+                    "search", {"query": "invoice", "sort": "date"})
+                smart_res = await session.call_tool(
+                    "search", {"query": "invoice", "sort": "date", "smart": True})
+                return accounts_res, search_res, smart_res
 
 
 def _payload(call_result):
@@ -131,10 +151,12 @@ def test_mcp_rejects_missing_bearer(db_dsn, db_conn):
 
     async def _no_auth(port):
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-        async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp") as (r, w, _):
-            async with ClientSession(r, w) as session:
-                await session.initialize()
+        from mcp.client.streamable_http import streamable_http_client
+        url = f"http://127.0.0.1:{port}/mcp"
+        async with _mcp_http_client() as client:
+            async with streamable_http_client(url, http_client=client) as (r, w, _):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
 
     try:
         with pytest.raises(Exception):

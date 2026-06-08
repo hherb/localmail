@@ -145,6 +145,13 @@ def build_mcp_server(
         lang: Annotated[str | None, Field(description=(
             'Restrict to a detected body language by ISO 639-1 code '
             '(e.g. "en", "de", "ja").'))] = None,
+        smart: Annotated[bool, Field(description=(
+            "Opt into an LLM query rewrite of the free-text query before "
+            "searching (page 1 only): a richer vector query, synonym expansion "
+            "OR-ed into the keyword arms, and natural-language filters. The "
+            "response field `rewrite_skipped` is true when the rewrite did not "
+            "happen (no rewriter configured, or the rewrite call failed) and "
+            "the original query ran instead. Defaults to false."))] = False,
     ) -> dict[str, Any]:
         """Hybrid lexical + vector search over message text and extracted
         attachment text — the default way to answer "find mail about X".
@@ -185,6 +192,7 @@ def build_mcp_server(
                 limit=limit,
                 cursor=cursor,
                 filters=filters,
+                smart=smart,
             )
         except SearchCursorExpired as exc:
             raise ToolError(

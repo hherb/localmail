@@ -74,3 +74,10 @@ def test_search_filter_params_are_each_documented(tools_by_name):
     ):
         assert (params[pname].get("description") or "").strip(), (
             f"search.{pname} is undocumented")
+
+
+def test_search_tool_exposes_documented_smart_param(tools_by_name):
+    params = _params(tools_by_name["search"])
+    assert "smart" in params, "search tool must expose a smart param"
+    assert (params["smart"].get("description") or "").strip(), \
+        "search.smart must be documented"

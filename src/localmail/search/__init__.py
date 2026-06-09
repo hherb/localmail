@@ -98,6 +98,14 @@ def create_searcher(
                     "rewriter_model", cfg.search.rewriter_model, exc,
                 )
                 rewriter = None
+            if rewriter is not None and cfg.search.rewriter_cache_size > 0:
+                from localmail.search.rewrite_cache import CachingRewriter
+
+                rewriter = CachingRewriter(
+                    rewriter,
+                    maxsize=cfg.search.rewriter_cache_size,
+                    ttl_s=cfg.search.rewriter_cache_ttl_s,
+                )
         else:
             rewriter = None
 

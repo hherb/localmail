@@ -632,10 +632,18 @@ rewriter_model = "granite4.1:3b-q8_0"    # any Ollama chat model
 rewriter_timeout_s = 10.0                # fall through if the LLM is slower
 rewriter_max_expansion_terms = 8         # cap on synonyms OR-ed into the lexical arms
 ollama_host = "http://localhost:11434"
+rewriter_cache_size = 128                # cache repeated --smart rewrites; 0 disables
+rewriter_cache_ttl_s = 1200              # cache entry lifetime in seconds
 ```
 
 Without `rewriter_enabled_by_default = true`, passing `--smart` reports that no
 rewriter is configured. Non-`--smart` search is completely unchanged.
+
+Successful rewrites are memoised in a bounded per-process LRU+TTL cache keyed on
+`(today, free_text)`, so a repeated identical `--smart` query skips a fresh
+Ollama call (the date is part of the key, so relative dates like "last summer"
+re-resolve after midnight). Failures are never cached. Set
+`rewriter_cache_size = 0` to disable the cache entirely.
 
 The same rewrite is available over the network read surfaces: `POST /v1/search`
 accepts a `smart` boolean in the request body, and the MCP `search` tool a

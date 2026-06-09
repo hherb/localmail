@@ -1,19 +1,25 @@
-from localmail.config import SearchConfig
+import threading
+from datetime import date as _date
+from unittest import mock
+
+import httpx
+import pytest
+
+from localmail.config import LocalmailConfig, SearchConfig
+from localmail.search import create_searcher
+from localmail.search.query import SearchFilters
+from localmail.search.rewrite_cache import CachingRewriter
+from localmail.search.rewriter import (
+    OllamaLLMRewriter,
+    RewriteParseError,
+    RewriteResult,
+)
 
 
 def test_searchconfig_has_rewriter_cache_defaults():
     cfg = SearchConfig()
     assert cfg.rewriter_cache_size == 128
     assert cfg.rewriter_cache_ttl_s == 1200
-import threading
-from datetime import date as _date
-
-import httpx
-import pytest
-
-from localmail.search.rewrite_cache import CachingRewriter
-from localmail.search.query import SearchFilters
-from localmail.search.rewriter import RewriteParseError, RewriteResult
 
 
 class FakeRewriter:
@@ -182,13 +188,6 @@ def test_concurrent_hot_key_does_not_corrupt():
     assert len(results) == 16
     assert all(r == results[0] for r in results)
     assert len(cache._data) == 1
-
-
-from unittest import mock
-
-from localmail.config import LocalmailConfig
-from localmail.search import create_searcher
-from localmail.search.rewriter import OllamaLLMRewriter
 
 
 def _cfg(*, cache_size: int) -> LocalmailConfig:

@@ -5,6 +5,10 @@ import logging
 import os
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from starlette.routing import Route
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -107,7 +111,7 @@ def create_app(
 
     mcp_server = None
     mcp_app = None
-    mcp_discovery_routes: list = []
+    mcp_discovery_routes: list[Route] = []
     if enable_mcp:
         mcp_server, mcp_app, mcp_discovery_routes = _try_build_mcp(
             pool, searcher, mcp_config or McpConfig()

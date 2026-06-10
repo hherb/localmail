@@ -39,3 +39,59 @@ def test_resolve_authorization_servers_empty_list_falls_back():
     # treat it like None so we never emit an empty authorization_servers.
     issuer = AnyHttpUrl("https://host:8443")
     assert resolve_authorization_servers([], issuer) == [issuer]
+
+
+import pytest
+
+pytest.importorskip("mcp")  # build_protected_resource_routes needs the SDK
+
+from localmail.config import McpConfig  # noqa: E402
+from localmail.mcp.discovery import build_protected_resource_routes  # noqa: E402
+
+
+def test_build_routes_registers_canonical_path():
+    routes = build_protected_resource_routes(
+        McpConfig(resource_server_url="https://host:8443")
+    )
+    paths = [r.path for r in routes]
+    assert paths == ["/.well-known/oauth-protected-resource/mcp"]
+
+
+def test_build_routes_serves_expected_document():
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    routes = build_protected_resource_routes(
+        McpConfig(
+            resource_server_url="https://host:8443",
+            issuer_url="https://host:8443",
+        )
+    )
+    client = TestClient(Starlette(routes=routes))
+    resp = client.get("/.well-known/oauth-protected-resource/mcp")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["resource"] == "https://host:8443/mcp"
+    assert body["authorization_servers"] == ["https://host:8443/"]
+    assert body["resource_name"] == "localmail"
+    assert body["bearer_methods_supported"] == ["header"]
+
+
+def test_build_routes_honours_explicit_authorization_servers():
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    routes = build_protected_resource_routes(
+        McpConfig(
+            resource_server_url="https://host:8443",
+            authorization_servers=["https://idp.example/"],
+        )
+    )
+    client = TestClient(Starlette(routes=routes))
+    body = client.get("/.well-known/oauth-protected-resource/mcp").json()
+    assert body["authorization_servers"] == ["https://idp.example/"]
+
+
+def test_build_protected_resource_routes_exported_from_package():
+    import localmail.mcp as pkg
+    assert hasattr(pkg, "build_protected_resource_routes")

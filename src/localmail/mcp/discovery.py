@@ -45,3 +45,23 @@ def resolve_authorization_servers(
     an empty list); an explicit non-empty list wins.
     """
     return configured if configured else [issuer_url]
+
+
+def build_protected_resource_routes(config: McpConfig) -> list:
+    """RFC 9728 protected-resource-metadata route(s) for the top-level serve app.
+
+    Returns a list of `starlette.routing.Route`; conformance of the emitted
+    document comes from the SDK. The single route lands at the canonical
+    `/.well-known/oauth-protected-resource/mcp` (origin root, well-known segment
+    inserted between host and resource path per RFC 9728 §3.1).
+    """
+    from mcp.server.auth.routes import create_protected_resource_routes
+
+    return create_protected_resource_routes(
+        resource_url=AnyHttpUrl(mcp_resource_url(str(config.resource_server_url))),
+        authorization_servers=resolve_authorization_servers(
+            config.authorization_servers, config.issuer_url
+        ),
+        scopes_supported=[],
+        resource_name=RESOURCE_NAME,
+    )

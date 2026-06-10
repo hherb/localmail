@@ -1,9 +1,16 @@
 """RFC 9728 protected-resource discovery helpers for the MCP server."""
 import pytest
 
-from pydantic import AnyHttpUrl
+# Importing `localmail.mcp.discovery` executes `localmail/mcp/__init__.py`, which
+# eagerly imports the SDK-bound `server` module — so the whole file (even the
+# pure-helper tests) needs the [mcp] extra. Gate at the top, like the sibling
+# test_mcp_* files, so the bare suite skips cleanly instead of erroring on
+# collection.
+pytest.importorskip("mcp")
 
-from localmail.mcp.discovery import (
+from pydantic import AnyHttpUrl  # noqa: E402
+
+from localmail.mcp.discovery import (  # noqa: E402
     MCP_MOUNT_PATH,
     mcp_resource_url,
     resolve_authorization_servers,
@@ -42,8 +49,6 @@ def test_resolve_authorization_servers_empty_list_falls_back():
     issuer = AnyHttpUrl("https://host:8443")
     assert resolve_authorization_servers([], issuer) == [issuer]
 
-
-pytest.importorskip("mcp")  # build_protected_resource_routes needs the SDK
 
 from localmail.config import McpConfig  # noqa: E402
 from localmail.mcp.discovery import build_protected_resource_routes  # noqa: E402
@@ -142,5 +147,29 @@ def test_prm_route_absent_by_default(db_dsn):
     app = create_app(db_dsn=db_dsn)
     try:
         assert not _has_prm_route(app)
+    finally:
+        app.state.pool.close()
+
+
+def test_prm_route_served_publicly_through_full_app(db_dsn):
+    # End-to-end: GET the canonical PRM path through the real create_app stack
+    # (middleware included). It must be reachable without auth and return the
+    # metadata document — a route merely being present in app.routes wouldn't
+    # catch a middleware that shadows or rejects it.
+    from localmail.serve.app import create_app
+
+    app = create_app(
+        db_dsn=db_dsn,
+        enable_mcp=True,
+        mcp_config=McpConfig(
+            enabled=True, resource_server_url="https://host:8443"
+        ),
+    )
+    try:
+        resp = TestClient(app).get(_PRM_PATH)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["resource"] == "https://host:8443/mcp"
+        assert body["resource_name"] == "localmail"
     finally:
         app.state.pool.close()

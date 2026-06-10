@@ -152,9 +152,12 @@ Token acquisition stays out-of-band (`POST /v1/auth/login`), documented in
   metadata — the explicit scope boundary. Adding a full AS is a clean future
   follow-up for which this PRM surface is a prerequisite, so this is not
   throwaway work.
-- **The SDK's non-canonical sub-mounted PRM copy stays.** It lives at
-  `/mcp/.well-known/oauth-protected-resource…` (harmless — no spec client queries
-  it); the top-level root route is authoritative. If the operator sets
+- **The SDK's non-canonical sub-mounted PRM copy stays.** Because we pass the
+  full resource URL (`<origin>/mcp`) to `AuthSettings.resource_server_url`, the
+  SDK's in-mount copy derives its own path from that and lands at
+  `/mcp/.well-known/oauth-protected-resource/mcp` (the well-known segment plus a
+  duplicated `/mcp`) — harmless, as no spec client queries it; the top-level root
+  route is authoritative. If the operator sets
   `authorization_servers` to something other than `[issuer_url]`, the
   sub-mounted copy (built by the SDK from `AuthSettings.issuer_url`) can list a
   different value than the canonical root doc — accepted as a minor known wart,

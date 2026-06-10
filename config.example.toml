@@ -169,6 +169,10 @@ stale_seconds = 60
 #                              # real external authorization server only if one
 #                              # mints tokens this server accepts — localmail
 #                              # itself is not an OAuth authorization server.
+# NOTE: when fronting localmail externally, set issuer_url (and, if you don't
+# override authorization_servers, it follows issuer_url) to the same external
+# origin as resource_server_url — otherwise the metadata advertises a localhost
+# authorization server alongside your real resource URL.
 
 # --- upgrade preflight --------------------------------------------------------
 

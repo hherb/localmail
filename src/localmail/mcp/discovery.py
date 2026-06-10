@@ -13,9 +13,14 @@ challenge + the metadata document), nothing more.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import AnyHttpUrl
 
 from localmail.config import McpConfig
+
+if TYPE_CHECKING:
+    from starlette.routing import Route
 
 # The path FastMCP is mounted at inside `localmail serve` (app.mount("/mcp", …)).
 # Kept here so the RFC 9728 resource URL and the SDK-derived metadata route path
@@ -47,7 +52,7 @@ def resolve_authorization_servers(
     return configured if configured else [issuer_url]
 
 
-def build_protected_resource_routes(config: McpConfig) -> list:
+def build_protected_resource_routes(config: McpConfig) -> list[Route]:
     """RFC 9728 protected-resource-metadata route(s) for the top-level serve app.
 
     Returns a list of `starlette.routing.Route`; conformance of the emitted

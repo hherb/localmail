@@ -1,4 +1,6 @@
 """RFC 9728 protected-resource discovery helpers for the MCP server."""
+import pytest
+
 from pydantic import AnyHttpUrl
 
 from localmail.mcp.discovery import (
@@ -41,12 +43,12 @@ def test_resolve_authorization_servers_empty_list_falls_back():
     assert resolve_authorization_servers([], issuer) == [issuer]
 
 
-import pytest
-
 pytest.importorskip("mcp")  # build_protected_resource_routes needs the SDK
 
 from localmail.config import McpConfig  # noqa: E402
 from localmail.mcp.discovery import build_protected_resource_routes  # noqa: E402
+from starlette.applications import Starlette  # noqa: E402
+from starlette.testclient import TestClient  # noqa: E402
 
 
 def test_build_routes_registers_canonical_path():
@@ -58,9 +60,6 @@ def test_build_routes_registers_canonical_path():
 
 
 def test_build_routes_serves_expected_document():
-    from starlette.applications import Starlette
-    from starlette.testclient import TestClient
-
     routes = build_protected_resource_routes(
         McpConfig(
             resource_server_url="https://host:8443",
@@ -78,9 +77,6 @@ def test_build_routes_serves_expected_document():
 
 
 def test_build_routes_honours_explicit_authorization_servers():
-    from starlette.applications import Starlette
-    from starlette.testclient import TestClient
-
     routes = build_protected_resource_routes(
         McpConfig(
             resource_server_url="https://host:8443",

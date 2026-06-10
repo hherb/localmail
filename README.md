@@ -493,6 +493,15 @@ via `POST /v1/auth/login` (refresh via `/v1/auth/refresh`) and passes it as
 `Authorization: Bearer <token>`. Every tool is scoped to the user's per-account
 grants (`localmail grant-account`), so a new user sees no mail until granted.
 
+A spec-strict client can also **discover** that `/mcp` is a protected resource
+(RFC 9728): an unauthenticated request gets a `401` whose `WWW-Authenticate`
+challenge points at `/.well-known/oauth-protected-resource/mcp`, served at the
+origin root. localmail is **not** an OAuth authorization server — discovery only
+advertises the resource; the token is still obtained out-of-band via
+`/v1/auth/login`. Set `[mcp].resource_server_url` (and `issuer_url`) to the
+externally reachable origin so the challenge and metadata are correct behind a
+proxy.
+
 Five read-only tools:
 
 - `search` — hybrid lexical + vector search; page forward with `next_cursor`.

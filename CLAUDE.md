@@ -1207,8 +1207,32 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
 - Tools return structured content; `SearchCursorExpired` / `NotFound` /
   `ValidationFailed` map to clean `ToolError`s. Raw attachment bytes are
   intentionally NOT exposed over MCP (HTTP `/v1/attachments` only). **Deferred
-  follow-ups**: full OAuth 2.1 discovery (Approach B); richer per-tool
-  docstrings; `McpConfig` URL fields as `AnyHttpUrl`.
+  follow-ups**: full OAuth 2.1 **authorization server** (`/authorize`, `/token`,
+  dynamic client registration) — the *discovery surface* half of "Approach B"
+  is now shipped (see next bullet); richer per-tool docstrings.
+- **RFC 9728 protected-resource discovery (shipped — "Approach B" discovery half):**
+  a spec-strict MCP client can discover `/mcp` as a protected resource without
+  localmail becoming an OAuth authorization server (it stays opaque-bearer;
+  tokens come from `/v1/auth/login` out-of-band). The pure module
+  [src/localmail/mcp/discovery.py](src/localmail/mcp/discovery.py) holds
+  `MCP_MOUNT_PATH`/`RESOURCE_NAME`, `mcp_resource_url(base)` (origin + `/mcp`,
+  trailing-slash-safe), `resolve_authorization_servers(configured, issuer)`
+  (`configured or [issuer_url]`), and the one SDK-touching wrapper
+  `build_protected_resource_routes(config)` (function-level SDK import so the
+  module stays import-safe). Two halves make the surface reachable: (1)
+  `build_mcp_server` passes `AnyHttpUrl(mcp_resource_url(...))` as
+  `AuthSettings.resource_server_url`, so the SDK's 401 `WWW-Authenticate`
+  challenge advertises the canonical root URL
+  `/.well-known/oauth-protected-resource/mcp`; (2) `create_app` registers the
+  SDK's `create_protected_resource_routes` on the **top-level** app (public,
+  via `_try_build_mcp` → `app.router.routes.extend(...)`) at that exact path —
+  the SDK's own sub-mounted copy lands at the non-canonical
+  `/mcp/.well-known/oauth-protected-resource/mcp` and is left alone (harmless).
+  New config `McpConfig.authorization_servers: list[AnyHttpUrl] | None = None`
+  (operator-configurable; defaults to `[issuer_url]`). `resource_server_url`
+  stays the bare public origin (no `/mcp`; appended internally). No migration,
+  no new dependency. Design:
+  [docs/superpowers/specs/2026-06-10-mcp-protected-resource-discovery-design.md](docs/superpowers/specs/2026-06-10-mcp-protected-resource-discovery-design.md).
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`

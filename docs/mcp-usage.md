@@ -80,8 +80,20 @@ The response is `{"token": "<bearer>", "expires_at": "<iso8601>"}`. Use that
 separate refresh-token credential** — `POST /v1/auth/refresh` rotates the
 existing bearer: send the current token in `Authorization: Bearer <token>` and
 receive a new `{"token", "expires_at"}` in return; the old token is revoked.
-There is **no OAuth authorization-server flow** for MCP in this model: the
-client configures the token directly. (See the [GUI server](../README.md#gui-server)
+**Discovery (RFC 9728):** a spec-strict MCP client can discover that `/mcp` is a
+protected resource. An unauthenticated request to `/mcp` returns `401` with a
+`WWW-Authenticate: Bearer … resource_metadata="…"` challenge pointing at
+`/.well-known/oauth-protected-resource/mcp` (served at the origin root), whose
+JSON document advertises the `resource`, `authorization_servers`, and supported
+bearer methods. Set `[mcp].resource_server_url` to the externally reachable
+origin so the challenge and the metadata are correct behind a proxy.
+
+There is still **no OAuth authorization-server flow** — localmail does not
+implement `/authorize`, `/token`, or dynamic client registration. Discovery only
+tells the client *where* the resource is and that it is bearer-protected; the
+token itself is obtained out-of-band via `/v1/auth/login` and configured on the
+client directly. A client that *requires* the full OAuth dance will not
+auto-negotiate end-to-end. (See the [GUI server](../README.md#gui-server)
 section of the README for the full auth route reference.)
 
 ### 5. Run the server

@@ -504,15 +504,24 @@ class McpConfig(BaseModel):
     `enabled` is true AND the optional `mcp` extra is installed. Disabled by
     default; set `enabled = true` to opt in, mirroring `search.reranker_enabled`.
 
-    `issuer_url` / `resource_server_url` are advertised in the MCP OAuth
-    resource-metadata the SDK exposes. Opaque-bearer clients (the v1 model)
-    configure their token directly and ignore these; set them to the public
-    serve URL for spec-strict MCP clients.
+    `issuer_url` / `resource_server_url` are advertised in the RFC 9728
+    protected-resource metadata. `resource_server_url` is the **public origin**
+    of the serve deployment (no `/mcp` suffix — the mount path is appended
+    internally); set it to the externally reachable URL so the metadata served
+    at `/.well-known/oauth-protected-resource/mcp` and the `WWW-Authenticate`
+    challenge agree. Tokens stay opaque-bearer, obtained out-of-band via
+    `/v1/auth/login`; localmail is not an OAuth authorization server.
+
+    `authorization_servers` is advertised in the metadata's required
+    `authorization_servers` field. `None` falls back to `[issuer_url]`; set an
+    explicit list to point spec-strict clients at a real external authorization
+    server whose tokens `LocalmailTokenVerifier` accepts.
     """
 
     enabled: bool = False
     issuer_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
     resource_server_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
+    authorization_servers: list[AnyHttpUrl] | None = None
 
 
 class Config(BaseModel):

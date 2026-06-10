@@ -25,3 +25,19 @@ def test_mcp_rejects_malformed_url():
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         McpConfig(issuer_url="not-a-url")
+
+
+def test_mcp_authorization_servers_default_none():
+    assert McpConfig().authorization_servers is None
+
+
+def test_config_parses_mcp_authorization_servers():
+    cfg = McpConfig(authorization_servers=["https://idp.example/"])
+    assert [str(u) for u in cfg.authorization_servers] == ["https://idp.example/"]
+
+
+def test_mcp_rejects_malformed_authorization_server_url():
+    import pytest
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        McpConfig(authorization_servers=["not-a-url"])

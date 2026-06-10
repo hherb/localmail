@@ -158,8 +158,17 @@ stale_seconds = 60
 # [mcp]
 # enabled = false              # mount the MCP server at /mcp inside `localmail serve`
 #                              # (requires the optional extra: uv sync --extra mcp)
-# issuer_url = "https://your-host:8443"          # advertised in OAuth resource metadata
-# resource_server_url = "https://your-host:8443" # (opaque-bearer clients ignore these)
+# issuer_url = "https://your-host:8443"          # advertised in RFC 9728 metadata
+# resource_server_url = "https://your-host:8443" # public origin (NO /mcp suffix;
+#                              # appended internally). Set to the externally
+#                              # reachable URL so the metadata at
+#                              # /.well-known/oauth-protected-resource/mcp and the
+#                              # 401 WWW-Authenticate challenge agree.
+# authorization_servers = ["https://your-host:8443"]   # required PRM field;
+#                              # defaults to [issuer_url] when unset. Point at a
+#                              # real external authorization server only if one
+#                              # mints tokens this server accepts — localmail
+#                              # itself is not an OAuth authorization server.
 
 # --- upgrade preflight --------------------------------------------------------
 

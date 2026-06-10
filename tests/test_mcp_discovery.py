@@ -115,3 +115,32 @@ def test_challenge_resource_metadata_matches_canonical_url():
         'resource_metadata="https://host:8443/.well-known/oauth-protected-resource/mcp"'
         in challenge
     )
+
+
+_PRM_PATH = "/.well-known/oauth-protected-resource/mcp"
+
+
+def _has_prm_route(app) -> bool:
+    return any(getattr(r, "path", None) == _PRM_PATH for r in app.routes)
+
+
+def test_prm_route_present_when_mcp_enabled(db_dsn):
+    from localmail.serve.app import create_app
+
+    app = create_app(
+        db_dsn=db_dsn, enable_mcp=True, mcp_config=McpConfig(enabled=True)
+    )
+    try:
+        assert _has_prm_route(app)
+    finally:
+        app.state.pool.close()
+
+
+def test_prm_route_absent_by_default(db_dsn):
+    from localmail.serve.app import create_app
+
+    app = create_app(db_dsn=db_dsn)
+    try:
+        assert not _has_prm_route(app)
+    finally:
+        app.state.pool.close()

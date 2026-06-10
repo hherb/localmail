@@ -52,16 +52,20 @@ from localmail.serve.routes import version as version_routes
 
 
 def _try_build_mcp(pool, searcher, mcp_config):
-    """Build the FastMCP server + ASGI app, or (None, None) if the extra is absent."""
+    """Build the FastMCP server + ASGI app + RFC 9728 discovery routes.
+
+    Returns (None, None, []) if the [mcp] extra is absent.
+    """
     try:
-        from localmail.mcp import build_mcp_server
+        from localmail.mcp import build_mcp_server, build_protected_resource_routes
     except ImportError:
         logging.getLogger("localmail.serve").info(
             "MCP enabled but the [mcp] extra is not installed; skipping /mcp mount"
         )
-        return None, None
+        return None, None, []
     server = build_mcp_server(pool, searcher=searcher, config=mcp_config)
-    return server, server.streamable_http_app()
+    routes = build_protected_resource_routes(mcp_config)
+    return server, server.streamable_http_app(), routes
 
 
 def create_app(
@@ -103,8 +107,11 @@ def create_app(
 
     mcp_server = None
     mcp_app = None
+    mcp_discovery_routes: list = []
     if enable_mcp:
-        mcp_server, mcp_app = _try_build_mcp(pool, searcher, mcp_config or McpConfig())
+        mcp_server, mcp_app, mcp_discovery_routes = _try_build_mcp(
+            pool, searcher, mcp_config or McpConfig()
+        )
 
     # Plane B supervisor: a real subprocess owner when we supervise the daemon,
     # else a stub reporting `external`. Constructing it is side-effect-free —
@@ -165,6 +172,7 @@ def create_app(
 
     if mcp_app is not None:
         app.mount("/mcp", mcp_app)
+        app.router.routes.extend(mcp_discovery_routes)
 
     # Exception handler for APIError raised inside route handlers / dependencies.
     # FastAPI's DI layer catches these before BaseHTTPMiddleware sees them, so we

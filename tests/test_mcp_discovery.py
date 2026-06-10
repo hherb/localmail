@@ -93,26 +93,22 @@ def test_build_protected_resource_routes_exported_from_package():
     assert hasattr(pkg, "build_protected_resource_routes")
 
 
-def test_challenge_resource_metadata_matches_canonical_url(db_dsn):
-    from psycopg_pool import ConnectionPool
+def test_challenge_resource_metadata_matches_canonical_url():
+    from unittest.mock import MagicMock
 
     from localmail.mcp import build_mcp_server
 
-    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
-    try:
-        server = build_mcp_server(
-            pool,
-            searcher=None,
-            config=McpConfig(enabled=True, resource_server_url="https://host:8443"),
-        )
-        client = TestClient(server.streamable_http_app())
-        resp = client.post(
-            "/",
-            json={"jsonrpc": "2.0", "method": "initialize", "id": 1},
-            headers={"Accept": "application/json, text/event-stream"},
-        )
-    finally:
-        pool.close()
+    server = build_mcp_server(
+        MagicMock(),  # pool is only used by the token verifier, never reached on a 401
+        searcher=None,
+        config=McpConfig(enabled=True, resource_server_url="https://host:8443"),
+    )
+    client = TestClient(server.streamable_http_app())
+    resp = client.post(
+        "/",
+        json={"jsonrpc": "2.0", "method": "initialize", "id": 1},
+        headers={"Accept": "application/json, text/event-stream"},
+    )
     assert resp.status_code == 401
     challenge = resp.headers["www-authenticate"]
     assert (

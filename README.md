@@ -9,6 +9,11 @@ PostgreSQL database. The archive is **read-only with respect to upstream**:
 localmail never deletes, modifies, or sends mail. Downstream agents read from
 Postgres and the attachment tree without touching IMAP.
 
+> **End-user docs:** this README is the operator/developer reference. For a
+> step-by-step guide aimed at end users — setup, the daemon, the CLI, the
+> browser-based **admin UI** (with screenshots), importing existing mail, and
+> AI-agent access — see the [user manual](docs/manual/users/index.html).
+
 ## Layout
 
 - Email rows + headers + raw RFC822 + extracted plaintext/HTML live in Postgres.

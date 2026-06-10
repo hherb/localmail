@@ -4,11 +4,16 @@
 <h1>Dashboard</h1>
 <p>Signed in as <strong>{{ current_user.username }}</strong>.</p>
 <div class="admin-card">
-  <p>Admin actions will appear here once the rest of Sub-plans 2–6 ship:</p>
+  <p>Manage your localmail instance:</p>
   <ul>
-    <li>Account management — Sub-plan 3</li>
-    <li>Daemon control — Sub-plan 5</li>
-    <li>Mbox imports — Sub-plan 6</li>
+    <li><a href="/admin/accounts"><strong>Accounts</strong></a> — add, edit, and
+      test IMAP / Gmail OAuth / archive accounts; pause or resume syncing.</li>
+    <li><a href="/admin/daemon"><strong>Daemon</strong></a> — start, stop, and
+      restart the sync daemon; watch per-account heartbeats.</li>
+    <li><a href="/admin/imports"><strong>Imports</strong></a> — bulk-import
+      existing mbox / Maildir archives into an archive account.</li>
+    <li><a href="/admin/users"><strong>Users</strong></a> — create API users,
+      grant per-account access, reset passwords, and manage admin rights.</li>
   </ul>
 </div>
 {% endblock %}

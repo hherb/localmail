@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI agents (MCP) · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a href="../setup/postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="../setup/install.html">2. Install localmail</a></li>
+        <li><a href="../setup/accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="../daemon/index.html">Daemon</a></li>
+        <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a href="../admin/index.html">Admin web UI</a></li>
+        <li><a href="../imports/index.html">Importing mail</a></li>
+        <li><a class="active" href="index.html">AI agents (MCP)</a></li>
+        <li><a href="../desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Using localmail</div>
+      <h1>AI agents &amp; smarter search</h1>
+      <p class="lede">Expose your archive's <strong>read</strong> surface to an
+      AI assistant over the Model Context Protocol (MCP), so a client like
+      Claude Desktop or Claude Code can search and read your mail on your
+      behalf — and let a local LLM sharpen your search queries with
+      <code>--smart</code>.</p>
+    </header>
+
+    <h2>The MCP server</h2>
+    <p>localmail can mount an <a href="https://modelcontextprotocol.io/">MCP</a>
+    server at <code>/mcp</code> inside the same <code>localmail serve</code>
+    process. An MCP-capable assistant connects to it and gets a handful of tools
+    for searching and reading the archive. It is <strong>read-only</strong> —
+    the same promise as the rest of localmail: an agent can search, browse, and
+    read, but can never send, delete, or modify mail, and can't pull raw
+    attachment bytes.</p>
+
+    <div class="callout">
+      <span class="label">Same boundary as the desktop app</span>
+      <p>MCP reuses the API-user and per-account ACL model. An agent is just
+      another user: it logs in with a username + password, and only ever sees
+      the accounts you've granted it. Give an assistant its own user so you can
+      revoke it independently.</p>
+    </div>
+
+    <h2>Set it up</h2>
+    <ol class="steps">
+      <li>
+        <h3>Install the optional extra.</h3>
+        <p>The MCP server is behind an opt-in dependency:</p>
+        <pre><code>uv sync --extra mcp</code></pre>
+        <p>Without it, <code>serve</code> still runs — it just logs a line
+        noting the MCP mount was skipped.</p>
+      </li>
+      <li>
+        <h3>Enable it in <code>config.toml</code>.</h3>
+        <pre><code>[mcp]
+enabled = true</code></pre>
+        <p>Both gates must be on: the extra installed <em>and</em>
+        <code>enabled = true</code>.</p>
+      </li>
+      <li>
+        <h3>Create an agent user and grant accounts.</h3>
+        <pre><code>localmail add-api-user agent
+localmail grant-account agent horst-gmail
+localmail grant-account agent work-fastmail</code></pre>
+        <p>A new user sees no mail until you grant accounts.</p>
+      </li>
+      <li>
+        <h3>Get a bearer token.</h3>
+        <p>The agent authenticates with an opaque bearer token obtained by
+        logging in. Against a running server:</p>
+        <pre><code>curl -sk https://localhost:8443/v1/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"username": "agent", "password": "…"}'
+# → {"token": "…", "expires_at": "…"}</code></pre>
+        <p>There's no separate refresh credential —
+        <code>POST /v1/auth/refresh</code> rotates the current bearer.</p>
+      </li>
+      <li>
+        <h3>Point your MCP client at <code>/mcp</code>.</h3>
+        <pre><code>URL:    https://&lt;host&gt;:&lt;port&gt;/mcp
+Header: Authorization: Bearer &lt;token&gt;</code></pre>
+        <p>For a self-signed cert on localhost / LAN, configure the client to
+        trust it (or front it with a reverse proxy holding a real cert).</p>
+      </li>
+    </ol>
+
+    <h2>What the agent can do</h2>
+    <p>Five read-only, ACL-scoped tools:</p>
+    <table>
+      <tr><th>Tool</th><th>What it does</th></tr>
+      <tr><td><code>search</code></td><td>Hybrid lexical + vector search over
+        the archive — the default "find mail about X". Supports the same
+        filters as the CLI, pagination, and <code>smart=true</code>.</td></tr>
+      <tr><td><code>list_messages</code></td><td>Date-ordered browse, newest
+        first, when there's no query — "show me recent mail".</td></tr>
+      <tr><td><code>get_message</code></td><td>Fetch one message's headers,
+        body, and attachment list by ID.</td></tr>
+      <tr><td><code>get_attachment</code></td><td>Read an attachment's
+        <strong>extracted text</strong> or its metadata — never raw bytes.</td></tr>
+      <tr><td><code>list_accounts</code></td><td>Enumerate the accounts this
+        agent is allowed to read.</td></tr>
+    </table>
+
+    <div class="callout warn">
+      <span class="label">Attachments are never raw bytes over MCP</span>
+      <p>An agent can read an attachment's extracted text or metadata, but not
+      its binary content (stored HTML/SVG blobs are an XSS sink). To download
+      original bytes, use the authenticated HTTP route
+      <code>GET /v1/attachments/{sha256}</code> instead.</p>
+    </div>
+
+    <p>For the full tool reference, paging semantics, and discovery details, see
+    <a href="https://github.com/hherb/localmail/blob/main/docs/mcp-usage.md">docs/mcp-usage.md</a>
+    in the repository.</p>
+
+    <h2 id="smarter-queries">Smarter queries with <code>--smart</code></h2>
+    <p>Search has an optional layer that runs your query through a <strong>local
+    LLM</strong> (via <a href="https://ollama.com/">Ollama</a>) before
+    retrieval. The model rewrites the free text for better recall, expands it
+    with related terms, and pulls natural-language constraints out into proper
+    filters — turning <em>"that invoice grandma sent me last spring"</em> into a
+    cleaner query with a date range and a sender hint.</p>
+
+    <p>It's opt-in and runs entirely on your own machine — nothing leaves your
+    network. From the CLI:</p>
+    <pre><code>localmail search "invoice from grandma last spring" --smart</code></pre>
+    <p>Agents get the same behaviour by passing <code>smart=true</code> to the
+    <code>search</code> tool. Either way, the response reports what happened via
+    <code>rewrite_status</code>:</p>
+    <table>
+      <tr><th>Status</th><th>Meaning</th></tr>
+      <tr><td><code>applied</code></td><td>The rewrite ran and shaped the
+        query.</td></tr>
+      <tr><td><code>unavailable</code></td><td>Smart was requested but no
+        rewriter is configured (e.g. the LLM isn't running). The plain query
+        ran instead.</td></tr>
+      <tr><td><code>failed</code></td><td>The rewrite was attempted but errored;
+        the plain query ran. A <code>rewrite_note</code> carries an actionable
+        detail (e.g. which model to pull).</td></tr>
+      <tr><td><code>not_requested</code> / <code>not_attempted</code></td>
+        <td>Smart was off, or this was a continuation page (rewrite only
+        happens on page 1).</td></tr>
+    </table>
+
+    <div class="callout tip">
+      <span class="label">Graceful by design</span>
+      <p>If the local LLM isn't available, <code>--smart</code> never fails your
+      search — it quietly falls back to the ordinary query and tells you it did.
+      You need a running Ollama with the configured model pulled for the rewrite
+      to actually apply.</p>
+    </div>
+
+    <div class="page-nav">
+      <a class="prev" href="../imports/index.html">
+        <span class="dir">Back</span>
+        <strong>Importing mail</strong>
+      </a>
+      <a class="next" href="../desktop-app/index.html">
+        <span class="dir">Next</span>
+        <strong>Desktop app</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

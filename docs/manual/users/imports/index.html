@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Importing mail · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a href="../setup/postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="../setup/install.html">2. Install localmail</a></li>
+        <li><a href="../setup/accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="../daemon/index.html">Daemon</a></li>
+        <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a href="../admin/index.html">Admin web UI</a></li>
+        <li><a class="active" href="index.html">Importing mail</a></li>
+        <li><a href="../agents/index.html">AI agents (MCP)</a></li>
+        <li><a href="../desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Using localmail</div>
+      <h1>Importing existing mail</h1>
+      <p class="lede">Already have years of mail in an <code>mbox</code> file or
+      a <code>Maildir</code> tree — a Thunderbird export, an old server backup,
+      a <code>Takeout</code> dump? Import it straight into your archive
+      alongside the mail localmail mirrors live over IMAP.</p>
+    </header>
+
+    <h2>How importing fits in</h2>
+    <p>localmail's live sync only ever reads <em>current</em> IMAP folders. Mail
+    that no longer exists on any server — or never did — gets in through the
+    import path instead. Imported messages land in the same
+    <code>messages</code> table, become fully searchable, and share the same
+    content-addressable attachment store, so a PDF you received twice (once over
+    IMAP, once in an old backup) is stored on disk exactly once.</p>
+
+    <table>
+      <tr><th>Concept</th><th>What to know</th></tr>
+      <tr><td>Target account</td><td>Imports go into an <strong>archive</strong>
+        account — an account with no IMAP host that the daemon never syncs.
+        Create one first (see below).</td></tr>
+      <tr><td>Idempotent</td><td>Re-running an import is safe. Already-imported
+        messages are skipped via the same per-account de-duplication used by
+        live sync (by <code>Message-Id</code>, or a content hash when there is
+        none).</td></tr>
+      <tr><td>Received date</td><td>Taken from the source: the mbox
+        <code>From&nbsp;</code> envelope line for mbox, or the file
+        modification time for Maildir. Stored as the message's internal date so
+        it sorts correctly in your archive.</td></tr>
+      <tr><td>Formats</td><td><code>mbox</code> (a single file) and
+        <code>maildir</code> (a directory of one-file-per-message).</td></tr>
+    </table>
+
+    <h2>Before you import</h2>
+    <ol class="steps">
+      <li>
+        <h3>Create an archive account.</h3>
+        <p>From the <a href="../admin/index.html">admin UI</a> (Accounts → New
+        account → auth method <code>archive</code>), or by adding an
+        <code>archive</code> account to <code>config.toml</code> and running
+        <code>localmail init-db</code>. Give it a memorable name like
+        <code>family-archive</code>.</p>
+      </li>
+      <li>
+        <h3>Allowlist the source directory.</h3>
+        <p>For safety, imports may only read from directories you explicitly
+        list. Set an allowlist under <code>[imports]</code> in
+        <code>config.toml</code> and restart <code>serve</code>:</p>
+        <pre><code>[imports]
+roots = ["/home/you/mail-archives"]</code></pre>
+        <p>A source path must resolve (after following symlinks) under one of
+        these roots. An empty <code>roots</code> list means imports are
+        <strong>disabled</strong>.</p>
+      </li>
+    </ol>
+
+    <h2>Option A — from the CLI</h2>
+    <p>The quickest path for a one-off bulk load. It runs in the foreground and
+    prints the final counts:</p>
+    <pre><code>localmail import /home/you/mail-archives/family-2019.mbox \
+  --account family-archive --kind mbox
+
+localmail import /home/you/mail-archives/old-maildir \
+  --account family-archive --kind maildir</code></pre>
+    <pre><code>status=completed processed=4 inserted=4 skipped_dup=0 failed=0</code></pre>
+    <p>The target must be an <code>archive</code> account, and only one import
+    may run at a time (a database busy-guard prevents two concurrent imports
+    from racing). Like every other localmail operation, a single unparseable
+    message is isolated and counted under <code>failed</code> rather than
+    aborting the whole run.</p>
+
+    <h2>Option B — from the admin UI</h2>
+    <p>The <strong>Imports</strong> panel does the same thing with a form, and
+    adds live progress and a cancel button — handy for large archives you want
+    to watch.</p>
+    <figure class="shot">
+      <img src="../assets/admin/admin-imports.png" alt="Imports panel showing allowed roots, the create form, and a completed job">
+      <figcaption>Pick the target archive account, the source kind, and a path
+      under an allowed root, then <strong>Start import</strong>. Past jobs are
+      listed below with their status and processed count.</figcaption>
+    </figure>
+
+    <p>Click a job to watch it run. The detail page updates as messages are
+    processed and offers a <strong>Cancel</strong> button; cancellation is
+    cooperative and takes effect at the next checkpoint.</p>
+    <figure class="shot">
+      <img src="../assets/admin/admin-import-detail.png" alt="Import job detail showing completed status with processed, inserted, skipped, and failed counts">
+      <figcaption>A finished import. <strong>Inserted</strong> is new messages,
+      <strong>Skipped</strong> is duplicates already in the archive, and
+      <strong>Failed</strong> is messages that couldn't be parsed.</figcaption>
+    </figure>
+
+    <div class="callout">
+      <span class="label">After a crash</span>
+      <p>If <code>serve</code> restarts while a panel-started import was
+      running, that job is reconciled to <code>failed</code> on startup so it
+      never looks stuck — a CLI import running in its own process is left
+      alone. Re-run the import; the idempotent skip means you won't get
+      duplicates.</p>
+    </div>
+
+    <h2>What gets searched</h2>
+    <p>Imported messages are indexed for search exactly like synced mail. To
+    make their attachment text and embeddings searchable too, run the same
+    backfill steps you'd run after a first sync — see
+    <a href="../cli-use/index.html#backfill">the CLI backfill workflow</a>
+    (<code>extract-backfill</code>, <code>embed-backfill</code>,
+    <code>lang-backfill</code>).</p>
+
+    <div class="page-nav">
+      <a class="prev" href="../admin/index.html">
+        <span class="dir">Back</span>
+        <strong>Admin web UI</strong>
+      </a>
+      <a class="next" href="../agents/index.html">
+        <span class="dir">Next</span>
+        <strong>AI agents (MCP)</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

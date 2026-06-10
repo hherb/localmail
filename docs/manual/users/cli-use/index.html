@@ -30,6 +30,9 @@
       <ul>
         <li><a href="../daemon/index.html">Daemon</a></li>
         <li><a class="active" href="index.html">CLI</a></li>
+        <li><a href="../admin/index.html">Admin web UI</a></li>
+        <li><a href="../imports/index.html">Importing mail</a></li>
+        <li><a href="../agents/index.html">AI agents (MCP)</a></li>
         <li><a href="../desktop-app/index.html">Desktop app</a></li>
       </ul>
     </nav>
@@ -47,16 +50,23 @@
     </header>
 
     <h2>Accounts &amp; credentials</h2>
+    <p>Accounts are stored in the <strong>database</strong> — it is the single
+    source of truth. <code>localmail init-db</code> seeds any
+    <code>[[accounts]]</code> blocks from <code>config.toml</code> on first run,
+    but after that the database is canonical. You can manage accounts entirely
+    from the CLI, or point-and-click in the
+    <a href="../admin/index.html">admin web UI</a>.</p>
     <table>
       <tr><th>Command</th><th>What it does</th></tr>
       <tr>
         <td><code>localmail list-accounts</code></td>
-        <td>Show every account in <code>config.toml</code> and whether a
-          credential (password or OAuth refresh token) is in the keyring.</td>
+        <td>Show every account in the database and whether a credential
+          (password or OAuth refresh token) is in the keyring.</td>
       </tr>
       <tr>
         <td><code>localmail add-account NAME</code></td>
-        <td>Prompt for an IMAP password (or app password) and store it.</td>
+        <td>Prompt for an IMAP password (or app password) and store it. Seeds
+          the row from <code>config.toml</code> if it isn't in the DB yet.</td>
       </tr>
       <tr>
         <td><code>localmail oauth-login NAME</code></td>
@@ -64,11 +74,25 @@
           is stored.</td>
       </tr>
       <tr>
+        <td><code>localmail enable-account NAME</code><br>
+            <code>localmail disable-account NAME</code></td>
+        <td>Resume / pause syncing for an account without deleting it. Takes
+          effect on the next daemon reload.</td>
+      </tr>
+      <tr>
         <td><code>localmail remove-account NAME</code></td>
-        <td>Drop both password and refresh token from the keyring. The
-          account entry in <code>config.toml</code> is untouched.</td>
+        <td>Drop the stored credentials from the keyring (the DB row is kept).
+          Add <code>--delete-row</code> to remove the account, and
+          <code>--force</code> to cascade when it still holds messages.</td>
       </tr>
     </table>
+
+    <div class="callout tip">
+      <span class="label">Archive accounts</span>
+      <p>An account with auth method <code>archive</code> has no IMAP host and
+      is never synced — it's a holding place for
+      <a href="../imports/index.html">imported mbox / Maildir mail</a>.</p>
+    </div>
 
     <h2>One-shot sync</h2>
     <p>If you don't want a daemon — e.g. you want to run a sync from cron
@@ -135,7 +159,14 @@ localmail sync --account horst-gmail --limit-per-folder 10
     <pre><code>localmail search "Berlin conference"
 localmail search "invoice has:attachment after:2025-01-01 from:anna"
 localmail search "Heizung" --format json | jq
-localmail search "minutes lang:en before:2025-06-01"</code></pre>
+localmail search "minutes lang:en before:2025-06-01"
+localmail search "that invoice grandma sent last spring" --smart</code></pre>
+
+    <p>The optional <code>--smart</code> flag runs your query through a local
+    LLM first — rewriting it for better recall and pulling natural-language
+    dates / senders into proper filters. It's entirely local and degrades
+    gracefully if the model isn't running. See
+    <a href="../agents/index.html#smarter-queries">Smarter search</a>.</p>
 
     <h3>Search DSL operators</h3>
     <table>
@@ -182,19 +213,33 @@ localmail retry-failed-embeddings</code></pre>
     <pre><code>localmail search-status                # row counts + backlog
 localmail search-status --format json  # for monitoring scripts</code></pre>
 
-    <h2>GUI server (HTTPS API)</h2>
+    <h2>GUI server (HTTPS API + admin UI)</h2>
     <p>If you want the desktop app — or any other tool — to reach the
     archive over a network boundary instead of direct DB access, run
-    <code>localmail serve</code>. See the
-    <a href="../desktop-app/index.html">Desktop app page</a> for the
-    end-to-end flow.</p>
+    <code>localmail serve</code>. The same process also hosts the browser-based
+    <a href="../admin/index.html">admin web UI</a> at <code>/admin</code> and,
+    optionally, the <a href="../agents/index.html">MCP server</a> for AI agents
+    at <code>/mcp</code>.</p>
     <pre><code>localmail rotate-tls --cert ~/.config/localmail/tls.crt \
                      --key  ~/.config/localmail/tls.key
-localmail add-api-user alice
+localmail add-api-user alice                 # desktop-app / API user
 localmail grant-account alice horst-gmail
+localmail add-api-user admin --admin         # bootstrap an admin-UI user
 localmail serve --bind 127.0.0.1 --port 8443 \
                 --tls-cert ~/.config/localmail/tls.crt \
                 --tls-key  ~/.config/localmail/tls.key</code></pre>
+    <p>See the <a href="../desktop-app/index.html">Desktop app page</a> for the
+    end-to-end client flow, and the
+    <a href="../admin/index.html">Admin web UI page</a> for managing accounts,
+    users, the daemon, and imports from a browser.</p>
+
+    <h2>Importing existing mail</h2>
+    <p>Bulk-load an old <code>mbox</code> file or <code>Maildir</code> tree into
+    an archive account:</p>
+    <pre><code>localmail import ~/archives/family-2019.mbox \
+  --account family-archive --kind mbox</code></pre>
+    <p>Re-running is idempotent. See
+    <a href="../imports/index.html">Importing mail</a> for the full workflow.</p>
 
     <h2>Useful one-liners</h2>
     <p>Once you have a populated archive, everything is in Postgres, so you

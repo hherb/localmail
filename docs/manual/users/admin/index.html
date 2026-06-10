@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin web UI · localmail user manual</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/png" href="../assets/logo.png">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a class="brand" href="../index.html" style="text-decoration:none;border:0;">
+      <img src="../assets/logo.png" alt="">
+      <div>
+        <span class="name">localmail</span>
+        <span class="tag">User manual</span>
+      </div>
+    </a>
+    <nav>
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="../index.html">Overview</a></li>
+        <li><a href="../setup/postgres.html">1. Set up PostgreSQL</a></li>
+        <li><a href="../setup/install.html">2. Install localmail</a></li>
+        <li><a href="../setup/accounts.html">3. Add email accounts</a></li>
+      </ul>
+      <h4>Using localmail</h4>
+      <ul>
+        <li><a href="../daemon/index.html">Daemon</a></li>
+        <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a class="active" href="index.html">Admin web UI</a></li>
+        <li><a href="../imports/index.html">Importing mail</a></li>
+        <li><a href="../agents/index.html">AI agents (MCP)</a></li>
+        <li><a href="../desktop-app/index.html">Desktop app</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div class="eyebrow">Using localmail</div>
+      <h1>The admin web UI</h1>
+      <p class="lede">Once <code>localmail serve</code> is running, an
+      administrator can manage the whole instance from a browser — accounts,
+      the sync daemon, archive imports, and API users — without touching the
+      CLI or <code>config.toml</code>.</p>
+    </header>
+
+    <h2>What the admin UI is for</h2>
+    <p>localmail keeps the <strong>database</strong> as the single source of
+    truth for account configuration. The admin UI is a thin, server-rendered
+    front-end over that database, mounted at <code>/admin</code> inside the
+    same <code>localmail serve</code> process that powers the desktop app and
+    the API. Everything it does is also doable from the
+    <a href="../cli-use/index.html">CLI</a>; the UI just makes it pointy-clicky
+    and remote-friendly.</p>
+
+    <div class="callout">
+      <span class="label">Who can reach it</span>
+      <p>Only users flagged as <strong>admin</strong> can sign in to
+      <code>/admin</code>. A regular API user (desktop-app login) has no admin
+      access. The machine API under <code>/v1/*</code> never reads the admin
+      session cookie — the two surfaces are isolated.</p>
+    </div>
+
+    <h2>Enable it</h2>
+    <ol class="steps">
+      <li>
+        <h3>Add signing keys to <code>config.toml</code>.</h3>
+        <p>The admin UI signs its session cookie and the Gmail-OAuth state
+        token. Generate one key per line and drop them under
+        <code>[serve]</code>:</p>
+        <pre><code>python -c "import secrets; print(secrets.token_urlsafe(32))"</code></pre>
+        <pre><code>[serve]
+session_signing_key = "&lt;paste a generated key&gt;"
+state_signing_key   = "&lt;paste another generated key&gt;"</code></pre>
+        <p>Without these keys the admin login is disabled. They are secrets —
+        keep them out of version control.</p>
+      </li>
+      <li>
+        <h3>Create the first admin user.</h3>
+        <p>This is the one bootstrap step that must happen on the server's
+        shell — there is no chicken-and-egg way to make the first admin from
+        the web:</p>
+        <pre><code>localmail add-api-user admin --admin</code></pre>
+        <p>You'll be prompted for a password (argon2id-hashed). Add
+        <code>--admin</code> to grant admin rights immediately. To promote an
+        existing user instead, use <code>localmail grant-admin USERNAME</code>.</p>
+      </li>
+      <li>
+        <h3>Start the server and open <code>/admin</code>.</h3>
+        <pre><code>localmail serve --bind 127.0.0.1 --port 8443 \
+  --tls-cert ~/.config/localmail/tls.crt \
+  --tls-key  ~/.config/localmail/tls.key</code></pre>
+        <p>Browse to <code>https://localhost:8443/admin/</code> and sign in.
+        For localhost-only use you can run with
+        <code>--no-tls --bind 127.0.0.1</code> and use
+        <code>http://</code> instead.</p>
+      </li>
+    </ol>
+
+    <h2>Sign in</h2>
+    <p>The login screen takes the username and password you set with
+    <code>add-api-user</code>. Logins are rate-limited (per-user, per-IP, and
+    globally) and every attempt is audited in Postgres, so the limits hold even
+    across multiple <code>serve</code> workers and restarts.</p>
+    <figure class="shot">
+      <img src="../assets/admin/admin-login.png" alt="Admin sign-in screen">
+      <figcaption>The <code>/admin/login</code> screen.</figcaption>
+    </figure>
+
+    <p>After signing in you land on the dashboard, which links to the four
+    management areas. The top nav bar is present on every admin page.</p>
+    <figure class="shot">
+      <img src="../assets/admin/admin-dashboard.png" alt="Admin dashboard with links to Accounts, Daemon, Imports, and Users">
+      <figcaption>The dashboard after signing in.</figcaption>
+    </figure>
+
+    <h2>Accounts</h2>
+    <p>The <strong>Accounts</strong> panel lists every account in the database
+    with its email, authentication method, and sync state. From here you can
+    add a new account, edit or delete one, and pause / resume syncing.</p>
+    <figure class="shot">
+      <img src="../assets/admin/admin-accounts.png" alt="Accounts list showing three accounts with auth methods and sync state">
+      <figcaption>The accounts list. <strong>Disable</strong> pauses syncing
+      without deleting anything; <strong>Delete</strong> refuses unless the
+      account holds no messages (or you force it).</figcaption>
+    </figure>
+
+    <p>The editor exposes every field of an account. Three authentication
+    methods are supported, and the form shows only the fields each one needs:</p>
+    <table>
+      <tr><th>Auth method</th><th>Use it for</th></tr>
+      <tr><td><code>password</code></td><td>Any IMAP server reachable with a
+        username + password (or app password): Fastmail, Microsoft 365,
+        iCloud, generic IMAP.</td></tr>
+      <tr><td><code>oauth2</code></td><td>Gmail. Click <strong>Connect
+        Gmail</strong> to run the browser consent flow and store a refresh
+        token — no password is ever held.</td></tr>
+      <tr><td><code>archive</code></td><td>A holding account for imported mail
+        (mbox / Maildir). It has no IMAP host and is never synced — see
+        <a href="../imports/index.html">Importing mail</a>.</td></tr>
+    </table>
+
+    <figure class="shot">
+      <img src="../assets/admin/admin-account-edit.png" alt="Account editor for a Gmail OAuth2 account with folder filters and deny flags">
+      <figcaption>Editing a Gmail (OAuth2) account. <strong>Test
+      connection</strong> verifies credentials live; the folder filters decide
+      which mailboxes are mirrored.</figcaption>
+    </figure>
+
+    <h3>Folder filters</h3>
+    <p>localmail never has to mirror every folder. The editor offers three
+    controls, evaluated together:</p>
+    <ul>
+      <li><strong>Allow</strong> — if non-empty, <em>only</em> these folders
+        are synced (one folder name per line). Blank means "all folders".</li>
+      <li><strong>Deny</strong> — folders to skip, by name.</li>
+      <li><strong>Deny flags</strong> — skip folders by their IMAP special-use
+        flag (<code>\Trash</code>, <code>\Junk</code>, <code>\All</code>, …).
+        Prefer these over names: a flag survives provider locales, so
+        <code>\Trash</code> denies both <code>[Gmail]/Trash</code> and a
+        localised <code>[Gmail]/Bin</code>.</li>
+    </ul>
+
+    <div class="callout warn">
+      <span class="label">Account changes need a daemon restart</span>
+      <p>The running daemon reads its account set on a periodic reload, but
+      brand-new accounts and credential changes take full effect after the
+      daemon re-reads — use the <strong>Daemon</strong> panel's
+      <em>Reload&nbsp;now</em>, or restart it.</p>
+    </div>
+
+    <h2>Daemon</h2>
+    <p>The <strong>Daemon</strong> panel shows the sync daemon's process state,
+    each worker thread's most recent heartbeat (red when stale), and a tail of
+    its log. What you can do here depends on how the daemon is supervised:</p>
+    <table>
+      <tr><th>Mode</th><th>Behaviour</th></tr>
+      <tr><td><strong>Supervised</strong><br>(<code>supervise_daemon = true</code>, the default)</td>
+        <td><code>serve</code> owns <code>localmail run</code> as a child
+        process. <strong>Start / Stop / Restart</strong> are live buttons.</td></tr>
+      <tr><td><strong>External</strong><br>(<code>supervise_daemon = false</code>)</td>
+        <td>An init system (systemd / launchd) owns the daemon. Lifecycle
+        buttons are disabled; you still get <strong>Reload&nbsp;now</strong>,
+        per-account <strong>restart-sync</strong>, and read-only status.</td></tr>
+    </table>
+    <figure class="shot">
+      <img src="../assets/admin/admin-daemon.png" alt="Daemon control panel showing external supervision and a Reload now button">
+      <figcaption>The daemon panel in <em>external</em> supervision mode —
+      lifecycle is owned by the init system, but reload and per-account
+      restart still work. The panel polls itself every couple of seconds.</figcaption>
+    </figure>
+
+    <h2>Imports</h2>
+    <p>The <strong>Imports</strong> panel bulk-loads existing mbox / Maildir
+    archives into an <code>archive</code> account. It is covered on its own
+    page — see <a href="../imports/index.html">Importing mail</a>.</p>
+
+    <h2>Users</h2>
+    <p>The <strong>Users</strong> panel manages API users: the people and
+    agents that can sign in to the desktop app, the API, or this admin UI.</p>
+    <figure class="shot">
+      <img src="../assets/admin/admin-users.png" alt="Users list showing an admin user and a regular user">
+      <figcaption>The users list. The <strong>Admin</strong> column marks who
+      can reach <code>/admin</code>.</figcaption>
+    </figure>
+
+    <p>The per-user editor is where access is actually granted. A new user can
+    see <strong>nothing</strong> until you tick the accounts they're allowed to
+    read — the checklist is the per-user access-control list.</p>
+    <figure class="shot">
+      <img src="../assets/admin/admin-user-edit.png" alt="User editor showing account-access checklist, password reset, admin toggle and delete">
+      <figcaption>Editing a user. Tick accounts to grant read access; toggle
+      admin rights; reset the password; revoke active sessions; or disable /
+      delete the user.</figcaption>
+    </figure>
+
+    <ul>
+      <li><strong>Account access</strong> — the ACL checklist. Every API call
+        that user makes is scoped to the ticked accounts.</li>
+      <li><strong>Grant / revoke admin</strong> — toggles access to
+        <code>/admin</code>.</li>
+      <li><strong>Set password</strong> — reset without knowing the old one
+        (admin override).</li>
+      <li><strong>Revoke sessions</strong> — invalidate every outstanding admin
+        cookie for that user immediately.</li>
+      <li><strong>Disable</strong> — keep the row but block all logins.</li>
+      <li><strong>Delete user</strong> — remove the user and all their tokens.</li>
+    </ul>
+
+    <div class="callout">
+      <span class="label">Lock-out guards</span>
+      <p>The UI won't let you delete or demote the <em>last</em> remaining
+      admin, and you can't delete or demote <em>yourself</em>. Those guards are
+      enforced server-side, so a hand-crafted request hits them too.</p>
+    </div>
+
+    <h2>Security notes</h2>
+    <ul>
+      <li>TLS is on by default. <code>--no-tls</code> is accepted only when
+        bound to <code>127.0.0.1</code>.</li>
+      <li>Every mutating action carries a method-bound CSRF token, so a token
+        minted for one action can't be replayed against another.</li>
+      <li>The admin session cookie is scoped so only <code>/admin/*</code>
+        routes read it; the machine API at <code>/v1/*</code> authenticates
+        with bearer tokens only.</li>
+      <li>Login attempts are rate-limited and audited in Postgres. Behind a
+        reverse proxy, set <code>[auth].trusted_proxies</code> so the per-IP
+        limit sees the real client address.</li>
+    </ul>
+
+    <div class="page-nav">
+      <a class="prev" href="../cli-use/index.html">
+        <span class="dir">Back</span>
+        <strong>CLI</strong>
+      </a>
+      <a class="next" href="../imports/index.html">
+        <span class="dir">Next</span>
+        <strong>Importing mail</strong>
+      </a>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

@@ -30,6 +30,9 @@
       <ul>
         <li><a href="../daemon/index.html">Daemon</a></li>
         <li><a href="../cli-use/index.html">CLI</a></li>
+        <li><a href="../admin/index.html">Admin web UI</a></li>
+        <li><a href="../imports/index.html">Importing mail</a></li>
+        <li><a href="../agents/index.html">AI agents (MCP)</a></li>
         <li><a class="active" href="index.html">Desktop app</a></li>
       </ul>
     </nav>
@@ -217,8 +220,9 @@ npm run tauri build
     <ul>
       <li>Send mail. localmail is read-only with respect to upstream.</li>
       <li>Delete or modify messages on the IMAP server.</li>
-      <li>Make changes to <code>config.toml</code> — account topology is
-        controlled by the CLI / config file, not the GUI.</li>
+      <li>Manage accounts or users — that's the job of the
+        <a href="../admin/index.html">admin web UI</a> and the CLI. The desktop
+        app is a read-only mail client.</li>
     </ul>
 
     <h2>Connecting from another machine</h2>

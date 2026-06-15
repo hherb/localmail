@@ -71,25 +71,42 @@ def _try_build_mcp(pool, searcher, mcp_config, serve_config, auth_config):
         return None, None, [], []
     consent_routes: list[Route] = []
     if mcp_config.authorization_server_enabled:
+        from pydantic import AnyHttpUrl
+
         from localmail.mcp import build_as_provider
+        from localmail.mcp.discovery import mcp_resource_url
         from localmail.serve.oauth.consent_router import build_consent_router
+
+        # localmail is its own AS + RS. The SDK sub-mounts the AS routes
+        # (/authorize, /token, /register, /.well-known/...) under /mcp and builds
+        # their advertised URLs from AuthSettings.issuer_url, so the issuer MUST
+        # equal the /mcp resource URL for those endpoints to resolve. There is no
+        # valid config where it differs, so derive it from resource_server_url
+        # rather than make the operator set it by hand. An explicitly-configured
+        # authorization_servers (an EXTERNAL IdP) is preserved.
+        as_issuer = AnyHttpUrl(mcp_resource_url(str(mcp_config.resource_server_url)))
+        effective_cfg = mcp_config.model_copy(update={
+            "issuer_url": as_issuer,
+            "authorization_servers": mcp_config.authorization_servers or [as_issuer],
+        })
 
         key = serve_config.state_signing_key.encode()
         provider = build_as_provider(
-            pool, config=mcp_config, signing_key=key, consent_path="/oauth/consent"
+            pool, config=effective_cfg, signing_key=key, consent_path="/oauth/consent"
         )
         server = build_mcp_server(
-            pool, searcher=searcher, config=mcp_config, auth_server_provider=provider
+            pool, searcher=searcher, config=effective_cfg, auth_server_provider=provider
         )
         consent_routes = build_consent_router(
             pool=pool,
             signing_key=key,
-            mcp_config=mcp_config,
+            mcp_config=effective_cfg,
             auth_config=auth_config,
         )
+        routes = build_protected_resource_routes(effective_cfg)
     else:
         server = build_mcp_server(pool, searcher=searcher, config=mcp_config)
-    routes = build_protected_resource_routes(mcp_config)
+        routes = build_protected_resource_routes(mcp_config)
     return server, server.streamable_http_app(), routes, consent_routes
 
 

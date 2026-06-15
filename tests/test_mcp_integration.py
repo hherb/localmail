@@ -181,15 +181,16 @@ def test_mcp_rejects_missing_bearer(db_dsn, db_conn):
 # endpoint URLs from AuthSettings.issuer_url. With a bare-origin issuer
 # (http://host:port) those would point at /authorize at the ROOT, which 404s.
 #
-# The fix is wiring-only and lives entirely in this fixture: set
-# `issuer_url = http://127.0.0.1:<port>/mcp`. Then the SDK advertises
-# endpoints under /mcp (matching the sub-mount) AND serves the AS metadata at
+# The fix (Task 12b) auto-DERIVES the AS issuer from the resource origin: the
+# operator sets ONLY `resource_server_url = http://127.0.0.1:<port>` (bare
+# origin, NO /mcp); `_try_build_mcp` derives `issuer_url =
+# http://127.0.0.1:<port>/mcp` so the SDK advertises endpoints under /mcp
+# (matching the sub-mount) AND serves the AS metadata at
 # `<issuer>/.well-known/oauth-authorization-server`
 # (= /mcp/.well-known/oauth-authorization-server) consistently, and the PRM's
 # authorization_servers[0] (the issuer) is a URL whose AS metadata is
-# fetchable. No source change is needed; the existing top-level PRM route +
-# the SDK's sub-mounted AS routes already line up once the issuer carries the
-# /mcp path. The test FOLLOWS the metadata documents (reads the endpoint URLs
+# fetchable. This fixture sets no issuer_url — proving the zero-config path
+# end-to-end. The test FOLLOWS the metadata documents (reads the endpoint URLs
 # from the fetched JSON) rather than hardcoding paths — proving a real client
 # could discover and use the AS cold.
 #
@@ -274,7 +275,6 @@ def test_mcp_oauth_cold_connect_dance(db_dsn, db_conn):
     app = create_app(
         db_dsn=db_dsn, searcher=searcher, enable_mcp=True,
         mcp_config=McpConfig(enabled=True, authorization_server_enabled=True,
-                             issuer_url=issuer,
                              resource_server_url=f"http://127.0.0.1:{port}"),
         serve_config=ServeConfig(state_signing_key="x" * 32))
     server, thread = _start_fixed_port(app, port)

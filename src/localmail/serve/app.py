@@ -55,10 +55,11 @@ from localmail.serve.routes import search as search_routes
 from localmail.serve.routes import version as version_routes
 
 
-def _try_build_mcp(pool, searcher, mcp_config):
-    """Build the FastMCP server + ASGI app + RFC 9728 discovery routes.
+def _try_build_mcp(pool, searcher, mcp_config, serve_config, auth_config):
+    """Build the FastMCP server + ASGI app + RFC 9728 discovery routes + (when
+    the OAuth authorization server is enabled) the interactive consent routes.
 
-    Returns (None, None, []) if the [mcp] extra is absent.
+    Returns (None, None, [], []) if the [mcp] extra is absent.
     """
     try:
         from localmail.mcp import build_mcp_server, build_protected_resource_routes
@@ -66,10 +67,29 @@ def _try_build_mcp(pool, searcher, mcp_config):
         logging.getLogger("localmail.serve").info(
             "MCP enabled but the [mcp] extra is not installed; skipping /mcp mount"
         )
-        return None, None, []
-    server = build_mcp_server(pool, searcher=searcher, config=mcp_config)
+        return None, None, [], []
+    consent_routes: list[Route] = []
+    if mcp_config.authorization_server_enabled:
+        from localmail.mcp import build_as_provider
+        from localmail.serve.oauth.consent_router import build_consent_router
+
+        key = serve_config.state_signing_key.encode()
+        provider = build_as_provider(
+            pool, config=mcp_config, signing_key=key, consent_path="/oauth/consent"
+        )
+        server = build_mcp_server(
+            pool, searcher=searcher, config=mcp_config, auth_server_provider=provider
+        )
+        consent_routes = build_consent_router(
+            pool=pool,
+            signing_key=key,
+            mcp_config=mcp_config,
+            auth_config=auth_config,
+        )
+    else:
+        server = build_mcp_server(pool, searcher=searcher, config=mcp_config)
     routes = build_protected_resource_routes(mcp_config)
-    return server, server.streamable_http_app(), routes
+    return server, server.streamable_http_app(), routes, consent_routes
 
 
 def create_app(
@@ -102,6 +122,14 @@ def create_app(
     auth_cfg = auth_config or AuthConfig()
     daemon_cfg = daemon_config or DaemonConfig()
     imports_cfg = imports_config or ImportsConfig()
+    mcp_cfg = mcp_config or McpConfig()
+
+    # Fail loud BEFORE opening the pool so a misconfig never leaks a connection.
+    if enable_mcp and mcp_cfg.authorization_server_enabled and not cfg.state_signing_key:
+        raise ValueError(
+            "mcp.authorization_server_enabled requires [serve].state_signing_key"
+        )
+
     pool = ConnectionPool(
         db_dsn,
         min_size=cfg.pool_min_size,
@@ -112,9 +140,10 @@ def create_app(
     mcp_server = None
     mcp_app = None
     mcp_discovery_routes: list[Route] = []
+    mcp_consent_routes: list[Route] = []
     if enable_mcp:
-        mcp_server, mcp_app, mcp_discovery_routes = _try_build_mcp(
-            pool, searcher, mcp_config or McpConfig()
+        mcp_server, mcp_app, mcp_discovery_routes, mcp_consent_routes = _try_build_mcp(
+            pool, searcher, mcp_cfg, cfg, auth_cfg
         )
 
     # Plane B supervisor: a real subprocess owner when we supervise the daemon,
@@ -177,6 +206,7 @@ def create_app(
     if mcp_app is not None:
         app.mount("/mcp", mcp_app)
         app.router.routes.extend(mcp_discovery_routes)
+        app.router.routes.extend(mcp_consent_routes)
 
     # Exception handler for APIError raised inside route handlers / dependencies.
     # FastAPI's DI layer catches these before BaseHTTPMiddleware sees them, so we

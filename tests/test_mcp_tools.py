@@ -105,7 +105,8 @@ def test_tool_search_empty_grants_returns_empty(db_dsn, db_conn):
         searcher._pool.close()
     assert page == {"results": [], "next_cursor": None, "total_estimate": None,
                     "took_ms": 0.0, "rewrite_skipped": False,
-                    "rewrite_status": "not_requested", "rewrite_note": None}
+                    "rewrite_status": "not_requested", "rewrite_note": None,
+                    "rewrite_note_code": None}
 
 
 def test_tool_get_message_granted(db_conn):

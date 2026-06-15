@@ -22,11 +22,12 @@ from localmail.api.search_cursor import (
 from localmail.config import SearchConfig
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.rewrite_status import (
+    CONTINUATION_PAGE,
     NOT_ATTEMPTED,
+    NOT_CONFIGURED,
     NOT_REQUESTED,
-    NOTE_NOT_ATTEMPTED,
-    NOTE_UNAVAILABLE,
     UNAVAILABLE,
+    note_for_code,
     rewrite_skipped_for_status,
 )
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
@@ -156,9 +157,12 @@ def run_search(
     ``searcher.config.candidates_per_arm_max``.
 
     ``smart`` requests an LLM query rewrite on page 1 (cursor is None) when the
-    searcher has a rewriter configured; the response ``rewrite_skipped`` is
-    True when a requested rewrite did not happen (rewriter unavailable, or the
-    rewrite call failed) and the un-rewritten query ran instead.
+    searcher has a rewriter configured. The response carries ``rewrite_status``
+    (a 5-value enum), an optional curated human ``rewrite_note``, and a stable
+    machine-readable ``rewrite_note_code`` (``missing_model`` / ``unreachable``
+    / ``unparseable`` / ``not_configured`` / ``continuation_page``, or ``None``
+    when there is no note). ``rewrite_skipped`` stays True only when a requested
+    rewrite did not happen (rewriter unavailable, or the rewrite call failed).
     """
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:
@@ -167,7 +171,8 @@ def run_search(
         # short-circuit reports not_requested (#176).
         return {"results": [], "next_cursor": None, "total_estimate": None,
                 "took_ms": 0.0, "rewrite_skipped": False,
-                "rewrite_status": NOT_REQUESTED, "rewrite_note": None}
+                "rewrite_status": NOT_REQUESTED, "rewrite_note": None,
+                "rewrite_note_code": None}
 
     cfg = searcher.config
     # smart is a page-1 signal: continuation (cursor present) reuses the
@@ -197,17 +202,21 @@ def run_search(
     next_cursor = _next_cursor(page, cfg=cfg)
     status: str
     note: str | None
+    code: str | None
     if cursor is None:
         if smart and not searcher.smart_available:
-            status, note = UNAVAILABLE, NOTE_UNAVAILABLE
+            status, code = UNAVAILABLE, NOT_CONFIGURED
+            note = note_for_code(NOT_CONFIGURED)
         else:
             status = page.rewrite_status
             note = page.rewrite_note
+            code = page.rewrite_note_code
     else:
         if smart:
-            status, note = NOT_ATTEMPTED, NOTE_NOT_ATTEMPTED
+            status, code = NOT_ATTEMPTED, CONTINUATION_PAGE
+            note = note_for_code(CONTINUATION_PAGE)
         else:
-            status, note = NOT_REQUESTED, None
+            status, note, code = NOT_REQUESTED, None, None
     return {
         "results": [_to_api_result(r) for r in page.results],
         "next_cursor": next_cursor,
@@ -216,6 +225,7 @@ def run_search(
         "rewrite_skipped": rewrite_skipped_for_status(status),
         "rewrite_status": status,
         "rewrite_note": note,
+        "rewrite_note_code": code,
     }
 
 

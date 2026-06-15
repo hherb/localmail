@@ -665,13 +665,18 @@ accepts a `smart` boolean in the request body, and the MCP `search` tool a
 configured — the wire endpoints degrade gracefully: an un-rewritten search runs
 instead.
 
-Every search response describes what happened to the rewrite via three fields:
+Every search response describes what happened to the rewrite via four fields:
 
 - `rewrite_status` — one of `applied`, `unavailable` (smart requested but no
   rewriter configured), `failed` (the rewrite errored), `not_attempted` (a
   continuation page — `smart` applies to page 1 only), or `not_requested`.
 - `rewrite_note` — an optional curated, actionable detail (e.g. which
   `ollama pull` fixes a missing model). `null` when there's nothing to say.
+- `rewrite_note_code` — a stable, machine-readable partner to `rewrite_note`
+  for clients that want to switch on the cause without parsing prose: one of
+  `missing_model`, `unreachable`, `unparseable` (the three `failed` causes),
+  `not_configured` (`unavailable`), `continuation_page` (`not_attempted`), or
+  `null` whenever `rewrite_note` is `null`.
 - `rewrite_skipped` — kept for back-compat; `true` only for `unavailable` and
   `failed`.
 

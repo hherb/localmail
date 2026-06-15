@@ -57,6 +57,7 @@ def _fake_searcher_returning_one_hit():
     # (run_search reads rewrite_status/rewrite_note off the page on page 1).
     page.rewrite_status = "applied"
     page.rewrite_note = None
+    page.rewrite_note_code = None
     s.search.return_value = page
     return s
 
@@ -334,6 +335,7 @@ def test_search_smart_param_is_forwarded_to_searcher(
     # The structured outcome must reach the wire, not just the derived bool.
     assert body["rewrite_status"] == "applied"
     assert body["rewrite_note"] is None
+    assert body["rewrite_note_code"] is None
     assert body["rewrite_skipped"] is False
 
 
@@ -374,4 +376,5 @@ def test_search_smart_without_rewriter_degrades(
     # The full structured outcome must reach the wire, not just the bool.
     assert body["rewrite_status"] == "unavailable"
     assert body["rewrite_note"] == "smart search is not configured on this server"
+    assert body["rewrite_note_code"] == "not_configured"
     assert body["rewrite_skipped"] is True

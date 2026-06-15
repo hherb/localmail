@@ -153,8 +153,11 @@ def build_mcp_server(
             "searching (page 1 only): a richer vector query, synonym expansion "
             "OR-ed into the keyword arms, and natural-language filters. The "
             "response carries `rewrite_status` (one of `applied`, "
-            "`unavailable`, `failed`, `not_attempted`, `not_requested`) and an "
-            "optional curated `rewrite_note` with an actionable detail; "
+            "`unavailable`, `failed`, `not_attempted`, `not_requested`), an "
+            "optional curated `rewrite_note` with an actionable detail, and a "
+            "machine-readable `rewrite_note_code` (`missing_model`, "
+            "`unreachable`, `unparseable`, `not_configured`, "
+            "`continuation_page`, or null); "
             "`rewrite_skipped` (kept for back-compat) is true only for "
             "`unavailable` and `failed`. On a continuation page `smart` is "
             "ignored and the status is `not_attempted`. Defaults to false."))]

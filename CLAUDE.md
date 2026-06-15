@@ -486,6 +486,14 @@ for the silent-no-op), and `not_requested` (smart off, or the empty-ACL
 short-circuit). The empty-ACL short-circuit also reports `total_estimate: None`
 (uniform with the normal path — **#175**; never `0`). See
 [docs/superpowers/specs/2026-06-08-rewrite-outcome-status-design.md](docs/superpowers/specs/2026-06-08-rewrite-outcome-status-design.md).
+Every response also carries a machine-readable **`rewrite_note_code`** (1:1 with
+the curated note, `null` when the note is `null`): `missing_model` / `unreachable`
+/ `unparseable` (the three `failed` causes), `not_configured` (`unavailable`),
+`continuation_page` (`not_attempted`). The **code is canonical** —
+`rewrite_status.classify_rewrite_failure(exc)` returns the code (no `model` arg)
+and the pure `note_for_code(code, *, model=None)` renders the human note from it,
+so the two cannot drift. See
+[docs/superpowers/specs/2026-06-15-rewrite-note-code-design.md](docs/superpowers/specs/2026-06-15-rewrite-note-code-design.md).
 
 **Phase 2 notes**:
 - `LightweightExtractor` handles 11 formats (PDF, DOCX, XLSX, PPTX, ODT, RTF,

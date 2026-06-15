@@ -179,7 +179,12 @@ safeguards bound abuse:
 
 - **Per-IP rate limit** — `[mcp] oauth_registration_max` registrations per
   `oauth_registration_window_s` (default 20 per hour). Excess requests receive
-  `429 Too Many Requests`.
+  `429 Too Many Requests`. The cap keys on the **immediate socket peer**, not on
+  `X-Forwarded-For` (unlike the login limiter, it does not peel
+  `auth.trusted_proxies`). Behind a reverse proxy every registration appears to
+  come from the proxy's IP, so the per-IP cap effectively becomes a single
+  global cap — coarse but still bounds spam; size `oauth_registration_max`
+  accordingly for proxied deployments.
 - **Unused-client cleanup** — registered clients that never complete a token
   exchange are deleted after `[mcp] oauth_client_unused_retention_s` (default
   24 hours).

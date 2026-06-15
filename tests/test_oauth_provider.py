@@ -128,6 +128,34 @@ def test_exchange_refresh_rotates(db_conn, db_pool):
     assert anyio.run(p.load_refresh_token, _client(), token.refresh_token) is None
 
 
+def test_exchange_refresh_rejects_disabled_user_without_500(db_conn, db_pool):
+    # A user disabled between load_refresh_token and exchange_refresh_token must
+    # fail closed with invalid_grant — never an AssertionError (HTTP 500).
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, "prov-disabled", "pw")
+        raw_code = codes.mint_code(
+            conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+            redirect_uri_provided_explicitly=True, code_challenge="chal",
+            scopes=[], ttl_s=60,
+        )
+        conn.commit()
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    token = anyio.run(p.exchange_authorization_code, _client(), loaded)
+    old_refresh = anyio.run(p.load_refresh_token, _client(), token.refresh_token)
+    assert old_refresh is not None
+    with db_pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE api_users SET disabled_at = now() WHERE id = %s", (uid,)
+            )
+        conn.commit()
+    with pytest.raises(TokenError) as exc:
+        anyio.run(p.exchange_refresh_token, _client(), old_refresh, [])
+    assert exc.value.error == "invalid_grant"
+
+
 def test_cross_client_code_rejected(db_conn, db_pool):
     p = _provider(db_pool)
     anyio.run(p.register_client, _client())

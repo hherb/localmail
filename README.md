@@ -517,7 +517,8 @@ existing api_user credentials — no new user accounts are created), and PKCE
 code exchange. Access tokens are stored in the existing `api_tokens` table, so
 the per-user account ACL and `localmail grant-account` grants are unchanged.
 Tokens auto-refresh; a browser re-login is needed only after ~30 days of
-inactivity or on revocation. See [docs/mcp-usage.md](docs/mcp-usage.md) for the
+inactivity, on revocation, or if the user is disabled. See
+[docs/mcp-usage.md](docs/mcp-usage.md) for the
 full operator guide including token lifetimes, DCR safeguards, and known
 limitations.
 

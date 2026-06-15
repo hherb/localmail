@@ -1,7 +1,49 @@
+import asyncio
+
 import pytest
 from psycopg_pool import ConnectionPool
 
+from localmail.config import AuthConfig
 from localmail.mcp.oauth import clients, registration
+from localmail.serve.oauth.registration_guard import resolve_scope_client_ip
+
+
+def _scope(peer, xff=None):
+    headers = [(b"x-forwarded-for", xff.encode())] if xff is not None else []
+    return {"type": "http", "client": (peer, 1234), "headers": headers}
+
+
+def test_resolve_scope_no_proxies_uses_socket_peer():
+    ip = resolve_scope_client_ip(
+        _scope("10.0.0.1", xff="203.0.113.9"), trusted_proxies=(), max_hops=3
+    )
+    assert ip == "10.0.0.1"
+
+
+def test_resolve_scope_peels_xff_for_trusted_peer():
+    cfg = AuthConfig(trusted_proxies=["10.0.0.0/8"])
+    ip = resolve_scope_client_ip(
+        _scope("10.0.0.1", xff="203.0.113.9"),
+        trusted_proxies=cfg.trusted_proxies_parsed,
+        max_hops=cfg.trusted_proxies_max_hops,
+    )
+    assert ip == "203.0.113.9"
+
+
+def test_resolve_scope_untrusted_peer_ignores_xff():
+    cfg = AuthConfig(trusted_proxies=["10.0.0.0/8"])
+    ip = resolve_scope_client_ip(
+        _scope("198.51.100.7", xff="203.0.113.9"),
+        trusted_proxies=cfg.trusted_proxies_parsed,
+        max_hops=cfg.trusted_proxies_max_hops,
+    )
+    assert ip == "198.51.100.7"
+
+
+def test_resolve_scope_no_client_returns_none():
+    assert resolve_scope_client_ip(
+        {"type": "http", "headers": []}, trusted_proxies=(), max_hops=3
+    ) is None
 
 
 def test_count_and_over_limit(db_conn):
@@ -74,3 +116,49 @@ def test_middleware_caps_registration(db_conn, db_pool):
     assert client.post("/register", json={}).status_code == 200
     assert client.post("/register", json={}).status_code == 200
     assert client.post("/register", json={}).status_code == 429
+
+
+def test_middleware_buckets_per_peeled_xff_client(db_conn, db_pool):
+    pytest.importorskip("mcp")
+    from localmail.config import McpConfig
+    from localmail.serve.oauth.registration_guard import RegistrationRateLimit
+
+    registration.reset(db_conn)
+    db_conn.commit()
+
+    async def stub_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    mw = RegistrationRateLimit(
+        stub_app,
+        pool=db_pool,
+        config=McpConfig(oauth_registration_max=1, oauth_registration_window_s=3600),
+        auth_config=AuthConfig(trusted_proxies=["10.0.0.0/8"]),
+        register_path_suffix="/register",
+    )
+
+    def post_from(xff_client):
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/register",
+            "client": ("10.0.0.1", 1234),
+            "headers": [(b"x-forwarded-for", xff_client.encode())],
+        }
+        status = {}
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(msg):
+            if msg["type"] == "http.response.start":
+                status["code"] = msg["status"]
+
+        asyncio.run(mw(scope, receive, send))
+        return status["code"]
+
+    # Cap is per peeled client IP, not per proxy socket peer (10.0.0.1).
+    assert post_from("203.0.113.1") == 200
+    assert post_from("203.0.113.1") == 429  # same client over cap
+    assert post_from("203.0.113.2") == 200  # distinct client, own bucket

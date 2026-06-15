@@ -1282,7 +1282,11 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   - **M1 — disabled-user refresh containment:** `refresh.load_refresh` JOINs
     `api_users` and filters `disabled_at IS NULL` (mirroring `api.auth.verify_token`),
     so a disabled user's refresh token is treated as non-existent — both the SDK's
-    `load_refresh_token` and `rotate_refresh` reject it. RFC 9700 §4.13.
+    `load_refresh_token` and `rotate_refresh` reject it. RFC 9700 §4.13. If the
+    user is disabled in the window *between* the SDK's load and exchange,
+    `provider._exchange_refresh_sync` fails closed with a `TokenError`
+    (`invalid_grant`) raised after the connection context exits — it no longer
+    asserts on the `None` rotation (which would have been an HTTP 500).
   - **M2 — broadened unused-client cleanup:** `clients.cleanup_unused` now reaps a
     client when it has **no unexpired refresh token** *and* its last activity
     (`COALESCE(last_used_at, created_at)`) is older than the retention window —

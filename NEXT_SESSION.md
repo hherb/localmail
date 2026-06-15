@@ -47,19 +47,23 @@ schema change, no new dependency, default-off AS path byte-for-byte unchanged.
   `X-Forwarded-For` against `auth.trusted_proxies` exactly like the login
   limiter. Empty config = socket peer (unchanged). Wired in `create_app`.
 
-Commit on `chore/mcp-oauth-as-hardening` (pushed; PR #184):
+Commits on `chore/mcp-oauth-as-hardening` (pushed; PR #184):
 
 | SHA | what |
 |---|---|
 | `d6bdcc8` | feat(mcp): harden OAuth AS — disabled-user refresh, idle-client reap, DCR proxy peeling (+ docs: mcp-usage, README, CLAUDE.md) |
+| `58055c7` | fix(mcp): post-review — graceful refresh-exchange `TokenError` (no 500), dedup `max_hops` default via `auth_config or AuthConfig()` |
 
 **Verification:** `unset VIRTUAL_ENV && uv run --extra mcp pytest -q tests/
---deselect tests/test_daemon_control_socket.py` → **1625 passed, 14 deselected,
+--deselect tests/test_daemon_control_socket.py` → **1626 passed, 14 deselected,
 0 failures**; `uv run mypy src/localmail` clean (120 files). Tests added: 3 in
 `test_oauth_refresh_store.py` (disabled→no-load, disabled→no-rotate,
 re-enable→loads), 2 in `test_oauth_clients_store.py` (live-token keeps client,
 expired-token reaps once-used), 5 in `test_oauth_registration_guard.py`
-(`resolve_scope_client_ip` ×4 + a direct-ASGI per-peeled-IP bucketing test).
+(`resolve_scope_client_ip` ×4 + a direct-ASGI per-peeled-IP bucketing test), and
+1 in `test_oauth_provider.py` (disabled-user refresh exchange → `invalid_grant`,
+not 500). A self-review (`/review`) flagged three items; all addressed in
+`58055c7` (M1-race + max_hops nit) and issue **#185** (M2 index).
 
 ## What's next
 
@@ -88,12 +92,14 @@ expired-token reaps once-used), 5 in `test_oauth_registration_guard.py`
 ## Open decisions & risks
 1. **PR #184 is open, not merged.** First action next session is §0 (merge).
    Working tree otherwise clean (only the untracked `.claude/scheduled_tasks.lock`).
-2. **M1 race (accepted):** if a user is disabled in the microseconds between the
-   SDK's `load_refresh_token` and `exchange_refresh_token`, the provider's
-   `_exchange_refresh_sync` assert (`new_refresh is not None`) could fire (→ 500
-   instead of `invalid_grant`). Pre-existing invariant from #182; the window is
-   negligible and the access token is rejected at `/mcp` regardless. Not hardened
-   here to keep scope contained; revisit if #183's store rework touches it.
+2. **M1 race (fixed in #184 after review):** a user disabled between the SDK's
+   `load_refresh_token` and `exchange_refresh_token` now fails closed with
+   `TokenError("invalid_grant")` from `provider._exchange_refresh_sync` (raised
+   after the connection context, mirroring `_exchange_code_sync`) — previously
+   the `assert new_refresh is not None` would have surfaced as an HTTP 500.
+   Pinned by `test_oauth_provider.py::test_exchange_refresh_rejects_disabled_user_without_500`.
+   Filed during review: **#185** (index `oauth_refresh_tokens(client_id)` for the
+   M2 cleanup subquery — negligible at current scale, fold into #183's migration).
 3. **macOS test noise** *(carried)* — `test_daemon_control_socket.py` fails locally
    on macOS (`AF_UNIX path too long`); deselect locally, Linux CI is the real
    signal. Also carried: psycopg_pool teardown `ResourceWarning`s, the websockets

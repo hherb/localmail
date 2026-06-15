@@ -17,6 +17,11 @@ from localmail.api.auth import generate_token, hash_token, verify_token
 if TYPE_CHECKING:
     from mcp.server.auth.provider import AccessToken
 
+# Sentinel client_id for api_tokens rows with no OAuth client (i.e. login-issued
+# tokens via /v1/auth/login, where oauth_client_id is NULL). Matches the
+# CLIENT_ID constant the opaque-bearer LocalmailTokenVerifier uses.
+_NO_OAUTH_CLIENT_ID = "localmail"
+
 
 def mint_access(
     conn: psycopg.Connection, *, user_id: int, client_id: str, ttl_s: int
@@ -45,7 +50,7 @@ def load_access(conn: psycopg.Connection, raw_token: str) -> "AccessToken | None
             (hash_token(raw_token),),
         )
         row = cur.fetchone()
-    client_id = row[0] if row and row[0] is not None else "localmail"
+    client_id = row[0] if row and row[0] is not None else _NO_OAUTH_CLIENT_ID
     return AccessToken(
         token=raw_token, client_id=client_id, scopes=[], subject=str(user.id)
     )

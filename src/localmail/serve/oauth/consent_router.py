@@ -8,12 +8,20 @@ POST /oauth/consent             -> verify the signed blob; on Allow, rate-limite
 
 Credential checks reuse the /v1/auth/login rate-limit path so this surface is
 not a brute-force bypass.
+
+No CSRF token guards the POST: the form carries no ambient authority. Auth is
+the username+password typed each time (there is no session cookie to ride), and
+the redirect target is the HMAC-signed, SDK-pre-validated redirect_uri inside
+`req` — not anything the submitting page controls. A cross-site auto-submit
+therefore can't act as the victim, so a CSRF token would add no protection.
 """
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 from urllib.parse import urlencode
 
+import anyio.to_thread
 import psycopg
 from psycopg_pool import ConnectionPool
 from starlette.requests import Request
@@ -25,8 +33,13 @@ from localmail.api import auth as api_auth
 from localmail.api.errors import RateLimited
 from localmail.config import AuthConfig, McpConfig
 from localmail.mcp.oauth import clients, codes
-from localmail.mcp.oauth.consent_forms import ConsentFormError, parse_consent_form
+from localmail.mcp.oauth.consent_forms import (
+    ConsentDecision,
+    ConsentFormError,
+    parse_consent_form,
+)
 from localmail.mcp.oauth.consent_state import (
+    ConsentPayload,
     ConsentStateExpired,
     ConsentStateInvalid,
     decode_consent_state,
@@ -63,38 +76,23 @@ def build_consent_router(
             return HTMLResponse(
                 "invalid or expired authorization request", status_code=400
             )
+        # _client_name hits the DB; keep it off the event loop.
+        client_name = await anyio.to_thread.run_sync(_client_name, payload.client_id)
         return _TEMPLATES.TemplateResponse(
             request=request,
             name="consent.html",
-            context={
-                "req": blob,
-                "client_name": _client_name(payload.client_id),
-                "error": None,
-            },
+            context={"req": blob, "client_name": client_name, "error": None},
         )
 
-    async def post_consent(request: Request) -> Response:
-        form = await request.form()
-        try:
-            decision = parse_consent_form({k: str(v) for k, v in form.items()})
-        except ConsentFormError as exc:
-            return HTMLResponse(str(exc), status_code=400)
-        try:
-            payload = decode_consent_state(decision.req, key=signing_key)
-        except (ConsentStateInvalid, ConsentStateExpired):
-            return HTMLResponse(
-                "invalid or expired authorization request", status_code=400
-            )
-
-        if not decision.allow:
-            return _redirect_with(
-                payload.redirect_uri,
-                error="access_denied",
-                **({"state": payload.state} if payload.state else {}),
-            )
-
+    def _authorize_and_mint(
+        request: Request,
+        payload: ConsentPayload,
+        decision: ConsentDecision,
+        client_ip: str | None,
+    ) -> Response:
+        # Runs in a worker thread (blocking DB + bcrypt). Builds and returns the
+        # full Response so the event-loop handler only awaits the offload.
         assert decision.username is not None and decision.password is not None
-        client_ip = request.client.host if request.client else None
         with pool.connection() as conn:
             try:
                 api_auth.check_login_rate_limits(
@@ -149,6 +147,33 @@ def build_consent_router(
             payload.redirect_uri,
             code=raw_code,
             **({"state": payload.state} if payload.state else {}),
+        )
+
+    async def post_consent(request: Request) -> Response:
+        form = await request.form()
+        try:
+            decision = parse_consent_form({k: str(v) for k, v in form.items()})
+        except ConsentFormError as exc:
+            return HTMLResponse(str(exc), status_code=400)
+        try:
+            payload = decode_consent_state(decision.req, key=signing_key)
+        except (ConsentStateInvalid, ConsentStateExpired):
+            return HTMLResponse(
+                "invalid or expired authorization request", status_code=400
+            )
+
+        if not decision.allow:
+            return _redirect_with(
+                payload.redirect_uri,
+                error="access_denied",
+                **({"state": payload.state} if payload.state else {}),
+            )
+
+        client_ip = request.client.host if request.client else None
+        return await anyio.to_thread.run_sync(
+            functools.partial(
+                _authorize_and_mint, request, payload, decision, client_ip
+            )
         )
 
     return [

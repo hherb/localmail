@@ -5,6 +5,7 @@ attempt audit and unused client rows.
 """
 from __future__ import annotations
 
+import anyio.to_thread
 from psycopg_pool import ConnectionPool
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -37,7 +38,9 @@ class RegistrationRateLimit:
             return
         client = scope.get("client")
         ip = client[0] if client else None
-        if self._over_limit(ip):
+        # The limit check + record/sweep are blocking DB work; keep them off the
+        # event loop so a /register burst can't stall the shared listener.
+        if await anyio.to_thread.run_sync(self._over_limit, ip):
             resp = JSONResponse(
                 {"error": "rate_limited",
                  "error_description": "too many registration attempts"},
@@ -45,7 +48,7 @@ class RegistrationRateLimit:
             )
             await resp(scope, receive, send)
             return
-        self._record_and_sweep(ip)
+        await anyio.to_thread.run_sync(self._record_and_sweep, ip)
         await self._app(scope, receive, send)
 
     def _over_limit(self, ip: str | None) -> bool:

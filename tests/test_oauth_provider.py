@@ -4,7 +4,7 @@ from psycopg_pool import ConnectionPool
 
 pytest.importorskip("mcp")
 
-from mcp.server.auth.provider import AuthorizationParams  # noqa: E402
+from mcp.server.auth.provider import AuthorizationParams, TokenError  # noqa: E402
 from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 
 from localmail.api import auth as api_auth  # noqa: E402
@@ -82,6 +82,30 @@ def test_exchange_authorization_code_mints_tokens_and_consumes_code(db_conn, db_
     assert anyio.run(p.load_authorization_code, _client(), raw_code) is None
     at = anyio.run(p.load_access_token, token.access_token)
     assert at is not None and at.subject == str(uid)
+
+
+def test_exchange_rejects_already_consumed_code(db_conn, db_pool):
+    # A code that passed load_authorization_code but was concurrently consumed
+    # must not mint a second token set (RFC 6749 single-use).
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, "prov-user", "pw")
+        raw_code = codes.mint_code(
+            conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+            redirect_uri_provided_explicitly=True, code_challenge="chal",
+            scopes=[], ttl_s=60,
+        )
+        conn.commit()
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    assert loaded is not None
+    # Simulate the racing exchange having already deleted the code.
+    with db_pool.connection() as conn:
+        assert codes.consume_code(conn, raw_code) is True
+        conn.commit()
+    with pytest.raises(TokenError) as exc:
+        anyio.run(p.exchange_authorization_code, _client(), loaded)
+    assert exc.value.error == "invalid_grant"
 
 
 def test_exchange_refresh_rotates(db_conn, db_pool):

@@ -20,6 +20,7 @@ from mcp.server.auth.provider import (
     AuthorizationParams,
     OAuthAuthorizationServerProvider,
     RefreshToken,
+    TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
@@ -145,17 +146,31 @@ class LocalmailASProvider(
         assert auth_code.subject is not None
         user_id = int(auth_code.subject)
         with self._pool.connection() as conn:
-            codes.consume_code(conn, auth_code.code)
-            access_raw = access.mint_access(
-                conn, user_id=user_id, client_id=client_id,
-                ttl_s=self._cfg.oauth_access_token_ttl_s,
+            # Atomic single-use guard (RFC 6749 §4.1.2). The SDK already loaded +
+            # validated the code, but two concurrent exchanges can both pass that
+            # check; only the DELETE that actually removed the row may mint. Raise
+            # AFTER the connection context exits — TokenError is a frozen
+            # dataclass and the contextmanager's __exit__ cannot set __traceback__
+            # on it.
+            consumed = codes.consume_code(conn, auth_code.code)
+            if not consumed:
+                conn.rollback()
+            else:
+                access_raw = access.mint_access(
+                    conn, user_id=user_id, client_id=client_id,
+                    ttl_s=self._cfg.oauth_access_token_ttl_s,
+                )
+                refresh_raw = refresh.mint_refresh(
+                    conn, client_id=client_id, user_id=user_id,
+                    scopes=auth_code.scopes,
+                    ttl_s=self._cfg.oauth_refresh_token_ttl_s,
+                )
+                clients.touch_last_used(conn, client_id)
+                conn.commit()
+        if not consumed:
+            raise TokenError(
+                "invalid_grant", "authorization code already used or expired"
             )
-            refresh_raw = refresh.mint_refresh(
-                conn, client_id=client_id, user_id=user_id,
-                scopes=auth_code.scopes, ttl_s=self._cfg.oauth_refresh_token_ttl_s,
-            )
-            clients.touch_last_used(conn, client_id)
-            conn.commit()
         return OAuthToken(
             access_token=access_raw,
             token_type="Bearer",
@@ -207,6 +222,9 @@ class LocalmailASProvider(
                 conn, user_id=row.user_id, client_id=client_id,
                 ttl_s=self._cfg.oauth_access_token_ttl_s,
             )
+            # A refresh is client activity too — keep last_used_at honest so the
+            # unused-client cleanup never reaps an actively-refreshing client.
+            clients.touch_last_used(conn, client_id)
             conn.commit()
         return OAuthToken(
             access_token=access_raw,

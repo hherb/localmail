@@ -46,6 +46,7 @@ from localmail.serve.daemon_supervisor import (
     socket_path,
 )
 from localmail.serve.middleware import APIErrorHandlerMiddleware, RequestIdMiddleware
+from localmail.serve.oauth.registration_guard import RegistrationRateLimit
 from localmail.serve.routes import accounts as accounts_routes
 from localmail.serve.routes import auth as auth_routes
 from localmail.serve.routes import attachments as attachments_routes
@@ -227,6 +228,17 @@ def create_app(
     # response (including error responses) gets the X-Request-Id header.
     app.add_middleware(APIErrorHandlerMiddleware)
     app.add_middleware(RequestIdMiddleware)
+
+    # Per-IP cap on the open Dynamic Client Registration endpoint. The SDK owns
+    # /register inside the /mcp sub-mount, so this top-level middleware matches
+    # the path by suffix and short-circuits with 429 before the sub-app sees it.
+    if enable_mcp and mcp_cfg.authorization_server_enabled:
+        app.add_middleware(
+            RegistrationRateLimit,
+            pool=pool,
+            config=mcp_cfg,
+            register_path_suffix="/register",
+        )
 
     @app.middleware("http")
     async def add_csp_header(request, call_next):

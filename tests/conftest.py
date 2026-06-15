@@ -124,7 +124,7 @@ def db_conn(db_dsn):
                 "attachment_text, attachment_chunks, failed_extractions, "
                 "api_users, api_tokens, user_accounts, api_login_attempts, "
                 "daemon_commands, daemon_heartbeats, import_jobs, "
-                "oauth_clients "
+                "oauth_clients, oauth_registration_attempts "
                 "RESTART IDENTITY CASCADE"
             )
         conn.commit()

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Authorize application — localmail</title>
+</head>
+<body>
+  <h1>Authorize {{ client_name }}</h1>
+  <p>
+    <strong>{{ client_name }}</strong> is requesting access to read mail in the
+    accounts you have been granted. Sign in to allow it.
+  </p>
+  {% if error %}<p role="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="/oauth/consent">
+    <input type="hidden" name="req" value="{{ req }}">
+    <label>Username <input name="username" autocomplete="username"></label>
+    <label>Password
+      <input type="password" name="password" autocomplete="current-password">
+    </label>
+    <button type="submit" name="decision" value="allow">Allow</button>
+    <button type="submit" name="decision" value="deny">Deny</button>
+  </form>
+</body>
+</html>

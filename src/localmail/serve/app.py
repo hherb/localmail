@@ -279,6 +279,15 @@ def create_app(
                 "style-src 'self' 'unsafe-inline'; script-src 'self'; "
                 "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
             )
+        elif request.url.path.startswith("/oauth/consent"):
+            # The OAuth consent page is a server-rendered login form that POSTs
+            # to itself; without form-action 'self' a real browser refuses the
+            # submission and the Allow/Deny buttons silently no-op. It ships no
+            # JavaScript, so script-src stays absent under default-src 'none'.
+            csp = (
+                "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
+                "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            )
         else:
             csp = (
                 "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "

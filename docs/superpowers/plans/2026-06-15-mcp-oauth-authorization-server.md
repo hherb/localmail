@@ -1881,6 +1881,16 @@ app routes with the consent router. When false: behaviour is exactly as today
 
 - [ ] **Step 1: Write the failing test**
 
+`create_app`'s VERIFIED signature is keyword-only and takes `db_dsn` (it builds
+the pool internally) — NOT a `pool=`. Relevant kwargs:
+`create_app(*, db_dsn: str, searcher=None, serve_config: ServeConfig | None,
+auth_config: AuthConfig | None, enable_mcp: bool, mcp_config: McpConfig | None)`.
+The MCP build happens in `_try_build_mcp(pool, searcher, mcp_config)`, which must
+be extended to also receive `serve_config` + `auth_config` (for the signing key +
+login rate limits). Discovery routes are already appended via
+`app.router.routes.extend(mcp_discovery_routes)` — append the consent routes the
+same way.
+
 ```python
 # tests/test_serve_oauth_gating.py
 import pytest
@@ -1893,17 +1903,17 @@ def _has_route(app, path: str) -> bool:
     return any(getattr(r, "path", None) == path for r in app.router.routes)
 
 
-def test_consent_route_absent_when_as_disabled(db_pool, search_disabled_cfg):
+def test_consent_route_absent_when_as_disabled(db_dsn, db_conn):
     app = create_app(
-        pool=db_pool, searcher=None, serve_config=ServeConfig(),
+        db_dsn=db_dsn, searcher=None, serve_config=ServeConfig(),
         enable_mcp=True, mcp_config=McpConfig(enabled=True),
     )
     assert not _has_route(app, "/oauth/consent")
 
 
-def test_consent_route_present_when_as_enabled(db_pool):
+def test_consent_route_present_when_as_enabled(db_dsn, db_conn):
     app = create_app(
-        pool=db_pool, searcher=None,
+        db_dsn=db_dsn, searcher=None,
         serve_config=ServeConfig(state_signing_key="x" * 32),
         enable_mcp=True,
         mcp_config=McpConfig(enabled=True, authorization_server_enabled=True),
@@ -1911,20 +1921,19 @@ def test_consent_route_present_when_as_enabled(db_pool):
     assert _has_route(app, "/oauth/consent")
 
 
-def test_as_enabled_without_signing_key_fails_loud(db_pool):
+def test_as_enabled_without_signing_key_fails_loud(db_dsn, db_conn):
     with pytest.raises(ValueError, match="state_signing_key"):
         create_app(
-            pool=db_pool, searcher=None, serve_config=ServeConfig(),
+            db_dsn=db_dsn, searcher=None, serve_config=ServeConfig(),
             enable_mcp=True,
             mcp_config=McpConfig(enabled=True, authorization_server_enabled=True),
         )
 ```
 
-Match `create_app`'s real signature — read `src/localmail/serve/app.py` and
-adapt the fixture/kwargs (the codebase's `create_app` may take `cfg` rather than
-individual kwargs; mirror however the existing `tests/test_serve_*` build the
-app). Drop `search_disabled_cfg` if there is no such fixture; pass whatever the
-existing serve tests pass.
+Note: `ServeConfig` has a `field_validator` on `state_signing_key` — check its
+constraints (e.g. a minimum length) and use a value that satisfies it in the
+"enabled" test (`"x" * 32` is a safe placeholder; adjust if the validator
+requires a specific shape).
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -2429,10 +2438,29 @@ gh pr create --fill
 
 ## Notes for the implementer
 
-- **Fixture names:** this plan assumes `db_conn` (a committed-then-truncated
-  connection) and `db_pool` (a `ConnectionPool`) fixtures. Verify the real names
-  in `tests/conftest.py` before Task 5 and substitute consistently. If only a
-  `pool` fixture exists, use it.
+- **Fixture names (VERIFIED against this repo):** `conftest.py` provides
+  `db_conn` (a committed-then-truncated `psycopg.Connection`) and `db_dsn` (a
+  session-scoped DSN string). **There is NO `db_pool`/`pool` fixture.** Wherever a
+  task's test text says `db_pool`, build a pool inline from `db_dsn` and close it,
+  exactly like `tests/test_mcp_auth.py`:
+
+  ```python
+  import pytest
+  from psycopg_pool import ConnectionPool
+
+  @pytest.fixture
+  def db_pool(db_dsn):
+      pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+      try:
+          yield pool
+      finally:
+          pool.close()
+  ```
+
+  Define this local fixture in each test module that needs it (or add it to
+  `conftest.py` once in Task 5 and reuse). Use `db_conn` for the store unit tests
+  (Tasks 5-8, 11b) and the inline `db_pool` for provider/router/app tests
+  (Tasks 9-12).
 - **`anyio.run` in provider tests:** the provider methods are `async`; the unit
   tests drive them with `anyio.run(...)`. The `mcp` SDK already pulls in `anyio`.
 - **No PKCE in the provider:** never hash `code_verifier` here — the SDK does it.

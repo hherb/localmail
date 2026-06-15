@@ -37,7 +37,9 @@ def tool_search(
 
     `smart` opts into an LLM query rewrite (page 1 only). The response carries
     `rewrite_status` (one of `applied`, `unavailable`, `failed`,
-    `not_attempted`, `not_requested`) and an optional curated `rewrite_note`;
+    `not_attempted`, `not_requested`), an optional curated human `rewrite_note`,
+    and a machine-readable `rewrite_note_code` (`missing_model`, `unreachable`,
+    `unparseable`, `not_configured`, `continuation_page`, or null);
     `rewrite_skipped` (kept for back-compat) is True only for `unavailable`
     and `failed`. On a continuation page, `smart` is ignored and the status is
     `not_attempted`.

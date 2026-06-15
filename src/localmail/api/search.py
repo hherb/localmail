@@ -157,9 +157,12 @@ def run_search(
     ``searcher.config.candidates_per_arm_max``.
 
     ``smart`` requests an LLM query rewrite on page 1 (cursor is None) when the
-    searcher has a rewriter configured; the response ``rewrite_skipped`` is
-    True when a requested rewrite did not happen (rewriter unavailable, or the
-    rewrite call failed) and the un-rewritten query ran instead.
+    searcher has a rewriter configured. The response carries ``rewrite_status``
+    (a 5-value enum), an optional curated human ``rewrite_note``, and a stable
+    machine-readable ``rewrite_note_code`` (``missing_model`` / ``unreachable``
+    / ``unparseable`` / ``not_configured`` / ``continuation_page``, or ``None``
+    when there is no note). ``rewrite_skipped`` stays True only when a requested
+    rewrite did not happen (rewriter unavailable, or the rewrite call failed).
     """
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:

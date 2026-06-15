@@ -102,7 +102,7 @@ src/localmail/
     reranker.py     # FastEmbedReranker + Reranker ABC
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + OllamaLLMRewriter
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0027_import_jobs_owner.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0028_oauth_server.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -1241,6 +1241,43 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   stays the bare public origin (no `/mcp`; appended internally). No migration,
   no new dependency. Design:
   [docs/superpowers/specs/2026-06-10-mcp-protected-resource-discovery-design.md](docs/superpowers/specs/2026-06-10-mcp-protected-resource-discovery-design.md).
+- **OAuth 2.1 authorization server (opt-in, shipped):** localmail can act as an
+  OAuth AS so spec-strict MCP clients self-onboard via browser login + consent —
+  no hand-pasted bearer token. Enabled with `[mcp] authorization_server_enabled =
+  true`; requires `[serve] state_signing_key` (>= 32 chars — `create_app` fails
+  loud at startup without it). The AS issuer is **auto-derived** as
+  `<resource_server_url>/mcp` in `_try_build_mcp` (zero-config for the operator;
+  an explicit `[mcp] authorization_servers` override is still honoured for
+  pointing at an external IdP). Code sub-packages:
+  `src/localmail/mcp/oauth/` — `consent_state.py` (HMAC-signed state token),
+  `consent_forms.py` (pure login/consent form logic), `clients.py` (DCR
+  registration + unused-client cleanup), `codes.py` (authorization code issue +
+  exchange), `refresh.py` (sliding refresh token rotation), `access.py`
+  (access token issue), `provider.py` (`load_access_token` wraps the existing
+  `verify_token` so the ACL is unchanged), `registration.py` (per-IP rate-limit
+  guard); `src/localmail/serve/oauth/` — `consent_router.py`
+  (`/oauth/consent` login + allow/deny screens), `registration_guard.py`
+  (per-IP middleware). Access tokens are stored in the existing `api_tokens`
+  table (`provider.load_access_token` wraps `verify_token`) — the per-user ACL
+  and `grant-account` grants are unchanged. Refresh tokens are sliding-rotated:
+  each refresh resets the 30-day clock (`oauth_refresh_token_ttl_s`); a browser
+  re-login is required only after ~30 days of inactivity, on revocation, or if
+  the api_user is disabled. The consent login reuses the `/v1/auth/login`
+  rate-limit + `DUMMY_PASSWORD_HASH` timing-parity protections. Open DCR (`POST
+  /register`) is bounded by a per-IP rate-limit middleware
+  (`oauth_registration_max` per `oauth_registration_window_s`, default 20/hour)
+  and unused-client cleanup (`oauth_client_unused_retention_s`, default 24h).
+  **Known limitations:** (1) AS metadata is served at the OIDC-style path-suffix
+  form `<origin>/mcp/.well-known/oauth-authorization-server`; the strict RFC 8414
+  §3.1 insertion form `<origin>/.well-known/oauth-authorization-server/mcp` is
+  NOT served (real MCP clients use the path-suffix form). (2) RFC 8707 resource
+  indicators are not carried through the flow or bound onto tokens (single
+  resource server; audience restriction adds nothing). Migration
+  `0028_oauth_server.sql` adds `oauth_clients`, `oauth_authorization_codes`,
+  `oauth_refresh_tokens`, `oauth_registration_attempts`, and nullable
+  `api_tokens.oauth_client_id`. No new uv dependency (`mcp` extra already
+  provides the AS machinery). Design:
+  [docs/superpowers/specs/2026-06-15-mcp-oauth-authorization-server-design.md](docs/superpowers/specs/2026-06-15-mcp-oauth-authorization-server-design.md).
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`
@@ -1259,7 +1296,7 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0027_import_jobs_owner.sql` (#162); next would be `0028_*.sql`.
+  Latest is `0028_oauth_server.sql`; next free slot `0029_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

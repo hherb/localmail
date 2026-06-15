@@ -501,11 +501,25 @@ grants (`localmail grant-account`), so a new user sees no mail until granted.
 A spec-strict client can also **discover** that `/mcp` is a protected resource
 (RFC 9728): an unauthenticated request gets a `401` whose `WWW-Authenticate`
 challenge points at `/.well-known/oauth-protected-resource/mcp`, served at the
-origin root. localmail is **not** an OAuth authorization server — discovery only
-advertises the resource; the token is still obtained out-of-band via
-`/v1/auth/login`. Set `[mcp].resource_server_url` (and `issuer_url`) to the
-externally reachable origin so the challenge and metadata are correct behind a
-proxy.
+origin root. By default localmail is not an OAuth authorization server —
+discovery only advertises the resource; the token is obtained out-of-band via
+`/v1/auth/login`. Set `[mcp].resource_server_url` to the externally reachable
+origin so the challenge and metadata are correct behind a proxy.
+
+For zero-config MCP client onboarding localmail can optionally act as an **OAuth
+2.1 authorization server**: enable it with `[mcp] authorization_server_enabled =
+true` plus `[serve] state_signing_key = "<>=32 chars>"` (required; `serve` fails
+loud if absent). The operator sets only `[mcp] resource_server_url`; the AS
+issuer and all OAuth endpoints are auto-derived as `<resource_server_url>/mcp`.
+A spec-strict client (e.g. Claude Desktop) then self-onboards via Dynamic Client
+Registration, a browser login + consent screen (the user logs in with their
+existing api_user credentials — no new user accounts are created), and PKCE
+code exchange. Access tokens are stored in the existing `api_tokens` table, so
+the per-user account ACL and `localmail grant-account` grants are unchanged.
+Tokens auto-refresh; a browser re-login is needed only after ~30 days of
+inactivity or on revocation. See [docs/mcp-usage.md](docs/mcp-usage.md) for the
+full operator guide including token lifetimes, DCR safeguards, and known
+limitations.
 
 Five read-only tools:
 

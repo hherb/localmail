@@ -62,7 +62,10 @@ uv run localmail grant-account agent horst-gmail      # one per account
 uv run localmail grant-account agent work-fastmail
 ```
 
-### 4. Obtain a bearer token
+### 4. Obtain a bearer token (opaque-bearer mode)
+
+This is the default mode when the OAuth authorization server is disabled (see
+[OAuth onboarding](#oauth-onboarding-zero-config) below for the alternative).
 
 Authentication is an **opaque bearer token** — the same `api_tokens` the HTTP
 API uses. The agent obtains one by logging in with the user's credentials:
@@ -88,13 +91,114 @@ JSON document advertises the `resource`, `authorization_servers`, and supported
 bearer methods. Set `[mcp].resource_server_url` to the externally reachable
 origin so the challenge and the metadata are correct behind a proxy.
 
-There is still **no OAuth authorization-server flow** — localmail does not
-implement `/authorize`, `/token`, or dynamic client registration. Discovery only
-tells the client *where* the resource is and that it is bearer-protected; the
-token itself is obtained out-of-band via `/v1/auth/login` and configured on the
-client directly. A client that *requires* the full OAuth dance will not
-auto-negotiate end-to-end. (See the [GUI server](../README.md#gui-server)
-section of the README for the full auth route reference.)
+When the authorization server is **off** (the default), there is no OAuth
+`/authorize`, `/token`, or dynamic client registration. Discovery only tells the
+client *where* the resource is and that it is bearer-protected; the token is
+obtained out-of-band via `/v1/auth/login` and configured on the client directly.
+A spec-strict client that requires the full OAuth dance should use the OAuth mode
+described below. (See the [GUI server](../README.md#gui-server) section of the
+README for the full auth route reference.)
+
+## OAuth onboarding (zero-config)
+
+localmail can act as an OAuth 2.1 **authorization server** so spec-strict MCP
+clients self-onboard via a browser login and consent — no hand-pasted bearer
+token required. This is opt-in and off by default.
+
+### Enabling the authorization server
+
+Three config settings are required (plus the public URL):
+
+```toml
+[serve]
+state_signing_key = "<at-least-32-random-characters>"   # REQUIRED; serve fails loud if absent
+
+[mcp]
+enabled = true
+authorization_server_enabled = true
+resource_server_url = "https://mail.example.com:8443"   # your public origin
+```
+
+`state_signing_key` must be at least 32 characters; `create_app` raises an
+error at startup if the AS is enabled without it. `resource_server_url` is the
+only URL the operator needs to set — the AS issuer and all OAuth endpoints are
+auto-derived as `<resource_server_url>/mcp`, so discovery and the endpoint URLs
+are self-consistent. Setting `[mcp] authorization_servers` explicitly is still
+honoured for pointing at an external IdP instead.
+
+The `mcp` extra must also be installed (`uv sync --extra mcp`), as with the
+opaque-bearer mode.
+
+### The cold-connect flow
+
+A spec-strict MCP client (e.g. Claude Desktop) that encounters `/mcp` for the
+first time performs these steps automatically:
+
+1. **Resource discovery** — `GET /.well-known/oauth-protected-resource/mcp`
+   (RFC 9728) returns a JSON document that advertises the authorization server
+   URL (`<origin>/mcp`).
+2. **AS metadata** — `GET <origin>/mcp/.well-known/oauth-authorization-server`
+   (RFC 8414) returns the `registration_endpoint`, `authorization_endpoint`, and
+   `token_endpoint`.
+3. **Dynamic client registration** — `POST <registration_endpoint>` (RFC 7591,
+   open/unauthenticated) returns a `client_id`. No client secret is issued.
+4. **Authorization redirect** — the client opens the user's browser at
+   `<authorization_endpoint>` with PKCE (S256 required). localmail redirects to
+   `/oauth/consent`, where the user logs in with their **existing api_user
+   username and password** and clicks Allow.
+5. **Code exchange** — localmail redirects back to the client's redirect URI
+   with an authorization code; the client exchanges it at `<token_endpoint>`
+   (with the PKCE `code_verifier`) for an access token and a refresh token.
+6. **Authenticated call** — the client passes `Authorization: Bearer
+   <access_token>` to `/mcp` on every subsequent request.
+
+Steps 1–5 happen once per client; the refresh token is then used to renew
+access tokens automatically.
+
+### Token lifetimes and re-authentication
+
+- **Access tokens** expire after 1 hour (configurable: `[mcp]
+  oauth_access_token_ttl_s`). The client's OAuth library refreshes them
+  silently; the 1-hour expiry is invisible to the user.
+- **Refresh tokens** are valid for 30 days and are **sliding**: each refresh
+  resets the clock (`[mcp] oauth_refresh_token_ttl_s`). An actively-used client
+  never needs to re-authenticate.
+- A **browser re-login** (repeating steps 4–5) is required only after
+  approximately 30 days of total inactivity, on explicit token revocation, or if
+  the api_user is disabled.
+
+Access tokens are stored in the existing `api_tokens` table, so the per-user
+account ACL applies unchanged — the agent sees only the accounts the user has
+been granted via `localmail grant-account`.
+
+### Open DCR safeguards
+
+The `/register` endpoint is unauthenticated (required for zero-config), but a
+registered client is inert until a real user completes the consent step. Two
+safeguards bound abuse:
+
+- **Per-IP rate limit** — `[mcp] oauth_registration_max` registrations per
+  `oauth_registration_window_s` (default 20 per hour). Excess requests receive
+  `429 Too Many Requests`.
+- **Unused-client cleanup** — registered clients that never complete a token
+  exchange are deleted after `[mcp] oauth_client_unused_retention_s` (default
+  24 hours).
+
+The consent login at `/oauth/consent` reuses the same Postgres-backed
+rate-limit and timing-parity protections as `/v1/auth/login`, so credential
+stuffing is bounded the same way.
+
+### Known limitations
+
+- **RFC 8414 metadata location.** localmail serves AS metadata at
+  `<origin>/mcp/.well-known/oauth-authorization-server` (the OIDC-style
+  path-suffix form used by the MCP SDK and spec-compliant MCP clients). A
+  hypothetical client that probes only the strict RFC 8414 §3.1 insertion form
+  (`<origin>/.well-known/oauth-authorization-server/mcp`) will not find it.
+  Real MCP clients work correctly.
+- **RFC 8707 resource indicators** are not carried through the flow or bound
+  onto tokens. localmail is a single resource server, so audience-restriction
+  adds nothing here.
 
 ### 5. Run the server
 
@@ -163,18 +267,33 @@ and conditional GET, and applies the same per-user ACL.
 ## Config reference
 
 ```toml
+[serve]
+# Required when authorization_server_enabled = true (>= 32 chars; serve fails
+# loud at startup if absent).
+state_signing_key = ""
+
 [mcp]
-enabled = false                                # mount /mcp inside `localmail serve`
-                                               # (requires: uv sync --extra mcp)
-issuer_url = "https://your-host:8443"          # advertised in OAuth resource metadata
-resource_server_url = "https://your-host:8443" # opaque-bearer clients ignore these
+enabled = false                                 # mount /mcp inside `localmail serve`
+                                                # (requires: uv sync --extra mcp)
+resource_server_url = "https://your-host:8443"  # public origin; set this behind a proxy
+                                                # so RFC 9728 discovery is correct
+
+# OAuth authorization-server mode (opt-in, default off):
+authorization_server_enabled = false
+oauth_access_token_ttl_s = 3600                 # 1 hour
+oauth_refresh_token_ttl_s = 2592000             # 30 days, sliding
+oauth_registration_max = 20                     # per-IP DCR rate-limit
+oauth_registration_window_s = 3600              # window for the rate-limit above
+oauth_client_unused_retention_s = 86400         # 24h; unused registered clients pruned
 ```
 
-`issuer_url` / `resource_server_url` are advertised in the MCP SDK's OAuth
-resource-metadata. Opaque-bearer clients (the v1 model described here) configure
-their token directly and ignore them — set them to the **public** serve URL only
-if you have a spec-strict MCP client that reads resource metadata. They default
-to `http://localhost:8443`.
+`resource_server_url` is advertised in the RFC 9728 protected-resource metadata.
+Opaque-bearer clients configure their token directly and do not use it — set it
+to the public serve URL only if you have a spec-strict client or the AS enabled.
+Defaults to `http://localhost:8443`.
 
-No new database migration is required — MCP reuses the existing `api_users`,
-`api_tokens`, and `user_accounts` (per-user ACL) tables.
+When `authorization_server_enabled = false` (the default), there is no OAuth AS
+and no new tables — MCP reuses the existing `api_users`, `api_tokens`, and
+`user_accounts` tables. When the AS is enabled, migration `0028_oauth_server.sql`
+adds `oauth_clients`, `oauth_authorization_codes`, `oauth_refresh_tokens`,
+`oauth_registration_attempts`, and a nullable `api_tokens.oauth_client_id`.

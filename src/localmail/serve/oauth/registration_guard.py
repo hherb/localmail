@@ -10,8 +10,40 @@ from psycopg_pool import ConnectionPool
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from localmail.config import McpConfig
+from localmail.api.client_ip import TrustedProxies, resolve_client_ip
+from localmail.config import AuthConfig, McpConfig
 from localmail.mcp.oauth import clients, registration
+
+# Default hop cap used when no AuthConfig is supplied; with an empty
+# trusted-proxy set XFF is never peeled, so the value is inert.
+_DEFAULT_MAX_HOPS = 3
+
+
+def _scope_xff(scope: Scope) -> str | None:
+    """First X-Forwarded-For header value from an ASGI scope, or None.
+
+    Mirrors ``request.headers.get("X-Forwarded-For")`` on the login path: the
+    first matching header line wins.
+    """
+    for name, value in scope.get("headers", []):
+        if name == b"x-forwarded-for":
+            return value.decode("latin-1")
+    return None
+
+
+def resolve_scope_client_ip(
+    scope: Scope, *, trusted_proxies: TrustedProxies, max_hops: int
+) -> str | None:
+    """Originating client IP for an ASGI scope, honouring trusted-proxy XFF
+    peeling — the same logic the login rate limiter uses, so the per-IP DCR
+    cap survives a reverse proxy instead of collapsing to a global cap.
+    """
+    client = scope.get("client")
+    peer = client[0] if client else None
+    return resolve_client_ip(
+        peer, _scope_xff(scope),
+        trusted_proxies=trusted_proxies, max_hops=max_hops,
+    )
 
 
 class RegistrationRateLimit:
@@ -21,12 +53,19 @@ class RegistrationRateLimit:
         *,
         pool: ConnectionPool,
         config: McpConfig,
+        auth_config: AuthConfig | None = None,
         register_path_suffix: str = "/register",
     ) -> None:
         self._app = app
         self._pool = pool
         self._cfg = config
         self._suffix = register_path_suffix
+        self._trusted_proxies = (
+            auth_config.trusted_proxies_parsed if auth_config else ()
+        )
+        self._max_hops = (
+            auth_config.trusted_proxies_max_hops if auth_config else _DEFAULT_MAX_HOPS
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
@@ -36,8 +75,9 @@ class RegistrationRateLimit:
         ):
             await self._app(scope, receive, send)
             return
-        client = scope.get("client")
-        ip = client[0] if client else None
+        ip = resolve_scope_client_ip(
+            scope, trusted_proxies=self._trusted_proxies, max_hops=self._max_hops
+        )
         # The limit check + record/sweep are blocking DB work; keep them off the
         # event loop so a /register burst can't stall the shared listener.
         if await anyio.to_thread.run_sync(self._over_limit, ip):

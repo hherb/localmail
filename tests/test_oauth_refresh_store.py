@@ -51,3 +51,40 @@ def test_expired_refresh_does_not_load(db_conn):
     raw = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=-1)
     db_conn.commit()
     assert refresh.load_refresh(db_conn, raw) is None
+
+
+def _disable_user(conn, uid):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_users SET disabled_at = now() WHERE id = %s", (uid,)
+        )
+    conn.commit()
+
+
+def test_disabled_user_refresh_does_not_load(db_conn):
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    assert refresh.load_refresh(db_conn, raw) is not None
+    _disable_user(db_conn, uid)
+    assert refresh.load_refresh(db_conn, raw) is None
+
+
+def test_rotate_rejected_for_disabled_user(db_conn):
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    _disable_user(db_conn, uid)
+    assert refresh.rotate_refresh(db_conn, raw, ttl_s=100) is None
+
+
+def test_re_enabled_user_refresh_loads_again(db_conn):
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    _disable_user(db_conn, uid)
+    assert refresh.load_refresh(db_conn, raw) is None
+    with db_conn.cursor() as cur:
+        cur.execute("UPDATE api_users SET disabled_at = NULL WHERE id = %s", (uid,))
+    db_conn.commit()
+    assert refresh.load_refresh(db_conn, raw) is not None

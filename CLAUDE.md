@@ -1278,6 +1278,26 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   `api_tokens.oauth_client_id`. No new uv dependency (`mcp` extra already
   provides the AS machinery). Design:
   [docs/superpowers/specs/2026-06-15-mcp-oauth-authorization-server-design.md](docs/superpowers/specs/2026-06-15-mcp-oauth-authorization-server-design.md).
+- **AS hardening tidy-ups (#182 review follow-ups M1/M2/M3, shipped):**
+  - **M1 — disabled-user refresh containment:** `refresh.load_refresh` JOINs
+    `api_users` and filters `disabled_at IS NULL` (mirroring `api.auth.verify_token`),
+    so a disabled user's refresh token is treated as non-existent — both the SDK's
+    `load_refresh_token` and `rotate_refresh` reject it. RFC 9700 §4.13.
+  - **M2 — broadened unused-client cleanup:** `clients.cleanup_unused` now reaps a
+    client when it has **no unexpired refresh token** *and* its last activity
+    (`COALESCE(last_used_at, created_at)`) is older than the retention window —
+    covering once-used-then-idle clients, not just never-used ones. The
+    `NOT EXISTS` live-refresh-token guard means an actively-refreshing client is
+    never reaped (reaping its row would break the next `get_client`).
+  - **M3 — DCR rate-limit proxy peeling:** `RegistrationRateLimit` takes an
+    `auth_config` and resolves the client IP via the new pure
+    `registration_guard.resolve_scope_client_ip` → shared `api.client_ip.resolve_client_ip`,
+    so the per-IP `/register` cap peels `X-Forwarded-For` against
+    `auth.trusted_proxies` exactly like the login limiter (empty config = socket
+    peer, unchanged). Wired in `create_app` (`auth_config=auth_cfg`).
+  - Still open: **#183** (RFC 9700 refresh-token *family* revocation on detected
+    reuse — needs a `family_id`/tombstone schema change) and RFC 8707 resource
+    indicators (single RS — moot). No new migration for M1/M2/M3.
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`

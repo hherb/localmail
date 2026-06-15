@@ -41,11 +41,20 @@ def mint_refresh(
 
 
 def load_refresh(conn: psycopg.Connection, raw_token: str) -> RefreshRow | None:
+    """Load a live refresh token's row, or None.
+
+    The ``api_users`` JOIN + ``disabled_at IS NULL`` filter mirrors
+    ``api.auth.verify_token``: a disabled user's refresh token is treated as
+    non-existent, so both the SDK's ``load_refresh_token`` and ``rotate_refresh``
+    reject it (RFC 9700 §4.13 — disabling a user must contain its tokens).
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT client_id, user_id, scopes, expires_at "
-            "FROM oauth_refresh_tokens "
-            "WHERE token_sha256 = %s AND expires_at > now()",
+            "SELECT r.client_id, r.user_id, r.scopes, r.expires_at "
+            "FROM oauth_refresh_tokens r "
+            "JOIN api_users u ON u.id = r.user_id "
+            "WHERE r.token_sha256 = %s AND r.expires_at > now() "
+            "  AND u.disabled_at IS NULL",
             (hash_token(raw_token),),
         )
         row = cur.fetchone()

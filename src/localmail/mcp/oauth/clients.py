@@ -83,13 +83,24 @@ def touch_last_used(conn: psycopg.Connection, client_id: str) -> None:
 
 
 def cleanup_unused(conn: psycopg.Connection, *, retention_s: int) -> int:
-    """Delete clients that never completed a token exchange and were created
-    more than ``retention_s`` ago. Returns the deleted count. Caller commits.
+    """Reap abandoned clients. Returns the deleted count. Caller commits.
+
+    A client is abandoned when it has **no live refresh token** and its last
+    activity (``last_used_at``, falling back to ``created_at`` for clients that
+    never exchanged) is older than ``retention_s``. This covers both
+    never-used registrations and once-used clients that idled until their
+    refresh token expired. A client with any unexpired refresh token is never
+    reaped — its tokens are still usable, so reaping the client row would
+    silently break its next ``get_client`` lookup.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM oauth_clients WHERE last_used_at IS NULL "
-            "AND created_at < now() - make_interval(secs => %s)",
+            "DELETE FROM oauth_clients c "
+            "WHERE COALESCE(c.last_used_at, c.created_at) "
+            "      < now() - make_interval(secs => %s) "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM oauth_refresh_tokens r "
+            "    WHERE r.client_id = c.client_id AND r.expires_at > now())",
             (retention_s,),
         )
         return cur.rowcount

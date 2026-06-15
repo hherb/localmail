@@ -254,6 +254,7 @@ def create_app(
             RegistrationRateLimit,
             pool=pool,
             config=mcp_cfg,
+            auth_config=auth_cfg,
             register_path_suffix="/register",
         )
 

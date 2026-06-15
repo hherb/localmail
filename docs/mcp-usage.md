@@ -179,15 +179,17 @@ safeguards bound abuse:
 
 - **Per-IP rate limit** — `[mcp] oauth_registration_max` registrations per
   `oauth_registration_window_s` (default 20 per hour). Excess requests receive
-  `429 Too Many Requests`. The cap keys on the **immediate socket peer**, not on
-  `X-Forwarded-For` (unlike the login limiter, it does not peel
-  `auth.trusted_proxies`). Behind a reverse proxy every registration appears to
-  come from the proxy's IP, so the per-IP cap effectively becomes a single
-  global cap — coarse but still bounds spam; size `oauth_registration_max`
-  accordingly for proxied deployments.
-- **Unused-client cleanup** — registered clients that never complete a token
-  exchange are deleted after `[mcp] oauth_client_unused_retention_s` (default
-  24 hours).
+  `429 Too Many Requests`. Like the login limiter, the cap resolves the client
+  IP by peeling `X-Forwarded-For` against `auth.trusted_proxies` (right-to-left,
+  capped at `auth.trusted_proxies_max_hops`), so behind a configured reverse
+  proxy the per-IP cap stays per-client instead of collapsing to a single global
+  cap. With no trusted proxies configured it uses the immediate socket peer.
+- **Unused-client cleanup** — a registered client is reaped once it has **no
+  unexpired refresh token** and its last activity (or creation time, for clients
+  that never exchanged) is older than `[mcp] oauth_client_unused_retention_s`
+  (default 24 hours). This covers both never-used registrations and once-used
+  clients that idled until their refresh token expired; an actively-refreshing
+  client is never reaped.
 
 The consent login at `/oauth/consent` reuses the same Postgres-backed
 rate-limit and timing-parity protections as `/v1/auth/login`, so credential

@@ -96,3 +96,22 @@ def test_post_tampered_blob_rejected(consent_client):
         "password": "secret-pw", "decision": "allow",
     })
     assert r.status_code == 400
+
+
+def test_unknown_user_still_runs_password_verify(consent_client, monkeypatch):
+    import localmail.api.auth as api_auth
+    calls = []
+    real = api_auth.verify_password
+
+    def spy(pw, h):
+        calls.append(h)
+        return real(pw, h)
+
+    monkeypatch.setattr(api_auth, "verify_password", spy)
+    r = consent_client.post("/oauth/consent", data={
+        "req": _blob(), "username": "no-such-user",
+        "password": "whatever", "decision": "allow",
+    })
+    assert r.status_code == 401
+    assert calls, "verify_password must run even for an unknown username (timing parity)"
+    assert api_auth.DUMMY_PASSWORD_HASH in calls

@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlencode
 
+import psycopg
 from psycopg_pool import ConnectionPool
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -46,9 +47,12 @@ def build_consent_router(
     mcp_config: McpConfig,
     auth_config: AuthConfig,
 ) -> list[Route]:
-    def _client_name(client_id: str) -> str:
-        with pool.connection() as conn:
+    def _client_name(client_id: str, conn: psycopg.Connection | None = None) -> str:
+        if conn is not None:
             row = clients.get_client(conn, client_id)
+            return row.client_name if row and row.client_name else client_id
+        with pool.connection() as c:
+            row = clients.get_client(c, client_id)
         return row.client_name if row and row.client_name else client_id
 
     async def get_consent(request: Request) -> Response:
@@ -105,24 +109,31 @@ def build_consent_router(
                     (decision.username,),
                 )
                 row = cur.fetchone()
-            ok = row is not None and api_auth.verify_password(decision.password, row[1])
+            if row is None:
+                # Equalize response time with the wrong-password path so an attacker
+                # cannot enumerate usernames by timing (mirrors api.auth.login).
+                api_auth.verify_password(decision.password, api_auth.DUMMY_PASSWORD_HASH)
+                ok = False
+            else:
+                ok = api_auth.verify_password(decision.password, row[1])
             api_auth.record_login_attempt(
                 conn,
                 decision.username,
                 client_ip,
                 "success" if ok else "failure",
             )
-            if not ok or row is None:
+            if not ok:
                 return _TEMPLATES.TemplateResponse(
                     request=request,
                     name="consent.html",
                     context={
                         "req": decision.req,
-                        "client_name": _client_name(payload.client_id),
+                        "client_name": _client_name(payload.client_id, conn),
                         "error": "invalid username or password",
                     },
                     status_code=401,
                 )
+            assert row is not None  # ok=True implies the else branch ran
             raw_code = codes.mint_code(
                 conn,
                 client_id=payload.client_id,

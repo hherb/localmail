@@ -215,17 +215,28 @@ class LocalmailASProvider(
             new_refresh = refresh.rotate_refresh(
                 conn, rt.token, ttl_s=self._cfg.oauth_refresh_token_ttl_s
             )
-            assert new_refresh is not None  # caller already loaded it
-            row = refresh.load_refresh(conn, new_refresh)
-            assert row is not None
-            access_raw = access.mint_access(
-                conn, user_id=row.user_id, client_id=client_id,
-                ttl_s=self._cfg.oauth_access_token_ttl_s,
-            )
-            # A refresh is client activity too — keep last_used_at honest so the
-            # unused-client cleanup never reaps an actively-refreshing client.
-            clients.touch_last_used(conn, client_id)
-            conn.commit()
+            # The SDK loaded the token moments ago, but it can become invalid in
+            # the interim — the user was disabled or the token revoked, so
+            # rotate_refresh → load_refresh now returns None. Fail closed with
+            # invalid_grant rather than crashing on an assert (HTTP 500). Raise
+            # AFTER the connection context exits — TokenError is a frozen
+            # dataclass and the contextmanager's __exit__ cannot set
+            # __traceback__ on it (same constraint as _exchange_code_sync).
+            if new_refresh is None:
+                conn.rollback()
+            else:
+                row = refresh.load_refresh(conn, new_refresh)
+                assert row is not None
+                access_raw = access.mint_access(
+                    conn, user_id=row.user_id, client_id=client_id,
+                    ttl_s=self._cfg.oauth_access_token_ttl_s,
+                )
+                # A refresh is client activity too — keep last_used_at honest so
+                # the unused-client cleanup never reaps an active client.
+                clients.touch_last_used(conn, client_id)
+                conn.commit()
+        if new_refresh is None:
+            raise TokenError("invalid_grant", "refresh token is no longer valid")
         return OAuthToken(
             access_token=access_raw,
             token_type="Bearer",

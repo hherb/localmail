@@ -14,10 +14,6 @@ from localmail.api.client_ip import TrustedProxies, resolve_client_ip
 from localmail.config import AuthConfig, McpConfig
 from localmail.mcp.oauth import clients, registration
 
-# Default hop cap used when no AuthConfig is supplied; with an empty
-# trusted-proxy set XFF is never peeled, so the value is inert.
-_DEFAULT_MAX_HOPS = 3
-
 
 def _scope_xff(scope: Scope) -> str | None:
     """First X-Forwarded-For header value from an ASGI scope, or None.
@@ -60,12 +56,12 @@ class RegistrationRateLimit:
         self._pool = pool
         self._cfg = config
         self._suffix = register_path_suffix
-        self._trusted_proxies = (
-            auth_config.trusted_proxies_parsed if auth_config else ()
-        )
-        self._max_hops = (
-            auth_config.trusted_proxies_max_hops if auth_config else _DEFAULT_MAX_HOPS
-        )
+        # A default AuthConfig() has no trusted proxies (XFF never peeled) and
+        # carries the canonical max_hops default, so the proxy-peeling knobs
+        # have a single source of truth instead of a duplicated constant.
+        auth = auth_config or AuthConfig()
+        self._trusted_proxies = auth.trusted_proxies_parsed
+        self._max_hops = auth.trusted_proxies_max_hops
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (

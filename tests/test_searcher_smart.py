@@ -96,6 +96,7 @@ def test_smart_enriches_parsed_and_times_rewrite(db_dsn, db_conn):
     assert "rewrite" in page.timing_ms
     assert page.rewrite_status == "applied"
     assert page.rewrite_note is None
+    assert page.rewrite_note_code is None
 
 
 def test_smart_falls_through_on_rewriter_failure(db_dsn, db_conn, caplog):
@@ -112,6 +113,7 @@ def test_smart_falls_through_on_rewriter_failure(db_dsn, db_conn, caplog):
         pool.close()
     assert page.rewrite_status == "failed"
     assert page.rewrite_note == "could not reach the rewriter service"
+    assert page.rewrite_note_code == "unreachable"
     assert page.query.rewritten_text is None          # un-rewritten
     assert any("rewrite skipped" in r.message for r in caplog.records)
 
@@ -130,6 +132,7 @@ def test_smart_failed_404_yields_model_pull_note(db_dsn, db_conn):
     assert page.rewrite_status == "failed"
     assert "granite4.1:3b-q8_0" in page.rewrite_note
     assert "ollama pull granite4.1:3b-q8_0" in page.rewrite_note
+    assert page.rewrite_note_code == "missing_model"
 
 
 def test_smart_expansion_applies_on_sort_date_path(db_dsn, db_conn):

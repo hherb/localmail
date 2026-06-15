@@ -32,6 +32,7 @@ from localmail.search.rewrite_status import (
     FAILED,
     NOT_REQUESTED,
     classify_rewrite_failure,
+    note_for_code,
 )
 from localmail.search.rewriter import QueryRewriter, RewriteParseError, apply_rewrite
 
@@ -257,6 +258,7 @@ class SearchPage:
     next_keyset: KeysetCursor | None = None
     rewrite_status: str = NOT_REQUESTED
     rewrite_note: str | None = None
+    rewrite_note_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -897,6 +899,7 @@ class Searcher:
 
         rewrite_status = NOT_REQUESTED
         rewrite_note: str | None = None
+        rewrite_note_code: str | None = None
         if smart and parsed.free_text.strip():
             t = time.monotonic()
             try:
@@ -909,7 +912,10 @@ class Searcher:
                 rewrite_status = APPLIED
             except (httpx.HTTPError, RewriteParseError) as exc:
                 rewrite_status = FAILED
-                rewrite_note = classify_rewrite_failure(exc, model=cfg.rewriter_model)
+                rewrite_note_code = classify_rewrite_failure(exc)
+                rewrite_note = note_for_code(
+                    rewrite_note_code, model=cfg.rewriter_model
+                )
                 log.warning("smart rewrite skipped: %s", exc)
             timing["rewrite"] = (time.monotonic() - t) * 1000
 
@@ -941,6 +947,7 @@ class Searcher:
                 next_keyset=next_keyset,
                 rewrite_status=rewrite_status,
                 rewrite_note=rewrite_note,
+                rewrite_note_code=rewrite_note_code,
             )
 
         # Empty-query fallback: an empty `free_text` is the canonical
@@ -967,6 +974,7 @@ class Searcher:
                 search_token=None, query=parsed, timing_ms=timing,
                 rewrite_status=rewrite_status,
                 rewrite_note=rewrite_note,
+                rewrite_note_code=rewrite_note_code,
             )
 
         with self._pool.connection() as conn:
@@ -1028,4 +1036,5 @@ class Searcher:
             search_token=token, query=parsed, timing_ms=timing,
             rewrite_status=rewrite_status,
             rewrite_note=rewrite_note,
+            rewrite_note_code=rewrite_note_code,
         )

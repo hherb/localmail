@@ -46,6 +46,7 @@ from localmail.serve.daemon_supervisor import (
     socket_path,
 )
 from localmail.serve.middleware import APIErrorHandlerMiddleware, RequestIdMiddleware
+from localmail.serve.oauth.registration_guard import RegistrationRateLimit
 from localmail.serve.routes import accounts as accounts_routes
 from localmail.serve.routes import auth as auth_routes
 from localmail.serve.routes import attachments as attachments_routes
@@ -55,10 +56,11 @@ from localmail.serve.routes import search as search_routes
 from localmail.serve.routes import version as version_routes
 
 
-def _try_build_mcp(pool, searcher, mcp_config):
-    """Build the FastMCP server + ASGI app + RFC 9728 discovery routes.
+def _try_build_mcp(pool, searcher, mcp_config, serve_config, auth_config):
+    """Build the FastMCP server + ASGI app + RFC 9728 discovery routes + (when
+    the OAuth authorization server is enabled) the interactive consent routes.
 
-    Returns (None, None, []) if the [mcp] extra is absent.
+    Returns (None, None, [], []) if the [mcp] extra is absent.
     """
     try:
         from localmail.mcp import build_mcp_server, build_protected_resource_routes
@@ -66,10 +68,46 @@ def _try_build_mcp(pool, searcher, mcp_config):
         logging.getLogger("localmail.serve").info(
             "MCP enabled but the [mcp] extra is not installed; skipping /mcp mount"
         )
-        return None, None, []
-    server = build_mcp_server(pool, searcher=searcher, config=mcp_config)
-    routes = build_protected_resource_routes(mcp_config)
-    return server, server.streamable_http_app(), routes
+        return None, None, [], []
+    consent_routes: list[Route] = []
+    if mcp_config.authorization_server_enabled:
+        from pydantic import AnyHttpUrl
+
+        from localmail.mcp import build_as_provider
+        from localmail.mcp.discovery import mcp_resource_url
+        from localmail.serve.oauth.consent_router import build_consent_router
+
+        # localmail is its own AS + RS. The SDK sub-mounts the AS routes
+        # (/authorize, /token, /register, /.well-known/...) under /mcp and builds
+        # their advertised URLs from AuthSettings.issuer_url, so the issuer MUST
+        # equal the /mcp resource URL for those endpoints to resolve. There is no
+        # valid config where it differs, so derive it from resource_server_url
+        # rather than make the operator set it by hand. An explicitly-configured
+        # authorization_servers (an EXTERNAL IdP) is preserved.
+        as_issuer = AnyHttpUrl(mcp_resource_url(str(mcp_config.resource_server_url)))
+        effective_cfg = mcp_config.model_copy(update={
+            "issuer_url": as_issuer,
+            "authorization_servers": mcp_config.authorization_servers or [as_issuer],
+        })
+
+        key = serve_config.state_signing_key.encode()
+        provider = build_as_provider(
+            pool, config=effective_cfg, signing_key=key, consent_path="/oauth/consent"
+        )
+        server = build_mcp_server(
+            pool, searcher=searcher, config=effective_cfg, auth_server_provider=provider
+        )
+        consent_routes = build_consent_router(
+            pool=pool,
+            signing_key=key,
+            mcp_config=effective_cfg,
+            auth_config=auth_config,
+        )
+        routes = build_protected_resource_routes(effective_cfg)
+    else:
+        server = build_mcp_server(pool, searcher=searcher, config=mcp_config)
+        routes = build_protected_resource_routes(mcp_config)
+    return server, server.streamable_http_app(), routes, consent_routes
 
 
 def create_app(
@@ -102,6 +140,14 @@ def create_app(
     auth_cfg = auth_config or AuthConfig()
     daemon_cfg = daemon_config or DaemonConfig()
     imports_cfg = imports_config or ImportsConfig()
+    mcp_cfg = mcp_config or McpConfig()
+
+    # Fail loud BEFORE opening the pool so a misconfig never leaks a connection.
+    if enable_mcp and mcp_cfg.authorization_server_enabled and not cfg.state_signing_key:
+        raise ValueError(
+            "mcp.authorization_server_enabled requires [serve].state_signing_key"
+        )
+
     pool = ConnectionPool(
         db_dsn,
         min_size=cfg.pool_min_size,
@@ -112,9 +158,10 @@ def create_app(
     mcp_server = None
     mcp_app = None
     mcp_discovery_routes: list[Route] = []
+    mcp_consent_routes: list[Route] = []
     if enable_mcp:
-        mcp_server, mcp_app, mcp_discovery_routes = _try_build_mcp(
-            pool, searcher, mcp_config or McpConfig()
+        mcp_server, mcp_app, mcp_discovery_routes, mcp_consent_routes = _try_build_mcp(
+            pool, searcher, mcp_cfg, cfg, auth_cfg
         )
 
     # Plane B supervisor: a real subprocess owner when we supervise the daemon,
@@ -177,6 +224,7 @@ def create_app(
     if mcp_app is not None:
         app.mount("/mcp", mcp_app)
         app.router.routes.extend(mcp_discovery_routes)
+        app.router.routes.extend(mcp_consent_routes)
 
     # Exception handler for APIError raised inside route handlers / dependencies.
     # FastAPI's DI layer catches these before BaseHTTPMiddleware sees them, so we
@@ -197,6 +245,17 @@ def create_app(
     # response (including error responses) gets the X-Request-Id header.
     app.add_middleware(APIErrorHandlerMiddleware)
     app.add_middleware(RequestIdMiddleware)
+
+    # Per-IP cap on the open Dynamic Client Registration endpoint. The SDK owns
+    # /register inside the /mcp sub-mount, so this top-level middleware matches
+    # the path by suffix and short-circuits with 429 before the sub-app sees it.
+    if enable_mcp and mcp_cfg.authorization_server_enabled:
+        app.add_middleware(
+            RegistrationRateLimit,
+            pool=pool,
+            config=mcp_cfg,
+            register_path_suffix="/register",
+        )
 
     @app.middleware("http")
     async def add_csp_header(request, call_next):
@@ -219,6 +278,15 @@ def create_app(
                 "default-src 'none'; img-src 'self' data:; "
                 "style-src 'self' 'unsafe-inline'; script-src 'self'; "
                 "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+            )
+        elif request.url.path.startswith("/oauth/consent"):
+            # The OAuth consent page is a server-rendered login form that POSTs
+            # to itself; without form-action 'self' a real browser refuses the
+            # submission and the Allow/Deny buttons silently no-op. It ships no
+            # JavaScript, so script-src stays absent under default-src 'none'.
+            csp = (
+                "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
+                "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
             )
         else:
             csp = (

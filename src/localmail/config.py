@@ -516,12 +516,28 @@ class McpConfig(BaseModel):
     `authorization_servers` field. `None` falls back to `[issuer_url]`; set an
     explicit list to point spec-strict clients at a real external authorization
     server whose tokens `LocalmailTokenVerifier` accepts.
+
+    Setting `authorization_server_enabled = true` turns localmail itself into an
+    OAuth 2.1 authorization server for MCP clients and requires
+    `[serve].state_signing_key` to be set.
     """
 
     enabled: bool = False
     issuer_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
     resource_server_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
     authorization_servers: list[AnyHttpUrl] | None = None
+
+    # OAuth 2.1 authorization server (MCP "Approach B"). Opt-in; when off the
+    # MCP server stays opaque-bearer + discovery only (today's behaviour). All
+    # tunables defaulted so the provider carries no magic numbers.
+    authorization_server_enabled: bool = False
+    oauth_access_token_ttl_s: int = 3600
+    oauth_refresh_token_ttl_s: int = 2592000
+    oauth_authorization_code_ttl_s: int = 60
+    oauth_consent_state_ttl_s: int = 300
+    oauth_registration_window_s: int = 3600
+    oauth_registration_max: int = 20
+    oauth_client_unused_retention_s: int = 86400
 
 
 class Config(BaseModel):

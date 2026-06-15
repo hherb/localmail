@@ -1,0 +1,252 @@
+"""LocalmailASProvider — the MCP SDK OAuthAuthorizationServerProvider backed by
+the localmail OAuth stores.
+
+`authorize` does NOT mint a code: it packs the authorization params into a
+signed consent blob and redirects to the interactive consent router, which mints
+the code after a verified login. PKCE S256 + redirect_uri matching are done by
+the SDK's TokenHandler using the AuthorizationCode we return from
+`load_authorization_code`; this provider never sees the code_verifier.
+"""
+from __future__ import annotations
+
+import time
+from typing import Literal, cast
+from urllib.parse import urlencode
+
+import anyio.to_thread
+from mcp.server.auth.provider import (
+    AccessToken,
+    AuthorizationCode,
+    AuthorizationParams,
+    OAuthAuthorizationServerProvider,
+    RefreshToken,
+    TokenError,
+)
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from pydantic import AnyUrl
+from psycopg_pool import ConnectionPool
+
+from localmail.config import McpConfig
+from localmail.mcp.oauth import access, clients, codes, refresh
+from localmail.mcp.oauth.consent_state import ConsentPayload, encode_consent_state
+
+TokenEndpointAuthMethod = Literal[
+    "none", "client_secret_post", "client_secret_basic", "private_key_jwt"
+]
+
+
+class LocalmailASProvider(
+    OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]
+):
+    def __init__(
+        self,
+        pool: ConnectionPool,
+        *,
+        config: McpConfig,
+        signing_key: bytes,
+        consent_path: str,
+    ) -> None:
+        self._pool = pool
+        self._cfg = config
+        self._key = signing_key
+        self._consent_path = consent_path
+
+    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        return await anyio.to_thread.run_sync(self._get_client_sync, client_id)
+
+    def _get_client_sync(self, client_id: str) -> OAuthClientInformationFull | None:
+        with self._pool.connection() as conn:
+            row = clients.get_client(conn, client_id)
+        if row is None:
+            return None
+        return OAuthClientInformationFull(
+            client_id=row.client_id,
+            redirect_uris=[AnyUrl(u) for u in row.redirect_uris],
+            client_name=row.client_name,
+            grant_types=row.grant_types or [],
+            response_types=row.response_types or [],
+            token_endpoint_auth_method=cast(
+                "TokenEndpointAuthMethod",
+                row.token_endpoint_auth_method or "none",
+            ),
+            scope=row.scope,
+        )
+
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        await anyio.to_thread.run_sync(self._register_client_sync, client_info)
+
+    def _register_client_sync(self, ci: OAuthClientInformationFull) -> None:
+        assert ci.client_id is not None
+        with self._pool.connection() as conn:
+            clients.register_client(
+                conn,
+                client_id=ci.client_id,
+                client_secret_sha256=None,
+                redirect_uris=[str(u) for u in (ci.redirect_uris or [])],
+                client_name=ci.client_name,
+                grant_types=list(ci.grant_types or []),
+                response_types=list(ci.response_types or []),
+                token_endpoint_auth_method=ci.token_endpoint_auth_method,
+                scope=ci.scope,
+            )
+            conn.commit()
+
+    async def authorize(
+        self, client: OAuthClientInformationFull, params: AuthorizationParams
+    ) -> str:
+        assert client.client_id is not None
+        payload = ConsentPayload(
+            client_id=client.client_id,
+            redirect_uri=str(params.redirect_uri),
+            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+            code_challenge=params.code_challenge,
+            scopes=list(params.scopes or []),
+            state=params.state,
+            exp=int(time.time()) + self._cfg.oauth_consent_state_ttl_s,
+        )
+        blob = encode_consent_state(payload, key=self._key)
+        return f"{self._consent_path}?{urlencode({'req': blob})}"
+
+    async def load_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: str
+    ) -> AuthorizationCode | None:
+        return await anyio.to_thread.run_sync(
+            self._load_code_sync, client.client_id, authorization_code
+        )
+
+    def _load_code_sync(
+        self, client_id: str | None, raw_code: str
+    ) -> AuthorizationCode | None:
+        with self._pool.connection() as conn:
+            row = codes.load_code(conn, raw_code)
+        if row is None or row.client_id != client_id:
+            return None
+        return AuthorizationCode(
+            code=raw_code,
+            scopes=row.scopes,
+            expires_at=row.expires_at.timestamp(),
+            client_id=row.client_id,
+            code_challenge=row.code_challenge,
+            redirect_uri=AnyUrl(row.redirect_uri),
+            redirect_uri_provided_explicitly=row.redirect_uri_provided_explicitly,
+            subject=str(row.user_id),
+        )
+
+    async def exchange_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
+    ) -> OAuthToken:
+        return await anyio.to_thread.run_sync(
+            self._exchange_code_sync, client.client_id, authorization_code
+        )
+
+    def _exchange_code_sync(
+        self, client_id: str | None, auth_code: AuthorizationCode
+    ) -> OAuthToken:
+        assert client_id is not None
+        assert auth_code.subject is not None
+        user_id = int(auth_code.subject)
+        with self._pool.connection() as conn:
+            # Atomic single-use guard (RFC 6749 §4.1.2). The SDK already loaded +
+            # validated the code, but two concurrent exchanges can both pass that
+            # check; only the DELETE that actually removed the row may mint. Raise
+            # AFTER the connection context exits — TokenError is a frozen
+            # dataclass and the contextmanager's __exit__ cannot set __traceback__
+            # on it.
+            consumed = codes.consume_code(conn, auth_code.code)
+            if not consumed:
+                conn.rollback()
+            else:
+                access_raw = access.mint_access(
+                    conn, user_id=user_id, client_id=client_id,
+                    ttl_s=self._cfg.oauth_access_token_ttl_s,
+                )
+                refresh_raw = refresh.mint_refresh(
+                    conn, client_id=client_id, user_id=user_id,
+                    scopes=auth_code.scopes,
+                    ttl_s=self._cfg.oauth_refresh_token_ttl_s,
+                )
+                clients.touch_last_used(conn, client_id)
+                conn.commit()
+        if not consumed:
+            raise TokenError(
+                "invalid_grant", "authorization code already used or expired"
+            )
+        return OAuthToken(
+            access_token=access_raw,
+            token_type="Bearer",
+            expires_in=self._cfg.oauth_access_token_ttl_s,
+            refresh_token=refresh_raw,
+        )
+
+    async def load_refresh_token(
+        self, client: OAuthClientInformationFull, refresh_token: str
+    ) -> RefreshToken | None:
+        return await anyio.to_thread.run_sync(
+            self._load_refresh_sync, client.client_id, refresh_token
+        )
+
+    def _load_refresh_sync(
+        self, client_id: str | None, raw: str
+    ) -> RefreshToken | None:
+        with self._pool.connection() as conn:
+            row = refresh.load_refresh(conn, raw)
+        if row is None or row.client_id != client_id:
+            return None
+        return RefreshToken(
+            token=raw, client_id=row.client_id, scopes=row.scopes,
+            expires_at=int(row.expires_at.timestamp()),
+        )
+
+    async def exchange_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: RefreshToken,
+        scopes: list[str],
+    ) -> OAuthToken:
+        return await anyio.to_thread.run_sync(
+            self._exchange_refresh_sync, client.client_id, refresh_token
+        )
+
+    def _exchange_refresh_sync(
+        self, client_id: str | None, rt: RefreshToken
+    ) -> OAuthToken:
+        assert client_id is not None
+        with self._pool.connection() as conn:
+            new_refresh = refresh.rotate_refresh(
+                conn, rt.token, ttl_s=self._cfg.oauth_refresh_token_ttl_s
+            )
+            assert new_refresh is not None  # caller already loaded it
+            row = refresh.load_refresh(conn, new_refresh)
+            assert row is not None
+            access_raw = access.mint_access(
+                conn, user_id=row.user_id, client_id=client_id,
+                ttl_s=self._cfg.oauth_access_token_ttl_s,
+            )
+            # A refresh is client activity too — keep last_used_at honest so the
+            # unused-client cleanup never reaps an actively-refreshing client.
+            clients.touch_last_used(conn, client_id)
+            conn.commit()
+        return OAuthToken(
+            access_token=access_raw,
+            token_type="Bearer",
+            expires_in=self._cfg.oauth_access_token_ttl_s,
+            refresh_token=new_refresh,
+        )
+
+    async def load_access_token(self, token: str) -> AccessToken | None:
+        return await anyio.to_thread.run_sync(self._load_access_sync, token)
+
+    def _load_access_sync(self, token: str) -> AccessToken | None:
+        with self._pool.connection() as conn:
+            at = access.load_access(conn, token)
+            conn.commit()
+        return at
+
+    async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
+        await anyio.to_thread.run_sync(self._revoke_sync, token.token)
+
+    def _revoke_sync(self, raw: str) -> None:
+        with self._pool.connection() as conn:
+            if not access.revoke_access(conn, raw):
+                refresh.revoke_refresh(conn, raw)
+            conn.commit()

@@ -11,7 +11,12 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from mcp.server.auth.middleware.auth_context import get_access_token
-from mcp.server.auth.settings import AuthSettings
+from mcp.server.auth.provider import OAuthAuthorizationServerProvider
+from mcp.server.auth.settings import (
+    AuthSettings,
+    ClientRegistrationOptions,
+    RevocationOptions,
+)
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from psycopg_pool import ConnectionPool
@@ -79,26 +84,47 @@ def build_mcp_server(
     *,
     searcher: Searcher | None,
     config: McpConfig,
+    auth_server_provider: OAuthAuthorizationServerProvider | None = None,
 ) -> FastMCP:
     """Construct the FastMCP server with five ACL-scoped tools.
 
-    `token_verifier` requires `auth` settings (the SDK rejects one without the
-    other); the issuer / resource-server URLs come from `config`.
+    Auth wiring requires `auth` settings (the SDK rejects a verifier/provider
+    without them); the issuer / resource-server URLs come from `config`. When
+    `auth_server_provider` is supplied, localmail acts as the OAuth
+    authorization server: the SDK uses the provider for the `/mcp` resource
+    check and mounts `/authorize`, `/token`, `/register`, `/revoke`, and the
+    AS metadata. Otherwise the opaque-bearer `token_verifier` path is used.
     """
-    server = FastMCP(
-        SERVER_NAME,
+    auth_settings = AuthSettings(
+        issuer_url=config.issuer_url,
+        resource_server_url=AnyHttpUrl(
+            mcp_resource_url(str(config.resource_server_url))
+        ),
+        required_scopes=[],
+    )
+    common_kwargs: dict[str, Any] = dict(
         stateless_http=True,
         json_response=True,
         streamable_http_path="/",
-        token_verifier=LocalmailTokenVerifier(pool),
-        auth=AuthSettings(
-            issuer_url=config.issuer_url,
-            resource_server_url=AnyHttpUrl(
-                mcp_resource_url(str(config.resource_server_url))
-            ),
-            required_scopes=[],
-        ),
     )
+    if auth_server_provider is not None:
+        auth_settings.client_registration_options = ClientRegistrationOptions(
+            enabled=True
+        )
+        auth_settings.revocation_options = RevocationOptions(enabled=True)
+        server = FastMCP(
+            SERVER_NAME,
+            auth_server_provider=auth_server_provider,
+            auth=auth_settings,
+            **common_kwargs,
+        )
+    else:
+        server = FastMCP(
+            SERVER_NAME,
+            token_verifier=LocalmailTokenVerifier(pool),
+            auth=auth_settings,
+            **common_kwargs,
+        )
 
     @server.tool()
     def search(

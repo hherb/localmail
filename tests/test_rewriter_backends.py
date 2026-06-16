@@ -9,7 +9,13 @@ import pytest
 
 from localmail.config import SearchConfig
 from localmail.search.rewriter import RewriteParseError
-from localmail.search.rewriter_backends import AnthropicRewriter, MissingApiKey, OpenAICompatRewriter
+from localmail.search.rewriter_backends import (
+    AnthropicRewriter,
+    MissingApiKey,
+    OllamaLLMRewriter,
+    OpenAICompatRewriter,
+    build_rewriter,
+)
 
 
 def test_ollama_backcompat_import_path_still_works():
@@ -150,3 +156,25 @@ def test_anthropic_malformed_body_raises_parse_error(monkeypatch):
     r = AnthropicRewriter(cfg, client=_client(handler))
     with pytest.raises(RewriteParseError):
         r.rewrite("orig")
+
+
+def test_build_rewriter_dispatch(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert isinstance(build_rewriter(SearchConfig(rewriter_backend="ollama")), OllamaLLMRewriter)
+    assert isinstance(build_rewriter(SearchConfig(rewriter_backend="openai")), OpenAICompatRewriter)
+    assert isinstance(build_rewriter(SearchConfig(rewriter_backend="anthropic")), AnthropicRewriter)
+
+
+def test_build_rewriter_openai_missing_key_propagates(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(MissingApiKey):
+        build_rewriter(SearchConfig(rewriter_backend="openai"))
+
+
+def test_all_backends_reexported_via_rewriter_module():
+    # PEP 562 __getattr__ keeps the deep import path working for every backend.
+    import localmail.search.rewriter as r
+    import localmail.search.rewriter_backends as b
+    for name in ("OllamaLLMRewriter", "OpenAICompatRewriter", "AnthropicRewriter", "build_rewriter", "MissingApiKey"):
+        assert getattr(r, name) is getattr(b, name)

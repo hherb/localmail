@@ -154,13 +154,19 @@ Ollama backend in ``rewriter_backends`` can import it."""
 
 if TYPE_CHECKING:  # pragma: no cover - import for type-checkers only
     from localmail.search.rewriter_backends import (  # noqa: F401
+        AnthropicRewriter,
         MissingApiKey,
         OllamaLLMRewriter,
+        OpenAICompatRewriter,
+        build_rewriter,
     )
 
 _BACKEND_REEXPORTS = frozenset(
     {
         "OllamaLLMRewriter",
+        "OpenAICompatRewriter",
+        "AnthropicRewriter",
+        "build_rewriter",
         "MissingApiKey",
     }
 )

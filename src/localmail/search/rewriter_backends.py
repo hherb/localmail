@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from typing import Callable
+from typing import Callable, assert_never
 
 import httpx
 
@@ -200,3 +200,25 @@ class AnthropicRewriter(_HttpJsonRewriter):
                 f"unexpected Anthropic reply: {body!r}"
             ) from exc
         return "{" + text
+
+
+def build_rewriter(
+    cfg: SearchConfig,
+    *,
+    client: httpx.Client | None = None,
+    today_provider: Callable[[], date] = date.today,
+) -> _HttpJsonRewriter:
+    """Construct the rewriter backend named by ``cfg.rewriter_backend``.
+
+    The cloud backends read their API key at construction and raise
+    :class:`MissingApiKey` when it is unset — ``create_searcher`` catches that
+    and degrades to "no ``--smart``".
+    """
+    backend = cfg.rewriter_backend
+    if backend == "ollama":
+        return OllamaLLMRewriter(cfg, client=client, today_provider=today_provider)
+    if backend == "openai":
+        return OpenAICompatRewriter(cfg, client=client, today_provider=today_provider)
+    if backend == "anthropic":
+        return AnthropicRewriter(cfg, client=client, today_provider=today_provider)
+    assert_never(backend)

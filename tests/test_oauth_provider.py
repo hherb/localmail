@@ -156,6 +156,32 @@ def test_exchange_refresh_rejects_disabled_user_without_500(db_conn, db_pool):
     assert exc.value.error == "invalid_grant"
 
 
+def test_exchange_code_rejects_disabled_user_without_500(db_conn, db_pool):
+    # A user disabled between consent (code mint) and code exchange must fail
+    # closed with invalid_grant — never an AssertionError (HTTP 500). load_refresh
+    # filters disabled users, so the just-minted refresh row reads back as absent.
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, "code-disabled", "pw")
+        raw_code = codes.mint_code(
+            conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+            redirect_uri_provided_explicitly=True, code_challenge="chal",
+            scopes=[], ttl_s=60,
+        )
+        conn.commit()
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    with db_pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE api_users SET disabled_at = now() WHERE id = %s", (uid,)
+            )
+        conn.commit()
+    with pytest.raises(TokenError) as exc:
+        anyio.run(p.exchange_authorization_code, _client(), loaded)
+    assert exc.value.error == "invalid_grant"
+
+
 def test_exchange_refresh_reuse_revokes_family(db_conn, db_pool):
     # Rotate once, then replay the original refresh -> invalid_grant AND the
     # active successor token is dead afterward (RFC 9700 §4.14.2).

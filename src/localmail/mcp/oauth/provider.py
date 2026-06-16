@@ -148,6 +148,7 @@ class LocalmailASProvider(
         assert client_id is not None
         assert auth_code.subject is not None
         user_id = int(auth_code.subject)
+        user_vanished = False
         with self._pool.connection() as conn:
             # Atomic single-use guard (RFC 6749 §4.1.2). The SDK already loaded +
             # validated the code, but two concurrent exchanges can both pass that
@@ -165,18 +166,27 @@ class LocalmailASProvider(
                     ttl_s=self._cfg.oauth_refresh_token_ttl_s,
                 )
                 new_row = refresh.load_refresh(conn, refresh_raw)
-                assert new_row is not None
-                access_raw = access.mint_access(
-                    conn, user_id=user_id, client_id=client_id,
-                    ttl_s=self._cfg.oauth_access_token_ttl_s,
-                    family_id=new_row.family_id,
-                )
-                clients.touch_last_used(conn, client_id)
-                conn.commit()
+                if new_row is None:
+                    # User disabled in the window between consent and exchange:
+                    # load_refresh filters disabled users, so the just-minted row
+                    # reads back as absent. Fail closed (mirror
+                    # _exchange_refresh_sync) rather than asserting -> HTTP 500.
+                    conn.rollback()
+                    user_vanished = True
+                else:
+                    access_raw = access.mint_access(
+                        conn, user_id=user_id, client_id=client_id,
+                        ttl_s=self._cfg.oauth_access_token_ttl_s,
+                        family_id=new_row.family_id,
+                    )
+                    clients.touch_last_used(conn, client_id)
+                    conn.commit()
         if not consumed:
             raise TokenError(
                 "invalid_grant", "authorization code already used or expired"
             )
+        if user_vanished:
+            raise TokenError("invalid_grant", "authorization code is no longer valid")
         return OAuthToken(
             access_token=access_raw,
             token_type="Bearer",

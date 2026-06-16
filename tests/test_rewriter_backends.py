@@ -158,6 +158,33 @@ def test_anthropic_malformed_body_raises_parse_error(monkeypatch):
         r.rewrite("orig")
 
 
+def _non_json_handler(request):
+    return httpx.Response(200, content=b"<html>not json</html>", headers={"content-type": "text/html"})
+
+
+def test_ollama_non_json_200_raises_parse_error():
+    cfg = SearchConfig(rewriter_backend="ollama")
+    r = OllamaLLMRewriter(cfg, client=_client(_non_json_handler))
+    with pytest.raises(RewriteParseError):
+        r.rewrite("orig")
+
+
+def test_openai_non_json_200_raises_parse_error(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    cfg = SearchConfig(rewriter_backend="openai")
+    r = OpenAICompatRewriter(cfg, client=_client(_non_json_handler))
+    with pytest.raises(RewriteParseError):
+        r.rewrite("orig")
+
+
+def test_anthropic_non_json_200_raises_parse_error(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    cfg = SearchConfig(rewriter_backend="anthropic")
+    r = AnthropicRewriter(cfg, client=_client(_non_json_handler))
+    with pytest.raises(RewriteParseError):
+        r.rewrite("orig")
+
+
 def test_build_rewriter_dispatch(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")

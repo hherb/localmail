@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from typing import Callable, assert_never
+from typing import Any, Callable, assert_never
 
 import httpx
 
@@ -80,6 +80,23 @@ class _HttpJsonRewriter:
         raw = self._request(prompt)
         return parse_rewrite_response(raw)
 
+    def _read_json(self, resp: httpx.Response) -> Any:
+        """Raise for HTTP status, then decode JSON.
+
+        A non-2xx response raises ``httpx.HTTPStatusError``; a 2xx body that is
+        not valid JSON raises :class:`RewriteParseError` (e.g. a proxy returning
+        an HTML error page with status 200) so the Searcher's graceful-
+        degradation catch still applies.
+        """
+        resp.raise_for_status()
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise RewriteParseError(
+                f"non-JSON response from {self.name} backend "
+                f"(status {resp.status_code})"
+            ) from exc
+
     def _request(self, prompt: str) -> str:
         raise NotImplementedError
 
@@ -100,8 +117,7 @@ class OllamaLLMRewriter(_HttpJsonRewriter):
                 "options": {"temperature": 0},
             },
         )
-        resp.raise_for_status()
-        body = resp.json()
+        body = self._read_json(resp)
         try:
             return body["response"]
         except (KeyError, TypeError) as exc:
@@ -144,8 +160,7 @@ class OpenAICompatRewriter(_HttpJsonRewriter):
                 "response_format": {"type": "json_object"},
             },
         )
-        resp.raise_for_status()
-        body = resp.json()
+        body = self._read_json(resp)
         try:
             return body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -191,8 +206,7 @@ class AnthropicRewriter(_HttpJsonRewriter):
                 ],
             },
         )
-        resp.raise_for_status()
-        body = resp.json()
+        body = self._read_json(resp)
         try:
             text = body["content"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:

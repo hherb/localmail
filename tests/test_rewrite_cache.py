@@ -214,3 +214,17 @@ def test_create_searcher_leaves_rewriter_bare_when_cache_disabled():
          mock.patch("localmail.search.embeddings.FastEmbedBackend"):
         searcher = create_searcher(cfg)
     assert isinstance(searcher._rewriter, OllamaLLMRewriter)
+
+
+def test_create_searcher_degrades_when_cloud_key_missing(monkeypatch):
+    # A cloud backend with no API key raises MissingApiKey at construction;
+    # create_searcher's guard must swallow it and run with no rewriter.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg = LocalmailConfig(database={"dsn": "postgresql:///localmail_test"})
+    cfg.search.rewriter_enabled_by_default = True
+    cfg.search.rewriter_backend = "openai"
+    with mock.patch("localmail.db.open_pool"), \
+         mock.patch("localmail.search.embeddings.FastEmbedBackend"):
+        searcher = create_searcher(cfg)
+    assert searcher._rewriter is None
+    assert searcher.smart_available is False

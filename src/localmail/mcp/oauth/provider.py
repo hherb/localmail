@@ -9,6 +9,7 @@ the SDK's TokenHandler using the AuthorizationCode we return from
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Literal, cast
 from urllib.parse import urlencode
@@ -29,6 +30,8 @@ from psycopg_pool import ConnectionPool
 from localmail.config import McpConfig
 from localmail.mcp.oauth import access, clients, codes, refresh
 from localmail.mcp.oauth.consent_state import ConsentPayload, encode_consent_state
+
+logger = logging.getLogger("localmail.mcp.oauth")
 
 TokenEndpointAuthMethod = Literal[
     "none", "client_secret_post", "client_secret_basic", "private_key_jwt"
@@ -211,21 +214,14 @@ class LocalmailASProvider(
         self, client_id: str | None, rt: RefreshToken
     ) -> OAuthToken:
         assert client_id is not None
+        access_raw: str | None = None
         with self._pool.connection() as conn:
-            new_refresh = refresh.rotate_refresh(
+            result = refresh.rotate_refresh(
                 conn, rt.token, ttl_s=self._cfg.oauth_refresh_token_ttl_s
             )
-            # The SDK loaded the token moments ago, but it can become invalid in
-            # the interim — the user was disabled or the token revoked, so
-            # rotate_refresh → load_refresh now returns None. Fail closed with
-            # invalid_grant rather than crashing on an assert (HTTP 500). Raise
-            # AFTER the connection context exits — TokenError is a frozen
-            # dataclass and the contextmanager's __exit__ cannot set
-            # __traceback__ on it (same constraint as _exchange_code_sync).
-            if new_refresh is None:
-                conn.rollback()
-            else:
-                row = refresh.load_refresh(conn, new_refresh)
+            if result.outcome == "rotated":
+                assert result.new_token is not None
+                row = refresh.load_refresh(conn, result.new_token)
                 assert row is not None
                 access_raw = access.mint_access(
                     conn, user_id=row.user_id, client_id=client_id,
@@ -235,13 +231,28 @@ class LocalmailASProvider(
                 # the unused-client cleanup never reaps an active client.
                 clients.touch_last_used(conn, client_id)
                 conn.commit()
-        if new_refresh is None:
+            elif result.outcome == "reuse":
+                # The family DELETE must persist; commit before raising.
+                conn.commit()
+            else:
+                conn.rollback()
+        # Raise AFTER the connection context exits — TokenError is a frozen
+        # dataclass and the contextmanager's __exit__ cannot set __traceback__
+        # on it (same constraint as _exchange_code_sync).
+        if result.outcome == "reuse":
+            logger.warning(
+                "refresh-token reuse detected; revoked family for client_id=%s",
+                client_id,
+            )
+            raise TokenError("invalid_grant", "refresh token reuse detected")
+        if result.outcome != "rotated":
             raise TokenError("invalid_grant", "refresh token is no longer valid")
+        assert access_raw is not None
         return OAuthToken(
             access_token=access_raw,
             token_type="Bearer",
             expires_in=self._cfg.oauth_access_token_ttl_s,
-            refresh_token=new_refresh,
+            refresh_token=result.new_token,
         )
 
     async def load_access_token(self, token: str) -> AccessToken | None:

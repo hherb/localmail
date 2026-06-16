@@ -4,7 +4,7 @@ from psycopg_pool import ConnectionPool
 
 pytest.importorskip("mcp")
 
-from mcp.server.auth.provider import AuthorizationParams, TokenError  # noqa: E402
+from mcp.server.auth.provider import AuthorizationParams, RefreshToken, TokenError  # noqa: E402
 from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 
 from localmail.api import auth as api_auth  # noqa: E402
@@ -178,6 +178,71 @@ def test_exchange_refresh_reuse_revokes_family(db_conn, db_pool):
         anyio.run(p.exchange_refresh_token, _client(), old_refresh, [])
     assert exc.value.error == "invalid_grant"
     assert anyio.run(p.load_refresh_token, _client(), rotated.refresh_token) is None
+
+
+def _full_flow_tokens(p, db_pool, username):
+    """Run code-exchange once; return (access_token, refresh_token, uid)."""
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, username, "pw")
+        raw_code = codes.mint_code(
+            conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+            redirect_uri_provided_explicitly=True, code_challenge="chal",
+            scopes=[], ttl_s=60,
+        )
+        conn.commit()
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    token = anyio.run(p.exchange_authorization_code, _client(), loaded)
+    return token.access_token, token.refresh_token, uid
+
+
+def test_code_exchange_access_token_is_tagged_with_family(db_conn, db_pool):
+    p = _provider(db_pool)
+    access_tok, _refresh, _uid = _full_flow_tokens(p, db_pool, "fam-tag-user")
+    with db_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT oauth_refresh_family_id FROM api_tokens WHERE token_sha256 = %s",
+            (api_auth.hash_token(access_tok),),
+        )
+        row = cur.fetchone()
+    assert row is not None and row[0] is not None
+
+
+def test_refresh_reuse_purges_family_access_tokens(db_conn, db_pool):
+    p = _provider(db_pool)
+    access_tok, refresh_tok, _uid = _full_flow_tokens(p, db_pool, "reuse-user")
+    # access token works before reuse
+    assert anyio.run(p.load_access_token, access_tok) is not None
+    # rotate once (consumes refresh_tok)
+    rt = anyio.run(p.load_refresh_token, _client(), refresh_tok)
+    anyio.run(p.exchange_refresh_token, _client(), rt, [])
+    # replay the now-consumed original refresh token -> reuse -> TokenError
+    with pytest.raises(TokenError):
+        rt2 = RefreshToken(
+            token=refresh_tok, client_id="cid", scopes=[], expires_at=None
+        )
+        anyio.run(p.exchange_refresh_token, _client(), rt2, [])
+    # the access token minted in that family is gone
+    assert anyio.run(p.load_access_token, access_tok) is None
+
+
+def test_reuse_purge_spares_login_token_of_same_user(db_conn, db_pool):
+    p = _provider(db_pool)
+    access_tok, refresh_tok, uid = _full_flow_tokens(p, db_pool, "spare-user")
+    with db_pool.connection() as conn:
+        login_tok, _exp = api_auth.issue_token(conn, uid)  # NULL family
+        conn.commit()
+    rt = anyio.run(p.load_refresh_token, _client(), refresh_tok)
+    anyio.run(p.exchange_refresh_token, _client(), rt, [])
+    with pytest.raises(TokenError):
+        rt2 = RefreshToken(
+            token=refresh_tok, client_id="cid", scopes=[], expires_at=None
+        )
+        anyio.run(p.exchange_refresh_token, _client(), rt2, [])
+    # OAuth access token purged, but the user's login token (NULL family) survives
+    assert anyio.run(p.load_access_token, access_tok) is None
+    with db_pool.connection() as conn:
+        assert api_auth.verify_token(conn, login_tok) is not None
 
 
 def test_cross_client_code_rejected(db_conn, db_pool):

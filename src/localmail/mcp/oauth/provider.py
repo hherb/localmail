@@ -159,14 +159,17 @@ class LocalmailASProvider(
             if not consumed:
                 conn.rollback()
             else:
-                access_raw = access.mint_access(
-                    conn, user_id=user_id, client_id=client_id,
-                    ttl_s=self._cfg.oauth_access_token_ttl_s,
-                )
                 refresh_raw = refresh.mint_refresh(
                     conn, client_id=client_id, user_id=user_id,
                     scopes=auth_code.scopes,
                     ttl_s=self._cfg.oauth_refresh_token_ttl_s,
+                )
+                new_row = refresh.load_refresh(conn, refresh_raw)
+                assert new_row is not None
+                access_raw = access.mint_access(
+                    conn, user_id=user_id, client_id=client_id,
+                    ttl_s=self._cfg.oauth_access_token_ttl_s,
+                    family_id=new_row.family_id,
                 )
                 clients.touch_last_used(conn, client_id)
                 conn.commit()
@@ -215,6 +218,7 @@ class LocalmailASProvider(
     ) -> OAuthToken:
         assert client_id is not None
         access_raw: str | None = None
+        purged = 0
         with self._pool.connection() as conn:
             result = refresh.rotate_refresh(
                 conn, rt.token, ttl_s=self._cfg.oauth_refresh_token_ttl_s
@@ -226,13 +230,16 @@ class LocalmailASProvider(
                 access_raw = access.mint_access(
                     conn, user_id=row.user_id, client_id=client_id,
                     ttl_s=self._cfg.oauth_access_token_ttl_s,
+                    family_id=row.family_id,
                 )
                 # A refresh is client activity too — keep last_used_at honest so
                 # the unused-client cleanup never reaps an active client.
                 clients.touch_last_used(conn, client_id)
                 conn.commit()
             elif result.outcome == "reuse":
-                # The family DELETE must persist; commit before raising.
+                assert result.family_id is not None
+                purged = access.revoke_access_family(conn, result.family_id)
+                # The family DELETE (refresh) + access purge must persist.
                 conn.commit()
             else:
                 conn.rollback()
@@ -241,8 +248,9 @@ class LocalmailASProvider(
         # on it (same constraint as _exchange_code_sync).
         if result.outcome == "reuse":
             logger.warning(
-                "refresh-token reuse detected; revoked family for client_id=%s",
-                client_id,
+                "refresh-token reuse detected; revoked family for client_id=%s "
+                "(access tokens purged=%d)",
+                client_id, purged,
             )
             raise TokenError("invalid_grant", "refresh token reuse detected")
         if result.outcome != "rotated":

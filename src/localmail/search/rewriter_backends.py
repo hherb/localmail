@@ -108,3 +108,47 @@ class OllamaLLMRewriter(_HttpJsonRewriter):
             raise RewriteParseError(
                 f"missing 'response' key in Ollama reply: {body!r}"
             ) from exc
+
+
+class OpenAICompatRewriter(_HttpJsonRewriter):
+    """Rewriter backed by an OpenAI-compatible ``/chat/completions`` endpoint.
+
+    Works against any server speaking the OpenAI Chat Completions API
+    (OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio,
+    llama.cpp-server, Ollama's own ``/v1``). ``response_format`` requests a
+    JSON object; non-compliant servers ignore it and the prompt's "Return
+    ONLY JSON" instruction plus graceful degradation cover the gap.
+    """
+
+    name = "openai"
+
+    def __init__(
+        self,
+        cfg: SearchConfig,
+        *,
+        client: httpx.Client | None = None,
+        today_provider: Callable[[], date] = date.today,
+    ) -> None:
+        super().__init__(cfg, client=client, today_provider=today_provider)
+        self._api_key = _require_env(cfg.rewriter_openai_api_key_env)
+
+    def _request(self, prompt: str) -> str:
+        resp = self._client.post(
+            f"{self._cfg.rewriter_openai_base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            json={
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "max_tokens": self._cfg.rewriter_max_tokens,
+                "response_format": {"type": "json_object"},
+            },
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        try:
+            return body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RewriteParseError(
+                f"unexpected OpenAI reply: {body!r}"
+            ) from exc

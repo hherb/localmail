@@ -11,7 +11,8 @@ Usage::
 from __future__ import annotations
 
 from localmail.search.query import ParsedQuery, QueryParseError, SearchFilters
-from localmail.search.rewriter import OllamaLLMRewriter, QueryRewriter, RewriteParseError, RewriteResult
+from localmail.search.rewriter import QueryRewriter, RewriteParseError, RewriteResult
+from localmail.search.rewriter_backends import OllamaLLMRewriter
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
 
 __all__ = [

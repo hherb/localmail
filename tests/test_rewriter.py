@@ -7,13 +7,13 @@ from datetime import date as _date
 from localmail.config import SearchConfig
 from localmail.search.query import ParsedQuery, SearchFilters
 from localmail.search.rewriter import (
-    OllamaLLMRewriter,
     RewriteParseError,
     RewriteResult,
     apply_rewrite,
     build_rewrite_prompt,
     parse_rewrite_response,
 )
+from localmail.search.rewriter_backends import OllamaLLMRewriter
 
 
 # ---------------------------------------------------------------------------

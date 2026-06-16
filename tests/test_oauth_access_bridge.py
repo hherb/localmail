@@ -1,3 +1,5 @@
+import uuid
+
 from localmail.api import auth as api_auth
 from localmail.mcp.oauth import access, clients
 
@@ -54,3 +56,55 @@ def test_revoke_access(db_conn):
     assert access.revoke_access(db_conn, raw) is True
     db_conn.commit()
     assert access.load_access(db_conn, raw) is None
+
+
+def _family_id(conn, raw):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT oauth_refresh_family_id FROM api_tokens WHERE token_sha256 = %s",
+            (api_auth.hash_token(raw),),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return row[0]
+
+
+def test_mint_access_persists_family_id(db_conn):
+    uid = _seed(db_conn)
+    fam = uuid.uuid4()
+    raw = access.mint_access(
+        db_conn, user_id=uid, client_id="cid", ttl_s=3600, family_id=fam
+    )
+    db_conn.commit()
+    assert _family_id(db_conn, raw) == fam
+
+
+def test_mint_access_without_family_is_null(db_conn):
+    uid = _seed(db_conn)
+    raw = access.mint_access(db_conn, user_id=uid, client_id="cid", ttl_s=3600)
+    db_conn.commit()
+    assert _family_id(db_conn, raw) is None
+
+
+def test_revoke_access_family_deletes_only_matching(db_conn):
+    uid = _seed(db_conn)
+    fam = uuid.uuid4()
+    other = uuid.uuid4()
+    in_fam = access.mint_access(
+        db_conn, user_id=uid, client_id="cid", ttl_s=3600, family_id=fam
+    )
+    other_fam = access.mint_access(
+        db_conn, user_id=uid, client_id="cid", ttl_s=3600, family_id=other
+    )
+    no_fam = access.mint_access(db_conn, user_id=uid, client_id="cid", ttl_s=3600)
+    db_conn.commit()
+    deleted = access.revoke_access_family(db_conn, fam)
+    db_conn.commit()
+    assert deleted == 1
+    assert access.load_access(db_conn, in_fam) is None
+    assert access.load_access(db_conn, other_fam) is not None
+    assert access.load_access(db_conn, no_fam) is not None
+
+
+def test_revoke_access_family_absent_returns_zero(db_conn):
+    assert access.revoke_access_family(db_conn, uuid.uuid4()) == 0

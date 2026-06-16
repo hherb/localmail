@@ -32,12 +32,14 @@ class RotateResult:
 
     - ``rotated``: presented token was live; ``new_token`` holds the successor.
     - ``reuse``: presented token was an already-consumed tombstone; its family
-      has been deleted. ``new_token`` is None.
+      has been deleted. ``new_token`` is None; ``family_id`` names the deleted
+      family so the caller can also purge the family's access tokens.
     - ``unknown``: presented token was absent, expired, or its user disabled
-      (no theft signal). ``new_token`` is None.
+      (no theft signal). ``new_token`` and ``family_id`` are None.
     """
     outcome: Literal["rotated", "reuse", "unknown"]
     new_token: str | None = None
+    family_id: _uuid.UUID | None = None
 
 
 def mint_refresh(
@@ -162,7 +164,7 @@ def rotate_refresh(
     family_id, is_consumed = state
     if is_consumed:
         _delete_family(conn, family_id)
-        return RotateResult("reuse")
+        return RotateResult("reuse", family_id=family_id)
     row = load_refresh(conn, raw_token)
     if row is None:
         # present but expired / user-disabled — natural, not theft.
@@ -182,7 +184,7 @@ def rotate_refresh(
         claimed = cur.rowcount == 1
     if not claimed:
         _delete_family(conn, row.family_id)
-        return RotateResult("reuse")
+        return RotateResult("reuse", family_id=row.family_id)
     new = mint_refresh(
         conn, client_id=row.client_id, user_id=row.user_id,
         scopes=row.scopes, ttl_s=ttl_s, family_id=row.family_id,

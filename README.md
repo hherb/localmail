@@ -518,8 +518,9 @@ code exchange. Access tokens are stored in the existing `api_tokens` table, so
 the per-user account ACL and `localmail grant-account` grants are unchanged.
 Tokens auto-refresh; a browser re-login is needed only after ~30 days of
 inactivity, on revocation, on detected refresh-token reuse (a rotated token
-replayed → the whole refresh chain is revoked, RFC 9700 §4.14.2), or if the
-user is disabled. See
+replayed → the whole refresh chain is revoked **and the access tokens issued
+from it are purged immediately** rather than lingering until expiry, RFC 9700
+§4.14.2), or if the user is disabled. See
 [docs/mcp-usage.md](docs/mcp-usage.md) for the
 full operator guide including token lifetimes, DCR safeguards, and known
 limitations.

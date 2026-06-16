@@ -96,3 +96,34 @@ def test_cleanup_unused_subquery_uses_client_id_index(db_conn):
         )
         plan = " ".join(r[0] for r in cur.fetchall())
     assert "oauth_refresh_tokens_client_id_idx" in plan
+
+
+def test_api_tokens_gains_oauth_refresh_family_id(db_conn):
+    cols = _columns(db_conn, "api_tokens")
+    assert "oauth_refresh_family_id" in cols
+
+
+def test_oauth_refresh_family_id_is_uuid_nullable(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'api_tokens' "
+            "  AND column_name = 'oauth_refresh_family_id'"
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "uuid" and row[1] == "YES"
+
+
+def test_api_tokens_has_refresh_family_partial_index(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE tablename = 'api_tokens' "
+            "  AND indexname = 'api_tokens_oauth_refresh_family_id_idx'"
+        )
+        row = cur.fetchone()
+    assert row is not None
+    indexdef = row[0]
+    assert "oauth_refresh_family_id" in indexdef
+    assert "IS NOT NULL" in indexdef  # partial index predicate present

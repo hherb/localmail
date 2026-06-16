@@ -191,3 +191,27 @@ def test_sweep_consumed_deletes_only_expired_tombstones(db_conn):
     assert _raw_lookup(db_conn, gone) is None
     assert _raw_lookup(db_conn, keep) is not None
     assert _raw_lookup(db_conn, live) is not None
+
+
+def test_reuse_result_carries_family_id(db_conn):
+    uid = _seed(db_conn)
+    old = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    fam = refresh.load_refresh(db_conn, old).family_id
+    refresh.rotate_refresh(db_conn, old, ttl_s=100)  # tombstones old
+    db_conn.commit()
+    replay = refresh.rotate_refresh(db_conn, old, ttl_s=100)  # reuse
+    db_conn.commit()
+    assert replay.outcome == "reuse"
+    assert replay.family_id == fam
+
+
+def test_rotated_and_unknown_results_have_no_family_id(db_conn):
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    rotated = refresh.rotate_refresh(db_conn, raw, ttl_s=100)
+    db_conn.commit()
+    assert rotated.outcome == "rotated" and rotated.family_id is None
+    unknown = refresh.rotate_refresh(db_conn, "bogus", ttl_s=100)
+    assert unknown.outcome == "unknown" and unknown.family_id is None

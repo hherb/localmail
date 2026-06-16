@@ -8,6 +8,7 @@ stays import-safe without the `mcp` extra.
 """
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 import psycopg
@@ -24,15 +25,26 @@ _NO_OAUTH_CLIENT_ID = "localmail"
 
 
 def mint_access(
-    conn: psycopg.Connection, *, user_id: int, client_id: str, ttl_s: int
+    conn: psycopg.Connection,
+    *,
+    user_id: int,
+    client_id: str,
+    ttl_s: int,
+    family_id: uuid.UUID | None = None,
 ) -> str:
-    """Mint an access token into api_tokens; return the raw token. Caller commits."""
+    """Mint an access token into api_tokens; return the raw token. Caller commits.
+
+    ``family_id`` ties the token to a refresh family so reuse detection can purge
+    it (see ``revoke_access_family``); ``None`` (login/non-OAuth) leaves it NULL.
+    """
     raw = generate_token()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO api_tokens (token_sha256, user_id, expires_at, oauth_client_id) "
-            "VALUES (%s, %s, now() + make_interval(secs => %s), %s)",
-            (hash_token(raw), user_id, ttl_s, client_id),
+            "INSERT INTO api_tokens "
+            "(token_sha256, user_id, expires_at, oauth_client_id, "
+            " oauth_refresh_family_id) "
+            "VALUES (%s, %s, now() + make_interval(secs => %s), %s, %s)",
+            (hash_token(raw), user_id, ttl_s, client_id, family_id),
         )
     return raw
 
@@ -64,3 +76,17 @@ def revoke_access(conn: psycopg.Connection, raw_token: str) -> bool:
             (hash_token(raw_token),),
         )
         return cur.rowcount > 0
+
+
+def revoke_access_family(conn: psycopg.Connection, family_id: uuid.UUID) -> int:
+    """Delete every access token in a refresh family. Returns the deleted count.
+
+    Called from the provider's reuse branch so a detected refresh-token reuse
+    contains the access window immediately. Caller commits.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM api_tokens WHERE oauth_refresh_family_id = %s",
+            (family_id,),
+        )
+        return cur.rowcount

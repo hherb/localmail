@@ -357,6 +357,11 @@ class SearchConfig(BaseModel):
     # Messages API requires max_tokens; OpenAI treats it as optional. The
     # Ollama backend ignores it (it uses /api/generate's own options). The
     # rewrite output is a small JSON object, so the default is generous but bounded.
+    # Note: the OpenAI backend sends `max_tokens` (correct for classic
+    # /chat/completions and every OpenAI-compatible server — vLLM, llama.cpp,
+    # Ollama's /v1). OpenAI's own reasoning models (o1/o3-family) reject
+    # `max_tokens` in favour of `max_completion_tokens`; point those at a
+    # non-reasoning model or a compatible proxy.
     rewriter_max_tokens: int = 1024
     # OpenAI-compatible backend (rewriter_backend = "openai"). Any server
     # speaking /chat/completions works (OpenAI, vLLM, Ollama's own /v1, etc.).

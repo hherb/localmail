@@ -245,6 +245,29 @@ def test_reuse_purge_spares_login_token_of_same_user(db_conn, db_pool):
         assert api_auth.verify_token(conn, login_tok) is not None
 
 
+def test_reuse_purges_access_tokens_across_whole_rotation_chain(db_conn, db_pool):
+    # Every rotation in a chain mints its access token into the same family, so
+    # reuse of any consumed token in the chain must purge ALL of them, not just
+    # the most recent. Pins the family-propagation contract across depth.
+    p = _provider(db_pool)
+    a0, r0, _uid = _full_flow_tokens(p, db_pool, "multi-rot-user")
+    access_tokens = [a0]
+    refresh_tok = r0
+    for _ in range(3):
+        rt = anyio.run(p.load_refresh_token, _client(), refresh_tok)
+        tok = anyio.run(p.exchange_refresh_token, _client(), rt, [])
+        access_tokens.append(tok.access_token)
+        refresh_tok = tok.refresh_token
+    for at in access_tokens:
+        assert anyio.run(p.load_access_token, at) is not None
+    # replay the earliest (already-consumed) refresh token -> reuse -> revoke family
+    with pytest.raises(TokenError):
+        rt_replay = RefreshToken(token=r0, client_id="cid", scopes=[], expires_at=None)
+        anyio.run(p.exchange_refresh_token, _client(), rt_replay, [])
+    for at in access_tokens:
+        assert anyio.run(p.load_access_token, at) is None
+
+
 def test_cross_client_code_rejected(db_conn, db_pool):
     p = _provider(db_pool)
     anyio.run(p.register_client, _client())

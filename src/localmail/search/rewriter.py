@@ -10,9 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from localmail.config import SearchConfig
@@ -148,64 +147,39 @@ def apply_rewrite(
     )
 
 
-_OLLAMA_FORMAT_SCHEMA = _RewriteSchema.model_json_schema()
+OLLAMA_FORMAT_SCHEMA = _RewriteSchema.model_json_schema()
+"""JSON schema passed as Ollama's ``format`` constraint. Public so the
+Ollama backend in ``rewriter_backends`` can import it."""
 
 
-class OllamaLLMRewriter:
-    """Query rewriter backed by a local Ollama ``/api/generate`` call.
+if TYPE_CHECKING:  # pragma: no cover - import for type-checkers only
+    from localmail.search.rewriter_backends import (  # noqa: F401
+        AnthropicRewriter,
+        MissingApiKey,
+        OllamaLLMRewriter,
+        OpenAICompatRewriter,
+        build_rewriter,
+    )
 
-    Raises ``httpx.HTTPError`` subclasses (timeout, connect, status) and
-    :class:`RewriteParseError` — it does not swallow failures. The Searcher
-    decides whether to fall through.
+_BACKEND_REEXPORTS = frozenset(
+    {
+        "OllamaLLMRewriter",
+        "OpenAICompatRewriter",
+        "AnthropicRewriter",
+        "build_rewriter",
+        "MissingApiKey",
+    }
+)
 
-    When no ``client`` is injected the instance owns a long-lived
-    :class:`httpx.Client` for the life of the rewriter (one per ``serve``
-    process). Call :meth:`close` to release it; an injected client is left
-    for the caller to close.
+
+def __getattr__(name: str):
+    """Back-compat: re-export the backend classes from their new module.
+
+    Lazy (PEP 562) so importing ``rewriter`` never triggers an import-time
+    cycle with ``rewriter_backends`` (which imports the pure helpers above).
     """
+    if name in _BACKEND_REEXPORTS:
+        from localmail.search import rewriter_backends
 
-    name = "ollama"
-
-    def __init__(
-        self,
-        cfg: SearchConfig,
-        *,
-        client: httpx.Client | None = None,
-        today_provider: Callable[[], date] = date.today,
-    ) -> None:
-        self._cfg = cfg
-        self.model = cfg.rewriter_model
-        self._owns_client = client is None
-        self._client = client or httpx.Client(timeout=cfg.rewriter_timeout_s)
-        self._today = today_provider
-
-    def close(self) -> None:
-        """Close the owned httpx client; a no-op for an injected client."""
-        if self._owns_client:
-            self._client.close()
-
-    def rewrite(self, free_text: str) -> RewriteResult:
-        prompt = build_rewrite_prompt(
-            free_text,
-            today=self._today(),
-            max_expansion_terms=self._cfg.rewriter_max_expansion_terms,
-        )
-        resp = self._client.post(
-            f"{self._cfg.ollama_host}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "format": _OLLAMA_FORMAT_SCHEMA,
-                "options": {"temperature": 0},
-            },
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        try:
-            raw = body["response"]
-        except (KeyError, TypeError) as exc:
-            raise RewriteParseError(
-                f"missing 'response' key in Ollama reply: {body!r}"
-            ) from exc
-        return parse_rewrite_response(raw)
+        return getattr(rewriter_backends, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

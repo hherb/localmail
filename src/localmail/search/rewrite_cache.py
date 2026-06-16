@@ -3,7 +3,7 @@
 A :class:`CachingRewriter` wraps any :class:`~localmail.search.rewriter.QueryRewriter`
 and is transparent to the :class:`~localmail.search.searcher.Searcher`: it
 implements the same Protocol (``name`` / ``model`` / ``rewrite``). The slow
-inner ``rewrite`` (an Ollama HTTP call) runs outside the lock, so a cache miss
+inner ``rewrite`` (an LLM HTTP call) runs outside the lock, so a cache miss
 never blocks a concurrent hit. Only successful results are cached — failures
 propagate uncached so a transient backend outage recovers on the next call.
 """

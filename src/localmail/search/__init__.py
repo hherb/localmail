@@ -11,7 +11,14 @@ Usage::
 from __future__ import annotations
 
 from localmail.search.query import ParsedQuery, QueryParseError, SearchFilters
-from localmail.search.rewriter import OllamaLLMRewriter, QueryRewriter, RewriteParseError, RewriteResult
+from localmail.search.rewriter import QueryRewriter, RewriteParseError, RewriteResult
+from localmail.search.rewriter_backends import (
+    AnthropicRewriter,
+    MissingApiKey,
+    OllamaLLMRewriter,
+    OpenAICompatRewriter,
+    build_rewriter,
+)
 from localmail.search.searcher import SearchPage, SearchResult, Searcher
 
 __all__ = [
@@ -25,6 +32,10 @@ __all__ = [
     "QueryRewriter",
     "RewriteResult",
     "OllamaLLMRewriter",
+    "OpenAICompatRewriter",
+    "AnthropicRewriter",
+    "build_rewriter",
+    "MissingApiKey",
     "RewriteParseError",
 ]
 
@@ -91,11 +102,11 @@ def create_searcher(
     if rewriter is _UNSET:
         if cfg.search.rewriter_enabled_by_default:
             try:
-                rewriter = OllamaLLMRewriter(cfg.search)
+                rewriter = build_rewriter(cfg.search)
             except Exception as exc:
                 logging.getLogger("localmail.search").warning(
-                    "rewriter init failed (%s=%r): %s — continuing without --smart",
-                    "rewriter_model", cfg.search.rewriter_model, exc,
+                    "rewriter init failed (backend=%r model=%r): %s — continuing without --smart",
+                    cfg.search.rewriter_backend, cfg.search.rewriter_model, exc,
                 )
                 rewriter = None
             if rewriter is not None and cfg.search.rewriter_cache_size > 0:

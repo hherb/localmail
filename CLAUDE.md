@@ -1324,10 +1324,19 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   switches on the outcome: `reuse` commits the family DELETE, logs a WARNING
   (`refresh-token reuse detected; revoked family for client_id=…`, no token
   leakage), and raises `TokenError("invalid_grant")`; `unknown` rolls back and
-  raises. **Known limitation:** two concurrent rotations of the same live token
-  race — the loser sees the token already tombstoned and returns `unknown`
-  (not `reuse`), so a genuinely concurrent replay isn't flagged as theft; this
-  is the accepted bound of the non-`SELECT FOR UPDATE` design. Design:
+  raises. **Concurrency:** the tombstone UPDATE carries an
+  `AND consumed_at IS NULL` guard + `rowcount == 1` claim check, so two
+  concurrent rotations of the same live token are serialised by the row lock —
+  exactly one claims it and mints a successor; the loser's guarded UPDATE
+  matches 0 rows (the token was consumed out from under it = a reuse signal) and
+  revokes the family. No double-successor, no `SELECT FOR UPDATE` needed.
+  **Accepted limitation:** the family DELETE only revokes refresh tokens; access
+  tokens already minted along the chain live in `api_tokens` with no `family_id`
+  correlation, so they stay valid at `/mcp` until their ≤1h TTL
+  (`oauth_access_token_ttl_s`). Reuse contains the 30-day refresh window
+  immediately; the ≤1h access window is bounded by expiry, not revoked. Instant
+  access containment would need a `family_id` on `api_tokens` + a join in the
+  DELETE (schema change, deferred). Design:
   [docs/superpowers/specs/2026-06-16-oauth-refresh-token-family-revocation-design.md](docs/superpowers/specs/2026-06-16-oauth-refresh-token-family-revocation-design.md).
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting

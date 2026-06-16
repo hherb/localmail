@@ -167,12 +167,22 @@ def rotate_refresh(
     if row is None:
         # present but expired / user-disabled — natural, not theft.
         return RotateResult("unknown")
+    # Atomically claim the token: the ``consumed_at IS NULL`` guard makes the
+    # tombstone single-writer. Under READ COMMITTED a concurrent rotation of the
+    # same live token blocks on the row lock, then re-evaluates the guard against
+    # the now-committed row and matches 0 rows — so exactly one caller claims it
+    # and mints a successor. The loser sees the token consumed out from under it
+    # (the same token presented twice = a reuse signal) and revokes the family.
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE oauth_refresh_tokens SET consumed_at = now() "
-            "WHERE token_sha256 = %s",
+            "WHERE token_sha256 = %s AND consumed_at IS NULL",
             (hash_token(raw_token),),
         )
+        claimed = cur.rowcount == 1
+    if not claimed:
+        _delete_family(conn, row.family_id)
+        return RotateResult("reuse")
     new = mint_refresh(
         conn, client_id=row.client_id, user_id=row.user_id,
         scopes=row.scopes, ttl_s=ttl_s, family_id=row.family_id,

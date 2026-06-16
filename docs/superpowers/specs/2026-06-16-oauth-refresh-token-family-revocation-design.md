@@ -135,6 +135,19 @@ No change to `load_refresh_token` / `exchange_refresh_token` signatures.
 - All rotation work stays inside one pool connection / transaction. On `reuse`
   the family-DELETE and the commit are atomic; a crash before commit leaves the
   tombstone in place (next replay re-detects reuse — safe).
+- **Concurrency:** the tombstone UPDATE is guarded by `AND consumed_at IS NULL`
+  and a `rowcount == 1` claim check. Under READ COMMITTED two concurrent
+  rotations of the same live token serialise on the row lock; exactly one claims
+  the row and mints a successor, and the loser's guarded UPDATE matches 0 rows
+  (the token was consumed concurrently — a reuse signal) and revokes the family.
+  This avoids a double-successor without `SELECT FOR UPDATE`.
+- **Accepted limitation (access-token TTL):** the family DELETE revokes refresh
+  tokens only. Access tokens already issued along the chain live in `api_tokens`
+  with no `family_id` correlation, so they remain valid at `/mcp` until their
+  ≤1h TTL (`oauth_access_token_ttl_s`). Reuse contains the 30-day refresh window
+  at once; the ≤1h access window is bounded by expiry, not revoked. Instant
+  access containment would require a `family_id` column on `api_tokens` + a join
+  in the DELETE — a schema change, deliberately out of scope here.
 - The M1 disabled-user race is preserved: a user disabled between the SDK's
   `load_refresh_token` and the exchange now lands in branch (5) → `unknown` →
   `invalid_grant`, never an HTTP 500.

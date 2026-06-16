@@ -103,7 +103,7 @@ src/localmail/
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + PEP562 back-compat re-exports
     rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0029_oauth_refresh_token_family.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0030_api_tokens_refresh_family.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -1342,14 +1342,28 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   exactly one claims it and mints a successor; the loser's guarded UPDATE
   matches 0 rows (the token was consumed out from under it = a reuse signal) and
   revokes the family. No double-successor, no `SELECT FOR UPDATE` needed.
-  **Accepted limitation:** the family DELETE only revokes refresh tokens; access
-  tokens already minted along the chain live in `api_tokens` with no `family_id`
-  correlation, so they stay valid at `/mcp` until their ≤1h TTL
-  (`oauth_access_token_ttl_s`). Reuse contains the 30-day refresh window
-  immediately; the ≤1h access window is bounded by expiry, not revoked. Instant
-  access containment would need a `family_id` on `api_tokens` + a join in the
-  DELETE (schema change, deferred). Design:
+  Design:
   [docs/superpowers/specs/2026-06-16-oauth-refresh-token-family-revocation-design.md](docs/superpowers/specs/2026-06-16-oauth-refresh-token-family-revocation-design.md).
+- **Access-token family containment on reuse (closes the prior accepted
+  limitation):** the family DELETE used to revoke refresh tokens only — access
+  tokens already minted along the chain lived in `api_tokens` with no family
+  correlation and stayed valid at `/mcp` until their ≤1h TTL. Migration
+  `0030_api_tokens_refresh_family.sql` adds nullable
+  `api_tokens.oauth_refresh_family_id` (UUID, partial index `WHERE … IS NOT
+  NULL`). OAuth-minted access tokens are tagged with their refresh family
+  (`access.mint_access(family_id=…)` — the code-exchange path reads the family
+  via `load_refresh` after minting the refresh token; the rotation path reuses
+  the `row.family_id` it already loads). On reuse detection
+  (`RotateResult.family_id`, populated on the `reuse` outcome) the provider's
+  reuse branch calls `access.revoke_access_family(family_id)` **inside the same
+  transaction** as the refresh-family DELETE and **before** the commit, so both
+  purges are atomic; the reuse WARNING gains `(access tokens purged=%d)`.
+  Reuse-only — normal rotation predecessors still expire by their ≤1h TTL (eager
+  revocation would break in-flight requests). Login tokens (`/v1/auth/login`,
+  `oauth_refresh_family_id IS NULL`) are structurally immune to the family purge.
+  `refresh.py` still touches only `oauth_refresh_tokens` (it reports `family_id`
+  as data); `access.py` owns `api_tokens`; the provider orchestrates both. Design:
+  [docs/superpowers/specs/2026-06-16-access-token-family-containment-design.md](docs/superpowers/specs/2026-06-16-access-token-family-containment-design.md).
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`
@@ -1368,7 +1382,7 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0029_oauth_refresh_token_family.sql`; next free slot `0030_*.sql`.
+  Latest is `0030_api_tokens_refresh_family.sql`; next free slot `0031_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

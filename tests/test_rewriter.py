@@ -158,6 +158,28 @@ def test_default_rewriter_model():
     assert SearchConfig().rewriter_model == "granite4.1:3b-q8_0"
 
 
+def test_rewriter_backend_literal_accepts_three_values():
+    for backend in ("ollama", "openai", "anthropic"):
+        assert SearchConfig(rewriter_backend=backend).rewriter_backend == backend
+
+
+def test_rewriter_backend_rejects_unknown():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        SearchConfig(rewriter_backend="cohere")
+
+
+def test_rewriter_backend_defaults():
+    cfg = SearchConfig()
+    assert cfg.rewriter_backend == "ollama"
+    assert cfg.rewriter_max_tokens == 1024
+    assert cfg.rewriter_openai_base_url == "https://api.openai.com/v1"
+    assert cfg.rewriter_openai_api_key_env == "OPENAI_API_KEY"
+    assert cfg.rewriter_anthropic_base_url == "https://api.anthropic.com"
+    assert cfg.rewriter_anthropic_api_key_env == "ANTHROPIC_API_KEY"
+    assert cfg.rewriter_anthropic_version == "2023-06-01"
+
+
 def test_ollama_happy_path():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/generate"

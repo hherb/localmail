@@ -349,10 +349,27 @@ class SearchConfig(BaseModel):
 
     # --- query rewriter (Phase 4) ---
     rewriter_enabled_by_default: bool = False
-    rewriter_backend: Literal["ollama"] = "ollama"
+    rewriter_backend: Literal["ollama", "openai", "anthropic"] = "ollama"
     rewriter_model: str = "granite4.1:3b-q8_0"
     rewriter_timeout_s: float = 10.0
     rewriter_max_expansion_terms: int = 8
+    # Generated-token cap for the OpenAI and Anthropic backends. Anthropic's
+    # Messages API requires max_tokens; OpenAI treats it as optional. The
+    # Ollama backend ignores it (it uses /api/generate's own options). The
+    # rewrite output is a small JSON object, so the default is generous but bounded.
+    rewriter_max_tokens: int = 1024
+    # OpenAI-compatible backend (rewriter_backend = "openai"). Any server
+    # speaking /chat/completions works (OpenAI, vLLM, Ollama's own /v1, etc.).
+    # The API key is read at construction from the named environment variable
+    # (never config/DB).
+    rewriter_openai_base_url: str = "https://api.openai.com/v1"
+    rewriter_openai_api_key_env: str = "OPENAI_API_KEY"
+    # Anthropic backend (rewriter_backend = "anthropic"). The version string is
+    # the anthropic-version request header.
+    # Pin a known-good anthropic-version; bump when adopting newer API features.
+    rewriter_anthropic_base_url: str = "https://api.anthropic.com"
+    rewriter_anthropic_api_key_env: str = "ANTHROPIC_API_KEY"
+    rewriter_anthropic_version: str = "2023-06-01"
     # Bounded per-process LRU+TTL cache for `--smart` rewrite results, keyed on
     # (today, free_text). Repeated identical smart queries skip a fresh Ollama
     # call. Entries are tiny, so the size can exceed page_cache_size. 0 disables.

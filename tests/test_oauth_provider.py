@@ -156,6 +156,30 @@ def test_exchange_refresh_rejects_disabled_user_without_500(db_conn, db_pool):
     assert exc.value.error == "invalid_grant"
 
 
+def test_exchange_refresh_reuse_revokes_family(db_conn, db_pool):
+    # Rotate once, then replay the original refresh -> invalid_grant AND the
+    # active successor token is dead afterward (RFC 9700 §4.14.2).
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, "prov-reuse", "pw")
+        raw_code = codes.mint_code(
+            conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+            redirect_uri_provided_explicitly=True, code_challenge="chal",
+            scopes=[], ttl_s=60,
+        )
+        conn.commit()
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    token = anyio.run(p.exchange_authorization_code, _client(), loaded)
+    old_refresh = anyio.run(p.load_refresh_token, _client(), token.refresh_token)
+    rotated = anyio.run(p.exchange_refresh_token, _client(), old_refresh, [])
+    assert anyio.run(p.load_refresh_token, _client(), rotated.refresh_token) is not None
+    with pytest.raises(TokenError) as exc:
+        anyio.run(p.exchange_refresh_token, _client(), old_refresh, [])
+    assert exc.value.error == "invalid_grant"
+    assert anyio.run(p.load_refresh_token, _client(), rotated.refresh_token) is None
+
+
 def test_cross_client_code_rejected(db_conn, db_pool):
     p = _provider(db_pool)
     anyio.run(p.register_client, _client())

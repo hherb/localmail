@@ -162,10 +162,15 @@ access tokens automatically.
   silently; the 1-hour expiry is invisible to the user.
 - **Refresh tokens** are valid for 30 days and are **sliding**: each refresh
   resets the clock (`[mcp] oauth_refresh_token_ttl_s`). An actively-used client
-  never needs to re-authenticate.
+  never needs to re-authenticate. Rotation is **single-use with family
+  revocation** (RFC 9700 §4.14.2): exchanging a refresh token retires it and
+  issues a successor. If an already-used refresh token is ever **replayed** — a
+  strong signal that a copy was stolen — the entire active refresh chain for
+  that client is revoked, forcing a fresh browser re-login. Keep only the most
+  recent refresh token; never retry a refresh with an older one.
 - A **browser re-login** (repeating steps 4–5) is required only after
-  approximately 30 days of total inactivity, on explicit token revocation, or if
-  the api_user is disabled.
+  approximately 30 days of total inactivity, on explicit token revocation, on
+  detected refresh-token reuse, or if the api_user is disabled.
 
 Access tokens are stored in the existing `api_tokens` table, so the per-user
 account ACL applies unchanged — the agent sees only the accounts the user has
@@ -304,3 +309,6 @@ and no new tables — MCP reuses the existing `api_users`, `api_tokens`, and
 `user_accounts` tables. When the AS is enabled, migration `0028_oauth_server.sql`
 adds `oauth_clients`, `oauth_authorization_codes`, `oauth_refresh_tokens`,
 `oauth_registration_attempts`, and a nullable `api_tokens.oauth_client_id`.
+Migration `0029_oauth_refresh_token_family.sql` then adds
+`oauth_refresh_tokens.family_id` + `consumed_at` (refresh-token family
+revocation on reuse) plus an `oauth_refresh_tokens(client_id)` index.

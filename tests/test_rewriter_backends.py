@@ -9,7 +9,7 @@ import pytest
 
 from localmail.config import SearchConfig
 from localmail.search.rewriter import RewriteParseError
-from localmail.search.rewriter_backends import MissingApiKey, OpenAICompatRewriter
+from localmail.search.rewriter_backends import AnthropicRewriter, MissingApiKey, OpenAICompatRewriter
 
 
 def test_ollama_backcompat_import_path_still_works():
@@ -87,5 +87,66 @@ def test_openai_malformed_body_raises_parse_error(monkeypatch):
 
     cfg = SearchConfig(rewriter_backend="openai")
     r = OpenAICompatRewriter(cfg, client=_client(handler))
+    with pytest.raises(RewriteParseError):
+        r.rewrite("orig")
+
+
+def test_anthropic_happy_path(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["x_api_key"] = request.headers.get("x-api-key")
+        seen["version"] = request.headers.get("anthropic-version")
+        seen["body"] = json.loads(request.content)
+        # The model continues from the prefilled "{"; the leading brace is the
+        # assistant prefill, so the API returns the remainder of the object.
+        return httpx.Response(
+            200,
+            json={"content": [{"type": "text", "text": '"rewritten_text": "x", "expansion_terms": ["y"]}'}]},
+        )
+
+    cfg = SearchConfig(rewriter_backend="anthropic")
+    r = AnthropicRewriter(cfg, client=_client(handler), today_provider=lambda: _date(2026, 6, 7))
+    out = r.rewrite("orig")
+
+    assert out.rewritten_text == "x"
+    assert out.expansion_terms == ["y"]
+    assert seen["path"] == "/v1/messages"
+    assert seen["x_api_key"] == "sk-ant-test"
+    assert seen["version"] == "2023-06-01"
+    assert seen["body"]["model"] == cfg.rewriter_model
+    assert seen["body"]["max_tokens"] == 1024
+    assert seen["body"]["temperature"] == 0
+    assert seen["body"]["messages"][-1] == {"role": "assistant", "content": "{"}
+
+
+def test_anthropic_missing_key_raises_at_construction(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(MissingApiKey):
+        AnthropicRewriter(SearchConfig(rewriter_backend="anthropic"))
+
+
+def test_anthropic_5xx_raises_http_error(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    def handler(request):
+        return httpx.Response(529, json={"error": "overloaded"})
+
+    cfg = SearchConfig(rewriter_backend="anthropic")
+    r = AnthropicRewriter(cfg, client=_client(handler))
+    with pytest.raises(httpx.HTTPStatusError):
+        r.rewrite("orig")
+
+
+def test_anthropic_malformed_body_raises_parse_error(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    def handler(request):
+        return httpx.Response(200, json={"unexpected": True})
+
+    cfg = SearchConfig(rewriter_backend="anthropic")
+    r = AnthropicRewriter(cfg, client=_client(handler))
     with pytest.raises(RewriteParseError):
         r.rewrite("orig")

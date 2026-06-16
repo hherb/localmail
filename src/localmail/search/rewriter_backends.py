@@ -152,3 +152,51 @@ class OpenAICompatRewriter(_HttpJsonRewriter):
             raise RewriteParseError(
                 f"unexpected OpenAI reply: {body!r}"
             ) from exc
+
+
+class AnthropicRewriter(_HttpJsonRewriter):
+    """Rewriter backed by the Anthropic ``/v1/messages`` API.
+
+    Anthropic has no JSON mode; an assistant turn prefilled with ``"{"`` forces
+    the model to emit a JSON object immediately (no tool-use, no SDK). The
+    prefilled brace is prepended back onto the response before parsing.
+    """
+
+    name = "anthropic"
+
+    def __init__(
+        self,
+        cfg: SearchConfig,
+        *,
+        client: httpx.Client | None = None,
+        today_provider: Callable[[], date] = date.today,
+    ) -> None:
+        super().__init__(cfg, client=client, today_provider=today_provider)
+        self._api_key = _require_env(cfg.rewriter_anthropic_api_key_env)
+
+    def _request(self, prompt: str) -> str:
+        resp = self._client.post(
+            f"{self._cfg.rewriter_anthropic_base_url}/v1/messages",
+            headers={
+                "x-api-key": self._api_key,
+                "anthropic-version": self._cfg.rewriter_anthropic_version,
+            },
+            json={
+                "model": self.model,
+                "max_tokens": self._cfg.rewriter_max_tokens,
+                "temperature": 0,
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "{"},
+                ],
+            },
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        try:
+            text = body["content"][0]["text"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RewriteParseError(
+                f"unexpected Anthropic reply: {body!r}"
+            ) from exc
+        return "{" + text

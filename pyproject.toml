@@ -31,10 +31,10 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "argon2-cffi>=23.1",
     "nh3>=0.2.18",
-    "cryptography>=43.0",
+    "cryptography>=48.0.1",
     "sqlparse>=0.5",
     "jinja2>=3.1",
-    "python-multipart>=0.0.9",
+    "python-multipart>=0.0.30",
 ]
 
 [project.optional-dependencies]

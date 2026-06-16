@@ -100,7 +100,8 @@ src/localmail/
     page_cache.py   # in-process LRU cache for paginated result pools
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
-    rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + OllamaLLMRewriter
+    rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + PEP562 back-compat re-exports
+    rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
 migrations/         # 0001_init.sql … 0029_oauth_refresh_token_family.sql (0023_daemon_heartbeats.sql also applied)
 tests/
@@ -429,15 +430,26 @@ for the Phase 2 plan.
 and [docs/superpowers/plans/2026-06-07-smart-query-rewriter.md](docs/superpowers/plans/2026-06-07-smart-query-rewriter.md).
 Opt-in (`search.rewriter_enabled_by_default` + the per-call `--smart`/`smart=`
 flag). [search/rewriter.py](src/localmail/search/rewriter.py) is pure helpers
-(`build_rewrite_prompt`, `parse_rewrite_response`, `apply_rewrite`) plus one IO
-class `OllamaLLMRewriter` (httpx → Ollama `/api/generate`, `format`-constrained
-JSON, `temperature=0`). The rewriter produces `rewritten_text` (vector arm +
+(`build_rewrite_prompt`, `parse_rewrite_response`, `apply_rewrite`); the IO
+backends live in [search/rewriter_backends.py](src/localmail/search/rewriter_backends.py)
+— a template-method base `_HttpJsonRewriter` (does prompt-build + parse;
+subclasses implement only `_request`) plus three `httpx`-only backends selected
+by `search.rewriter_backend` (`ollama` default | `openai` | `anthropic`) via the
+`build_rewriter(cfg)` factory. `OllamaLLMRewriter` → Ollama `/api/generate`
+(`format`-constrained JSON); `OpenAICompatRewriter` → any OpenAI-compatible
+`/chat/completions` (`response_format` json_object); `AnthropicRewriter` →
+Anthropic `/v1/messages` (assistant `"{"` prefill forces JSON, no tool-use). All
+use `temperature=0`. The cloud backends read their API key at construction from
+the env var named by `rewriter_openai_api_key_env` / `rewriter_anthropic_api_key_env`
+(never config/DB); a missing key raises `MissingApiKey`, which `create_searcher`'s
+guard turns into graceful "no `--smart`". `rewriter.py` keeps the old deep import
+path working via a PEP 562 `__getattr__`. No new uv extra (`httpx` is already a dep). The rewriter produces `rewritten_text` (vector arm +
 reranker), `expansion_terms` (OR-ed into the lexical arms — see below), and
 `extracted_filters` (NL → structured). **`apply_rewrite` merge precedence:
 explicit operators win** — the LLM fills only the scalar filter slots
 (`after`/`before`/`from`/`to`/`subject`/`has_attachment`) the user left `None`;
 it never sets account/folder/lang. **Failure policy lives in the Searcher, not
-the rewriter**: `OllamaLLMRewriter` raises typed exceptions
+the rewriter**: the backends raise typed exceptions
 (`httpx.HTTPError` subclasses, `RewriteParseError` — incl. a 200-with-missing-
 `response`-key); `Searcher.search` catches `(httpx.HTTPError, RewriteParseError)`,
 keeps the un-rewritten query, logs `smart rewrite skipped: …`, and surfaces it

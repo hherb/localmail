@@ -632,8 +632,9 @@ from `lang:` queries.
 uv run localmail search "tax stuff from the accountant last summer" --smart
 ```
 
-`--smart` runs the free-text part of your query through a **local** LLM (via
-[Ollama](https://ollama.com)) before searching. The model is asked to produce
+`--smart` runs the free-text part of your query through an LLM before searching
+(a **local** [Ollama](https://ollama.com) model by default; an OpenAI-compatible
+or Anthropic cloud model if you choose — see below). The model is asked to produce
 three things:
 
 - a cleaner, semantically richer **rewritten query** for the vector arm,
@@ -647,24 +648,45 @@ three things:
 slots you left empty. The model never invents `account:`, `folder:`, or `lang:`
 filters.
 
-Everything stays on the host: the query text is sent only to your local Ollama
-instance, never to a remote service. If Ollama is unreachable, the request
-times out, or the model returns malformed output, the search **falls through to
-the original query** and prints a one-line `note: --smart rewrite skipped …`
-(your search still runs — it's just not rewritten).
+With the default Ollama backend everything stays on the host: the query text is
+sent only to your local Ollama instance, never to a remote service. (If you
+switch `rewriter_backend` to `openai` or `anthropic`, the free-text query is
+sent to that provider — choose accordingly.) If the LLM is unreachable, the
+request times out, or the model returns malformed output, the search **falls
+through to the original query** and prints a one-line `note: --smart rewrite
+skipped …` (your search still runs — it's just not rewritten).
 
-Setup: install Ollama and pull the model once
+Setup (default, local Ollama): install Ollama and pull the model once
 (`ollama pull granite4.1:3b-q8_0`), then enable the feature in `config.toml`:
 
 ```toml
 [search]
 rewriter_enabled_by_default = true       # build the rewriter at startup
-rewriter_model = "granite4.1:3b-q8_0"    # any Ollama chat model
+rewriter_backend = "ollama"              # "ollama" (default) | "openai" | "anthropic"
+rewriter_model = "granite4.1:3b-q8_0"    # set to match the chosen backend
 rewriter_timeout_s = 10.0                # fall through if the LLM is slower
 rewriter_max_expansion_terms = 8         # cap on synonyms OR-ed into the lexical arms
 ollama_host = "http://localhost:11434"
 rewriter_cache_size = 128                # cache repeated --smart rewrites; 0 disables
 rewriter_cache_ttl_s = 1200              # cache entry lifetime in seconds
+```
+
+To use a cloud model instead, set `rewriter_backend` and point `rewriter_model`
+at that provider's model. The API key is read from an environment variable
+(named by `rewriter_openai_api_key_env` / `rewriter_anthropic_api_key_env`,
+default `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) and is **never** written to
+config or the database; an unset key degrades to "no `--smart`":
+
+```toml
+[search]
+rewriter_enabled_by_default = true
+rewriter_backend = "anthropic"           # or "openai"
+rewriter_model = "claude-haiku-4-5"      # an "openai" example: "gpt-4o-mini"
+rewriter_max_tokens = 1024               # cap on generated tokens (cloud backends)
+# OpenAI-compatible base URL (includes /v1, per the OpenAI SDK convention):
+# rewriter_openai_base_url = "https://api.openai.com/v1"
+# Anthropic base URL (origin only; the client appends /v1/messages):
+# rewriter_anthropic_base_url = "https://api.anthropic.com"
 ```
 
 Without `rewriter_enabled_by_default = true`, passing `--smart` reports that no

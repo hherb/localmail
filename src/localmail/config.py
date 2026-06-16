@@ -362,11 +362,16 @@ class SearchConfig(BaseModel):
     # speaking /chat/completions works (OpenAI, vLLM, Ollama's own /v1, etc.).
     # The API key is read at construction from the named environment variable
     # (never config/DB).
+    # base_url INCLUDES /v1 (OpenAI SDK convention); the client appends only
+    # /chat/completions. For Ollama's own OpenAI-compat endpoint use
+    # "http://localhost:11434/v1".
     rewriter_openai_base_url: str = "https://api.openai.com/v1"
     rewriter_openai_api_key_env: str = "OPENAI_API_KEY"
     # Anthropic backend (rewriter_backend = "anthropic"). The version string is
     # the anthropic-version request header.
     # Pin a known-good anthropic-version; bump when adopting newer API features.
+    # base_url is the ORIGIN only (no /v1 suffix); the client appends
+    # /v1/messages. This is the opposite convention from the OpenAI field above.
     rewriter_anthropic_base_url: str = "https://api.anthropic.com"
     rewriter_anthropic_api_key_env: str = "ANTHROPIC_API_KEY"
     rewriter_anthropic_version: str = "2023-06-01"

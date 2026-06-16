@@ -92,6 +92,10 @@ def cleanup_unused(conn: psycopg.Connection, *, retention_s: int) -> int:
     refresh token expired. A client with any unexpired refresh token is never
     reaped — its tokens are still usable, so reaping the client row would
     silently break its next ``get_client`` lookup.
+
+    A consumed tombstone (``consumed_at IS NOT NULL``) left behind by token
+    rotation does **not** count as a live token — otherwise a rotated-away
+    predecessor would keep an abandoned client alive indefinitely.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -100,7 +104,8 @@ def cleanup_unused(conn: psycopg.Connection, *, retention_s: int) -> int:
             "      < now() - make_interval(secs => %s) "
             "  AND NOT EXISTS ("
             "    SELECT 1 FROM oauth_refresh_tokens r "
-            "    WHERE r.client_id = c.client_id AND r.expires_at > now())",
+            "    WHERE r.client_id = c.client_id AND r.expires_at > now() "
+            "      AND r.consumed_at IS NULL)",
             (retention_s,),
         )
         return cur.rowcount

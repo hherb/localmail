@@ -71,3 +71,21 @@ def test_cleanup_reaps_used_client_with_only_expired_refresh_token(db_conn):
     assert clients.cleanup_unused(db_conn, retention_s=0) == 1
     db_conn.commit()
     assert clients.get_client(db_conn, cid) is None
+
+
+def test_cleanup_reaps_client_whose_only_token_is_a_tombstone(db_conn):
+    # A not-yet-expired *consumed* tombstone must NOT count as a live token and
+    # keep an abandoned client alive (the M2 interaction with #183).
+    cid = _register(db_conn, client_id="tombstoned")
+    clients.touch_last_used(db_conn, cid)
+    uid = api_auth.create_user(db_conn, "tomb-user", "pw")
+    raw = refresh.mint_refresh(db_conn, client_id=cid, user_id=uid, scopes=[], ttl_s=3600)
+    db_conn.commit()
+    with db_conn.cursor() as cur:
+        from localmail.api.auth import hash_token
+        cur.execute("UPDATE oauth_refresh_tokens SET consumed_at = now() "
+                    "WHERE token_sha256 = %s", (hash_token(raw),))
+    db_conn.commit()
+    assert clients.cleanup_unused(db_conn, retention_s=0) == 1
+    db_conn.commit()
+    assert clients.get_client(db_conn, cid) is None

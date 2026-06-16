@@ -51,3 +51,48 @@ def test_registration_attempts_has_ip_ts_index(db_conn):
         )
         defs = " ".join(r[0] for r in cur.fetchall())
     assert "ip" in defs and "ts" in defs  # composite (ip, ts) index present
+
+
+def test_refresh_tokens_gains_family_and_consumed(db_conn):
+    cols = _columns(db_conn, "oauth_refresh_tokens")
+    assert {"family_id", "consumed_at"} <= cols
+
+
+def test_refresh_tokens_has_client_id_and_family_indexes(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes WHERE tablename = %s",
+            ("oauth_refresh_tokens",),
+        )
+        defs = " ".join(r[0] for r in cur.fetchall())
+    assert "family_id" in defs
+    assert "(client_id)" in defs.replace(" ", "")
+
+
+def test_cleanup_unused_subquery_uses_client_id_index(db_conn):
+    # #185 acceptance: the NOT EXISTS correlated subquery must hit the
+    # client_id index, not a seq scan, once oauth_refresh_tokens is seeded.
+    from localmail.api import auth as api_auth
+    from localmail.mcp.oauth import clients, refresh
+
+    clients.register_client(
+        db_conn, client_id="idx-cid", client_secret_sha256=None,
+        redirect_uris=["https://c/cb"], client_name=None,
+        grant_types=["refresh_token"], response_types=["code"],
+        token_endpoint_auth_method="none", scope=None,
+    )
+    uid = api_auth.create_user(db_conn, "idx-user", "pw")
+    for _ in range(50):
+        refresh.mint_refresh(
+            db_conn, client_id="idx-cid", user_id=uid, scopes=[], ttl_s=3600
+        )
+    db_conn.commit()
+    with db_conn.cursor() as cur:
+        cur.execute("SET LOCAL enable_seqscan = off")
+        cur.execute(
+            "EXPLAIN SELECT 1 FROM oauth_refresh_tokens r "
+            "WHERE r.client_id = %s AND r.expires_at > now()",
+            ("idx-cid",),
+        )
+        plan = " ".join(r[0] for r in cur.fetchall())
+    assert "oauth_refresh_tokens_client_id_idx" in plan

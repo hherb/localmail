@@ -102,7 +102,7 @@ src/localmail/
     reranker.py     # FastEmbedReranker + Reranker ABC
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + OllamaLLMRewriter
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0028_oauth_server.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0029_oauth_refresh_token_family.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -1299,9 +1299,36 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
     so the per-IP `/register` cap peels `X-Forwarded-For` against
     `auth.trusted_proxies` exactly like the login limiter (empty config = socket
     peer, unchanged). Wired in `create_app` (`auth_config=auth_cfg`).
-  - Still open: **#183** (RFC 9700 refresh-token *family* revocation on detected
-    reuse — needs a `family_id`/tombstone schema change) and RFC 8707 resource
-    indicators (single RS — moot). No new migration for M1/M2/M3.
+  - Still open: RFC 8707 resource indicators (single RS — moot). No new
+    migration for M1/M2/M3.
+- **Refresh-token family revocation on reuse (#183, #185, shipped):** rotation no
+  longer hard-deletes the presented refresh token. Migration
+  `0029_oauth_refresh_token_family.sql` adds `oauth_refresh_tokens.family_id`
+  (`UUID NOT NULL DEFAULT gen_random_uuid()` — existing rows become singleton
+  families) + `consumed_at TIMESTAMPTZ` (NULL = live; set = rotated tombstone),
+  plus indexes on `family_id` and `client_id` (the latter is **#185**, serving
+  `cleanup_unused`'s correlated `NOT EXISTS`). `refresh.rotate_refresh` now
+  returns a `RotateResult(outcome, new_token)` enum: it **tombstones** the
+  presented token (UPDATE `consumed_at`) and mints a successor in the **same
+  family** (`outcome="rotated"`); replaying an already-consumed token is reuse
+  (a stolen-copy signal, RFC 9700 §4.14.2) → it `DELETE`s the **whole family**
+  and returns `outcome="reuse"`; an absent/expired/disabled-user token is
+  `outcome="unknown"` (natural, never nukes the family — the M1 disabled-user
+  containment now lands here). `refresh.load_refresh` filters
+  `consumed_at IS NULL` so tombstones never load as live;
+  `refresh.sweep_consumed` GCs consumed tombstones past their own `expires_at`
+  (opportunistic, called on the rotation path — reuse stays detectable for the
+  token's full lifetime). `clients.cleanup_unused`'s live-token guard gained
+  `AND r.consumed_at IS NULL` so a not-yet-expired tombstone can't keep an
+  abandoned client alive (the M2 interaction). `provider._exchange_refresh_sync`
+  switches on the outcome: `reuse` commits the family DELETE, logs a WARNING
+  (`refresh-token reuse detected; revoked family for client_id=…`, no token
+  leakage), and raises `TokenError("invalid_grant")`; `unknown` rolls back and
+  raises. **Known limitation:** two concurrent rotations of the same live token
+  race — the loser sees the token already tombstoned and returns `unknown`
+  (not `reuse`), so a genuinely concurrent replay isn't flagged as theft; this
+  is the accepted bound of the non-`SELECT FOR UPDATE` design. Design:
+  [docs/superpowers/specs/2026-06-16-oauth-refresh-token-family-revocation-design.md](docs/superpowers/specs/2026-06-16-oauth-refresh-token-family-revocation-design.md).
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`
@@ -1320,7 +1347,7 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0028_oauth_server.sql`; next free slot `0029_*.sql`.
+  Latest is `0029_oauth_refresh_token_family.sql`; next free slot `0030_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

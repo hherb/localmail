@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Importer core: stream an archive source through sync.process_one_message.
 
 Owns the import_jobs row lifecycle: marks running, per-message SAVEPOINT

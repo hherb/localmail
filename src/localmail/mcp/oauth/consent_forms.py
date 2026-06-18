@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure validation/parsing of the /oauth/consent POST body.
 
 No IO. The router calls this, then (on allow) verifies credentials and mints a

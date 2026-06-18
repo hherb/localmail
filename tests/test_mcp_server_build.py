@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """build_mcp_server wires five tools onto a FastMCP instance."""
 import asyncio
 

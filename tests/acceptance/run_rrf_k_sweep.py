@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Sweep `SearchConfig.rrf_k` against either acceptance corpus.
 
 Seeds the chosen corpus and runs the extract/embed workers exactly once,

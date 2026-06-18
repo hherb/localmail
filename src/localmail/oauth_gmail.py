@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Gmail OAuth2 (XOAUTH2) for IMAP access.
 
 The interactive consent flow is run by `localmail oauth-login NAME` and writes

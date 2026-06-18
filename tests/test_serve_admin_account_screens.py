@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Admin account-management HTML screens (2A.3)."""
 from __future__ import annotations
 

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unauthenticated /v1/version and /v1/health endpoints + /v1/capabilities."""
 from __future__ import annotations
 

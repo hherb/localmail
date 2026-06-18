@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure readers for mbox / maildir archive sources (no DB).
 
 Each reader yields `ImportedMessage(mailbox_name, raw_bytes, received_date)`.

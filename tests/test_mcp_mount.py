@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """create_app mounts /mcp only when enabled (and the extra is importable)."""
 import pytest
 from starlette.routing import Mount

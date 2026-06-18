@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Shared CSRF helpers for admin JSON routers.
 
 The HTML admin routers (`auth_router`, `dashboard_router`) embed CSRF

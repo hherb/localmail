@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure path-allowlist guard for archive imports (no DB, no FastAPI).
 
 `resolve_import_path` resolves the operator-supplied path to a realpath and

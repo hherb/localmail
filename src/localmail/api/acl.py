@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Per-user account ACL.
 
 `user_accounts` is the join table; every authenticated read of account-scoped

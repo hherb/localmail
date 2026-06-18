@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Daemon account hot-reload: reconcile spawns/tears-down/respawns (2B.1)."""
 
 from __future__ import annotations

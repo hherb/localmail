@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """In-memory stand-in for the Google OAuth Flow used by api/admin/oauth.py.
 
 Mirrors the FakeIMAPClient pattern in tests/_fake_imap.py. Not exposed via

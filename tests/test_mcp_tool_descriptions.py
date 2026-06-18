@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """The agent-facing MCP tool + parameter descriptions are the contract an MCP
 client (e.g. Claude) reads to decide *which* tool to call and *how* to fill its
 arguments. These tests pin that every tool and every parameter carries

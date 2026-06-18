@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Daemon liveness heartbeats (2B.2, Plane A).
 
 Every daemon worker thread (per-account IDLE + poll) and process-level worker

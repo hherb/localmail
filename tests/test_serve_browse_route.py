@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Tests for GET /v1/messages — the keyset-paginated browse route."""
 from datetime import datetime, timedelta, timezone
 

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Tests for the reusable bounded-backoff retry helper (#133).
 
 These pin the contract that:

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Admin user-management HTML screens (2A.4).
 
 Thin server-rendered HTMX router mounted at /admin. Renders Jinja fragments and

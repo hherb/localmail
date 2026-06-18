@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """End-to-end importer-core tests (real DB)."""
 from __future__ import annotations
 

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """GET/POST /admin/login: render form, validate creds, issue cookie."""
 from __future__ import annotations
 

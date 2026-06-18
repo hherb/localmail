@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Smoke tests for the attachment fixture builder — verify fixture bytes
 roundtrip through LightweightExtractor."""
 

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """LocalmailASProvider — the MCP SDK OAuthAuthorizationServerProvider backed by
 the localmail OAuth stores.
 

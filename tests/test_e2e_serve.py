@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """End-to-end smoke: spin up uvicorn in a thread, hit it with httpx, verify."""
 import socket
 import threading

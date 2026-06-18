@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure helpers describing the per-page outcome of a smart query rewrite.
 
 No IO, no FastAPI — reusable by the api/ layer and any future transport.

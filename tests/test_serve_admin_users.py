@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HTTP-route tests for /v1/admin/users (Sub-plan 2A.4)."""
 from __future__ import annotations
 

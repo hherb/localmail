@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """IMAP IDLE loop for an account's INBOX.
 
 One connection per account is kept open and in IDLE state. New-mail

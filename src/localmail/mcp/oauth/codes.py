@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Single-use authorization-code store. Codes are SHA-256-hashed; the raw code
 is returned to the client once (via the redirect) and never stored.
 """

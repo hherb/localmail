@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unit tests for the plan classifier in the acceptance harness.
 
 The classifier is a pure function over EXPLAIN ANALYZE text — no DB

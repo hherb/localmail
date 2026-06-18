@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """RFC822 -> structured ParsedMessage (no side effects, no DB, no IO)."""
 
 from __future__ import annotations

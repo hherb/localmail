@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """`localmail serve` threads cfg.mcp into create_app."""
 from click.testing import CliRunner
 

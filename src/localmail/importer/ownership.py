@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure helpers for import-job ownership / orphan detection (#162).
 
 Each import_jobs row records the host + pid of the process that created and runs

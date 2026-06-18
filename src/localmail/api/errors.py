@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Typed exceptions for the localmail.api layer.
 
 Each subclass declares its HTTP status + RFC 7807 problem type.

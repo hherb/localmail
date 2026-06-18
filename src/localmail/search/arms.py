@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """SQL retrieval arms for hybrid search: BM25 (messages, chunks) + vector (chunks, attachment_chunks).
 
 Each arm is a pure function `(conn, parsed_query, cfg, ...) -> list[ArmHit]`.

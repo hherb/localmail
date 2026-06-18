@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """The 0028 migration creates the OAuth AS tables + api_tokens.oauth_client_id."""
 from __future__ import annotations
 

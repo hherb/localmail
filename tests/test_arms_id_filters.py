@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Server-side narrowing by account_ids / folder_ids works at every arm.
 
 These tests assert that _filter_sql injects the right SQL predicates so

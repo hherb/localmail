@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Tests for the body-language detection module.
 
 The module ships with a `LanguageDetector` protocol, a deterministic

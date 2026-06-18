@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Service-layer tests for the admin web OAuth flow."""
 
 from __future__ import annotations

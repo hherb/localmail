@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """End-to-end: the three formerly-unsupported keys round-trip through
 `build_query_string` into the right DSL tokens."""
 from __future__ import annotations

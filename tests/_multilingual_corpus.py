@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Synthetic multilingual email corpus for Phase 1 acceptance.
 
 Builds ~50 emails across de / en / es / no / ja using existing `_eml.py`

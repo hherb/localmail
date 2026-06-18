@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """FastMCP server exposing five ACL-scoped localmail tools.
 
 Each tool resolves the authenticated user from the request's access token

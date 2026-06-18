@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unit tests for pure helpers in ``tests/acceptance/run_browse_explain.py``.
 
 The harness itself is a script that needs a live Postgres; these tests

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Horst Herb
+
 // Account form: show/hide field groups by the selected auth method.
 // CSP for /admin is `script-src 'self'` (no inline handlers), so all behaviour
 // is bound here from a served file (mirrors daemon-panel.js).

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """DaemonSupervisor — subprocess lifecycle, state machine, ring buffer (2B.4).
 
 Plane B: the serve process owns `localmail run` as a child. These tests drive

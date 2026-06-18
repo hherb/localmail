@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HTTP-route tests for /v1/admin/daemon + restart-sync (2B.4).
 
 Plane B lifecycle routes drive a dummy-subprocess supervisor swapped onto

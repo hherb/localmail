@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Bridge DB account rows to the daemon's AccountConfig worker boundary.
 
 Pure: no IO. The daemon enumerates syncable accounts from the DB

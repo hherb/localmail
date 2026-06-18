@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Verify search-related tables/columns/indexes exist after migration."""
 
 from __future__ import annotations

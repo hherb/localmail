@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Daemon: one worker thread per account, plus a per-account IDLE thread on INBOX."""
 
 from __future__ import annotations

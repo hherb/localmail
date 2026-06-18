@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """CLI tests for api-user management.
 
 We bypass the TOML config path by setting LOCALMAIL_DSN_OVERRIDE; the

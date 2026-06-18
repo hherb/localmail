@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Parse a free-text-plus-operators search query into a typed shape.
 
 Supported operators (all optional, in any order, anywhere in the query):

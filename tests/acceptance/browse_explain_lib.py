@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Shared library for the browse-explain acceptance harness and pytest tests.
 
 Pure primitives — no CLI, no argparse, no stdout. Two consumers:

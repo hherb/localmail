@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Enable `python -m localmail …`.
 
 The console-script entry point (`localmail = localmail.cli:main`) is the

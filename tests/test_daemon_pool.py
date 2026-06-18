@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Tests for unified daemon connection-pool sizing (#37, closes #9).
 
 These pin down the contract that:

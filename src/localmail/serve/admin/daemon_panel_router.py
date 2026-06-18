@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Admin HTML daemon-control panel (2B.5).
 
 `GET /admin/daemon` renders the full page; `GET /admin/_partials/daemon-status`

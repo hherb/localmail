@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Synthetic attachment fixture corpus for Phase 2 acceptance.
 
 Builds in-memory bytes for each fixture format (no .eml or .pdf files

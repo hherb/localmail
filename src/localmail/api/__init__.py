@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Transport-free API library for the localmail GUI/MCP server.
 
 Public service functions live in submodules:

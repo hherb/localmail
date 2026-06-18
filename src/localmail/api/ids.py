@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Wire-format ID parsing for the localmail.api boundary.
 
 External callers (HTTP, MCP) send entity IDs as **strings** — BIGSERIAL values

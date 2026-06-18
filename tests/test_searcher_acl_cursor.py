@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """User-scoped cache invariants on Searcher.continue_page / grow_pool.
 
 A search_token minted under user_id=A must NOT serve cached results to a

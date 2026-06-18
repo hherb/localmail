@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Service layer for admin-UI user management (Sub-plan 2A.4).
 
 Transport-free: pure functions over a psycopg connection, no FastAPI imports

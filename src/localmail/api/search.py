@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HTTP-friendly wrapper over localmail.search.Searcher.
 
 Filter dicts from the HTTP layer get translated to the DSL query string the

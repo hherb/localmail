@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """DaemonSupervisor — Plane B process lifecycle for `localmail run` (2B.4).
 
 The serve process optionally owns the sync daemon as a child subprocess so the

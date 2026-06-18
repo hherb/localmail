@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Benchmark the chunking-loop INSERT strategy (issue #5).
 
 `embed_worker._chunk_messages_lazily` INSERTs message chunks row-by-row (one

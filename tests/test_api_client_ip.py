@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unit tests for resolve_client_ip — pure-Python, no DB, no FastAPI.
 
 Coverage matrix matches T1–T16 in

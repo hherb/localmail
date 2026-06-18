@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """CSRF tokens for admin forms.
 
 Bound to (user_id, action) so a token minted for one form is useless for

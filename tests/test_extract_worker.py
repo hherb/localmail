@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Tests for extract_worker — text/empty/raised flow + SAVEPOINT discipline."""
 
 from __future__ import annotations

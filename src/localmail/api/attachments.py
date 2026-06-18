@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Attachment metadata, streaming, and extracted-text accessors.
 
 Attachment blobs are content-addressable and shared across messages and

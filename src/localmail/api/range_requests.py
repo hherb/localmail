@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HTTP Range header parsing for byte-stream endpoints (RFC 9110 §14.1).
 
 Pure parsing utilities used by `/v1/attachments/{sha256}` to serve

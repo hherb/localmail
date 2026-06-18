@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Public surface of ``localmail.api.auth`` (#115).
 
 The dummy hash, rate-limit check, and audit insert are legitimately needed

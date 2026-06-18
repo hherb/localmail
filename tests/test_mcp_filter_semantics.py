@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Couple the MCP ``search`` filter *prose* to the SQL ``_filter_sql`` emits.
 
 PR #167 encoded the actual filter operators into the agent-facing

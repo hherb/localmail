@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Invariant: no /v1/* machine route reads the admin session cookie (#121).
 
 PR #118 widened the admin session cookie's Path from /admin to / so it

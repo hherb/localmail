@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """DSL parser support for account_id: and folder_id: tokens.
 
 The integer-keyed tokens populate SearchFilters.account_ids /

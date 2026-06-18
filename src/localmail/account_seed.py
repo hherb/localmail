@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """One-time TOML->DB account seed, run at init-db.
 
 A pure planner (`plan_account_seed`) decides which config.toml accounts to

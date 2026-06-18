@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Paginated message browse — service layer.
 
 Mirrors the shape of the /v1/changes payload but supports keyset pagination

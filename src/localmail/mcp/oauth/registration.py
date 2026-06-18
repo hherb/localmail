@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """DB-backed per-IP sliding-window rate limit for open Dynamic Client
 Registration, mirroring api_login_attempts (multi-worker-safe).
 """

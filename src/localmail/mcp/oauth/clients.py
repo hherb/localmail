@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Dynamic-client-registration store (RFC 7591). Open registration is inert
 until a user logs in + consents; spam is bounded by the route rate limit and
 `cleanup_unused`.

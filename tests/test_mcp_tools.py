@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """MCP tool bodies — thin api/ wrappers, ACL-scoped."""
 import hashlib
 from datetime import datetime, timezone

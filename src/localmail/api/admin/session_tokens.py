@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HMAC-signed JSON payloads for admin cookie sessions.
 
 Wire format:

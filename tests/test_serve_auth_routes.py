@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 from fastapi.testclient import TestClient
 
 from localmail.serve.app import create_app

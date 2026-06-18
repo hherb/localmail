@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Reusable bounded exponential-backoff retry that respects a stop signal.
 
 Used at daemon startup (#133): the construction-time DB touches

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """CLI account commands operate on the DB (Sub-plan 2A.2d).
 
 Scaffolding for Tasks 4-8.  Task 4 covers `list-accounts`.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Top-level HTTP middleware enforcing the per-IP DCR registration cap before a
 request reaches the SDK-owned /register route inside the /mcp sub-mount. On each
 admitted POST it records the attempt and opportunistically sweeps both the

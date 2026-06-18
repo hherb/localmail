@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Test that Daemon spawns + cleanly joins the extract_worker thread."""
 
 from __future__ import annotations

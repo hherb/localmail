@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Attachment extraction worker.
 
 Polls ``attachment_blobs`` for MIME-allowlisted blobs without an

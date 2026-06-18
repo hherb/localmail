@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure tests for user_forms + the service's pure guard predicate."""
 from __future__ import annotations
 

@@ -809,3 +809,17 @@ the full table.
 row-by-row vs batched-`executemany` chunk INSERTs. The #5 measurement
 showed the loop is tokenization-bound (not INSERT-bound), so the
 production loop stays row-by-row — see that issue for the full table.
+
+## License
+
+localmail is free software, licensed under the **GNU Affero General Public
+License v3.0 or later** (`AGPL-3.0-or-later`). See [LICENSE](LICENSE) for the
+full text.
+
+The AGPL's network-use clause (section 13) matters here: if you run a modified
+localmail as a network-accessible service (e.g. the `serve` HTTP/MCP server),
+you must offer the corresponding source of your modified version to its users.
+
+Each source file carries an SPDX header
+(`# SPDX-License-Identifier: AGPL-3.0-or-later`) so its license travels with the
+file even when copied out of this repository.

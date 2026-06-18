@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unix-domain control socket for the daemon supervisor (2B.4).
 
 The serve process owns the supervisor; the `localmail daemon` CLI runs in a

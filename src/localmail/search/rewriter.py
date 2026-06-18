@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """LLM query rewriter for the opt-in ``--smart`` search path (Phase 4).
 
 Pure helpers plus a single IO class (:class:`OllamaLLMRewriter`). The IO

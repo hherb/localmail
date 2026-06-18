@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Background worker: fill embeddings for message_chunks and attachment_chunks.
 
 Phase 1 handled message_chunks only; Phase 2 extends the worker to also chunk

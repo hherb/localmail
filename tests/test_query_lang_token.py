@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """DSL parser tests for the `lang:` token.
 
 `lang:en` populates SearchFilters.languages as a list; multiple tokens append.

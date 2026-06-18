@@ -5,6 +5,8 @@ description = "Local PostgreSQL archive of one or more IMAP accounts."
 authors = [
     { name = "Horst Herb" }
 ]
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "chardet>=5.2",

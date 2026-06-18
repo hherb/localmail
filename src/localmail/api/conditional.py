@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HTTP conditional-request helpers (RFC 9110 §13.1).
 
 Pure parsing utilities. No IO; no FastAPI dependencies. Used by

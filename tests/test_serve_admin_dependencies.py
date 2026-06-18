@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """require_admin_session dependency: cookie → AdminUser, else redirect/403."""
 from __future__ import annotations
 

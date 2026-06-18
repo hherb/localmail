@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure form-parsing helpers for the user admin screens (no IO).
 
 Keeps the HTML router thin: every raw-form → service-kwargs transform and every

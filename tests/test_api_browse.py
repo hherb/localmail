@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Tests for localmail.api.browse.list_messages."""
 from datetime import datetime, timedelta, timezone
 from typing import Any

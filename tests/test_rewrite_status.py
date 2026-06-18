@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unit tests for the pure rewrite-outcome status/note/code helpers."""
 import httpx
 import pytest

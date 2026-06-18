@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Search engine orchestrator + pure helpers (RRF, snippets).
 
 Most of this module is the Searcher class (Tasks 14–19); this commit

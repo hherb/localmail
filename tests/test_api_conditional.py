@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unit tests for `localmail.api.conditional` — pure parsers for ETag,
 If-None-Match (weak compare), and If-Range (strong compare). No DB, no
 HTTP. Mirrors `tests/test_api_range_requests.py` in shape and intent.

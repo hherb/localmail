@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Authentication primitives: password hashing, token issuance, verification,
 and higher-level service functions (login, refresh, whoami, logout).
 

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Daemon startup resilience: wait for Postgres rather than crash (#133).
 
 ``Daemon.__init__`` does DB IO during construction (enumerate syncable

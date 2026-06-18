@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Embedding backend protocol + FastEmbedBackend (in-process ONNX).
 
 Phase 1 ships fastembed only. OllamaBackend lands in Phase 4 alongside

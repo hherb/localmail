@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Daemon consumes daemon_commands at the top of reconcile (2B.3).
 
 These are real-DB tests: commands FK accounts(id), so accounts must exist in the

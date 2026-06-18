@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Admin-only service layer for localmail.
 
 Every public function here checks the caller's admin status at the service

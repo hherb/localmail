@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Attachment extractors.
 
 Protocol + LightweightExtractor (pure-Python, no OCR, covers 11 allowlisted

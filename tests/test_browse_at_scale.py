@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """At-scale regression coverage for the broad-folder browse plan family (#87).
 
 Pins that the DISTINCT-regression signature (``Unique`` node plus

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 # tests/test_migration_0020.py
 """Regression tests for the 0020_accounts_canonical migration.
 

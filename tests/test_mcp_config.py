@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """McpConfig parsing + defaults."""
 from localmail.config import Config, McpConfig
 

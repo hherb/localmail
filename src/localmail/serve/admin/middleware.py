@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """ASGI middleware that rewrites sensitive query parameters before logging.
 
 The request handler still sees the originals via get_unscrubbed_query_params,

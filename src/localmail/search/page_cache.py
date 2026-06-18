@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Bounded LRU + TTL cache for paginated search results.
 
 Keys are opaque search_token strings (the Searcher generates them). Values

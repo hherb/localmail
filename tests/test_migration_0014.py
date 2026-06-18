@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Schema smoke test for migration 0014 (api_users, api_tokens)."""
 import psycopg
 

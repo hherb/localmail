@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HTTP routes for the admin web OAuth flow (Sub-plan 2A).
 
 Split into two APIRouters because the URL prefixes differ:

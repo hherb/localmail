@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Admin daemon-control panel (2B.5): GET /admin/daemon page + the
 /admin/_partials/daemon-status HTMX partial. Auth-gated; renders normal /
 stale / external states; mutating controls carry method-bound CSRF tokens.

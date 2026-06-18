@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Recall@K + MRR@K eval harness for the Phase-1 multilingual acceptance suite.
 
 Usage:

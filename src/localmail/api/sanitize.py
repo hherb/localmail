@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HTML sanitizer for message bodies.
 
 External resource loading is blocked by default; only ``cid:`` references

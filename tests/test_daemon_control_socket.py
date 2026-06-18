@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unix control socket for the daemon supervisor (2B.4).
 
 Newline-delimited JSON: the CLI connects to `${runtime_dir}/

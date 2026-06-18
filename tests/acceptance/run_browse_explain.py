@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Measure the planner choice for ``localmail.api.browse.list_messages``.
 
 This is the operator-facing CLI; the pure primitives live in

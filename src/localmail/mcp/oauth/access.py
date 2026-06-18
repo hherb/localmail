@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Access-token bridge: OAuth access tokens live in `api_tokens` so the existing
 resource-server verifier (`api.auth.verify_token`) and per-user ACL apply
 unchanged. `oauth_client_id` attributes the token to its client.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Admin user authentication and admin-grant management.
 
 Service layer; takes a psycopg connection. Transport-free.

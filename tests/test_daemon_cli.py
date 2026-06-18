@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """`localmail daemon …` CLI subgroup (2B.4).
 
 Plane A commands (status / reload / restart-account) work against the DB and

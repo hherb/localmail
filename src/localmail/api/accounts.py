@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Account and folder listing for the GUI navigation tree.
 
 `is_archive_only` is currently derived as "account exists but no mailbox has

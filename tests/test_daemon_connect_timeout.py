@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Bounded connect + statement for the daemon's fresh psycopg connects (#140, #142).
 
 Three daemon paths open a *fresh* ``psycopg.connect(self._dsn)`` rather than

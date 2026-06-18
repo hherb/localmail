@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """End-to-end ACL tests through the HTTP layer.
 
 Alice has grants to account A; Bob has grants to account B. Every

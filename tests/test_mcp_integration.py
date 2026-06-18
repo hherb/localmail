@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """End-to-end: real MCP client over Streamable HTTP against the mounted /mcp."""
 import asyncio
 import base64

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Admin-UI web OAuth flow for Gmail (HMAC-signed stateless state).
 
 Consumes [serve].state_signing_key (closes issue #114) and

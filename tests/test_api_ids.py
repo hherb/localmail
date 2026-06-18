@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unit tests for the string-to-int ID parser at the api boundary."""
 from __future__ import annotations
 

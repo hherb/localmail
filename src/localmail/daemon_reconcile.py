@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure account-reconcile diff for the daemon's hot-reload (2B.1).
 
 No IO, no threads. The daemon reads the desired syncable account set from the

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure decision planner for the enable-account / disable-account CLI commands.
 
 IO-free: given an account's auth_method, its current ``sync_enabled`` value, and

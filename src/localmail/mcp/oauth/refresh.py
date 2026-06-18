@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Rotating refresh-token store. Tokens are SHA-256-hashed.
 
 Rotation tombstones the presented token (sets ``consumed_at``) and mints a

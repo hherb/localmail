@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """RFC 9728 protected-resource discovery for the MCP server.
 
 Pure helpers (no IO) that derive the resource URL and authorization-server list,

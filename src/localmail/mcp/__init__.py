@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """localmail MCP server (Search Phase 3). Gated by the [mcp] extra."""
 from __future__ import annotations
 

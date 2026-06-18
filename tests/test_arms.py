@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Integration tests for the three Phase-1 retrieval arms.
 
 These rely on real Postgres + pgvector, so all are integration

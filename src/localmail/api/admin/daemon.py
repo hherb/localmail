@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Service layer for daemon status (2B.2).
 
 Pure read accessor over a psycopg connection — no FastAPI, no IO beyond the

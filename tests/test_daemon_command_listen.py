@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """LISTEN/NOTIFY wake: the listener sets the reconcile wake on NOTIFY, and
 run_forever reconciles early instead of waiting out reload_seconds (2B.3)."""
 from __future__ import annotations

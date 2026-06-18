@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """FastAPI dependencies for admin routes.
 
 require_admin_session() reads the session cookie, verifies its HMAC, looks

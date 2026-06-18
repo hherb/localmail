@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Resolve a CLI account name to an action: use the DB row, seed it from
 TOML first, or report it missing. Pure: no IO, no clock.
 

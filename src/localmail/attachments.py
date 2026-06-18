@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Content-addressable attachment storage.
 
 Each attachment payload is stored exactly once on disk, at

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """MCP tool bodies. Each is a thin, ACL-scoped wrapper over a localmail.api
 accessor. Transport-free and individually unit-testable against a real conn.
 """

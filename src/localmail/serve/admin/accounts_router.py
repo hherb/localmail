@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """HTTP routes for /v1/admin/accounts (Sub-plan 2A).
 
 Thin wrapper over `localmail.api.admin.accounts`. Every route requires an

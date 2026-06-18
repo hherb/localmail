@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Pure helper: derive the originating client IP from a socket peer plus
 an X-Forwarded-For header, applying right-to-left peeling against an
 operator-configured trusted-proxy CIDR set.

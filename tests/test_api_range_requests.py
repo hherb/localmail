@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
 """Unit tests for the pure Range-header parser (`localmail.api.range_requests`).
 
 These cover RFC 9110 §14.1 single-range semantics and the "ignore unparseable

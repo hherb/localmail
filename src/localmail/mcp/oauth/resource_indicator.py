@@ -20,12 +20,12 @@ def canonicalize_resource(raw: str) -> str | None:
     """Return the canonical resource identifier, or None if `raw` is invalid."""
     try:
         parts = urlsplit(raw.strip())
+        port = parts.port  # lazy property; raises ValueError on a bad port
     except ValueError:
         return None
     if parts.scheme not in _DEFAULT_PORTS or not parts.hostname or parts.fragment:
         return None
     host = parts.hostname  # already lowercased by urlsplit
-    port = parts.port
     netloc = host
     if port is not None and port != _DEFAULT_PORTS[parts.scheme]:
         netloc = f"{host}:{port}"
@@ -48,7 +48,8 @@ def resolve_accepted_resources(
             raise ValueError("resource_indicators has no valid entries")
         return out
     canon = canonicalize_resource(derived)
-    assert canon is not None  # derived comes from mcp_resource_url — always valid
+    if canon is None:  # derived comes from mcp_resource_url — should never happen
+        raise ValueError(f"derived resource is not canonicalizable: {derived!r}")
     return [canon]
 
 

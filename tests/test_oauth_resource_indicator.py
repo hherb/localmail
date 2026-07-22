@@ -30,6 +30,8 @@ CANON = "https://mail.example.com/mcp"
         ("/mcp", None),                                     # relative
         ("not a url", None),
         ("", None),
+        ("https://h:abc/mcp", None),                       # non-numeric port
+        ("https://h:999999/mcp", None),                    # out-of-range port
     ],
 )
 def test_canonicalize(raw, expected):
@@ -38,6 +40,10 @@ def test_canonicalize(raw, expected):
 
 def test_resolve_defaults_to_derived_when_configured_none():
     assert resolve_accepted_resources(None, "https://h/mcp/") == ["https://h/mcp"]
+
+
+def test_resolve_empty_list_falls_back_to_derived():
+    assert resolve_accepted_resources([], "https://h/mcp") == ["https://h/mcp"]
 
 
 def test_resolve_uses_configured_and_canonicalizes():

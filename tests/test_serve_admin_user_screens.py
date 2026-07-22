@@ -140,3 +140,36 @@ def test_delete_self_blocked_fragment(admin_client, admin_user_id):
         headers={"X-CSRF-Token": admin_client.csrf_for(f"/admin/users/{admin_user_id}/delete")})
     assert r.status_code == 409
     assert "your own" in r.text.lower()
+
+
+def test_edit_password_input_is_htmx_includable(admin_client, admin_user_id):
+    """Regression (#160): the reset-password input must not carry
+    form="_none". That attribute disassociates it from any form, so htmx's
+    hx-include serialises an empty password -> the endpoint 400s -> htmx does
+    not swap 4xx -> the change silently no-ops. The working accounts form omits
+    the attribute; the users form must too."""
+    r = admin_client.get(f"/admin/users/{admin_user_id}")
+    assert r.status_code == 200
+    m = re.search(r'<input[^>]*name="password"[^>]*>', r.text)
+    assert m, "reset-password input not found on the edit screen"
+    assert 'form="_none"' not in m.group(0), m.group(0)
+
+
+def test_set_password_persists(admin_client, db_conn, admin_user_id):
+    """When the password field is actually sent, the endpoint returns 200 and
+    the new hash is persisted (guards the server contract the template feeds)."""
+    from localmail.api.auth import verify_password
+
+    r = admin_client.post(
+        f"/admin/users/{admin_user_id}/password",
+        data={"password": "brand-new-secret-9"},
+        headers={"X-CSRF-Token": admin_client.csrf_for(
+            f"/admin/users/{admin_user_id}/password")})
+    assert r.status_code == 200
+    assert "Password updated" in r.text
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT password_hash FROM api_users WHERE id = %s",
+                    (admin_user_id,))
+        row = cur.fetchone()
+    assert row is not None
+    assert verify_password("brand-new-secret-9", row[0])

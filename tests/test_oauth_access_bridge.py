@@ -169,3 +169,30 @@ def test_load_access_no_accepted_set_skips_enforcement(db_conn):
     )
     db_conn.commit()
     assert access.load_access(db_conn, raw) is not None  # accepted_resources=None
+
+
+def test_load_access_canonicalizes_bound_resource_before_matching(db_conn):
+    # Stored value is NON-canonical (trailing slash) but must match the
+    # canonical accepted entry — this makes canonicalize_resource load-bearing.
+    uid = _seed(db_conn)
+    raw = access.mint_access(
+        db_conn, user_id=uid, client_id="cid", ttl_s=3600,
+        resource="https://h/mcp/",
+    )
+    db_conn.commit()
+    at = access.load_access(db_conn, raw, accepted_resources=["https://h/mcp"])
+    assert at is not None and at.subject == str(uid)
+
+
+def test_load_access_rejects_non_canonicalizable_bound_resource(db_conn):
+    # A corrupt/hand-inserted resource that canonicalize_resource() can't parse
+    # must fail closed (rejected) when an accepted set is enforced.
+    uid = _seed(db_conn)
+    raw = access.mint_access(
+        db_conn, user_id=uid, client_id="cid", ttl_s=3600,
+        resource="not a url",
+    )
+    db_conn.commit()
+    assert access.load_access(
+        db_conn, raw, accepted_resources=["https://h/mcp"]
+    ) is None

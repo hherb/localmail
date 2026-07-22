@@ -17,7 +17,7 @@ from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 
 from localmail.api import auth as api_auth  # noqa: E402
 from localmail.config import McpConfig  # noqa: E402
-from localmail.mcp.oauth import codes  # noqa: E402
+from localmail.mcp.oauth import access, codes, refresh  # noqa: E402
 from localmail.mcp.oauth.consent_state import decode_consent_state  # noqa: E402
 from localmail.mcp.oauth.provider import LocalmailASProvider  # noqa: E402
 
@@ -370,3 +370,47 @@ def test_authorize_rejects_absent_when_required(db_conn, db_pool):
     params = _authorize_params(None)
     with pytest.raises(AuthorizeError):
         anyio.run(p.authorize, _client(), params)
+
+
+def test_code_exchange_binds_resource_and_enforces(db_conn, db_pool):
+    p = _provider_cfg(db_pool, resource_server_url="https://h")
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, "prov-res-user", "pw")
+        raw_code = codes.mint_code(
+            conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+            redirect_uri_provided_explicitly=True, code_challenge="chal",
+            scopes=[], ttl_s=60, resource="https://h/mcp",
+        )
+        conn.commit()
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    assert loaded is not None and loaded.resource == "https://h/mcp"
+    token = anyio.run(p.exchange_authorization_code, _client(), loaded)
+
+    # access token bound + enforced through the provider's accepted set
+    at_ok = access.load_access(
+        db_conn, token.access_token, accepted_resources=["https://h/mcp"]
+    )
+    assert at_ok is not None
+    at_bad = access.load_access(
+        db_conn, token.access_token, accepted_resources=["https://other/mcp"]
+    )
+    assert at_bad is None
+    # refresh token carries the resource too
+    rrow = refresh.load_refresh(db_conn, token.refresh_token)
+    assert rrow is not None and rrow.resource == "https://h/mcp"
+
+
+def test_load_access_token_enforces_via_provider(db_conn, db_pool):
+    p = _provider_cfg(db_pool, resource_server_url="https://h")
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, "prov-unlisted-user", "pw")
+        # A token bound to an unlisted resource must not verify through the
+        # provider (accepted = ["https://h/mcp"]).
+        raw = access.mint_access(
+            conn, user_id=uid, client_id="cid", ttl_s=3600,
+            resource="https://other/mcp",
+        )
+        conn.commit()
+    assert anyio.run(p.load_access_token, raw) is None

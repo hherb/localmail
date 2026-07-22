@@ -154,6 +154,7 @@ class LocalmailASProvider(
             redirect_uri=AnyUrl(row.redirect_uri),
             redirect_uri_provided_explicitly=row.redirect_uri_provided_explicitly,
             subject=str(row.user_id),
+            resource=row.resource,
         )
 
     async def exchange_authorization_code(
@@ -185,6 +186,7 @@ class LocalmailASProvider(
                     conn, client_id=client_id, user_id=user_id,
                     scopes=auth_code.scopes,
                     ttl_s=self._cfg.oauth_refresh_token_ttl_s,
+                    resource=auth_code.resource,
                 )
                 new_row = refresh.load_refresh(conn, refresh_raw)
                 if new_row is None:
@@ -199,6 +201,7 @@ class LocalmailASProvider(
                         conn, user_id=user_id, client_id=client_id,
                         ttl_s=self._cfg.oauth_access_token_ttl_s,
                         family_id=new_row.family_id,
+                        resource=auth_code.resource,
                     )
                     clients.touch_last_used(conn, client_id)
                     conn.commit()
@@ -262,6 +265,7 @@ class LocalmailASProvider(
                     conn, user_id=row.user_id, client_id=client_id,
                     ttl_s=self._cfg.oauth_access_token_ttl_s,
                     family_id=row.family_id,
+                    resource=row.resource,
                 )
                 # A refresh is client activity too — keep last_used_at honest so
                 # the unused-client cleanup never reaps an active client.
@@ -299,7 +303,7 @@ class LocalmailASProvider(
 
     def _load_access_sync(self, token: str) -> AccessToken | None:
         with self._pool.connection() as conn:
-            at = access.load_access(conn, token)
+            at = access.load_access(conn, token, accepted_resources=self._accepted)
             conn.commit()
         return at
 

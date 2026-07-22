@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from localmail.api.admin.csrf import make_csrf_token
-from localmail.api.auth import hash_password
+from localmail.api.auth import hash_password, verify_password
 from localmail.config import ServeConfig
 from localmail.serve.admin.csrf import csrf_action
 from localmail.serve.app import create_app
@@ -143,23 +143,27 @@ def test_delete_self_blocked_fragment(admin_client, admin_user_id):
 
 
 def test_edit_password_input_is_htmx_includable(admin_client, admin_user_id):
-    """Regression (#160): the reset-password input must not carry
-    form="_none". That attribute disassociates it from any form, so htmx's
-    hx-include serialises an empty password -> the endpoint 400s -> htmx does
-    not swap 4xx -> the change silently no-ops. The working accounts form omits
-    the attribute; the users form must too."""
+    """Regression (#160): the reset-password input must not carry a `form`
+    attribute at all. Any `form` value binds it to that form (here a
+    non-existent one), so htmx's hx-include serialises an empty password ->
+    the endpoint 400s -> htmx does not swap 4xx -> the change silently no-ops.
+    The working accounts form has no `form` attribute; the users form must not
+    either.
+
+    Proxy test: TestClient runs no JS, so this asserts the attribute is gone
+    rather than observing the browser's htmx serialisation directly. A true
+    end-to-end guard would need a browser (Playwright) test."""
     r = admin_client.get(f"/admin/users/{admin_user_id}")
     assert r.status_code == 200
     m = re.search(r'<input[^>]*name="password"[^>]*>', r.text)
     assert m, "reset-password input not found on the edit screen"
-    assert 'form="_none"' not in m.group(0), m.group(0)
+    tag = m.group(0)
+    assert "form=" not in tag, tag
 
 
 def test_set_password_persists(admin_client, db_conn, admin_user_id):
     """When the password field is actually sent, the endpoint returns 200 and
     the new hash is persisted (guards the server contract the template feeds)."""
-    from localmail.api.auth import verify_password
-
     r = admin_client.post(
         f"/admin/users/{admin_user_id}/password",
         data={"password": "brand-new-secret-9"},

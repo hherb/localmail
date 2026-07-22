@@ -208,9 +208,13 @@ stuffing is bounded the same way.
   hypothetical client that probes only the strict RFC 8414 §3.1 insertion form
   (`<origin>/.well-known/oauth-authorization-server/mcp`) will not find it.
   Real MCP clients work correctly.
-- **RFC 8707 resource indicators** are not carried through the flow or bound
-  onto tokens. localmail is a single resource server, so audience-restriction
-  adds nothing here.
+- **RFC 8707 resource indicators** are validated at `/authorize` (against
+  `[mcp] resource_indicators`, default `<origin>/mcp`) and the bound audience is
+  carried onto the issued tokens and enforced at `/mcp`. Two SDK-imposed limits
+  remain: the token-endpoint `resource` is validated at authorize time only, and
+  a bad resource is reported as `invalid_request` (the SDK has no
+  `invalid_target` code). A missing `resource` is accepted unless `[mcp]
+  oauth_require_resource_indicator = true`.
 
 ### 5. Run the server
 

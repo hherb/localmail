@@ -520,7 +520,11 @@ Tokens auto-refresh; a browser re-login is needed only after ~30 days of
 inactivity, on revocation, on detected refresh-token reuse (a rotated token
 replayed → the whole refresh chain is revoked **and the access tokens issued
 from it are purged immediately** rather than lingering until expiry, RFC 9700
-§4.14.2), or if the user is disabled. See
+§4.14.2), or if the user is disabled. localmail also validates the RFC 8707
+`resource` indicator at `/authorize` and binds the issued access/refresh
+tokens' audience to `<origin>/mcp`, enforced on every `/mcp` request
+(`/v1` REST is unaffected); set `[mcp] oauth_require_resource_indicator =
+true` to make the `resource` parameter mandatory rather than optional. See
 [docs/mcp-usage.md](docs/mcp-usage.md) for the
 full operator guide including token lifetimes, DCR safeguards, and known
 limitations.

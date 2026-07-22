@@ -103,7 +103,7 @@ src/localmail/
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + PEP562 back-compat re-exports
     rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0030_api_tokens_refresh_family.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0031_oauth_resource_indicator.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -1279,12 +1279,10 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   /register`) is bounded by a per-IP rate-limit middleware
   (`oauth_registration_max` per `oauth_registration_window_s`, default 20/hour)
   and unused-client cleanup (`oauth_client_unused_retention_s`, default 24h).
-  **Known limitations:** (1) AS metadata is served at the OIDC-style path-suffix
+  **Known limitations:** AS metadata is served at the OIDC-style path-suffix
   form `<origin>/mcp/.well-known/oauth-authorization-server`; the strict RFC 8414
   §3.1 insertion form `<origin>/.well-known/oauth-authorization-server/mcp` is
-  NOT served (real MCP clients use the path-suffix form). (2) RFC 8707 resource
-  indicators are not carried through the flow or bound onto tokens (single
-  resource server; audience restriction adds nothing). Migration
+  NOT served (real MCP clients use the path-suffix form). Migration
   `0028_oauth_server.sql` adds `oauth_clients`, `oauth_authorization_codes`,
   `oauth_refresh_tokens`, `oauth_registration_attempts`, and nullable
   `api_tokens.oauth_client_id`. No new uv dependency (`mcp` extra already
@@ -1311,8 +1309,7 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
     so the per-IP `/register` cap peels `X-Forwarded-For` against
     `auth.trusted_proxies` exactly like the login limiter (empty config = socket
     peer, unchanged). Wired in `create_app` (`auth_config=auth_cfg`).
-  - Still open: RFC 8707 resource indicators (single RS — moot). No new
-    migration for M1/M2/M3.
+  - No new migration for M1/M2/M3.
 - **Refresh-token family revocation on reuse (#183, #185, shipped):** rotation no
   longer hard-deletes the presented refresh token. Migration
   `0029_oauth_refresh_token_family.sql` adds `oauth_refresh_tokens.family_id`
@@ -1364,6 +1361,23 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   `refresh.py` still touches only `oauth_refresh_tokens` (it reports `family_id`
   as data); `access.py` owns `api_tokens`; the provider orchestrates both. Design:
   [docs/superpowers/specs/2026-06-16-access-token-family-containment-design.md](docs/superpowers/specs/2026-06-16-access-token-family-containment-design.md).
+- **RFC 8707 resource indicators (shipped):** `/authorize` validates the
+  client's `resource` against a configurable accepted set
+  (`McpConfig.resource_indicators`, default
+  `[mcp_resource_url(resource_server_url)]`) via the pure
+  `mcp/oauth/resource_indicator.py`
+  (`canonicalize_resource`/`resolve_accepted_resources`/`decide_resource`); the
+  bound resource is carried through the consent blob →
+  `oauth_authorization_codes.resource` → onto the minted access
+  (`api_tokens.oauth_resource`) + refresh (`oauth_refresh_tokens.resource`)
+  tokens, and enforced at `/mcp` in `access.load_access` (NULL = unrestricted;
+  `/v1` REST unchanged). A missing `resource` is accepted (and bound to the
+  first accepted resource) unless `oauth_require_resource_indicator = true`, in
+  which case it's rejected with `invalid_request`. Migration
+  `0031_oauth_resource_indicator.sql` adds the three `resource`/`oauth_resource`
+  columns. **Accepted SDK limitations:** the SDK swallows the token-endpoint
+  `resource` (validated at authorize time only) and lacks an `invalid_target`
+  error code (a bad resource → `invalid_request`).
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`
@@ -1382,7 +1396,7 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0030_api_tokens_refresh_family.sql`; next free slot `0031_*.sql`.
+  Latest is `0031_oauth_resource_indicator.sql`; next free slot `0032_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

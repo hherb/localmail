@@ -10,7 +10,7 @@
 
   <fieldset>
     <legend>Reset password</legend>
-    <input type="password" name="password" form="_none">
+    <input type="password" name="password">
     <button type="button" class="admin-button"
       hx-post="/admin/users/{{ detail.id }}/password"
       hx-include="[name='password']" hx-target="#user-message" hx-swap="innerHTML"

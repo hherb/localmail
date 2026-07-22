@@ -249,7 +249,7 @@ accounts the token's user has been granted.
 | Tool | Parameters | When to use |
 | --- | --- | --- |
 | `search` | `query`, `sort="rank"\|"date"`, `limit`, `cursor`, `account_ids`, `folder_ids`, `date_from`, `date_to`, `from_addr`, `to`, `subject`, `has_attachment`, `lang`, `smart` | Hybrid lexical + vector search over the archive. The default entry point for "find mail about X". Pass `smart=true` for a local LLM query rewrite (page 1 only). The response carries `rewrite_status` (`applied`, `unavailable`, `failed`, `not_attempted`, or `not_requested`) and an optional curated `rewrite_note` with an actionable detail; `rewrite_skipped` (kept for back-compat) is true only for `unavailable`/`failed`. On a continuation page `smart` is ignored and the status is `not_attempted`. |
-| `get_message` | `message_id`, `full_headers=False` | Fetch one message's headers, body, and attachment list once search/browse has surfaced its ID. |
+| `get_message` | `message_id`, `full_headers=False` | Fetch one message's headers, body, and attachment list once search/browse has surfaced its ID. Each attachment entry carries `filename`, `sha256`, `content_type` (stored MIME type), and `size` (decoded bytes) — enough to decide text-vs-original retrieval and size a download before fetching. |
 | `get_attachment` | `sha256`, `mode="text"\|"metadata"` | Read an attachment's **extracted text** or its metadata. Never returns raw bytes. |
 | `list_messages` | `account_ids`, `folder_ids`, `limit`, `cursor` | Keyset date-ordered browse (newest first) when there's no query — "show me recent mail". |
 | `list_accounts` | — | Enumerate the accounts this agent is allowed to read. |

@@ -126,6 +126,41 @@ def test_tool_get_message_granted(db_conn):
     assert msg["account"]["id"] == str(acct)
 
 
+def test_tool_get_message_attachment_carries_content_type_and_size(db_conn):
+    """#196: the MCP get_message body exposes content_type + size per
+    attachment, matching the REST route (shared api.messages path)."""
+    uid = create_user(db_conn, "carol-att", "hunter2")
+    acct = _insert_account(db_conn, "carol-att-acct")
+    grant_account(db_conn, uid, acct)
+    sha_hex = "ab" * 32
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes)"
+            " VALUES (%s, %s, 'application/pdf', 84213)",
+            (bytes.fromhex(sha_hex), f"/nonexistent/{sha_hex}"),
+        )
+        cur.execute(
+            "INSERT INTO messages"
+            "  (account_id, message_id, raw_sha256, subject, attachments,"
+            "   headers, raw_bytes, size_bytes)"
+            " VALUES (%s, '<att-mcp@x>', %s, 'hi', %s::jsonb, '{}'::jsonb, 'r', 1)"
+            " RETURNING id",
+            (acct, b"\x7f" * 32,
+             psycopg.types.json.Jsonb([{"filename": "booking.pdf", "sha256": sha_hex}])),
+        )
+        row = cur.fetchone(); assert row is not None
+        mid = int(row[0])
+    db_conn.commit()
+    msg = tools.tool_get_message(
+        db_conn, message_id=mid,
+        allowed_account_ids=allowed_account_ids(db_conn, uid),
+    )
+    assert msg["attachments"] == [
+        {"filename": "booking.pdf", "sha256": sha_hex,
+         "content_type": "application/pdf", "size": 84213}
+    ]
+
+
 def test_tool_get_message_denied_raises_notfound(db_conn):
     uid = create_user(db_conn, "dave", "hunter2")
     granted = _insert_account(db_conn, "dave-granted")

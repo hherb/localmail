@@ -82,6 +82,57 @@ def _seed_msg(conn: psycopg.Connection, **overrides) -> int:
 _ANY_ACCOUNT = list(range(1, 1000))
 
 
+def _insert_blob(conn: psycopg.Connection, sha_hex: str, mime: str | None, size: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (sha256) DO NOTHING",
+            (bytes.fromhex(sha_hex), f"/nonexistent/{sha_hex}", mime, size),
+        )
+
+
+def test_get_message_attachment_entries_include_content_type_and_size(
+    db_conn: psycopg.Connection,
+) -> None:
+    """#196: each attachment entry carries the blob's stored MIME type and
+    decoded byte size so a downstream agent can branch on type/size without
+    an extra probe request per attachment."""
+    sha_hex = "ab" * 32
+    _insert_blob(db_conn, sha_hex, "application/pdf", 84213)
+    mid = _seed_msg(
+        db_conn,
+        attachments=[{"filename": "booking.pdf", "sha256": sha_hex}],
+    )
+    db_conn.commit()
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    att = msg["attachments"][0]
+    assert att == {
+        "filename": "booking.pdf",
+        "sha256": sha_hex,
+        "content_type": "application/pdf",
+        "size": 84213,
+    }
+
+
+def test_get_message_attachment_missing_blob_row_yields_null_type_and_size(
+    db_conn: psycopg.Connection,
+) -> None:
+    """An attachment referencing a sha with no attachment_blobs row degrades
+    to content_type/size = None rather than raising or dropping the entry."""
+    sha_hex = "cd" * 32
+    mid = _seed_msg(
+        db_conn,
+        attachments=[{"filename": "orphan.bin", "sha256": sha_hex}],
+    )
+    db_conn.commit()
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    att = msg["attachments"][0]
+    assert att["content_type"] is None
+    assert att["size"] is None
+    assert att["filename"] == "orphan.bin"
+    assert att["sha256"] == sha_hex
+
+
 def test_get_message_returns_compact_headers(db_conn: psycopg.Connection) -> None:
     mid = _seed_msg(db_conn)
     db_conn.commit()

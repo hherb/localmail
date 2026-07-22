@@ -54,6 +54,47 @@ def test_get_message(
     assert "<p>hi" in body["body_html"]
 
 
+def test_get_message_attachment_carries_content_type_and_size(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    """#196: the /v1/messages/{id} attachment list exposes content_type + size
+    so the kastellan mail worker can branch on type/size without a probe."""
+    sha_hex = "ab" * 32
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method) "
+            "VALUES ('att','x@y.test','imap.x','password') RETURNING id"
+        )
+        row = cur.fetchone(); assert row is not None
+        aid = row[0]
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, 'application/pdf', 84213)",
+            (bytes.fromhex(sha_hex), f"/nonexistent/{sha_hex}"),
+        )
+        cur.execute(
+            """INSERT INTO messages (account_id, message_id, subject, attachments,
+                                     raw_bytes, raw_sha256, size_bytes, headers,
+                                     date_sent, date_received)
+               VALUES (%s, '<att@x>', 'hi', %s::jsonb, 'RAW', %s, 3, '{}'::jsonb, %s, %s)
+               RETURNING id""",
+            (aid, json.dumps([{"filename": "booking.pdf", "sha256": sha_hex}]),
+             b"\x01" * 32, datetime(2026, 3, 4, tzinfo=timezone.utc),
+             datetime.now(timezone.utc)),
+        )
+        row = cur.fetchone(); assert row is not None
+        mid = row[0]
+    db_conn.commit()
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(f"/v1/messages/{mid}", headers={"Authorization": f"Bearer {api_token}"})
+    assert r.status_code == 200
+    assert r.json()["attachments"] == [
+        {"filename": "booking.pdf", "sha256": sha_hex,
+         "content_type": "application/pdf", "size": 84213}
+    ]
+
+
 def test_get_message_full_headers(
     db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
 ) -> None:

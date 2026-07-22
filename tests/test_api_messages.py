@@ -82,6 +82,117 @@ def _seed_msg(conn: psycopg.Connection, **overrides) -> int:
 _ANY_ACCOUNT = list(range(1, 1000))
 
 
+def _insert_blob(conn: psycopg.Connection, sha_hex: str, mime: str | None, size: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (sha256) DO NOTHING",
+            (bytes.fromhex(sha_hex), f"/nonexistent/{sha_hex}", mime, size),
+        )
+
+
+def test_get_message_attachment_entries_include_content_type_and_size(
+    db_conn: psycopg.Connection,
+) -> None:
+    """#196: each attachment entry carries the blob's stored MIME type and
+    decoded byte size so a downstream agent can branch on type/size without
+    an extra probe request per attachment."""
+    sha_hex = "ab" * 32
+    _insert_blob(db_conn, sha_hex, "application/pdf", 84213)
+    mid = _seed_msg(
+        db_conn,
+        attachments=[{"filename": "booking.pdf", "sha256": sha_hex}],
+    )
+    db_conn.commit()
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    att = msg["attachments"][0]
+    assert att == {
+        "filename": "booking.pdf",
+        "sha256": sha_hex,
+        "content_type": "application/pdf",
+        "size": 84213,
+    }
+
+
+def test_get_message_attachment_missing_blob_row_yields_null_type_and_size(
+    db_conn: psycopg.Connection,
+) -> None:
+    """An attachment referencing a sha with no attachment_blobs row degrades
+    to content_type/size = None rather than raising or dropping the entry."""
+    sha_hex = "cd" * 32
+    mid = _seed_msg(
+        db_conn,
+        attachments=[{"filename": "orphan.bin", "sha256": sha_hex}],
+    )
+    db_conn.commit()
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    att = msg["attachments"][0]
+    assert att["content_type"] is None
+    assert att["size"] is None
+    assert att["filename"] == "orphan.bin"
+    assert att["sha256"] == sha_hex
+
+
+def test_get_message_attachment_null_mime_yields_null_content_type(
+    db_conn: psycopg.Connection,
+) -> None:
+    """A blob row with a NULL mime_type surfaces content_type=None but keeps
+    the (NOT NULL) size — the case the ``str | None`` map type exists for."""
+    sha_hex = "ef" * 32
+    _insert_blob(db_conn, sha_hex, None, 512)
+    mid = _seed_msg(
+        db_conn,
+        attachments=[{"filename": "unknown.dat", "sha256": sha_hex}],
+    )
+    db_conn.commit()
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    att = msg["attachments"][0]
+    assert att["content_type"] is None
+    assert att["size"] == 512
+
+
+def test_get_message_multiple_attachments_each_carry_meta(
+    db_conn: psycopg.Connection,
+) -> None:
+    """The batched blob lookup resolves every referenced sha, not just one."""
+    sha_a = "a1" * 32
+    sha_b = "b2" * 32
+    _insert_blob(db_conn, sha_a, "application/pdf", 84213)
+    _insert_blob(db_conn, sha_b, "image/png", 2048)
+    mid = _seed_msg(
+        db_conn,
+        attachments=[
+            {"filename": "booking.pdf", "sha256": sha_a},
+            {"filename": "logo.png", "sha256": sha_b},
+        ],
+    )
+    db_conn.commit()
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    by_name = {a["filename"]: a for a in msg["attachments"]}
+    assert by_name["booking.pdf"]["content_type"] == "application/pdf"
+    assert by_name["booking.pdf"]["size"] == 84213
+    assert by_name["logo.png"]["content_type"] == "image/png"
+    assert by_name["logo.png"]["size"] == 2048
+
+
+def test_get_message_attachment_malformed_sha_degrades_to_null(
+    db_conn: psycopg.Connection,
+) -> None:
+    """A non-hex sha in the JSONB must not 500 the whole message; it degrades
+    to null metadata like an absent blob row (guards the bytes.fromhex path)."""
+    mid = _seed_msg(
+        db_conn,
+        attachments=[{"filename": "corrupt.bin", "sha256": "not-a-valid-sha"}],
+    )
+    db_conn.commit()
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    att = msg["attachments"][0]
+    assert att["filename"] == "corrupt.bin"
+    assert att["sha256"] == "not-a-valid-sha"
+    assert att["content_type"] is None
+    assert att["size"] is None
+
+
 def test_get_message_returns_compact_headers(db_conn: psycopg.Connection) -> None:
     mid = _seed_msg(db_conn)
     db_conn.commit()

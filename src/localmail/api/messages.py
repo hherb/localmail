@@ -65,6 +65,7 @@ def get_message(
 
     cid_to_sha = _build_cid_map(attachments or [])
     sanitized_html = sanitize_html(body_html or "", cid_to_sha=cid_to_sha) if body_html else None
+    blob_meta = _load_attachment_meta(conn, attachments or [])
 
     msg: dict[str, Any] = {
         "id": str(mid),
@@ -77,8 +78,7 @@ def get_message(
         "body_text": body_text,
         "body_html": sanitized_html,
         "attachments": [
-            {"filename": a.get("filename"), "sha256": a.get("sha256")}
-            for a in (attachments or [])
+            _attachment_entry(a, blob_meta) for a in (attachments or [])
         ],
         "account": {"id": str(account_id), "name": account_name, "address": account_address},
         "folders": [{"id": str(fid), "name": fname} for fid, fname in folder_rows],
@@ -111,6 +111,54 @@ def get_message_raw(
 
 def _address(addr: str | None, name: str | None) -> dict[str, str | None]:
     return {"address": addr, "name": name}
+
+
+def _load_attachment_meta(
+    conn: psycopg.Connection, attachments: list[dict[str, Any]]
+) -> dict[str, tuple[str | None, int]]:
+    """Return ``{sha256_hex: (mime_type, size_bytes)}`` for the message's blobs.
+
+    One batched lookup over ``attachment_blobs`` keyed on the sha256s the
+    message references — the stored MIME type and decoded byte length that
+    ``get_message`` surfaces as each entry's ``content_type`` / ``size`` (#196).
+    A sha with no blob row is simply absent from the map (callers degrade to
+    ``None``).
+    """
+    sha_hexes = {a["sha256"] for a in attachments if a.get("sha256")}
+    sha_bytes = []
+    for h in sha_hexes:
+        try:
+            sha_bytes.append(bytes.fromhex(h))
+        except ValueError:
+            # A malformed sha in the JSONB (corruption, a bad importer) must not
+            # 500 the whole message — it just misses the lookup and degrades to
+            # null metadata, like an absent blob row.
+            continue
+    if not sha_bytes:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sha256, mime_type, size_bytes FROM attachment_blobs "
+            "WHERE sha256 = ANY(%s)",
+            (sha_bytes,),
+        )
+        return {bytes(sha).hex(): (mime, size) for sha, mime, size in cur.fetchall()}
+
+
+def _attachment_entry(
+    att: dict[str, Any], blob_meta: dict[str, tuple[str | None, int]]
+) -> dict[str, Any]:
+    sha = att.get("sha256")
+    mime: str | None = None
+    size: int | None = None
+    if sha is not None and sha in blob_meta:
+        mime, size = blob_meta[sha]
+    return {
+        "filename": att.get("filename"),
+        "sha256": sha,
+        "content_type": mime,
+        "size": size,
+    }
 
 
 def _build_cid_map(attachments: list[dict[str, Any]]) -> dict[str, str]:

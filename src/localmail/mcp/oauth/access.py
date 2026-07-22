@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import psycopg
 
 from localmail.api.auth import generate_token, hash_token, verify_token
+from localmail.mcp.oauth.resource_indicator import canonicalize_resource
 
 if TYPE_CHECKING:
     from mcp.server.auth.provider import AccessToken
@@ -34,26 +35,39 @@ def mint_access(
     client_id: str,
     ttl_s: int,
     family_id: uuid.UUID | None = None,
+    resource: str | None = None,
 ) -> str:
     """Mint an access token into api_tokens; return the raw token. Caller commits.
 
     ``family_id`` ties the token to a refresh family so reuse detection can purge
     it (see ``revoke_access_family``); ``None`` (login/non-OAuth) leaves it NULL.
+    ``resource`` binds the RFC 8707 audience (``None`` = unrestricted).
     """
     raw = generate_token()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO api_tokens "
             "(token_sha256, user_id, expires_at, oauth_client_id, "
-            " oauth_refresh_family_id) "
-            "VALUES (%s, %s, now() + make_interval(secs => %s), %s, %s)",
-            (hash_token(raw), user_id, ttl_s, client_id, family_id),
+            " oauth_refresh_family_id, oauth_resource) "
+            "VALUES (%s, %s, now() + make_interval(secs => %s), %s, %s, %s)",
+            (hash_token(raw), user_id, ttl_s, client_id, family_id, resource),
         )
     return raw
 
 
-def load_access(conn: psycopg.Connection, raw_token: str) -> "AccessToken | None":
-    """Verify an access token and return the SDK AccessToken, or None."""
+def load_access(
+    conn: psycopg.Connection,
+    raw_token: str,
+    *,
+    accepted_resources: list[str] | None = None,
+) -> "AccessToken | None":
+    """Verify an access token and return the SDK AccessToken, or None.
+
+    When ``accepted_resources`` is given, a token bound to a resource
+    (``oauth_resource IS NOT NULL``) is rejected unless its canonical resource is
+    in the set (RFC 8707 audience enforcement at /mcp). A NULL resource is always
+    unrestricted; ``accepted_resources=None`` skips enforcement entirely.
+    """
     from mcp.server.auth.provider import AccessToken
 
     user = verify_token(conn, raw_token)
@@ -61,10 +75,15 @@ def load_access(conn: psycopg.Connection, raw_token: str) -> "AccessToken | None
         return None
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT oauth_client_id FROM api_tokens WHERE token_sha256 = %s",
+            "SELECT oauth_client_id, oauth_resource FROM api_tokens "
+            "WHERE token_sha256 = %s",
             (hash_token(raw_token),),
         )
         row = cur.fetchone()
+    bound_resource = row[1] if row else None
+    if accepted_resources is not None and bound_resource is not None:
+        if canonicalize_resource(bound_resource) not in accepted_resources:
+            return None
     client_id = row[0] if row and row[0] is not None else _NO_OAUTH_CLIENT_ID
     return AccessToken(
         token=raw_token, client_id=client_id, scopes=[], subject=str(user.id)

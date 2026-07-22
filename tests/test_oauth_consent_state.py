@@ -58,3 +58,19 @@ def test_expired_rejected():
 def test_missing_separator_rejected():
     with pytest.raises(ConsentStateInvalid):
         decode_consent_state("no-dot-here", key=KEY)
+
+
+def test_consent_payload_round_trips_resource():
+    payload = ConsentPayload(
+        client_id="cid",
+        redirect_uri="https://c/cb",
+        redirect_uri_provided_explicitly=True,
+        code_challenge="chal",
+        scopes=["s"],
+        state=None,
+        exp=int(time.time()) + 300,
+        resource="https://h/mcp",
+    )
+    blob = encode_consent_state(payload, key=KEY)
+    back = decode_consent_state(blob, key=KEY)
+    assert back.resource == "https://h/mcp"

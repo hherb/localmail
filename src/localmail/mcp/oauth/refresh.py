@@ -27,6 +27,7 @@ class RefreshRow:
     scopes: list[str]
     expires_at: datetime
     family_id: _uuid.UUID
+    resource: str | None
 
 
 @dataclass(frozen=True)
@@ -53,27 +54,31 @@ def mint_refresh(
     scopes: list[str],
     ttl_s: int,
     family_id: _uuid.UUID | None = None,
+    resource: str | None = None,
 ) -> str:
     """Mint + persist a refresh token; return the raw token. Caller commits.
 
     ``family_id=None`` lets the DB default mint a fresh family (code-exchange);
     a supplied value joins the successor to its parent's family (rotation).
+    ``resource`` binds the RFC 8707 audience carried forward on rotation.
     """
     raw = generate_token()
     with conn.cursor() as cur:
         if family_id is None:
             cur.execute(
                 "INSERT INTO oauth_refresh_tokens (token_sha256, client_id, "
-                "user_id, scopes, expires_at) "
-                "VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s))",
-                (hash_token(raw), client_id, user_id, scopes, ttl_s),
+                "user_id, scopes, expires_at, resource) "
+                "VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s), %s)",
+                (hash_token(raw), client_id, user_id, scopes, ttl_s, resource),
             )
         else:
             cur.execute(
                 "INSERT INTO oauth_refresh_tokens (token_sha256, client_id, "
-                "user_id, scopes, expires_at, family_id) "
-                "VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s), %s)",
-                (hash_token(raw), client_id, user_id, scopes, ttl_s, family_id),
+                "user_id, scopes, expires_at, family_id, resource) "
+                "VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s), "
+                "%s, %s)",
+                (hash_token(raw), client_id, user_id, scopes, ttl_s, family_id,
+                 resource),
             )
     return raw
 
@@ -86,7 +91,8 @@ def load_refresh(conn: psycopg.Connection, raw_token: str) -> RefreshRow | None:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT r.client_id, r.user_id, r.scopes, r.expires_at, r.family_id "
+            "SELECT r.client_id, r.user_id, r.scopes, r.expires_at, "
+            "r.family_id, r.resource "
             "FROM oauth_refresh_tokens r "
             "JOIN api_users u ON u.id = r.user_id "
             "WHERE r.token_sha256 = %s AND r.expires_at > now() "
@@ -98,7 +104,7 @@ def load_refresh(conn: psycopg.Connection, raw_token: str) -> RefreshRow | None:
         return None
     return RefreshRow(
         client_id=row[0], user_id=row[1], scopes=row[2],
-        expires_at=row[3], family_id=row[4],
+        expires_at=row[3], family_id=row[4], resource=row[5],
     )
 
 
@@ -191,6 +197,7 @@ def rotate_refresh(
     new = mint_refresh(
         conn, client_id=row.client_id, user_id=row.user_id,
         scopes=row.scopes, ttl_s=ttl_s, family_id=row.family_id,
+        resource=row.resource,
     )
     # Opportunistic GC on the rotation path — there is no background sweeper, and
     # the table is small (bounded by live clients), so an indexed DELETE here is

@@ -44,3 +44,14 @@ def test_mcp_rejects_malformed_authorization_server_url():
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         McpConfig(authorization_servers=["not-a-url"])
+
+
+def test_resource_indicator_defaults():
+    cfg = McpConfig()
+    assert cfg.resource_indicators is None
+    assert cfg.oauth_require_resource_indicator is False
+
+
+def test_resource_indicators_parse_list():
+    cfg = McpConfig(resource_indicators=["https://a.com/mcp"])
+    assert [str(u) for u in cfg.resource_indicators] == ["https://a.com/mcp"]

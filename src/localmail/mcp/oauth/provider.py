@@ -22,6 +22,7 @@ from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     OAuthAuthorizationServerProvider,
     RefreshToken,
     TokenError,
@@ -31,8 +32,13 @@ from pydantic import AnyUrl
 from psycopg_pool import ConnectionPool
 
 from localmail.config import McpConfig
+from localmail.mcp.discovery import mcp_resource_url
 from localmail.mcp.oauth import access, clients, codes, refresh
 from localmail.mcp.oauth.consent_state import ConsentPayload, encode_consent_state
+from localmail.mcp.oauth.resource_indicator import (
+    decide_resource,
+    resolve_accepted_resources,
+)
 
 logger = logging.getLogger("localmail.mcp.oauth")
 
@@ -56,6 +62,11 @@ class LocalmailASProvider(
         self._cfg = config
         self._key = signing_key
         self._consent_path = consent_path
+        self._accepted = resolve_accepted_resources(
+            [str(u) for u in config.resource_indicators]
+            if config.resource_indicators else None,
+            mcp_resource_url(str(config.resource_server_url)),
+        )
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return await anyio.to_thread.run_sync(self._get_client_sync, client_id)
@@ -101,6 +112,12 @@ class LocalmailASProvider(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
         assert client.client_id is not None
+        decision = decide_resource(
+            params.resource, self._accepted,
+            require=self._cfg.oauth_require_resource_indicator,
+        )
+        if not decision.ok:
+            raise AuthorizeError("invalid_request", decision.error)
         payload = ConsentPayload(
             client_id=client.client_id,
             redirect_uri=str(params.redirect_uri),
@@ -109,6 +126,7 @@ class LocalmailASProvider(
             scopes=list(params.scopes or []),
             state=params.state,
             exp=int(time.time()) + self._cfg.oauth_consent_state_ttl_s,
+            resource=decision.bound,
         )
         blob = encode_consent_state(payload, key=self._key)
         return f"{self._consent_path}?{urlencode({'req': blob})}"
@@ -136,6 +154,7 @@ class LocalmailASProvider(
             redirect_uri=AnyUrl(row.redirect_uri),
             redirect_uri_provided_explicitly=row.redirect_uri_provided_explicitly,
             subject=str(row.user_id),
+            resource=row.resource,
         )
 
     async def exchange_authorization_code(
@@ -167,6 +186,7 @@ class LocalmailASProvider(
                     conn, client_id=client_id, user_id=user_id,
                     scopes=auth_code.scopes,
                     ttl_s=self._cfg.oauth_refresh_token_ttl_s,
+                    resource=auth_code.resource,
                 )
                 new_row = refresh.load_refresh(conn, refresh_raw)
                 if new_row is None:
@@ -181,6 +201,7 @@ class LocalmailASProvider(
                         conn, user_id=user_id, client_id=client_id,
                         ttl_s=self._cfg.oauth_access_token_ttl_s,
                         family_id=new_row.family_id,
+                        resource=auth_code.resource,
                     )
                     clients.touch_last_used(conn, client_id)
                     conn.commit()
@@ -244,6 +265,7 @@ class LocalmailASProvider(
                     conn, user_id=row.user_id, client_id=client_id,
                     ttl_s=self._cfg.oauth_access_token_ttl_s,
                     family_id=row.family_id,
+                    resource=row.resource,
                 )
                 # A refresh is client activity too — keep last_used_at honest so
                 # the unused-client cleanup never reaps an active client.
@@ -281,7 +303,7 @@ class LocalmailASProvider(
 
     def _load_access_sync(self, token: str) -> AccessToken | None:
         with self._pool.connection() as conn:
-            at = access.load_access(conn, token)
+            at = access.load_access(conn, token, accepted_resources=self._accepted)
             conn.commit()
         return at
 

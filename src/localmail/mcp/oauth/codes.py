@@ -23,6 +23,7 @@ class CodeRow:
     code_challenge: str
     scopes: list[str]
     expires_at: datetime
+    resource: str | None
 
 
 def mint_code(
@@ -35,6 +36,7 @@ def mint_code(
     code_challenge: str,
     scopes: list[str],
     ttl_s: int,
+    resource: str | None = None,
 ) -> str:
     """Mint + persist a single-use code; return the raw code. Caller commits."""
     raw = generate_token()
@@ -42,10 +44,12 @@ def mint_code(
         cur.execute(
             "INSERT INTO oauth_authorization_codes (code_sha256, client_id, "
             "user_id, redirect_uri, redirect_uri_provided_explicitly, "
-            "code_challenge, scopes, expires_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s))",
+            "code_challenge, scopes, expires_at, resource) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, "
+            "now() + make_interval(secs => %s), %s)",
             (hash_token(raw), client_id, user_id, redirect_uri,
-             redirect_uri_provided_explicitly, code_challenge, scopes, ttl_s),
+             redirect_uri_provided_explicitly, code_challenge, scopes, ttl_s,
+             resource),
         )
     return raw
 
@@ -55,7 +59,8 @@ def load_code(conn: psycopg.Connection, raw_code: str) -> CodeRow | None:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT client_id, user_id, redirect_uri, "
-            "redirect_uri_provided_explicitly, code_challenge, scopes, expires_at "
+            "redirect_uri_provided_explicitly, code_challenge, scopes, expires_at, "
+            "resource "
             "FROM oauth_authorization_codes "
             "WHERE code_sha256 = %s AND expires_at > now()",
             (hash_token(raw_code),),
@@ -71,6 +76,7 @@ def load_code(conn: psycopg.Connection, raw_code: str) -> CodeRow | None:
         code_challenge=row[4],
         scopes=row[5],
         expires_at=row[6],
+        resource=row[7],
     )
 
 

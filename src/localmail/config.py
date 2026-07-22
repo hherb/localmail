@@ -550,17 +550,23 @@ class McpConfig(BaseModel):
     Setting `authorization_server_enabled = true` turns localmail itself into an
     OAuth 2.1 authorization server for MCP clients and requires
     `[serve].state_signing_key` to be set.
+
+    `resource_indicators` is the RFC 8707 accepted-resource set; `None` falls
+    back to `[mcp_resource_url(resource_server_url)]`. `oauth_require_resource_indicator`
+    rejects an /authorize request that omits `resource`.
     """
 
     enabled: bool = False
     issuer_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
     resource_server_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8443")
     authorization_servers: list[AnyHttpUrl] | None = None
+    resource_indicators: list[AnyHttpUrl] | None = None
 
     # OAuth 2.1 authorization server (MCP "Approach B"). Opt-in; when off the
     # MCP server stays opaque-bearer + discovery only (today's behaviour). All
     # tunables defaulted so the provider carries no magic numbers.
     authorization_server_enabled: bool = False
+    oauth_require_resource_indicator: bool = False
     oauth_access_token_ttl_s: int = 3600
     oauth_refresh_token_ttl_s: int = 2592000
     oauth_authorization_code_ttl_s: int = 60

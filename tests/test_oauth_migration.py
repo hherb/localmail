@@ -130,3 +130,19 @@ def test_api_tokens_has_refresh_family_partial_index(db_conn):
     indexdef = row[0]
     assert "oauth_refresh_family_id" in indexdef
     assert "IS NOT NULL" in indexdef  # partial index predicate present
+
+
+def test_migration_0031_adds_resource_columns(db_conn):
+    checks = [
+        ("oauth_authorization_codes", "resource"),
+        ("oauth_refresh_tokens", "resource"),
+        ("api_tokens", "oauth_resource"),
+    ]
+    with db_conn.cursor() as cur:
+        for table, col in checks:
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = %s AND column_name = %s",
+                (table, col),
+            )
+            assert cur.fetchone() is not None, f"{table}.{col} missing"

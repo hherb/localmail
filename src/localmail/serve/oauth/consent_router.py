@@ -144,6 +144,7 @@ def build_consent_router(
                 code_challenge=payload.code_challenge,
                 scopes=payload.scopes,
                 ttl_s=mcp_config.oauth_authorization_code_ttl_s,
+                resource=payload.resource,
             )
             conn.commit()
         return _redirect_with(

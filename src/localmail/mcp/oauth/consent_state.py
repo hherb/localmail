@@ -27,6 +27,7 @@ class ConsentPayload:
     scopes: list[str]
     state: str | None
     exp: int
+    resource: str | None = None
 
 
 class ConsentStateExpired(ValueError):

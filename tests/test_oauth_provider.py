@@ -7,7 +7,12 @@ from psycopg_pool import ConnectionPool
 
 pytest.importorskip("mcp")
 
-from mcp.server.auth.provider import AuthorizationParams, RefreshToken, TokenError  # noqa: E402
+from mcp.server.auth.provider import (  # noqa: E402
+    AuthorizationParams,
+    AuthorizeError,
+    RefreshToken,
+    TokenError,
+)
 from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 
 from localmail.api import auth as api_auth  # noqa: E402
@@ -311,3 +316,57 @@ def test_cross_client_code_rejected(db_conn, db_pool):
         conn.commit()
     # a different client trying to load this code gets None
     assert anyio.run(p.load_authorization_code, _client(cid="other", uris=("https://o/cb",)), raw_code) is None
+
+
+def _provider_cfg(pool, **over):
+    return LocalmailASProvider(
+        pool, config=McpConfig(authorization_server_enabled=True, **over),
+        signing_key=SIGNING_KEY, consent_path="/oauth/consent",
+    )
+
+
+def _authorize_params(resource):
+    return AuthorizationParams(
+        state=None, scopes=[], code_challenge="chal",
+        redirect_uri="https://c/cb", redirect_uri_provided_explicitly=True,
+        resource=resource,
+    )
+
+
+def test_authorize_binds_matching_resource(db_conn, db_pool):
+    p = _provider_cfg(db_pool, resource_server_url="https://h")
+    anyio.run(p.register_client, _client())
+    params = _authorize_params("https://h/mcp")
+    url = anyio.run(p.authorize, _client(), params)
+    blob = url.split("req=", 1)[1]
+    payload = decode_consent_state(blob, key=SIGNING_KEY)
+    assert payload.resource == "https://h/mcp"
+
+
+def test_authorize_binds_canonical_when_absent(db_conn, db_pool):
+    p = _provider_cfg(db_pool, resource_server_url="https://h")
+    anyio.run(p.register_client, _client())
+    params = _authorize_params(None)
+    url = anyio.run(p.authorize, _client(), params)
+    blob = url.split("req=", 1)[1]
+    payload = decode_consent_state(blob, key=SIGNING_KEY)
+    assert payload.resource == "https://h/mcp"
+
+
+def test_authorize_rejects_unlisted_resource(db_conn, db_pool):
+    p = _provider_cfg(db_pool, resource_server_url="https://h")
+    anyio.run(p.register_client, _client())
+    params = _authorize_params("https://evil/mcp")
+    with pytest.raises(AuthorizeError):
+        anyio.run(p.authorize, _client(), params)
+
+
+def test_authorize_rejects_absent_when_required(db_conn, db_pool):
+    p = _provider_cfg(
+        db_pool, resource_server_url="https://h",
+        oauth_require_resource_indicator=True,
+    )
+    anyio.run(p.register_client, _client())
+    params = _authorize_params(None)
+    with pytest.raises(AuthorizeError):
+        anyio.run(p.authorize, _client(), params)

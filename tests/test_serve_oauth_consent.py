@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Horst Herb
 
 import time
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from starlette.applications import Starlette
@@ -49,12 +50,13 @@ def consent_client(db_conn, db_pool):
     return TestClient(app, follow_redirects=False)
 
 
-def _blob():
+def _blob(resource=None):
     return encode_consent_state(
         ConsentPayload(
             client_id="cid", redirect_uri="https://c/cb",
             redirect_uri_provided_explicitly=True, code_challenge="chal",
             scopes=[], state="st", exp=int(time.time()) + 300,
+            resource=resource,
         ),
         key=KEY,
     )
@@ -75,6 +77,24 @@ def test_post_allow_with_valid_credentials_redirects_with_code(consent_client):
     loc = r.headers["location"]
     assert loc.startswith("https://c/cb?")
     assert "code=" in loc and "state=st" in loc
+
+
+def test_post_allow_forwards_resource_to_code(consent_client, db_conn):
+    r = consent_client.post("/oauth/consent", data={
+        "req": _blob(resource="https://h/mcp"), "username": "consent-user",
+        "password": "secret-pw", "decision": "allow",
+    })
+    assert r.status_code == 303
+    loc = r.headers["location"]
+    code = parse_qs(urlparse(loc).query)["code"][0]
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT resource FROM oauth_authorization_codes WHERE code_sha256 = %s",
+            (api_auth.hash_token(code),),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "https://h/mcp"
 
 
 def test_post_deny_redirects_with_error(consent_client):

@@ -64,6 +64,14 @@ The installed `mcp` SDK (`.venv/.../mcp/server/auth/`) gives us:
 - **Single RS:** cross-resource audience restriction is a tautology today. The
   `resource_indicators` list + accepted-set membership check are the forward seam
   for a future second RS.
+- **AS-mode toggle:** audience enforcement lives on the AS provider's `/mcp`
+  verification path (`load_access(accepted_resources=self._accepted)`). If an
+  operator runs with the OAuth AS enabled (minting `oauth_resource`-bound
+  tokens) and later switches to plain opaque-bearer mode
+  (`authorization_server_enabled = false`), those already-minted tokens are then
+  verified by `LocalmailTokenVerifier`, which performs no resource check — they
+  revert to unrestricted. Toggling AS mode is a privileged admin action, so this
+  is outside the threat model; noted for completeness.
 
 ## Approach (decisions taken)
 

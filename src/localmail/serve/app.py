@@ -163,9 +163,17 @@ def create_app(
     mcp_discovery_routes: list[Route] = []
     mcp_consent_routes: list[Route] = []
     if enable_mcp:
-        mcp_server, mcp_app, mcp_discovery_routes, mcp_consent_routes = _try_build_mcp(
-            pool, searcher, mcp_cfg, cfg, auth_cfg
-        )
+        # Provider construction validates config that pydantic can't (e.g.
+        # resolve_accepted_resources rejects an all-malformed resource_indicators
+        # list) and so may raise after the pool is already open. Close it first to
+        # honour the "never leak a connection on misconfig" invariant above.
+        try:
+            mcp_server, mcp_app, mcp_discovery_routes, mcp_consent_routes = _try_build_mcp(
+                pool, searcher, mcp_cfg, cfg, auth_cfg
+            )
+        except Exception:
+            pool.close()
+            raise
 
     # Plane B supervisor: a real subprocess owner when we supervise the daemon,
     # else a stub reporting `external`. Constructing it is side-effect-free —

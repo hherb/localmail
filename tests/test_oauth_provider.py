@@ -414,3 +414,31 @@ def test_load_access_token_enforces_via_provider(db_conn, db_pool):
         )
         conn.commit()
     assert anyio.run(p.load_access_token, raw) is None
+
+
+def test_refresh_exchange_binds_resource_onto_new_access_and_enforces(db_conn, db_pool):
+    # The refresh-exchange (rotation) path must carry the bound resource onto the
+    # freshly-minted access token AND that token must be enforced at /mcp. A
+    # refresh bound to an unlisted resource (config narrowed after issuance)
+    # rotates into an access token that fails closed; a listed one verifies.
+    p = _provider_cfg(db_pool, resource_server_url="https://h")  # accepted = [https://h/mcp]
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, "prov-refresh-res-user", "pw")
+        listed = refresh.mint_refresh(
+            conn, client_id="cid", user_id=uid, scopes=[], ttl_s=3600,
+            resource="https://h/mcp",
+        )
+        unlisted = refresh.mint_refresh(
+            conn, client_id="cid", user_id=uid, scopes=[], ttl_s=3600,
+            resource="https://other/mcp",
+        )
+        conn.commit()
+
+    rt_listed = anyio.run(p.load_refresh_token, _client(), listed)
+    rotated_listed = anyio.run(p.exchange_refresh_token, _client(), rt_listed, [])
+    assert anyio.run(p.load_access_token, rotated_listed.access_token) is not None
+
+    rt_unlisted = anyio.run(p.load_refresh_token, _client(), unlisted)
+    rotated_unlisted = anyio.run(p.exchange_refresh_token, _client(), rt_unlisted, [])
+    assert anyio.run(p.load_access_token, rotated_unlisted.access_token) is None

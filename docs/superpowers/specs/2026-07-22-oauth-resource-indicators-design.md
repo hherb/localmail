@@ -63,7 +63,11 @@ The installed `mcp` SDK (`.venv/.../mcp/server/auth/`) gives us:
   shared `verify_token` path is unchanged — outside RFC 8707 scope.
 - **Single RS:** cross-resource audience restriction is a tautology today. The
   `resource_indicators` list + accepted-set membership check are the forward seam
-  for a future second RS.
+  for a future second RS. **Operational note for that future:** with more than
+  one accepted resource, an absent `resource` binds to `accepted[0]` — an
+  arbitrary choice among the resource servers. A multi-RS deployment should set
+  `oauth_require_resource_indicator = true` so a resource-less authorize request
+  is rejected rather than silently bound to the first RS.
 - **AS-mode toggle:** audience enforcement lives on the AS provider's `/mcp`
   verification path (`load_access(accepted_resources=self._accepted)`). If an
   operator runs with the OAuth AS enabled (minting `oauth_resource`-bound

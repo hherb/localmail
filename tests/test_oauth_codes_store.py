@@ -59,3 +59,27 @@ def test_expired_code_does_not_load(db_conn):
     )
     db_conn.commit()
     assert codes.load_code(db_conn, raw) is None
+
+
+def test_mint_and_load_code_round_trips_resource(db_conn):
+    uid = _seed_client_and_user(db_conn)
+    raw = codes.mint_code(
+        db_conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+        redirect_uri_provided_explicitly=True, code_challenge="chal",
+        scopes=[], ttl_s=60, resource="https://h/mcp",
+    )
+    db_conn.commit()
+    row = codes.load_code(db_conn, raw)
+    assert row is not None and row.resource == "https://h/mcp"
+
+
+def test_mint_code_defaults_resource_none(db_conn):
+    uid = _seed_client_and_user(db_conn)
+    raw = codes.mint_code(
+        db_conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+        redirect_uri_provided_explicitly=True, code_challenge="chal",
+        scopes=[], ttl_s=60,
+    )
+    db_conn.commit()
+    row = codes.load_code(db_conn, raw)
+    assert row is not None and row.resource is None

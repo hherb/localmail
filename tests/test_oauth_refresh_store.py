@@ -218,3 +218,28 @@ def test_rotated_and_unknown_results_have_no_family_id(db_conn):
     assert rotated.outcome == "rotated" and rotated.family_id is None
     unknown = refresh.rotate_refresh(db_conn, "bogus", ttl_s=100)
     assert unknown.outcome == "unknown" and unknown.family_id is None
+
+
+def test_mint_and_load_refresh_round_trips_resource(db_conn):
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(
+        db_conn, client_id="cid", user_id=uid, scopes=["s"],
+        ttl_s=3600, resource="https://h/mcp",
+    )
+    db_conn.commit()
+    row = refresh.load_refresh(db_conn, raw)
+    assert row is not None and row.resource == "https://h/mcp"
+
+
+def test_rotate_carries_resource_to_successor(db_conn):
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(
+        db_conn, client_id="cid", user_id=uid, scopes=["s"],
+        ttl_s=3600, resource="https://h/mcp",
+    )
+    db_conn.commit()
+    result = refresh.rotate_refresh(db_conn, raw, ttl_s=3600)
+    db_conn.commit()
+    assert result.outcome == "rotated" and result.new_token is not None
+    succ = refresh.load_refresh(db_conn, result.new_token)
+    assert succ is not None and succ.resource == "https://h/mcp"

@@ -125,9 +125,17 @@ def _load_attachment_meta(
     ``None``).
     """
     sha_hexes = {a["sha256"] for a in attachments if a.get("sha256")}
-    if not sha_hexes:
+    sha_bytes = []
+    for h in sha_hexes:
+        try:
+            sha_bytes.append(bytes.fromhex(h))
+        except ValueError:
+            # A malformed sha in the JSONB (corruption, a bad importer) must not
+            # 500 the whole message — it just misses the lookup and degrades to
+            # null metadata, like an absent blob row.
+            continue
+    if not sha_bytes:
         return {}
-    sha_bytes = [bytes.fromhex(h) for h in sha_hexes]
     with conn.cursor() as cur:
         cur.execute(
             "SELECT sha256, mime_type, size_bytes FROM attachment_blobs "

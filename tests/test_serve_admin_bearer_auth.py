@@ -151,7 +151,6 @@ def test_bearer_admin_creates_user_without_csrf(client, admin_token):
         json={"username": "newbie", "password": "pw"},
     )
     assert r.status_code == 201, r.text
-    assert r.status_code not in (303, 400)
 
 
 def test_bearer_admin_cancels_unknown_import_without_csrf(client, admin_token):
@@ -160,7 +159,6 @@ def test_bearer_admin_cancels_unknown_import_without_csrf(client, admin_token):
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert r.status_code == 404, r.text
-    assert r.status_code not in (303, 400)
 
 
 def test_bearer_admin_reloads_daemon_without_csrf(client, admin_token):
@@ -169,4 +167,19 @@ def test_bearer_admin_reloads_daemon_without_csrf(client, admin_token):
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert r.status_code == 200, r.text
-    assert r.status_code not in (303, 400)
+
+
+def test_bearer_does_not_reach_oauth_start_still_cookie_only(client, admin_token):
+    """Phase-1 boundary: oauth_router.oauth_start stays require_admin_session().
+
+    A bearer client hits the cookie path (no cookie -> redirect), so it gets a
+    303 to /admin/login, never bearer-authed. This pins the documented Phase-3
+    carry-in (OAuth-connect auth story is unresolved) against silent drift: if a
+    future change bearer-enables oauth/start, this test flips and forces a
+    deliberate update here + in test_session_cookie_scope.py's guard.
+    """
+    r = client.post(
+        "/v1/admin/accounts/1/oauth/start",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert r.status_code == 303, r.text

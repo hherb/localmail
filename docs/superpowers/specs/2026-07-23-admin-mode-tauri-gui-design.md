@@ -118,12 +118,23 @@ untouched.
   cookie + CSRF — the web UI is unchanged.
 
 Security note: bearer admin access is exactly as strong as the session cookie
-(both resolve to an `is_admin` user); a leaked admin bearer already had full read
-access. CSRF is skipped *only* for bearer auth, which does not carry ambient
-cookie credentials, so the CSRF threat model does not apply. The
+(both resolve to an `is_admin` user). CSRF is skipped *only* for bearer auth,
+which does not carry ambient cookie credentials, so the CSRF threat model does
+not apply. The
 [tests/test_session_cookie_scope.py](../../../tests/test_session_cookie_scope.py)
 invariant (no non-`/v1/admin/*` route reads the session cookie) stays green — we
 add a *bearer* path, never a new cookie reader.
+
+Blast-radius note: a token issued to an `is_admin` user is now an *admin*
+credential, not merely an ACL-scoped read credential. Any bearer belonging to
+an admin user unlocks the full `/v1/admin/*` write surface (user/account CRUD,
+imports, daemon control). This is deliberate — it mirrors the session cookie's
+authority — but it does mean the leak consequence for that token class is
+now admin-write, not just read. There is no per-token scope (no read-only
+token for an admin user) and admin mutations are not audit-differentiated by
+auth channel (`admin_auth_kind` is consumed only by `check_csrf`). Both are
+tracked as follow-ups in #204, not v1 blockers; the mitigation is unchanged
+(the token lives only in the OS keyring, same as the viewer's read token).
 
 ### Frontend (Svelte)
 

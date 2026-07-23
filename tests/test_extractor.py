@@ -344,6 +344,51 @@ def test_docling_extractor_accepts_config() -> None:
     assert de2._cfg.extractor_ocr_languages == ["en", "de", "ja"]
 
 
+def test_docling_extractor_passes_configured_max_pages_to_convert(
+    monkeypatch, tmp_path
+) -> None:
+    """The configured page cap reaches docling's convert() call.
+
+    On docling 2.x the page limit is a convert-level argument
+    (DocumentConverter.convert(..., max_num_pages=N)), not a
+    PdfPipelineOptions field. This pins that extractor_docling_max_pages
+    is actually forwarded so the OOM-guard cap takes effect.
+    """
+    import localmail.search.extractor as ext_mod
+    from localmail.config import SearchConfig
+    from localmail.search.extractor import DoclingExtractor
+
+    recorded: dict[str, object] = {}
+
+    class _FakeDoc:
+        pages = [object()]
+
+        def export_to_markdown(self) -> str:
+            return "hello"
+
+    class _FakeResult:
+        document = _FakeDoc()
+
+    class _FakeConverter:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def convert(self, source: str, **kwargs: object) -> _FakeResult:
+            recorded.update(kwargs)
+            recorded["source"] = source
+            return _FakeResult()
+
+    monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _FakeConverter)
+
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4 dummy")
+
+    de = DoclingExtractor(SearchConfig(extractor_docling_max_pages=50))
+    de.extract(pdf, "application/pdf")
+
+    assert recorded.get("max_num_pages") == 50
+
+
 def test_iter_exc_chain_yields_self_then_cause() -> None:
     """The chain walk yields the exception, then its __cause__, in order."""
     from localmail.search.extractor import iter_exc_chain
@@ -405,7 +450,7 @@ def _fake_converter_raising(exc_factory):
         def __init__(self, *args, **kwargs) -> None:
             pass
 
-        def convert(self, source):
+        def convert(self, source, **kwargs):
             raise exc_factory()
 
     return _FakeConverter

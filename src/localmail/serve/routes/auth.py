@@ -27,6 +27,7 @@ class TokenResponse(BaseModel):
 class WhoamiResponse(BaseModel):
     username: str
     user_id: str
+    is_admin: bool
 
 
 class ChangePasswordRequest(BaseModel):
@@ -76,7 +77,9 @@ def refresh(request: Request, _user=Depends(get_authenticated_user)) -> TokenRes
 
 @router.get("/whoami", response_model=WhoamiResponse)
 def whoami(user=Depends(get_authenticated_user)) -> WhoamiResponse:
-    return WhoamiResponse(username=user.username, user_id=str(user.id))
+    return WhoamiResponse(
+        username=user.username, user_id=str(user.id), is_admin=user.is_admin
+    )
 
 
 @router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)

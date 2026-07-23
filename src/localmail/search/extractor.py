@@ -622,11 +622,13 @@ class DoclingExtractor:
         ExtractedText with text='' when docling produces no text (e.g.,
         the OCR pipeline fails to find any glyphs on a blank scan).
 
-        Passes extractor_docling_max_pages and extractor_ocr_languages
-        from SearchConfig into PdfPipelineOptions when the installed
-        docling version exposes those option classes. Falls back to a
-        default DocumentConverter() when they are unavailable (older
-        docling builds) — the page cap and language list are best-effort.
+        Passes extractor_ocr_languages from SearchConfig into
+        PdfPipelineOptions when the installed docling version exposes those
+        option classes (falling back to a default DocumentConverter() on older
+        builds — the language list is then best-effort). The page cap
+        extractor_docling_max_pages is a convert-level argument on docling 2.x,
+        so it is forwarded to converter.convert(..., max_num_pages=...) and
+        applies on both the option-class and fallback paths.
         """
         DocumentConverter = _try_import_docling()
         if DocumentConverter is None:
@@ -660,12 +662,6 @@ class DoclingExtractor:
                 do_ocr=True,
                 ocr_options=EasyOcrOptions(lang=self._cfg.extractor_ocr_languages),
             )
-            try:
-                pipeline_options.max_num_pages = self._cfg.extractor_docling_max_pages
-            except Exception:
-                # Older docling versions may not expose this attribute.
-                pass
-
             converter = DocumentConverter(
                 format_options={
                     InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
@@ -676,7 +672,13 @@ class DoclingExtractor:
             converter = DocumentConverter()
 
         try:
-            result = converter.convert(str(blob_path))
+            # The page cap is a convert-level argument on docling 2.x, not a
+            # PdfPipelineOptions field — passing it here is what makes
+            # extractor_docling_max_pages actually bound the OCR workload.
+            result = converter.convert(
+                str(blob_path),
+                max_num_pages=self._cfg.extractor_docling_max_pages,
+            )
         except Exception as exc:
             if _exc_chain_has_transient_module(exc):
                 raise TransientExtractorError(

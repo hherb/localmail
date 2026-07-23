@@ -130,3 +130,15 @@ def test_cookie_admin_mutation_with_csrf_succeeds(cookie_client):
         json=_create_body("z2"),
     )
     assert r.status_code in (200, 201), r.text
+
+
+@pytest.mark.parametrize("path", ["/v1/admin/users", "/v1/admin/imports", "/v1/admin/daemon"])
+def test_bearer_admin_reads_every_admin_router(client, admin_token, path):
+    r = client.get(path, headers={"Authorization": f"Bearer {admin_token}"})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("path", ["/v1/admin/users", "/v1/admin/imports", "/v1/admin/daemon"])
+def test_non_admin_bearer_forbidden_on_every_router(client, user_token, path):
+    r = client.get(path, headers={"Authorization": f"Bearer {user_token}"})
+    assert r.status_code == 403

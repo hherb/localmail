@@ -185,3 +185,25 @@ def test_login_429_carries_retry_after_and_cap(db_dsn: str, api_user, db_conn) -
     assert body["status"] == 429
     assert body["cap"] == "global"
     assert body["retry_after_s"] == 60
+
+
+def test_whoami_reports_is_admin(db_dsn, db_conn):
+    from localmail.api.auth import hash_password, issue_token
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash, is_admin) "
+            "VALUES ('root', %s, TRUE), ('peon', %s, FALSE) RETURNING id",
+            (hash_password("pw"), hash_password("pw")),
+        )
+        cur.execute("SELECT username, id FROM api_users")
+        ids = {u: i for u, i in cur.fetchall()}
+    admin_tok, _ = issue_token(db_conn, ids["root"])
+    peon_tok, _ = issue_token(db_conn, ids["peon"])
+    db_conn.commit()
+
+    client = _client(db_dsn)
+    r_admin = client.get("/v1/auth/whoami", headers={"Authorization": f"Bearer {admin_tok}"})
+    r_peon = client.get("/v1/auth/whoami", headers={"Authorization": f"Bearer {peon_tok}"})
+    assert r_admin.status_code == 200 and r_admin.json()["is_admin"] is True
+    assert r_peon.status_code == 200 and r_peon.json()["is_admin"] is False

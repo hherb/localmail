@@ -21,7 +21,7 @@ from localmail.api.admin import users as svc
 from localmail.api.admin.auth import AdminUser, UserNotFound
 from localmail.api.ids import parse_int_id
 from localmail.serve.admin.csrf import check_csrf
-from localmail.serve.admin.dependencies import require_admin_session
+from localmail.serve.admin.dependencies import require_admin
 
 router = APIRouter(tags=["admin-users"])
 
@@ -72,7 +72,7 @@ def _detail_dict(u: svc.UserDetail) -> dict:
 
 
 @router.get("/users")
-def list_users(request: Request, admin: AdminUser = require_admin_session()) -> dict:
+def list_users(request: Request, admin: AdminUser = require_admin()) -> dict:
     pool = request.app.state.pool
     with pool.connection() as conn:
         rows = svc.list_users(conn)
@@ -82,7 +82,7 @@ def list_users(request: Request, admin: AdminUser = require_admin_session()) -> 
 @router.post("/users", status_code=201)
 def create_user(
     body: _UserIn, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     check_csrf(request, admin, x_csrf_token, "/v1/admin/users")
@@ -102,7 +102,7 @@ def create_user(
 @router.get("/users/{user_id}")
 def get_user(
     user_id: str, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
 ) -> dict:
     uid = parse_int_id(user_id, field="user_id")
     pool = request.app.state.pool
@@ -117,7 +117,7 @@ def get_user(
 @router.patch("/users/{user_id}")
 def patch_user(
     user_id: str, body: _UserPatch, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     uid = parse_int_id(user_id, field="user_id")
@@ -142,7 +142,7 @@ def patch_user(
 @router.post("/users/{user_id}/password", status_code=204)
 def post_password(
     user_id: str, body: _PasswordIn, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
     uid = parse_int_id(user_id, field="user_id")
@@ -161,7 +161,7 @@ def post_password(
 @router.post("/users/{user_id}/grants")
 def post_grant(
     user_id: str, body: _GrantIn, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     uid = parse_int_id(user_id, field="user_id")
@@ -182,7 +182,7 @@ def post_grant(
 @router.post("/users/{user_id}/revoke-sessions", status_code=204)
 def post_revoke_sessions(
     user_id: str, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
     uid = parse_int_id(user_id, field="user_id")
@@ -199,7 +199,7 @@ def post_revoke_sessions(
 @router.delete("/users/{user_id}", status_code=204)
 def delete_user(
     user_id: str, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
     uid = parse_int_id(user_id, field="user_id")

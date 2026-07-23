@@ -294,6 +294,7 @@ class AuthenticatedUser:
     """The user behind a valid bearer token."""
     id: int
     username: str
+    is_admin: bool = False
 
 
 def generate_token() -> str:
@@ -344,7 +345,7 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
     h = hash_token(token)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT u.id, u.username "
+            "SELECT u.id, u.username, u.is_admin "
             "FROM api_tokens t "
             "JOIN api_users u ON u.id = t.user_id "
             "WHERE t.token_sha256 = %s "
@@ -362,7 +363,7 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
             "       OR last_used_at < now() - make_interval(secs => %s))",
             (h, LAST_USED_REFRESH_SECONDS),
         )
-    return AuthenticatedUser(id=row[0], username=row[1])
+    return AuthenticatedUser(id=row[0], username=row[1], is_admin=bool(row[2]))
 
 
 def create_user(conn: psycopg.Connection, username: str, password: str) -> int:

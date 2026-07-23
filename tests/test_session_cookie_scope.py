@@ -27,6 +27,14 @@ from localmail.serve.app import create_app
 # inner `_dep` function in serve/admin/dependencies.py:require_admin_session is
 # ever renamed, update this constant — otherwise the dependency-detection half
 # of the invariant goes silently vacuous (the cookie-name half still fires).
+# MAINTENANCE: after the bearer-auth migration (require_admin(), bearer OR
+# cookie), the accounts/users/imports/daemon /v1/admin/* routers all depend on
+# require_admin(), not require_admin_session(). The only /v1/admin/* route
+# still depending on require_admin_session() directly is
+# oauth_router.py::oauth_start (POST /v1/admin/accounts/{id}/oauth/start). If a
+# future phase migrates OAuth off the cookie-only dependency too, this test's
+# "guard the guard" assertion (test_dep_detector_fires_on_admin_routes) will
+# need a new admin route to anchor on, or the detector goes vacuous.
 _ADMIN_SESSION_DEP_QUALNAME = "require_admin_session.<locals>._dep"
 
 

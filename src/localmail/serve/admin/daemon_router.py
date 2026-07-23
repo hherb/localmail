@@ -30,7 +30,7 @@ from localmail.api.admin.auth import AdminUser
 from localmail.api.errors import NotFound
 from localmail.api.ids import parse_int_id
 from localmail.serve.admin.csrf import check_csrf
-from localmail.serve.admin.dependencies import require_admin_session
+from localmail.serve.admin.dependencies import require_admin
 from localmail.serve.daemon_supervisor import (
     DaemonSupervisorT,
     SupervisorState,
@@ -81,7 +81,7 @@ def build_daemon_view(
 @router.get("/daemon")
 def get_daemon(
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
 ) -> dict:
     supervisor = request.app.state.daemon_supervisor
     daemon_cfg = request.app.state.daemon_config
@@ -107,7 +107,7 @@ def _lifecycle(
 @router.post("/daemon/start")
 def start_daemon(
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = _CSRF_HEADER,
 ) -> JSONResponse:
     return _lifecycle(request, admin, x_csrf_token, "start")
@@ -116,7 +116,7 @@ def start_daemon(
 @router.post("/daemon/stop")
 def stop_daemon(
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = _CSRF_HEADER,
 ) -> JSONResponse:
     return _lifecycle(request, admin, x_csrf_token, "stop")
@@ -125,7 +125,7 @@ def stop_daemon(
 @router.post("/daemon/restart")
 def restart_daemon(
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = _CSRF_HEADER,
 ) -> JSONResponse:
     return _lifecycle(request, admin, x_csrf_token, "restart")
@@ -134,7 +134,7 @@ def restart_daemon(
 @router.post("/daemon/reload")
 def reload_daemon(
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = _CSRF_HEADER,
 ) -> dict:
     check_csrf(request, admin, x_csrf_token, "/v1/admin/daemon/reload")
@@ -150,7 +150,7 @@ def reload_daemon(
 def restart_account_sync(
     account_id: str,
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = _CSRF_HEADER,
 ) -> dict:
     aid = parse_int_id(account_id, field="account_id")

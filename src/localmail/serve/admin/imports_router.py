@@ -19,7 +19,7 @@ from localmail.api.errors import NotFound
 from localmail.api.ids import parse_int_id
 from localmail.importer.paths import ImportPathError, resolve_import_path
 from localmail.serve.admin.csrf import check_csrf
-from localmail.serve.admin.dependencies import require_admin_session
+from localmail.serve.admin.dependencies import require_admin
 
 router = APIRouter(tags=["admin-imports"])
 
@@ -52,7 +52,7 @@ def _job_dict(j: svc.ImportJob) -> dict:
 
 
 @router.get("/imports")
-def list_imports(request: Request, admin: AdminUser = require_admin_session()) -> dict:
+def list_imports(request: Request, admin: AdminUser = require_admin()) -> dict:
     pool = request.app.state.pool
     with pool.connection() as conn:
         rows = svc.list_jobs(conn)
@@ -62,7 +62,7 @@ def list_imports(request: Request, admin: AdminUser = require_admin_session()) -
 @router.post("/imports", status_code=201)
 def create_import(
     body: _ImportIn, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     check_csrf(request, admin, x_csrf_token, "/v1/admin/imports")
@@ -98,7 +98,7 @@ def create_import(
 
 @router.get("/imports/{job_id}")
 def get_import(
-    job_id: str, request: Request, admin: AdminUser = require_admin_session(),
+    job_id: str, request: Request, admin: AdminUser = require_admin(),
 ) -> dict:
     jid = parse_int_id(job_id, field="job_id")
     pool = request.app.state.pool
@@ -113,7 +113,7 @@ def get_import(
 @router.post("/imports/{job_id}/cancel", status_code=204)
 def cancel_import(
     job_id: str, request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
     jid = parse_int_id(job_id, field="job_id")

@@ -4,8 +4,10 @@
 """HTTP routes for /v1/admin/accounts (Sub-plan 2A).
 
 Thin wrapper over `localmail.api.admin.accounts`. Every route requires an
-admin session (cookie + HMAC + is_admin = TRUE); every mutating route
-additionally validates a CSRF token bound to (user_id, action).
+admin — either the browser session cookie (HMAC + is_admin = TRUE) or an
+`Authorization: Bearer <token>` for native clients; every mutating route
+additionally validates a CSRF token bound to (user_id, action), skipped for
+the bearer path (no ambient cookie credential to forge).
 
 The CSRF token is supplied as the `X-CSRF-Token` request header on JSON
 routes — forms are not used here because the admin UI calls these endpoints
@@ -25,7 +27,7 @@ from localmail.api.admin.auth import AdminUser
 from localmail.api.errors import NotFound
 from localmail.api.ids import parse_int_id
 from localmail.serve.admin.csrf import check_csrf
-from localmail.serve.admin.dependencies import require_admin_session
+from localmail.serve.admin.dependencies import require_admin
 
 
 router = APIRouter(tags=["admin-accounts"])
@@ -96,7 +98,7 @@ def _account_dict(a: svc.Account) -> dict:
 @router.get("/accounts")
 def list_accounts(
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
 ) -> dict:
     pool = request.app.state.pool
     with pool.connection() as conn:
@@ -108,7 +110,7 @@ def list_accounts(
 def create_account(
     body: _AccountIn,
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     check_csrf(request, admin, x_csrf_token, "/v1/admin/accounts")
@@ -136,7 +138,7 @@ def create_account(
 def get_account(
     account_id: str,
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
 ) -> dict:
     aid = parse_int_id(account_id, field="account_id")
     pool = request.app.state.pool
@@ -153,7 +155,7 @@ def patch_account(
     account_id: str,
     body: _AccountPatch,
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     aid = parse_int_id(account_id, field="account_id")
@@ -175,7 +177,7 @@ def delete_account(
     account_id: str,
     request: Request,
     force: bool = Query(False),
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
     aid = parse_int_id(account_id, field="account_id")
@@ -196,7 +198,7 @@ def post_password(
     account_id: str,
     body: _PasswordIn,
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
     aid = parse_int_id(account_id, field="account_id")
@@ -225,7 +227,7 @@ def post_password(
 def test_connection(
     account_id: str,
     request: Request,
-    admin: AdminUser = require_admin_session(),
+    admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
     """URL kept as `test-connection` per the design doc; backed by

@@ -96,3 +96,26 @@ def test_verify_token_updates_last_used_at(db_conn: psycopg.Connection) -> None:
         row = cur.fetchone()
         assert row is not None
         assert row[0] is not None
+
+
+def test_verify_token_reports_is_admin_flag(db_conn: psycopg.Connection) -> None:
+    from localmail.api.auth import hash_password
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash, is_admin) "
+            "VALUES ('root', %s, TRUE), ('peon', %s, FALSE) RETURNING id",
+            (hash_password("pw"), hash_password("pw")),
+        )
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id, username FROM api_users ORDER BY username")
+        rows = cur.fetchall()
+    ids = {username: uid for uid, username in rows}
+    admin_tok, _ = issue_token(db_conn, ids["root"])
+    peon_tok, _ = issue_token(db_conn, ids["peon"])
+    db_conn.commit()
+
+    admin_user = verify_token(db_conn, admin_tok)
+    peon_user = verify_token(db_conn, peon_tok)
+    assert admin_user is not None and admin_user.is_admin is True
+    assert peon_user is not None and peon_user.is_admin is False

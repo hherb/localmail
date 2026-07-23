@@ -545,11 +545,13 @@ git commit -m "feat(admin): bearer-or-cookie require_admin across users/imports/
 Phase 1 is independently shippable (open a PR from `feat/admin-mode-gui`). Subsequent phases each get their own plan when we reach them, per the design's phasing:
 
 - **Phase 2** — frontend shell: `whoami.is_admin` detection, admin nav/route, `AdminView` scaffold (`gui/`).
-- **Phase 3** — Accounts panel (+ Gmail OAuth connect).
+- **Phase 3** — Accounts panel (+ Gmail OAuth connect). **Carry-in from Phase 1 final review:** the OAuth-connect routes are *not* bearer-accessible after Phase 1. `POST /v1/admin/accounts/{id}/oauth/start` lives in `oauth_router.py` (not one of the four routers swapped here) and still uses `require_admin_session()`, so a keyring-bearer native client gets a 303 to `/admin/login`. Deeper: the callback `GET /admin/oauth/callback` is inherently cookie-bound — Google redirects the *system browser*, which the native app never gave a session cookie. Phase 3 must resolve the OAuth-connect auth story before wiring the "Connect" button: either (a) bearer-enable `oauth/start` and have the callback complete against a short-lived server-side state the app polls (the design's poll-secret-status flow already assumes this), or (b) a browser-based mini-login. Decide during Phase 3 brainstorming.
 - **Phase 4** — Daemon panel (status/logs + DB-queue controls; lifecycle gated on `supervise_daemon_externally`).
 - **Phase 5** — Users & ACL panel.
 - **Phase 6** — Imports panel.
 - **Phase 7** — macOS packaging note (dmg already configured; codesign/notarize is a separate ops task).
+
+**Maintenance note (from Phase 1 final review):** `tests/test_session_cookie_scope.py`'s guard asserts that *some* `/v1/admin/*` route still depends on `require_admin_session` (the cookie dependency). After Phase 1 only `oauth_router.py::oauth_start` satisfies it. When Phase 3 migrates OAuth off the cookie dependency, that guard becomes a false-positive failure and must be updated to reflect the new set of cookie-only routes (a `MAINTENANCE:` comment near `_ADMIN_SESSION_DEP_QUALNAME` flags this).
 
 Design reference: [docs/superpowers/specs/2026-07-23-admin-mode-tauri-gui-design.md](../specs/2026-07-23-admin-mode-tauri-gui-design.md).
 

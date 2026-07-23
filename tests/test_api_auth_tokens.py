@@ -98,8 +98,8 @@ def test_verify_token_updates_last_used_at(db_conn: psycopg.Connection) -> None:
         assert row[0] is not None
 
 
-def test_verify_token_reports_is_admin_flag(db_conn):
-    from localmail.api.auth import hash_password, issue_token, verify_token
+def test_verify_token_reports_is_admin_flag(db_conn: psycopg.Connection) -> None:
+    from localmail.api.auth import hash_password
 
     with db_conn.cursor() as cur:
         cur.execute(

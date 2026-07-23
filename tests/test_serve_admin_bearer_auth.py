@@ -142,3 +142,31 @@ def test_bearer_admin_reads_every_admin_router(client, admin_token, path):
 def test_non_admin_bearer_forbidden_on_every_router(client, user_token, path):
     r = client.get(path, headers={"Authorization": f"Bearer {user_token}"})
     assert r.status_code == 403
+
+
+def test_bearer_admin_creates_user_without_csrf(client, admin_token):
+    r = client.post(
+        "/v1/admin/users",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"username": "newbie", "password": "pw"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.status_code not in (303, 400)
+
+
+def test_bearer_admin_cancels_unknown_import_without_csrf(client, admin_token):
+    r = client.post(
+        "/v1/admin/imports/999999/cancel",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert r.status_code == 404, r.text
+    assert r.status_code not in (303, 400)
+
+
+def test_bearer_admin_reloads_daemon_without_csrf(client, admin_token):
+    r = client.post(
+        "/v1/admin/daemon/reload",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.status_code not in (303, 400)

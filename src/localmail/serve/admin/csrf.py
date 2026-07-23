@@ -75,7 +75,12 @@ def check_csrf(
 
     ``action`` is the URL path; the bound action additionally carries the
     request method (see ``csrf_action``) so tokens are method-scoped.
+
+    Bearer-authenticated admin requests (native clients) carry no ambient
+    cookie credential, so CSRF does not apply and is skipped.
     """
+    if getattr(request.state, "admin_auth_kind", "cookie") == "bearer":
+        return
     if not csrf_token:
         raise HTTPException(status_code=400, detail="CSRF token missing")
     key = session_signing_key(request)

@@ -153,6 +153,57 @@ pub async fn http_post_json_no_resp<B: Serialize>(
     Ok(())
 }
 
+pub async fn http_patch_json<B: Serialize, T: DeserializeOwned>(
+    client: &Client,
+    url: &str,
+    body: &B,
+    bearer: Option<&str>,
+) -> Result<T, HttpError> {
+    let mut req = client.patch(url).json(body);
+    if let Some(tok) = bearer {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(HttpError::HttpStatus {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    resp.json::<T>()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))
+}
+
+pub async fn http_delete(
+    client: &Client,
+    url: &str,
+    bearer: Option<&str>,
+) -> Result<(), HttpError> {
+    let mut req = client.delete(url);
+    if let Some(tok) = bearer {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(HttpError::HttpStatus {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +280,58 @@ mod tests {
         let client = Client::new();
         let url = format!("{}/logout", server.url());
         http_post_empty(&client, &url, Some("tok")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_patch_json_sends_body_and_decodes_response() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("PATCH", "/thing")
+            .match_header("authorization", "Bearer tok")
+            .match_body(mockito::Matcher::JsonString(r#"{"message":"set"}"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"message":"set"}"#)
+            .create_async()
+            .await;
+
+        let client = Client::new();
+        let url = format!("{}/thing", server.url());
+        let body = serde_json::json!({ "message": "set" });
+        let got: Echo = http_patch_json(&client, &url, &body, Some("tok")).await.unwrap();
+        assert_eq!(got.message, "set");
+        m.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn http_delete_accepts_204_and_maps_409() {
+        let mut server = mockito::Server::new_async().await;
+        let _ok = server
+            .mock("DELETE", "/gone")
+            .with_status(204)
+            .create_async()
+            .await;
+        let client = Client::new();
+        http_delete(&client, &format!("{}/gone", server.url()), Some("tok"))
+            .await
+            .expect("204 should succeed");
+
+        let _conflict = server
+            .mock("DELETE", "/busy")
+            .with_status(409)
+            .with_body("account has messages")
+            .create_async()
+            .await;
+        let err = http_delete(&client, &format!("{}/busy", server.url()), Some("tok"))
+            .await
+            .unwrap_err();
+        match err {
+            HttpError::HttpStatus { status, body } => {
+                assert_eq!(status, 409);
+                assert_eq!(body, "account has messages");
+            }
+            other => panic!("expected HttpStatus 409, got {other:?}"),
+        }
     }
 
     #[test]

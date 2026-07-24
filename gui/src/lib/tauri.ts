@@ -63,6 +63,7 @@ export interface LoginSummary {
 export interface WhoamiResponse {
   username: string;
   user_id: string;
+  is_admin: boolean;
 }
 
 export interface Capabilities {

@@ -8,6 +8,7 @@
 //!
 //! The bearer token is NEVER returned to the JS side — Rust holds it.
 
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -52,6 +53,10 @@ struct LoginRequest<'a> {
 pub struct WhoamiResponse {
     pub username: String,
     pub user_id: String,
+    // Absent on a serve older than the bearer-admin release; a viewer-only
+    // client must still log in rather than fail to decode.
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 pub async fn login(store: &KeyringStore, username: &str, password: &str) -> Result<LoginSummary, AuthError> {
@@ -108,6 +113,17 @@ pub async fn refresh(store: &KeyringStore) -> Result<LoginSummary, AuthError> {
     })
 }
 
+// Split out so tests can drive a non-TLS reqwest::Client against mockito while
+// the real caller still goes through build_pinned_client.
+async fn fetch_whoami(
+    client: &Client,
+    base_url: &str,
+    token: &str,
+) -> Result<WhoamiResponse, AuthError> {
+    let endpoint = format!("{base_url}v1/auth/whoami");
+    Ok(http_get_json(client, &endpoint, Some(token)).await?)
+}
+
 pub async fn whoami(store: &KeyringStore) -> Result<WhoamiResponse, AuthError> {
     let (url, pin) = read_endpoint(store)?;
     let token = store
@@ -115,9 +131,7 @@ pub async fn whoami(store: &KeyringStore) -> Result<WhoamiResponse, AuthError> {
         .map_err(|e| AuthError::Keyring(e.to_string()))?
         .ok_or(AuthError::NotLoggedIn)?;
     let client = build_pinned_client(&pin)?;
-    let endpoint = format!("{url}v1/auth/whoami");
-    let resp: WhoamiResponse = http_get_json(&client, &endpoint, Some(&token)).await?;
-    Ok(resp)
+    fetch_whoami(&client, &url, &token).await
 }
 
 // Thin Tauri command wrappers
@@ -190,6 +204,45 @@ mod tests {
             matches!(err, AuthError::NotLoggedIn),
             "expected NotLoggedIn for missing username, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_whoami_parses_is_admin_true() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("GET", "/v1/auth/whoami")
+            .match_header("authorization", "Bearer tok-admin")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"username":"root","user_id":"1","is_admin":true}"#)
+            .create_async()
+            .await;
+
+        let client = Client::new();
+        let base = format!("{}/", server.url());
+        let me = fetch_whoami(&client, &base, "tok-admin").await.unwrap();
+        assert_eq!(me.username, "root");
+        assert!(me.is_admin);
+        m.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_whoami_defaults_is_admin_false_on_older_server() {
+        // A serve predating the bearer-admin release omits is_admin entirely.
+        // Decoding must succeed and fall back to false, not fail the login.
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/auth/whoami")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"username":"viewer","user_id":"7"}"#)
+            .create_async()
+            .await;
+
+        let client = Client::new();
+        let base = format!("{}/", server.url());
+        let me = fetch_whoami(&client, &base, "tok").await.unwrap();
+        assert!(!me.is_admin);
     }
 
     #[tokio::test]

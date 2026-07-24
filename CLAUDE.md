@@ -1383,6 +1383,67 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`
   client isn't installed).
 
+## Desktop GUI admin mode (`gui/`, phases 2+3 shipped)
+
+The Tauri 2 + Svelte 5 client gained an operator/admin mode gated on
+`is_admin`. Design:
+[docs/superpowers/specs/2026-07-23-admin-mode-tauri-gui-design.md](docs/superpowers/specs/2026-07-23-admin-mode-tauri-gui-design.md);
+phase 1 (backend bearer auth) shipped in PR #203, phases 2+3 (frontend shell
++ Accounts panel) in the plan
+[docs/superpowers/plans/2026-07-24-admin-mode-gui-phase2-3.md](docs/superpowers/plans/2026-07-24-admin-mode-gui-phase2-3.md).
+**No Python changed** for phases 2+3 — the whole surface rides the existing
+`/v1/admin/accounts*` JSON API.
+
+- **`is_admin` on the wire.** Rust `WhoamiResponse` carries it with
+  `#[serde(default)]`, so a `serve` predating #203 still logs in (falls back
+  to `false`) instead of failing to decode. The auth store's `logged_in`
+  snapshot exposes `isAdmin`; MainView renders the Admin button from it.
+  `screens/AdminView.svelte` is the tabbed overlay (Accounts / Daemon /
+  Users / Imports); only Accounts is implemented, the rest are placeholders.
+- **Rust proxies** live in
+  [gui/src-tauri/src/commands/admin/accounts.rs](gui/src-tauri/src/commands/admin/accounts.rs)
+  (tests split into `accounts_tests.rs` via `#[cfg(test)] #[path = …]` to keep
+  the module under the size guideline). Each endpoint has a mockito-testable
+  `fetch_*`/`post_*` helper + a keyring wrapper + a thin `#[tauri::command]`,
+  mirroring `commands::auth_change_password`. `http/client.rs` gained
+  `http_patch_json` + `http_delete`.
+- **The PATCH body MUST omit unset fields.** `AdminAccountPatch` marks every
+  field `#[serde(skip_serializing_if = "Option::is_none")]`. This is
+  load-bearing, not style: `api.admin.accounts.update_account` writes *every
+  key present* in `fields`, so a serialized `"imap_host": null` **blanks the
+  column**. Pinned by
+  `patch_update_omits_unset_fields_entirely`. `AccountForm` mirrors this on
+  the TS side — it diffs against the loaded row and sends only changed keys,
+  which is why a cleared IMAP port cannot be sent. For the same reason
+  **`auth_method` is locked on edit** (the selector is `disabled`): every
+  transition dead-ends under omit-unset — `→ oauth2` needs an `oauth_provider`
+  the web consent flow supplies, and `→ archive` needs `imap_host`/`imap_port`
+  nulled, which omit-unset can't express. Changing an account's auth method
+  means recreating it. A non-numeric port is rejected inline (not silently
+  dropped). Folder-filter editing is not yet in the form (issue #206).
+- **Pure modules** (project convention — logic out of components):
+  `lib/admin_error.ts` (`httpStatusOf`/`isConflict`/`isForbidden`, a
+  depth-bounded walk of the nested `{kind, detail}` Rust error shape, so the
+  UI can *act* on a status instead of string-matching `formatError`) and
+  `lib/admin_auth_method.ts` (`hasImapEndpoint`/`usesStoredPassword`).
+  Routing the auth-method comparisons through functions also stops TS from
+  narrowing a local `$state` to its initialiser's literal type, which made
+  `authMethod !== "archive"` look unreachable to `svelte-check`.
+- **Deliberately absent — do not "finish" without backend work first:**
+  Gmail **Connect**. `POST /v1/admin/accounts/{id}/oauth/start` lives in
+  `oauth_router.py`, which #203 did *not* swap to `require_admin()`, so it is
+  still cookie-only and a bearer client cannot start the flow. The design's
+  completion check ("poll secret status until the refresh token appears")
+  also has no backing field — `_account_dict` exposes no secret status and no
+  `/v1/admin` endpoint reports one. Both are backend gaps. `clear_secret`
+  likewise has a service function but no JSON route.
+- **Pre-existing, unrelated:** `cargo clippy --all-targets -- -D warnings`
+  fails on `gui/src-tauri/src/commands/search.rs:189` (`approx_constant`, a
+  `3.14` dummy `took_ms` in a test). It predates this work. CI *does* gate
+  clippy (`gui-ci.yml` runs `cargo clippy --locked -- -D warnings`) but
+  **without `--all-targets`**, so `#[cfg(test)]` modules are never linted —
+  hence a green `main`. Use the bare CI invocation when checking locally.
+
 ## Conventions
 
 - **No comments unless the WHY is non-obvious.** Don't restate the SQL or the

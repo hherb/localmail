@@ -166,6 +166,11 @@ def test_create_account_missing_csrf_rejected(admin_client):
         data={"name": "y", "email_address": "y@y.com", "auth_method": "archive"},
     )
     assert r.status_code == 400
+    # The gate in admin-forms.js swaps a 400 into the form ONLY when the body
+    # is text/html; this CSRF rejection must stay JSON so it is NOT swapped in
+    # as raw `{"detail": ...}`. Pin the premise the gate depends on (mirrors
+    # the `indexOf("text/html")` check exactly).
+    assert "text/html" not in r.headers["content-type"]
 
 
 def test_edit_form_prefills(admin_client, db_conn):

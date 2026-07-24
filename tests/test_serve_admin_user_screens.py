@@ -99,6 +99,18 @@ def test_create_blank_username_inline_error(admin_client):
         headers={"X-CSRF-Token": admin_client.csrf_for("/admin/users")})
     assert r.status_code == 400
     assert "username" in r.text.lower()
+    # The users form relies on the same admin-forms.js swap mechanism as the
+    # accounts form: the 400 must be an HTML fragment whose root id matches the
+    # form's hx-target (#user-form-fields) or htmx drops it silently.
+    assert r.headers["content-type"].startswith("text/html")
+    assert 'id="user-form-fields"' in r.text
+
+
+def test_admin_pages_load_error_surfacing_script(admin_client):
+    # base.html must load admin-forms.js on the users pages too; without it the
+    # 400 validation fragment above is dropped and a rejected create looks inert.
+    page = admin_client.get("/admin/users/new").text
+    assert "/admin/static/admin-forms.js" in page
 
 
 def test_create_success_redirects(admin_client):

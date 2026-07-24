@@ -12,6 +12,14 @@
 // JSON error (e.g. the 400 that check_csrf raises) must not be swapped into
 // the form as raw `{"detail": ...}` text. CSP for /admin is `script-src
 // 'self'`, so this lives in a served file, not inline.
+//
+// This handler is bound to document.body, so it fires for EVERY admin htmx
+// request. It is safe only because the sole 400/422 text/html responses the
+// admin routes emit are field-error fragments whose root id matches the
+// triggering form's hx-target. Any new admin endpoint that returns a
+// non-fragment 400/422 as text/html (e.g. a full HTML error page) would be
+// swapped into that target as garbage — keep such errors JSON, or scope this
+// handler.
 (function () {
   "use strict";
   document.body.addEventListener("htmx:beforeSwap", function (evt) {

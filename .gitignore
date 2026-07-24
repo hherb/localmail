@@ -33,3 +33,4 @@ site/manual/
 
 # Local-only Claude Code permissions (machine-specific, never in the repo)
 .claude/settings.local.json
+.claude/scheduled_tasks.lock

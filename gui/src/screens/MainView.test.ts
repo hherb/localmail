@@ -51,6 +51,19 @@ const tauriMocks = vi.hoisted(() => ({
 
 vi.mock("../lib/tauri", () => tauriMocks);
 
+// MainView mounts AdminView, whose Accounts panel fetches on mount. Without
+// this the panel would reach the real invoke() bridge, which is absent here.
+const adminAccountsMocks = vi.hoisted(() => ({
+  listAdminAccounts: vi.fn(async () => []),
+  updateAdminAccount: vi.fn(),
+  deleteAdminAccount: vi.fn(),
+  getAdminAccount: vi.fn(),
+  createAdminAccount: vi.fn(),
+  storeAdminAccountPassword: vi.fn(),
+  testAdminAccountConnection: vi.fn(),
+}));
+vi.mock("../lib/api/admin_accounts", () => adminAccountsMocks);
+
 const apiMocks = vi.hoisted(() => ({
   getChanges: vi.fn(async () => ({ new_messages: [], next_cursor: null })),
   getVersion: vi.fn(async () => ({

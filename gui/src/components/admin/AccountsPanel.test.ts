@@ -69,6 +69,17 @@ describe("AccountsPanel", () => {
     });
   });
 
+  it("shows the error state when the command resolves to a non-array", async () => {
+    // A bridge that is not wired up (no Tauri host) resolves undefined rather
+    // than rejecting. The panel must surface that, not crash on rows.length.
+    api.listAdminAccounts.mockResolvedValueOnce(undefined);
+    const { container } = render(AccountsPanel);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="accounts-error"]')).toBeTruthy();
+    });
+    expect(container.querySelector('[data-testid="accounts-empty"]')).toBeFalsy();
+  });
+
   it("toggles sync_enabled through updateAdminAccount", async () => {
     const { container } = render(AccountsPanel);
     await waitFor(() => {

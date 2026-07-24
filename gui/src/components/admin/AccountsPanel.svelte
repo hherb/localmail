@@ -45,7 +45,14 @@
     loading = true;
     errorMessage = null;
     try {
-      rows = await listAdminAccounts();
+      // An unwired bridge resolves undefined instead of rejecting; treat any
+      // non-array as a failure so it reaches the error state rather than
+      // crashing the template.
+      const result = await listAdminAccounts();
+      if (!Array.isArray(result)) {
+        throw new Error("unexpected response from list_admin_accounts_cmd");
+      }
+      rows = result;
     } catch (err: unknown) {
       errorMessage = formatError(err);
     } finally {
@@ -109,7 +116,11 @@
   {#if loading}
     <p data-testid="accounts-loading">Loading accounts…</p>
   {:else if rows.length === 0}
-    <p data-testid="accounts-empty">No accounts configured yet.</p>
+    <!-- Only claim the archive is empty when the load actually succeeded;
+         otherwise the error above is the whole story. -->
+    {#if errorMessage === null}
+      <p data-testid="accounts-empty">No accounts configured yet.</p>
+    {/if}
   {:else}
     <table>
       <thead>

@@ -42,9 +42,11 @@
     <header class="page-header">
       <div class="eyebrow">Step 3 of 3 · Getting started</div>
       <h1>Add email accounts</h1>
-      <p class="lede">Tell localmail which mailboxes to mirror. Each account
-      is one entry in <code>config.toml</code> plus one credential stored in
-      the OS keyring. The recipes below cover the major providers.</p>
+      <p class="lede">Tell localmail which mailboxes to mirror. Each account is
+      a row in the <strong>database</strong> — seeded from a
+      <code>config.toml</code> block or created point-and-click in the
+      <a href="../admin/index.html">admin web UI</a> — plus one credential
+      stored in the OS keyring. The recipes below cover the major providers.</p>
     </header>
 
     <div class="provider-strip">
@@ -58,11 +60,30 @@
     </div>
 
     <h2>How accounts are defined</h2>
-    <p>Every account is an <code>[[accounts]]</code> array entry. The
-    <code>name</code> is what you'll use everywhere on the CLI (it's also
-    the keyring identifier). The <code>auth_method</code> is either
-    <code>"password"</code> (anything with an app password or plain IMAP
-    password) or <code>"oauth2"</code> (currently Gmail only).</p>
+    <p>The <strong>database is the single source of truth</strong> for account
+    configuration. There are two ways to get an account into it:</p>
+    <ul>
+      <li><strong>config.toml + CLI</strong> (the recipes on this page). You
+        declare an <code>[[accounts]]</code> block, then run
+        <code>localmail init-db</code> (which seeds the row) or
+        <code>localmail add-account NAME</code> /
+        <code>localmail oauth-login NAME</code> (which seed the row from the
+        block on first use if it isn't in the database yet).</li>
+      <li><strong>The <a href="../admin/index.html">admin web UI</a></strong> —
+        create, edit, and delete accounts entirely from a browser, no
+        <code>config.toml</code> required.</li>
+    </ul>
+    <p>Seeding is <strong>one-directional and idempotent</strong>: TOML fills an
+    empty database, but once a row exists the database wins — editing the TOML
+    block afterwards logs a warning and changes nothing. Edit live accounts in
+    the admin UI or with the account CLI commands, not by re-running
+    <code>init-db</code>.</p>
+
+    <p>Each <code>[[accounts]]</code> block needs a <code>name</code> (your
+    handle for it everywhere on the CLI, and the keyring identifier) and an
+    <code>auth_method</code> — either <code>"password"</code> (anything with an
+    app password or plain IMAP password) or <code>"oauth2"</code> (currently
+    Gmail only):</p>
 
     <pre><code>[[accounts]]
 name        = "work-fastmail"        # used on the CLI: localmail add-account work-fastmail
@@ -75,15 +96,27 @@ auth_method = "password"             # or "oauth2"
 # folder_deny       = ["Drafts"]
 # folder_deny_flags = ["\\Trash", "\\Junk", "\\All"]</code></pre>
 
-    <p>Add as many <code>[[accounts]]</code> entries as you like. Each one
-    runs in its own pair of daemon threads, so accounts don't block each
-    other.</p>
+    <p>Add as many <code>[[accounts]]</code> entries as you like. Each live
+    account runs in its own pair of daemon threads, so accounts don't block
+    each other. You can pause an account at any time with
+    <code>localmail disable-account NAME</code> (and resume with
+    <code>enable-account</code>) — it stays in the database but is skipped by
+    the daemon and one-shot sync.</p>
+
+    <div class="callout tip">
+      <span class="label">A third auth method: <code>archive</code></span>
+      <p>Accounts with <code>auth_method = "archive"</code> have no IMAP host and
+      are never synced — they're holding places for
+      <a href="../imports/index.html">imported mbox / Maildir mail</a>. You
+      can't declare one in a TOML block; create it in the admin UI (or it's
+      created for you by the import flow).</p>
+    </div>
 
     <div class="callout">
       <span class="label">After every edit</span>
-      <p>Run <code>localmail list-accounts</code> to confirm localmail
-      sees the new entry and whether a credential is stored. It's a quick
-      sanity check.</p>
+      <p>Run <code>localmail list-accounts</code> to confirm localmail sees the
+      account and whether a credential (password or OAuth refresh token) is
+      stored. It's a quick sanity check.</p>
     </div>
 
     <hr>
@@ -169,6 +202,18 @@ folder_deny_flags = ["\\Trash", "\\Junk", "\\All"]</code></pre>
         access tokens automatically — no further interaction needed unless
         you revoke access at
         <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</p>
+
+        <div class="callout">
+          <span class="label">Prefer a browser?</span>
+          <p>The <a href="../admin/index.html">admin web UI</a> has a
+          <strong>Connect Gmail</strong> button that runs the same consent flow
+          from the account editor — handy when the server is remote and you
+          can't run <code>oauth-login</code> on its shell. It needs
+          <code>[serve].state_signing_key</code> and
+          <code>[serve].oauth_callback_url</code> set (a redirect URI you also
+          register in the Google Cloud console). The CLI flow above needs
+          neither.</p>
+        </div>
       </li>
 
       <li>
@@ -303,11 +348,18 @@ name        = "proton"
 email       = "you@proton.me"
 imap_host   = "127.0.0.1"
 imap_port   = 1143               # use the port Bridge shows you
-auth_method = "password"
-# Bridge presents a self-signed TLS cert. Bridge installs its root
-# into the OS trust store; if STARTTLS verification still fails on
-# your system, set:
-# ssl_verify = false</code></pre>
+auth_method = "password"</code></pre>
+
+        <div class="callout warn">
+          <span class="label">Bridge must use SSL, and its cert must be trusted</span>
+          <p>localmail always connects over <strong>implicit TLS and verifies
+          the server certificate</strong> — there is no plaintext, STARTTLS, or
+          "skip verification" option. Set Bridge's IMAP connection security to
+          <strong>SSL</strong> (not STARTTLS), and install the certificate
+          Bridge presents into your OS trust store — Bridge can export it from
+          its settings. Without that, verification fails and the connection is
+          refused.</p>
+        </div>
       </li>
 
       <li>
@@ -383,15 +435,21 @@ auth_method = "password"</code></pre>
 name        = "self-hosted"
 email       = "you@yourdomain.com"
 imap_host   = "mail.yourdomain.com"
-imap_port   = 993                  # 143 with STARTTLS also supported
-auth_method = "password"
-
-# Optional knobs:
-# starttls   = true                # for port 143
-# ssl_verify = false               # if your server uses a self-signed cert</code></pre>
+imap_port   = 993
+auth_method = "password"</code></pre>
 
     <p>Then:</p>
     <pre><code>localmail add-account self-hosted</code></pre>
+
+    <div class="callout">
+      <span class="label">TLS is mandatory and verified</span>
+      <p>localmail connects over <strong>implicit TLS</strong> only (the port
+      <code>993</code> style, TLS from the first byte) and <strong>verifies the
+      server certificate</strong>. There is no STARTTLS (port <code>143</code>)
+      support and no config knob to skip verification. If your server uses a
+      self-signed certificate, add its CA to your operating system's trust store
+      so verification passes.</p>
+    </div>
 
     <hr>
 
@@ -443,8 +501,10 @@ auth_method = "password"
       interface you'd like to start with: the
       <a href="../daemon/index.html">daemon</a> for an always-on mirror,
       the <a href="../cli-use/index.html">CLI</a> for scripted sync and
-      search, or the <a href="../desktop-app/index.html">desktop app</a>
-      for a window to read your archive.</p>
+      search, the <a href="../admin/index.html">admin web UI</a> to manage
+      accounts and users from a browser, or the
+      <a href="../desktop-app/index.html">desktop app</a> for a window to read
+      your archive.</p>
     </div>
 
     <div class="page-nav">

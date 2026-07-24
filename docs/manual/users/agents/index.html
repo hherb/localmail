@@ -109,6 +109,20 @@ Header: Authorization: Bearer &lt;token&gt;</code></pre>
       </li>
     </ol>
 
+    <div class="callout">
+      <span class="label">Optional: browser self-onboarding (OAuth 2.1)</span>
+      <p>The steps above hand the client a bearer token you obtained yourself —
+      the simplest path, and all most clients need. For spec-strict MCP clients
+      that expect to self-onboard, localmail can also act as an OAuth 2.1
+      <strong>authorization server</strong>: the client sends the user through a
+      browser login + consent screen and receives its own token, no
+      hand-pasting. It's opt-in — set
+      <code>[mcp].authorization_server_enabled = true</code> (which also
+      requires <code>[serve].state_signing_key</code>). Either way the token is
+      still scoped to the user's per-account grants, and access stays
+      read-only.</p>
+    </div>
+
     <h2>What the agent can do</h2>
     <p>Five read-only, ACL-scoped tools:</p>
     <table>

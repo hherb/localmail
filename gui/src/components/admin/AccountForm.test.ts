@@ -147,4 +147,38 @@ describe("AccountForm", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(api.createAdminAccount).not.toHaveBeenCalled();
   });
+
+  it("locks the auth method on edit — the transition dead-ends server-side", async () => {
+    const { container } = render(AccountForm, {
+      props: { accountId: "5", onSaved: vi.fn(), onCancel: vi.fn() },
+    });
+    await waitFor(() =>
+      expect(field(container, "field-auth-method").disabled).toBe(true),
+    );
+    expect(
+      container.querySelector('[data-testid="auth-method-locked"]'),
+    ).toBeTruthy();
+  });
+
+  it("rejects a non-numeric port instead of silently dropping it", async () => {
+    const { container } = render(AccountForm, {
+      props: { accountId: null, onSaved: vi.fn(), onCancel: vi.fn() },
+    });
+    await fireEvent.input(field(container, "field-name"), { target: { value: "x" } });
+    await fireEvent.input(field(container, "field-email"), {
+      target: { value: "x@y.z" },
+    });
+    await fireEvent.input(field(container, "field-imap-host"), {
+      target: { value: "imap.e.rk" },
+    });
+    await fireEvent.input(field(container, "field-imap-port"), {
+      target: { value: "not-a-port" },
+    });
+    await submit(container);
+    await waitFor(() => {
+      const err = container.querySelector('[data-testid="account-form-error"]');
+      expect(err?.textContent).toContain("whole number");
+    });
+    expect(api.createAdminAccount).not.toHaveBeenCalled();
+  });
 });

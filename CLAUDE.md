@@ -1414,8 +1414,13 @@ phase 1 (backend bearer auth) shipped in PR #203, phases 2+3 (frontend shell
   column**. Pinned by
   `patch_update_omits_unset_fields_entirely`. `AccountForm` mirrors this on
   the TS side — it diffs against the loaded row and sends only changed keys,
-  which is why a cleared IMAP port cannot be sent (switch the account to
-  `archive` instead).
+  which is why a cleared IMAP port cannot be sent. For the same reason
+  **`auth_method` is locked on edit** (the selector is `disabled`): every
+  transition dead-ends under omit-unset — `→ oauth2` needs an `oauth_provider`
+  the web consent flow supplies, and `→ archive` needs `imap_host`/`imap_port`
+  nulled, which omit-unset can't express. Changing an account's auth method
+  means recreating it. A non-numeric port is rejected inline (not silently
+  dropped). Folder-filter editing is not yet in the form (issue #206).
 - **Pure modules** (project convention — logic out of components):
   `lib/admin_error.ts` (`httpStatusOf`/`isConflict`/`isForbidden`, a
   depth-bounded walk of the nested `{kind, detail}` Rust error shape, so the

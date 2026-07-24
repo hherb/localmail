@@ -1383,23 +1383,50 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`
   client isn't installed).
 
-## Desktop GUI admin mode (`gui/`, phases 2+3 shipped)
+## Desktop GUI admin mode (`gui/`, phases 2+3+4 shipped)
 
 The Tauri 2 + Svelte 5 client gained an operator/admin mode gated on
 `is_admin`. Design:
 [docs/superpowers/specs/2026-07-23-admin-mode-tauri-gui-design.md](docs/superpowers/specs/2026-07-23-admin-mode-tauri-gui-design.md);
 phase 1 (backend bearer auth) shipped in PR #203, phases 2+3 (frontend shell
 + Accounts panel) in the plan
-[docs/superpowers/plans/2026-07-24-admin-mode-gui-phase2-3.md](docs/superpowers/plans/2026-07-24-admin-mode-gui-phase2-3.md).
-**No Python changed** for phases 2+3 — the whole surface rides the existing
-`/v1/admin/accounts*` JSON API.
+[docs/superpowers/plans/2026-07-24-admin-mode-gui-phase2-3.md](docs/superpowers/plans/2026-07-24-admin-mode-gui-phase2-3.md),
+phase 4 (Daemon panel) as a follow-up slice. **No Python changed** for phases
+2+3+4 — the whole surface rides the existing `/v1/admin/accounts*` and
+`/v1/admin/daemon*` JSON APIs (all bearer-capable via `require_admin()`; CSRF
+is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
 
 - **`is_admin` on the wire.** Rust `WhoamiResponse` carries it with
   `#[serde(default)]`, so a `serve` predating #203 still logs in (falls back
   to `false`) instead of failing to decode. The auth store's `logged_in`
   snapshot exposes `isAdmin`; MainView renders the Admin button from it.
   `screens/AdminView.svelte` is the tabbed overlay (Accounts / Daemon /
-  Users / Imports); only Accounts is implemented, the rest are placeholders.
+  Users / Imports); Accounts and Daemon are implemented, Users and Imports
+  are placeholders.
+- **Daemon panel (phase 4).** `components/admin/DaemonPanel.svelte` fetches the
+  fused `GET /v1/admin/daemon` view (process state + `daemon_heartbeats` +
+  recent log) and self-refreshes every `POLL_INTERVAL_MS = 2000` (mirrors the
+  web panel's `DAEMON_PANEL_POLL_SECONDS = 2`); the interval is cleared in
+  `onDestroy`. Rust proxies live in
+  [gui/src-tauri/src/commands/admin/daemon.rs](gui/src-tauri/src/commands/admin/daemon.rs)
+  (`daemon_tests.rs` split out) — `get_admin_daemon` (GET), `lifecycle_admin_daemon`
+  (POST `/daemon/{start,stop,restart}`, decodes the **202** transitional status),
+  `reload_admin_daemon` + `restart_account_sync` (POST, decode `{command_id}`).
+  TS wrapper [gui/src/lib/api/admin_daemon.ts](gui/src/lib/api/admin_daemon.ts).
+  **Staleness is the server's per-heartbeat `stale` flag alone — never a client
+  clock** (matches the web panel + #148); stale rows render red. **Lifecycle
+  (start/stop/restart) buttons are disabled when
+  `supervise_daemon_externally`** (the launchd deployment), while reload +
+  per-account restart-sync stay enabled — those are DB-mediated (Plane A) and
+  work regardless of who owns the process. A rejected control (busy-guard /
+  external-stub **409**, mapped by `isConflict`) surfaces as a visible
+  `daemon-action-message`, never an inert button. The per-account restart-sync
+  dedup (idle+poll workers → one button) is the pure, unit-tested
+  [gui/src/lib/daemon_view.ts](gui/src/lib/daemon_view.ts)`::restartSyncAccountIds`.
+  **CI-trap note:** any admin panel that fetches on mount MUST be stubbed in
+  `AdminView.test.ts` **and** `MainView.test.ts` (both mount the overlay) or an
+  unhandled promise rejection leaks while vitest still reports "passed" (the
+  bug PR #205 caught post-push).
 - **Rust proxies** live in
   [gui/src-tauri/src/commands/admin/accounts.rs](gui/src-tauri/src/commands/admin/accounts.rs)
   (tests split into `accounts_tests.rs` via `#[cfg(test)] #[path = …]` to keep

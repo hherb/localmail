@@ -3,3 +3,4 @@
 //! the token user's `is_admin` flag (403 otherwise).
 
 pub mod accounts;
+pub mod daemon;

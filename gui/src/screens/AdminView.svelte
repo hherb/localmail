@@ -5,10 +5,11 @@
    * two overlays behave identically. Each tab body renders only when
    * active, keeping the DOM small and tab assertions trivial.
    *
-   * Only the Accounts panel is implemented; the remaining three are
+   * Accounts and Daemon panels are implemented; Users and Imports remain
    * placeholders until their own phases land.
    */
   import AccountsPanel from "../components/admin/AccountsPanel.svelte";
+  import DaemonPanel from "../components/admin/DaemonPanel.svelte";
 
   type Tab = "accounts" | "daemon" | "users" | "imports";
 
@@ -63,7 +64,7 @@
           <AccountsPanel />
         {/if}
         {#if tab === "daemon"}
-          <p class="placeholder">Daemon control is not available in this build yet.</p>
+          <DaemonPanel />
         {/if}
         {#if tab === "users"}
           <p class="placeholder">User management is not available in this build yet.</p>

@@ -64,6 +64,25 @@ const adminAccountsMocks = vi.hoisted(() => ({
 }));
 vi.mock("../lib/api/admin_accounts", () => adminAccountsMocks);
 
+// AdminView also mounts DaemonPanel (on its tab), which fetches on mount.
+// Stubbed here so navigating there never reaches the absent invoke() bridge.
+const adminDaemonMocks = vi.hoisted(() => ({
+  getAdminDaemon: vi.fn(async () => ({
+    state: "external",
+    pid: null,
+    started_at: null,
+    supervise_daemon_externally: true,
+    heartbeats: [],
+    recent_log: [],
+  })),
+  startAdminDaemon: vi.fn(),
+  stopAdminDaemon: vi.fn(),
+  restartAdminDaemon: vi.fn(),
+  reloadAdminDaemon: vi.fn(),
+  restartAccountSync: vi.fn(),
+}));
+vi.mock("../lib/api/admin_daemon", () => adminDaemonMocks);
+
 const apiMocks = vi.hoisted(() => ({
   getChanges: vi.fn(async () => ({ new_messages: [], next_cursor: null })),
   getVersion: vi.fn(async () => ({

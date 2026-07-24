@@ -1,4 +1,4 @@
-import { fireEvent, render } from "@testing-library/svelte";
+import { fireEvent, render, waitFor } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 
 // AccountsPanel fetches on mount, so the admin API module is stubbed here.
@@ -12,6 +12,24 @@ const api = vi.hoisted(() => ({
   testAdminAccountConnection: vi.fn(),
 }));
 vi.mock("../lib/api/admin_accounts", () => api);
+
+// DaemonPanel likewise fetches on mount when its tab is activated.
+const daemonApi = vi.hoisted(() => ({
+  getAdminDaemon: vi.fn(async () => ({
+    state: "external",
+    pid: null,
+    started_at: null,
+    supervise_daemon_externally: true,
+    heartbeats: [],
+    recent_log: [],
+  })),
+  startAdminDaemon: vi.fn(),
+  stopAdminDaemon: vi.fn(),
+  restartAdminDaemon: vi.fn(),
+  reloadAdminDaemon: vi.fn(),
+  restartAccountSync: vi.fn(),
+}));
+vi.mock("../lib/api/admin_daemon", () => daemonApi);
 
 import AdminView from "./AdminView.svelte";
 
@@ -46,6 +64,19 @@ describe("AdminView", () => {
         .querySelector('[data-testid="admin-tab-accounts"]')
         ?.getAttribute("aria-selected"),
     ).toBe("false");
+  });
+
+  it("renders the Daemon panel when the daemon tab is active", async () => {
+    const { container } = render(AdminView, {
+      props: { open: true, onClose: vi.fn() },
+    });
+    await fireEvent.click(
+      container.querySelector('[data-testid="admin-tab-daemon"]') as HTMLButtonElement,
+    );
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="daemon-refresh"]')).toBeTruthy();
+    });
+    expect(daemonApi.getAdminDaemon).toHaveBeenCalled();
   });
 
   it("calls onClose when the close button is clicked", async () => {

@@ -1,11 +1,11 @@
 # NEXT_SESSION.md — localmail handoff
 
 > **Status as of 2026-07-24 UTC (session 6).** Shipped **admin-mode GUI phases
-> 2 + 3** on branch `feat/admin-mode-gui-phase2-3` (8 commits, `2c97298` →
-> `00d80b1`). The desktop app now reveals an **Admin** overlay for `is_admin`
-> users with a working **Accounts panel** (CRUD, pause/resume sync, IMAP
-> password storage, test-connection). **Branch is NOT pushed and has no PR
-> yet** — that is step 0 below.
+> 2 + 3** on branch `feat/admin-mode-gui-phase2-3` (10 commits, `2c97298` →
+> `5631004`), pushed and open as **PR #205**. The desktop app now reveals an
+> **Admin** overlay for `is_admin` users with a working **Accounts panel**
+> (CRUD, pause/resume sync, IMAP password storage, test-connection).
+> **Next step: confirm CI green and merge** — see §0.
 >
 > **Note on the previous handoff:** the NEXT_SESSION.md this session inherited
 > was stale — it described session 3 (PR #201). Two sessions ran after it
@@ -55,6 +55,8 @@ identical pre-branch count (1749).
 | `d6bcd86` | `AccountsPanel` + `AccountForm` (list, sync toggle, CRUD) |
 | `adae918` | per-account credential storage + IMAP test-connection |
 | `00d80b1` | mount Accounts panel in `AdminView`; docs (CLAUDE.md + README.md) |
+| `d40f053` | handoff (NEXT_SESSION.md + `docs/handoffs/` snapshot) |
+| `5631004` | **fix:** panel crashed on a non-array list response; stub the admin API in `MainView.test.ts` |
 
 **New files:** `gui/src-tauri/src/commands/admin/{mod,accounts,accounts_tests}.rs`;
 `gui/src/screens/AdminView.svelte`; `gui/src/components/admin/{AccountsPanel,AccountForm,AccountSecrets}.svelte`;
@@ -81,7 +83,11 @@ identical pre-branch count (1749).
 
 **Verification (all run this session, all green):**
 - `cd gui && npm run check` → **315 files, 0 errors, 0 warnings**
-- `cd gui && npm test` → **360 passed** (43 files; was 316/36 pre-branch)
+- `cd gui && npm test` → **361 passed** (43 files; was 316/36 pre-branch), zero
+  unhandled errors. **NB:** grep the run for the `Errors N error` / "Unhandled
+  Errors" block, not just the `Tests` line — vitest reports an unhandled
+  rejection *and* still says "passed". That is exactly the bug CI caught after
+  the first push (see the `5631004` fix).
 - `cd gui && npm run build` → succeeds
 - `cd gui/src-tauri && cargo test` → **95 passed** (was 79 pre-branch)
 - `uv run --extra mcp --extra extraction pytest -q tests/ --deselect tests/test_daemon_control_socket.py`
@@ -90,12 +96,14 @@ identical pre-branch count (1749).
 
 ## What's next
 
-### 0. **Push the branch and open the PR** *(nothing is on `origin` yet)*
-   **Acceptance:** PR open against `main`, CI green (`python-ci` + the
-   path-filtered `gui-ci`, which *will* run — this branch touches `gui/**`).
+### 0. **Merge PR #205** — CI is green
+   Branch pushed, **PR #205** open. First push's `svelte-check + vitest` job
+   **failed** on the unhandled-error bug; `5631004` fixed it and **all three
+   checks now pass** (`svelte-check + vitest`, `cargo test + clippy` on
+   ubuntu + macos). Just merge.
 ```bash
-git push -u origin feat/admin-mode-gui-phase2-3
-gh pr create --fill   # or write a body from the commit list above
+gh pr checks 205                            # confirm still green
+gh pr merge 205 --squash --delete-branch
 ```
 
 ### 1. **Admin GUI phase 4 — Daemon panel** *(the design's next slice)*
@@ -136,15 +144,19 @@ gh pr create --fill   # or write a body from the commit list above
 ### 4. **(Carried, unrelated) `cargo clippy --all-targets -- -D warnings` fails on `main`**
    `gui/src-tauri/src/commands/search.rs:189` uses `3.14` as a dummy `took_ms`
    in a test → `clippy::approx_constant`. **Pre-existing**, verified not on this
-   branch's diff, and CI gates no clippy step. One-character fix (e.g. `3.5`)
-   whenever someone is in that file.
+   branch's diff. CI **does** gate clippy (`gui-ci.yml`: `cargo clippy --locked
+   -- -D warnings`) but **without `--all-targets`**, so it lints only the
+   lib/bin targets and never sees a `#[cfg(test)]` module — which is why `main`
+   is green. One-character fix (e.g. `3.5`) whenever someone is in that file;
+   adding `--all-targets` to CI would require fixing it first.
 
 ## Open decisions & risks
-1. **Branch unpushed, no PR.** All 8 commits are local only. §0 above.
-2. **`gui-ci` has not run on this work.** Only local checks so far. The branch
-   touches `gui/**`, so `.github/workflows/gui-ci.yml` will run for the first
-   time on push — expect it to exercise `npm ci && npm run check && npm test &&
-   npm run build` plus `cargo check`. Local equivalents are all green.
+1. **PR #205 open, CI green, not yet merged.** §0 above.
+2. **`gui-ci` clippy runs WITHOUT `--all-targets`** (`cargo clippy --locked --
+   -D warnings`), so it lints only lib/bin targets, never a `#[cfg(test)]`
+   module. That is why the pre-existing `search.rs:189` test-lint (§4) does not
+   fail CI. Full job also runs `npm run check && npm test && npm run build` +
+   `cargo test` on ubuntu + macos — all green on `5631004`.
 3. **Admin bearer blast radius** *(carried, tracked as #204)*: a token issued to
    an `is_admin` user is now an admin credential — no per-token scope, and admin
    mutations are not audit-differentiated by auth channel. Deliberate (mirrors
@@ -185,12 +197,12 @@ git push -u origin feat/admin-mode-gui-phase2-3 && gh pr create --fill
 
 # Frontend (MUST be run from gui/ — see risk #7):
 cd gui && npm run check && npm test && npm run build && cd ..
-#   expect: 0 errors / 360 passed / build ok
+#   expect: 0 errors / 361 passed / build ok / NO "Unhandled Errors" block
 
 # Rust:
-cd gui/src-tauri && cargo test && cd ../..
-#   expect: 95 passed
-#   (cargo clippy -D warnings fails on a PRE-EXISTING search.rs lint — see §4)
+cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings && cd ../..
+#   expect: 95 passed, clippy clean (this is the exact CI invocation)
+#   NB: adding --all-targets surfaces a PRE-EXISTING search.rs lint — see §4
 
 # Python (unchanged by this branch; use --extra mcp so MCP/OAuth tests run):
 unset VIRTUAL_ENV && uv run --extra mcp --extra extraction pytest -q tests/ \
@@ -199,7 +211,7 @@ unset VIRTUAL_ENV && uv sync --frozen --extra mcp      # restore CI-matching env
 unset VIRTUAL_ENV && uv run mypy src/localmail         # expect clean, 122 files
 ```
 
-`origin/main` at `0b1a98b`; local branch `feat/admin-mode-gui-phase2-3` at
-`00d80b1`, **8 commits ahead, unpushed**. Latest migration
-`0031_oauth_resource_indicator.sql`; next free slot `0032_*.sql`.
-Dependabot open alerts: **0**.
+`origin/main` at `0b1a98b`; branch `feat/admin-mode-gui-phase2-3` at
+`5631004`, **10 commits ahead, pushed as PR #205 (CI green, awaiting merge)**.
+Latest migration `0031_oauth_resource_indicator.sql`; next free slot
+`0032_*.sql`. Dependabot open alerts: **0**.

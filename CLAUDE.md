@@ -1434,8 +1434,10 @@ phase 1 (backend bearer auth) shipped in PR #203, phases 2+3 (frontend shell
   likewise has a service function but no JSON route.
 - **Pre-existing, unrelated:** `cargo clippy --all-targets -- -D warnings`
   fails on `gui/src-tauri/src/commands/search.rs:189` (`approx_constant`, a
-  `3.14` dummy `took_ms` in a test). It predates this work and is not
-  gated in CI.
+  `3.14` dummy `took_ms` in a test). It predates this work. CI *does* gate
+  clippy (`gui-ci.yml` runs `cargo clippy --locked -- -D warnings`) but
+  **without `--all-targets`**, so `#[cfg(test)]` modules are never linted —
+  hence a green `main`. Use the bare CI invocation when checking locally.
 
 ## Conventions
 

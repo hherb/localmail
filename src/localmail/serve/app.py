@@ -283,12 +283,18 @@ def create_app(
         # the locked-down policy. 'unsafe-inline' on style-src is preserved
         # for /admin/* because htmx injects inline `style="..."` attributes
         # during swaps (display:none transitions, optimistic UI), which a
-        # strict CSP would break. The risk is contained: admin pages are
-        # rendered from Jinja templates we control, not from email bodies.
+        # strict CSP would break. `connect-src 'self'` is REQUIRED: htmx
+        # submits every admin form/button via fetch/XHR, which the browser
+        # governs with connect-src — without it, connect-src falls back to
+        # `default-src 'none'` and the browser blocks the request before it
+        # leaves the page, so Save/Store silently no-op. The risk is
+        # contained: admin pages are rendered from Jinja templates we
+        # control, not from email bodies.
         if request.url.path.startswith("/admin"):
             csp = (
                 "default-src 'none'; img-src 'self' data:; "
                 "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+                "connect-src 'self'; "
                 "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
             )
         elif request.url.path.startswith("/oauth/consent"):

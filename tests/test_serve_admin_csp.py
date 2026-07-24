@@ -30,9 +30,21 @@ def test_admin_login_csp_allows_scripts_styles_forms(client: TestClient) -> None
     assert "form-action 'self'" in csp
 
 
+def test_admin_csp_allows_htmx_xhr_connect_src(client: TestClient) -> None:
+    # htmx submits every admin form/button via fetch/XHR, which the browser
+    # governs with connect-src. Without an explicit connect-src it falls back
+    # to `default-src 'none'` and the browser blocks the request *before it
+    # leaves the page* — Save/Store/etc. silently no-op. Regression guard.
+    r = client.get("/admin/login")
+    csp = r.headers["content-security-policy"]
+    assert "connect-src 'self'" in csp
+
+
 def test_non_admin_route_csp_still_locked_down(client: TestClient) -> None:
     r = client.get("/openapi.json")
     csp = r.headers["content-security-policy"]
     assert "form-action 'none'" in csp
     # script-src must NOT be present (falls back to default-src 'none')
     assert "script-src" not in csp
+    # connect-src is admin-only; other paths stay locked to default-src 'none'
+    assert "connect-src" not in csp

@@ -144,6 +144,20 @@ def test_create_account_validation_error_inline(admin_client):
     )
     assert r.status_code == 400
     assert "imap_port" in r.text
+    # admin-forms.js only swaps a 400 into the form when the body is HTML
+    # (a JSON 400, e.g. a CSRF failure, must NOT be swapped as raw text).
+    # Lock that contract: the inline-error response is an HTML fragment
+    # whose root id matches the form's hx-target.
+    assert r.headers["content-type"].startswith("text/html")
+    assert 'id="account-form-fields"' in r.text
+
+
+def test_admin_pages_load_error_surfacing_script(admin_client):
+    # The client-side handler that makes 400 validation fragments visible must
+    # be loaded on every admin page (via base.html). Without it, htmx drops the
+    # 4xx body and a rejected Save looks like a silent no-op.
+    page = admin_client.get("/admin/accounts/new").text
+    assert "/admin/static/admin-forms.js" in page
 
 
 def test_create_account_missing_csrf_rejected(admin_client):
@@ -152,6 +166,11 @@ def test_create_account_missing_csrf_rejected(admin_client):
         data={"name": "y", "email_address": "y@y.com", "auth_method": "archive"},
     )
     assert r.status_code == 400
+    # The gate in admin-forms.js swaps a 400 into the form ONLY when the body
+    # is text/html; this CSRF rejection must stay JSON so it is NOT swapped in
+    # as raw `{"detail": ...}`. Pin the premise the gate depends on (mirrors
+    # the `indexOf("text/html")` check exactly).
+    assert "text/html" not in r.headers["content-type"]
 
 
 def test_edit_form_prefills(admin_client, db_conn):

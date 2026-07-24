@@ -6,6 +6,7 @@
   <title>{% block title %}localmail admin{% endblock %}</title>
   <link rel="stylesheet" href="/admin/static/admin.css">
   <script src="/admin/static/htmx.min.js" defer></script>
+  <script src="/admin/static/admin-forms.js" defer></script>
 </head>
 <body{% if current_user %} hx-headers='{"X-CSRF-Token": "{{ csrf_token_for("htmx") }}"}'{% endif %}>
   <header class="admin-header">

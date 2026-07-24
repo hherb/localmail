@@ -549,12 +549,22 @@ message-reading, attachment download, and connection / account management.
 See [gui/README.md](gui/README.md) for develop / build instructions.
 
 **Admin mode.** When the logged-in user has `is_admin`, the header shows an
-**Admin** button opening an admin overlay. The Accounts panel manages account
-CRUD, pause/resume sync, IMAP password storage, and test-connection — driven
-over the same bearer token the viewer already uses (no cookie, no CSRF; a
-native client carries no ambient credential). Daemon, Users, and Imports
-panels are not built yet; use the web admin at `/admin/*` for those. Gmail
-**Connect** (OAuth) is likewise still web-only.
+**Admin** button opening an admin overlay, driven over the same bearer token
+the viewer already uses (no cookie, no CSRF; a native client carries no
+ambient credential). Two panels are built:
+
+- **Accounts** — account CRUD, pause/resume sync, IMAP password storage, and
+  test-connection.
+- **Daemon** — a self-refreshing status view (process state, per-worker
+  heartbeats, recent log) plus controls, mirroring the web `/admin/daemon`
+  panel. Reload and per-account restart-sync work regardless of who owns the
+  daemon process; the start/stop/restart lifecycle buttons are disabled when
+  the daemon is supervised externally (launchd / systemd), which is the case
+  under the recommended two-agent deployment. A rejected control (a busy-guard
+  **409**) surfaces as a visible message, never an inert button.
+
+Users and Imports panels are not built yet; use the web admin at `/admin/*`
+for those. Gmail **Connect** (OAuth) is likewise still web-only.
 
 ```bash
 cd gui

@@ -119,4 +119,29 @@ describe("auth store", () => {
     expect(mocks.logoutMock).toHaveBeenCalled();
     expect(auth.snapshot.phase).toBe("logged_out");
   });
+
+  it("carries is_admin from whoami into the logged_in snapshot", async () => {
+    mocks.whoamiMock.mockResolvedValueOnce({
+      username: "root", user_id: "1", is_admin: true,
+    });
+    mocks.getCapabilitiesMock.mockResolvedValueOnce({
+      search: true, attachments: true, attachment_text: true,
+      threading: false, send: false,
+    });
+    await auth.refreshState();
+    const snap = auth.snapshot;
+    expect(snap.phase).toBe("logged_in");
+    expect(snap.phase === "logged_in" && snap.isAdmin).toBe(true);
+  });
+
+  it("defaults isAdmin to false when whoami omits it", async () => {
+    mocks.whoamiMock.mockResolvedValueOnce({ username: "viewer", user_id: "7" });
+    mocks.getCapabilitiesMock.mockResolvedValueOnce({
+      search: true, attachments: true, attachment_text: true,
+      threading: false, send: false,
+    });
+    await auth.refreshState();
+    const snap = auth.snapshot;
+    expect(snap.phase === "logged_in" && snap.isAdmin).toBe(false);
+  });
 });

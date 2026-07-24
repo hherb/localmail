@@ -40,6 +40,7 @@ export type AuthState =
   | {
       phase: "logged_in";
       username: string;
+      isAdmin: boolean;
       capabilities: Capabilities;
       expiresAt?: string;
     };
@@ -75,7 +76,13 @@ class AuthStore {
     try {
       const me = await whoami();
       const caps = await getCapabilities();
-      this.#state = { phase: "logged_in", username: me.username, capabilities: caps };
+      // === true normalises the undefined an older server sends.
+      this.#state = {
+        phase: "logged_in",
+        username: me.username,
+        isAdmin: me.is_admin === true,
+        capabilities: caps,
+      };
     } catch (err: unknown) {
       const kind = (err as { kind?: string } | undefined)?.kind;
       if (kind === "NotConnected") {

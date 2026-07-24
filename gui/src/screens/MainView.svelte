@@ -20,6 +20,7 @@
   import Splitter from "../components/Splitter.svelte";
   import VersionGate from "../components/VersionGate.svelte";
   import SettingsScreen from "./SettingsScreen.svelte";
+  import AdminView from "./AdminView.svelte";
   import {
     DEFAULT_LEFT_WIDTH_PX,
     DEFAULT_MIDDLE_WIDTH_PX,
@@ -36,6 +37,7 @@
 
   let pending: boolean = $state(false);
   let settingsOpen: boolean = $state(false);
+  let adminOpen: boolean = $state(false);
   let widths: PaneWidths = $state(loadInitialWidths());
   let containerWidth: number = $state(
     typeof window !== "undefined" ? window.innerWidth : 1024,
@@ -141,6 +143,15 @@
           <li class="cap" class:on={snap.capabilities.threading}>threading</li>
           <li class="cap" class:on={snap.capabilities.send}>send</li>
         </ul>
+        {#if snap.isAdmin}
+          <button
+            aria-label="Admin"
+            title="Admin"
+            data-testid="open-admin"
+            onclick={() => (adminOpen = true)}
+            disabled={pending}
+          >Admin</button>
+        {/if}
         <button
           aria-label="Settings"
           title="Settings"
@@ -153,6 +164,7 @@
       </div>
     </header>
     <SettingsScreen open={settingsOpen} onClose={() => (settingsOpen = false)} />
+    <AdminView open={adminOpen} onClose={() => (adminOpen = false)} />
     <SearchBar />
     <ActiveFilterChips />
     <main

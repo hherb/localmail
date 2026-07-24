@@ -77,6 +77,7 @@ function forceLoggedIn(): void {
   Object.assign(auth.snapshot, {
     phase: "logged_in",
     username: "test-user",
+    isAdmin: false,
     capabilities: {
       search: false,
       attachments: false,
@@ -85,6 +86,11 @@ function forceLoggedIn(): void {
       send: false,
     },
   });
+}
+
+function forceLoggedInAdmin(): void {
+  forceLoggedIn();
+  Object.assign(auth.snapshot, { isAdmin: true });
 }
 
 beforeEach(() => {
@@ -105,6 +111,28 @@ describe("MainView", () => {
     // VersionGate is mounted unconditionally, but the .app shell only
     // appears when phase === "logged_in".
     expect(container.querySelector(".app")).toBeFalsy();
+  });
+
+  it("hides the Admin button for a non-admin user", () => {
+    forceLoggedIn();
+    const { container } = render(MainView);
+    expect(container.querySelector('[data-testid="open-admin"]')).toBeFalsy();
+  });
+
+  it("shows the Admin button for an admin user", () => {
+    forceLoggedInAdmin();
+    const { container } = render(MainView);
+    expect(container.querySelector('[data-testid="open-admin"]')).toBeTruthy();
+  });
+
+  it("opens the admin overlay when the Admin button is clicked", async () => {
+    forceLoggedInAdmin();
+    const { container } = render(MainView);
+    const btn = container.querySelector(
+      '[data-testid="open-admin"]',
+    ) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    expect(container.querySelector('[data-testid="admin-panel-body"]')).toBeTruthy();
   });
 
   it("renders the three-pane shell with two splitters when logged in", () => {

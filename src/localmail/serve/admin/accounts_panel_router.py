@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
@@ -259,15 +259,12 @@ def sync_toggle(
     )
 
 
-_HTTP_SEE_OTHER = 303
-
-
 @router.post("/accounts/{account_id}/oauth/start")
 def oauth_start(
     account_id: int, request: Request,
     admin: AdminUser = require_admin_session(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
-) -> RedirectResponse:
+) -> Response:
     check_csrf(request, admin, x_csrf_token,
                f"/admin/accounts/{account_id}/oauth/start")
     cfg = request.app.state.serve_config
@@ -290,7 +287,15 @@ def oauth_start(
             raise HTTPException(status_code=400, detail=str(e))
         except oauth_svc.OAuthNotConfigured as e:
             raise HTTPException(status_code=503, detail=str(e))
-    return RedirectResponse(url, status_code=_HTTP_SEE_OTHER)
+    # "Connect Gmail" is an htmx hx-post button: the response is consumed by
+    # XHR, which would follow a bare 3xx *transparently* into a cross-origin
+    # fetch of accounts.google.com — blocked by the /admin CSP
+    # `connect-src 'self'`, so the consent page would never open. HX-Redirect
+    # makes htmx navigate the top-level window (location.href), which is not
+    # governed by connect-src. See test_oauth_start_redirects_to_google.
+    resp = Response(status_code=200)
+    resp.headers["HX-Redirect"] = url
+    return resp
 
 
 @router.post("/accounts/{account_id}/delete", response_class=HTMLResponse)

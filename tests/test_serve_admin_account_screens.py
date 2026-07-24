@@ -442,8 +442,15 @@ def test_oauth_start_redirects_to_google(admin_client, db_conn, monkeypatch):
         lambda conn, account_id, **kw: "https://accounts.google.com/o/oauth2/auth?x=1",
     )
     r = _post_with_token(admin_client, f"/admin/accounts/{aid}/oauth/start")
-    assert r.status_code == 303
-    assert r.headers["location"].startswith("https://accounts.google.com/")
+    # "Connect Gmail" is an htmx hx-post button, so the response is consumed by
+    # XHR. A bare 3xx would be followed *transparently* by the XHR into a
+    # cross-origin fetch of accounts.google.com — which the /admin CSP
+    # `connect-src 'self'` blocks, so the consent page never opens and the
+    # account can never get a refresh token. HX-Redirect makes htmx navigate the
+    # top-level window instead (location.href — not governed by connect-src).
+    assert r.status_code == 200
+    assert r.headers["HX-Redirect"].startswith("https://accounts.google.com/")
+    assert "location" not in r.headers
 
 
 def test_oauth_start_not_configured_is_503(admin_client, db_conn, monkeypatch):

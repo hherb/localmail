@@ -8,6 +8,8 @@
    * Only the Accounts panel is implemented; the remaining three are
    * placeholders until their own phases land.
    */
+  import AccountsPanel from "../components/admin/AccountsPanel.svelte";
+
   type Tab = "accounts" | "daemon" | "users" | "imports";
 
   interface Props {
@@ -58,7 +60,7 @@
       </div>
       <section class="body" role="tabpanel" data-testid="admin-panel-body">
         {#if tab === "accounts"}
-          <p class="placeholder">Accounts panel</p>
+          <AccountsPanel />
         {/if}
         {#if tab === "daemon"}
           <p class="placeholder">Daemon control is not available in this build yet.</p>

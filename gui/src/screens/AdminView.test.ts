@@ -1,6 +1,18 @@
 import { fireEvent, render } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 
+// AccountsPanel fetches on mount, so the admin API module is stubbed here.
+const api = vi.hoisted(() => ({
+  listAdminAccounts: vi.fn(async () => []),
+  updateAdminAccount: vi.fn(),
+  deleteAdminAccount: vi.fn(),
+  getAdminAccount: vi.fn(),
+  createAdminAccount: vi.fn(),
+  storeAdminAccountPassword: vi.fn(),
+  testAdminAccountConnection: vi.fn(),
+}));
+vi.mock("../lib/api/admin_accounts", () => api);
+
 import AdminView from "./AdminView.svelte";
 
 describe("AdminView", () => {

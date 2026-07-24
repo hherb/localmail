@@ -20,6 +20,7 @@
     type AdminAccountPatch,
     type AdminAuthMethod,
   } from "../../lib/api/admin_accounts";
+  import { hasImapEndpoint } from "../../lib/admin_auth_method";
   import { formatError } from "../../lib/format_error";
 
   interface Props {
@@ -41,7 +42,7 @@
   let saving: boolean = $state(false);
 
   const isEdit = $derived(accountId !== null);
-  const needsImap = $derived(authMethod !== "archive");
+  const needsImap = $derived(hasImapEndpoint(authMethod));
 
   onMount(async () => {
     if (accountId === null) return;

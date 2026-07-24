@@ -548,6 +548,14 @@ running `localmail serve` instance over HTTPS and provides search,
 message-reading, attachment download, and connection / account management.
 See [gui/README.md](gui/README.md) for develop / build instructions.
 
+**Admin mode.** When the logged-in user has `is_admin`, the header shows an
+**Admin** button opening an admin overlay. The Accounts panel manages account
+CRUD, pause/resume sync, IMAP password storage, and test-connection — driven
+over the same bearer token the viewer already uses (no cookie, no CSRF; a
+native client carries no ambient credential). Daemon, Users, and Imports
+panels are not built yet; use the web admin at `/admin/*` for those. Gmail
+**Connect** (OAuth) is likewise still web-only.
+
 ```bash
 cd gui
 npm install

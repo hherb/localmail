@@ -13,6 +13,7 @@
     type AdminAuthMethod,
     type ProbedFolder,
   } from "../../lib/api/admin_accounts";
+  import { hasImapEndpoint, usesStoredPassword } from "../../lib/admin_auth_method";
   import { formatError } from "../../lib/format_error";
 
   interface Props {
@@ -27,8 +28,8 @@
   let folders: ProbedFolder[] | null = $state(null);
   let busy: boolean = $state(false);
 
-  const canStorePassword = $derived(authMethod === "password");
-  const canTestConnection = $derived(authMethod !== "archive");
+  const canStorePassword = $derived(usesStoredPassword(authMethod));
+  const canTestConnection = $derived(hasImapEndpoint(authMethod));
 
   async function onStorePassword(): Promise<void> {
     busy = true;

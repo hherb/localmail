@@ -158,7 +158,7 @@
       <h3>Process</h3>
       <p data-testid="daemon-state">
         State: <strong>{view.state}</strong>
-        {#if view.pid}(pid {view.pid}){/if}
+        {#if view.pid != null}(pid {view.pid}){/if}
         {#if view.started_at}— started {view.started_at}{/if}
       </p>
       {#if view.supervise_daemon_externally}
@@ -204,7 +204,10 @@
             </tr>
           </thead>
           <tbody>
-            {#each view.heartbeats as hb, i (i)}
+            <!-- Keyed on the server-unique (worker_kind, account_id) pair
+                 (daemon_heartbeats' two partial unique indexes), so a row keeps
+                 its DOM node across the 2s refresh instead of churning by index. -->
+            {#each view.heartbeats as hb, i (hb.worker_kind + ":" + (hb.account_id ?? ""))}
               <tr class:daemon-stale={hb.stale} data-testid="heartbeat-row-{i}">
                 <td>{hb.worker_kind}</td>
                 <td>{hb.account_id ?? "—"}</td>

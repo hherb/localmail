@@ -160,6 +160,28 @@ describe("DaemonPanel", () => {
     });
   });
 
+  it("keeps the last good view when a background poll fails", async () => {
+    // The mount fetch succeeds; the next (background) poll rejects. A transient
+    // poll failure must surface on the error line without wiping the last good
+    // view — see DaemonPanel.svelte fetchView (catch touches only errorMessage).
+    vi.useFakeTimers();
+    api.getAdminDaemon
+      .mockResolvedValueOnce(view())
+      .mockRejectedValueOnce({
+        kind: "Http",
+        detail: { kind: "HttpStatus", detail: { status: 503, body: "down" } },
+      });
+
+    const { getByTestId } = render(DaemonPanel);
+    await vi.advanceTimersByTimeAsync(0); // resolve the mount fetch
+    expect(getByTestId("daemon-state").textContent).toContain("running");
+
+    await vi.advanceTimersByTimeAsync(2000); // fire one poll interval → rejects
+    expect(getByTestId("daemon-error").textContent).toContain("503");
+    // The last good view is still rendered, not replaced by a spinner/blank.
+    expect(getByTestId("daemon-state").textContent).toContain("running");
+  });
+
   it("does not keep polling after unmount during the initial fetch", async () => {
     // If the panel is unmounted while the very first getAdminDaemon() is still
     // in flight, onDestroy runs before the poll interval is assigned. The

@@ -47,6 +47,28 @@ pub struct DaemonView {
     pub recent_log: Vec<String>,
 }
 
+/// The three supervisor lifecycle operations. Deserialised at the Tauri command
+/// boundary, so an unknown op is rejected before any request is built — the URL
+/// path segment can only ever be one of these three (self-enforcing contract,
+/// mirroring the TS `LifecycleOp` union).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleOp {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl LifecycleOp {
+    fn as_str(&self) -> &'static str {
+        match self {
+            LifecycleOp::Start => "start",
+            LifecycleOp::Stop => "stop",
+            LifecycleOp::Restart => "restart",
+        }
+    }
+}
+
 /// The transitional supervisor status returned (202) by a lifecycle POST.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct DaemonStatus {
@@ -111,11 +133,11 @@ pub async fn get_admin_daemon(store: &KeyringStore) -> Result<DaemonView, AuthEr
 
 pub async fn lifecycle_admin_daemon(
     store: &KeyringStore,
-    op: &str,
+    op: LifecycleOp,
 ) -> Result<DaemonStatus, AuthError> {
     let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
-    post_lifecycle(&client, &url, &token, op).await
+    post_lifecycle(&client, &url, &token, op.as_str()).await
 }
 
 pub async fn reload_admin_daemon(store: &KeyringStore) -> Result<CommandAck, AuthError> {
@@ -140,9 +162,9 @@ pub async fn get_admin_daemon_cmd() -> Result<DaemonView, AuthError> {
 }
 
 #[tauri::command]
-pub async fn lifecycle_admin_daemon_cmd(op: String) -> Result<DaemonStatus, AuthError> {
+pub async fn lifecycle_admin_daemon_cmd(op: LifecycleOp) -> Result<DaemonStatus, AuthError> {
     let store = KeyringStore::new();
-    lifecycle_admin_daemon(&store, &op).await
+    lifecycle_admin_daemon(&store, op).await
 }
 
 #[tauri::command]

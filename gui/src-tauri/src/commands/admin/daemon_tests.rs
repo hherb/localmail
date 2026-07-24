@@ -181,3 +181,24 @@ async fn fetch_without_token_returns_not_logged_in() {
     let err = get_admin_daemon(&store).await.unwrap_err();
     assert!(matches!(err, AuthError::NotLoggedIn));
 }
+
+#[test]
+fn lifecycle_op_accepts_the_three_ops_and_rejects_anything_else() {
+    // Deserialised at the command boundary, so an unknown op can never reach
+    // the URL path — a request for it is never built.
+    assert!(matches!(
+        serde_json::from_str::<LifecycleOp>("\"start\"").unwrap(),
+        LifecycleOp::Start
+    ));
+    assert!(matches!(
+        serde_json::from_str::<LifecycleOp>("\"stop\"").unwrap(),
+        LifecycleOp::Stop
+    ));
+    assert!(matches!(
+        serde_json::from_str::<LifecycleOp>("\"restart\"").unwrap(),
+        LifecycleOp::Restart
+    ));
+    assert!(serde_json::from_str::<LifecycleOp>("\"reload\"").is_err());
+    assert!(serde_json::from_str::<LifecycleOp>("\"START\"").is_err());
+    assert!(serde_json::from_str::<LifecycleOp>("\"\"").is_err());
+}

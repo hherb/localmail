@@ -128,6 +128,21 @@ describe("AccountsPanel", () => {
     await waitFor(() => expect(api.getAdminAccount).toHaveBeenCalledWith("1"));
   });
 
+  it("expands the credentials row for a password account", async () => {
+    const { container } = render(AccountsPanel);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="open-secrets-1"]')).toBeTruthy();
+    });
+    await fireEvent.click(
+      container.querySelector('[data-testid="open-secrets-1"]') as HTMLButtonElement,
+    );
+    await waitFor(() => {
+      expect(
+        container.querySelector('[data-testid="secrets-test-connection"]'),
+      ).toBeTruthy();
+    });
+  });
+
   it("offers a force-delete confirmation on 409 and retries with force", async () => {
     api.deleteAdminAccount.mockRejectedValueOnce({
       kind: "Http",

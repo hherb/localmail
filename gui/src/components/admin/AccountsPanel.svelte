@@ -17,6 +17,7 @@
   import { isConflict } from "../../lib/admin_error";
   import { formatError } from "../../lib/format_error";
   import AccountForm from "./AccountForm.svelte";
+  import AccountSecrets from "./AccountSecrets.svelte";
 
   let rows: AdminAccountSummary[] = $state([]);
   let loading: boolean = $state(true);
@@ -26,6 +27,7 @@
   let forceDeleteReason: string | null = $state(null);
   let formOpen: boolean = $state(false);
   let editingId: string | null = $state(null);
+  let secretsId: string | null = $state(null);
 
   onMount(load);
 
@@ -134,6 +136,10 @@
             </td>
             <td>
               <button
+                data-testid="open-secrets-{row.id}"
+                onclick={() => (secretsId = secretsId === row.id ? null : row.id)}
+              >Credentials</button>
+              <button
                 data-testid="edit-account-{row.id}"
                 onclick={() => openForm(row.id)}
                 disabled={busyId === row.id}
@@ -157,6 +163,13 @@
                   disabled={busyId === row.id}
                 >Delete anyway (removes its messages)</button>
                 <button onclick={() => (forceDeleteId = null)}>Cancel</button>
+              </td>
+            </tr>
+          {/if}
+          {#if secretsId === row.id}
+            <tr class="secrets-row">
+              <td colspan="5">
+                <AccountSecrets accountId={row.id} authMethod={row.auth_method} />
               </td>
             </tr>
           {/if}
@@ -196,6 +209,9 @@
   }
   .confirm-row td {
     background: #fff4f3;
+  }
+  .secrets-row td {
+    background: #f7f9fc;
   }
   .confirm-text {
     margin-right: 0.75rem;

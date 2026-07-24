@@ -2,6 +2,7 @@
 //! registers them all via `tauri::generate_handler!`.
 
 pub mod accounts;
+pub mod admin;
 pub mod attachments;
 pub mod auth;
 pub mod auth_change_password;

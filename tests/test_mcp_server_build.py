@@ -25,3 +25,19 @@ def test_build_registers_expected_tools(db_dsn):
         "search", "get_message", "get_attachment",
         "list_messages", "list_accounts",
     }
+
+
+def test_build_disables_dns_rebinding_protection(db_dsn):
+    """MCP is served on a network bind, not localhost. The SDK auto-enables a
+    localhost-only DNS-rebinding Host allow-list when transport_security is
+    unset, which rejects every non-localhost client with 421 Misdirected
+    Request. /mcp is bearer-gated and not browser-facing, so it must be turned
+    off. Regression for the network-bind 421."""
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=False)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+    finally:
+        pool.close()
+    security = server.settings.transport_security
+    assert security is not None
+    assert security.enable_dns_rebinding_protection is False

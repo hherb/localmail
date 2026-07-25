@@ -60,6 +60,15 @@ def _build_flow(*, redirect_uri: str, client_secrets_file: Path | None):
             "Gmail OAuth is not configured on this server "
             "(gmail_oauth.client_secrets_file is unset in config.toml)"
         )
+    if not redirect_uri:
+        # An empty redirect_uri would build a consent URL with no redirect_uri
+        # parameter — Google rejects it with an opaque 400 "Missing required
+        # parameter: redirect_uri". Fail loud and actionable here instead.
+        raise OAuthNotConfigured(
+            "Gmail OAuth callback URL is not configured on this server "
+            "(set [serve].oauth_callback_url in config.toml, e.g. "
+            "https://127.0.0.1:8443/admin/oauth/callback)"
+        )
     flow = Flow.from_client_secrets_file(
         client_secrets_file=str(client_secrets_file),
         scopes=_GOOGLE_SCOPES,

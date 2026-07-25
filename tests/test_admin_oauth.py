@@ -103,6 +103,22 @@ def test_start_oauth_raises_oauth_not_configured_when_secrets_missing(db_conn):
                     redirect_uri=CB, client_secrets_file=None)
 
 
+def test_start_oauth_raises_oauth_not_configured_when_callback_url_empty(db_conn):
+    """An unset [serve].oauth_callback_url surfaces as a typed
+    OAuthNotConfigured (clean 503) rather than building a consent URL with no
+    redirect_uri, which Google rejects with an opaque 400 "Missing required
+    parameter: redirect_uri".
+
+    No ``fake_flow`` fixture — the real ``_build_flow`` runs and hits the empty
+    redirect_uri guard (which precedes the Flow build, so SECRETS need not
+    exist).
+    """
+    aid = _make_oauth_account(db_conn)
+    with pytest.raises(OAuthNotConfigured):
+        start_oauth(db_conn, aid, admin_user_id=42, signing_key=KEY,
+                    redirect_uri="", client_secrets_file=SECRETS)
+
+
 def test_complete_oauth_rejects_cross_user_replay(db_conn, fake_flow):
     aid = _make_oauth_account(db_conn)
     url = start_oauth(db_conn, aid, admin_user_id=42,

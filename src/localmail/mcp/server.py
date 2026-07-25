@@ -22,6 +22,7 @@ from mcp.server.auth.settings import (
 )
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 from psycopg_pool import ConnectionPool
 from pydantic import AnyHttpUrl, Field
 
@@ -109,6 +110,15 @@ def build_mcp_server(
         stateless_http=True,
         json_response=True,
         streamable_http_path="/",
+        # localmail serves /mcp on a network bind (see [serve] --bind), but the
+        # SDK auto-enables DNS-rebinding protection with a localhost-only Host
+        # allow-list whenever transport_security is unset. That rejects every
+        # non-localhost client with 421 Misdirected Request. /mcp is gated by a
+        # bearer token and is not browser-facing, so rebinding protection buys
+        # nothing here — disable it so network clients can connect.
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        ),
     )
     if auth_server_provider is not None:
         auth_settings.client_registration_options = ClientRegistrationOptions(

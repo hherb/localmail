@@ -4,6 +4,7 @@
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
 from localmail.config import ServeConfig
@@ -230,6 +231,157 @@ def test_changes_no_cursor_caps_at_default_limit_in_desc_order(
     returned_ids = [int(m["message_id"]) for m in new_messages]
     assert returned_ids == sorted(returned_ids, reverse=True)
     assert returned_ids[0] == seeded_ids[-1]
+
+
+@pytest.fixture
+def _shared_account(db_conn) -> int:
+    """The one test account both `client` and `other_client` are granted.
+
+    Decoupled from `seed_messages` so account grants are in place *before*
+    any messages exist -- required for the "fresh subscription primes at
+    the current (possibly empty) tip" tests below, where a subscription is
+    established via a GET before any mail has been seeded.
+    """
+    return _ensure_account(db_conn)
+
+
+@pytest.fixture
+def other_user(db_conn):
+    """A second api user, distinct from the primary `api_user` (alice)."""
+    from localmail.api.auth import create_user, reset_login_rate_limiter
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
+    uid = create_user(db_conn, "bob", "hunter3")
+    db_conn.commit()
+    return uid
+
+
+@pytest.fixture
+def other_token(db_conn, other_user):
+    from localmail.api.auth import login
+    token, _expires = login(db_conn, "bob", "hunter3")
+    db_conn.commit()
+    return token
+
+
+def _grant(db_conn, user_id: int, account_id: int) -> None:
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_accounts (user_id, account_id) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (user_id, account_id),
+        )
+    db_conn.commit()
+
+
+@pytest.fixture
+def client(db_dsn, db_conn, api_user, api_token, _shared_account):
+    """Authenticated TestClient bound to the primary seeded user (alice),
+    already granted access to the shared test account."""
+    _grant(db_conn, api_user.id, _shared_account)
+    return TestClient(
+        create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG),
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+
+
+@pytest.fixture
+def other_client(db_dsn, db_conn, other_user, other_token, _shared_account):
+    """Authenticated TestClient bound to a second user (bob), also granted
+    access to the shared test account."""
+    _grant(db_conn, other_user, _shared_account)
+    return TestClient(
+        create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG),
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+
+@pytest.fixture
+def seed_messages(db_conn):
+    """Returns a callable that seeds `n` messages on the shared test account
+    and returns their (ascending) message ids."""
+    def _seed(n: int) -> list[int]:
+        now = datetime.now(timezone.utc)
+        ids = [
+            _seed_msg(db_conn, now - timedelta(minutes=(n - i)), f"{i:02x}")
+            for i in range(n)
+        ]
+        db_conn.commit()
+        return ids
+    return _seed
+
+
+def test_subscription_returns_only_unacked_then_advances(client, seed_messages):
+    """A named subscription is a server-side cursor: poll, ack, poll again.
+
+    Establishes the subscription *before* any mail exists -- mirroring the
+    real client lifecycle (subscribe once, then mail arrives) -- so this
+    test doesn't collide with the separate "fresh subscription starts at
+    the tip, not the backlog" rule covered by
+    `test_unknown_subscription_starts_from_tip_not_backlog` below.
+    """
+    client.get("/v1/changes", params={"subscription": "kastellan"})
+
+    ids = seed_messages(3)  # returns ascending message ids
+
+    first = client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert [m["message_id"] for m in first["new_messages"]] == [str(i) for i in ids]
+
+    # Ack only the first message; the next poll must resume from there.
+    r = client.post("/v1/changes/ack",
+                    json={"subscription": "kastellan", "cursor": str(ids[0])})
+    assert r.status_code == 204
+
+    second = client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert [m["message_id"] for m in second["new_messages"]] == [str(i) for i in ids[1:]]
+
+
+def test_ack_never_rewinds(client, seed_messages):
+    """A stale/replayed ack must not resurface already-acked messages."""
+    ids = seed_messages(2)
+    client.post("/v1/changes/ack", json={"subscription": "kastellan", "cursor": str(ids[1])})
+    client.post("/v1/changes/ack", json={"subscription": "kastellan", "cursor": str(ids[0])})
+
+    after = client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert after["new_messages"] == []
+
+
+def test_subscriptions_are_per_user_and_per_name(client, other_client, seed_messages):
+    """One subscription's cursor must not affect another's.
+
+    Primes the sibling subscriptions ("gui" for alice, "kastellan" for bob)
+    before mail exists, for the same reason as
+    `test_subscription_returns_only_unacked_then_advances` above: isolating
+    the ack-scoping behaviour under test from the fresh-subscription
+    tip-start rule.
+    """
+    client.get("/v1/changes", params={"subscription": "gui"})
+    other_client.get("/v1/changes", params={"subscription": "kastellan"})
+
+    ids = seed_messages(2)
+    client.post("/v1/changes/ack", json={"subscription": "kastellan", "cursor": str(ids[1])})
+
+    other_name = client.get("/v1/changes", params={"subscription": "gui"}).json()
+    assert len(other_name["new_messages"]) == 2
+
+    other_user_resp = other_client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert len(other_user_resp["new_messages"]) == 2
+
+
+def test_unknown_subscription_starts_from_tip_not_backlog(client, seed_messages):
+    """A fresh subscription must NOT replay history as if it were new mail."""
+    seed_messages(3)
+    fresh = client.get("/v1/changes", params={"subscription": "brand-new"}).json()
+    assert fresh["new_messages"] == []
+    assert fresh["next_cursor"] != "0"
+
+
+def test_subscription_and_since_mutually_exclusive_400(client) -> None:
+    """Passing both `subscription` and `since` is a 400 -- a caller must not
+    be able to accidentally mix server-side and client-side cursors."""
+    r = client.get("/v1/changes", params={"subscription": "kastellan", "since": "0"})
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
 
 
 def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db_conn) -> None:

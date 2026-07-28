@@ -4,11 +4,13 @@
 """Polling endpoint: messages inserted since a cursor."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 
 from localmail.api.acl import allowed_account_ids
+from localmail.api.errors import ValidationFailed
 from localmail.api.ids import parse_int_id
 from localmail.config import ServeConfig
 from localmail.serve.middleware import get_authenticated_user
@@ -17,11 +19,59 @@ router = APIRouter()
 
 _DEFAULT_LIMIT = 200
 
+_MAX_SUBSCRIPTION_NAME = 64
+_SUBSCRIPTION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _validate_subscription_name(name: object) -> str:
+    """Validate a wire-format subscription name.
+
+    Non-empty, at most `_MAX_SUBSCRIPTION_NAME` chars, `[A-Za-z0-9_-]+` only
+    -- keeps it safe to use as a plain SQL parameter and a log/URL token.
+    """
+    if not isinstance(name, str) or not name or len(name) > _MAX_SUBSCRIPTION_NAME \
+            or not _SUBSCRIPTION_NAME_RE.match(name):
+        raise ValidationFailed(
+            f"subscription must be 1-{_MAX_SUBSCRIPTION_NAME} chars of "
+            f"[A-Za-z0-9_-], got {name!r}"
+        )
+    return name
+
+
+def _subscription_cursor(conn, user_id: int, name: str) -> int | None:
+    """Stored cursor for (user, name); None when the subscription is new."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT cursor FROM channel_subscriptions WHERE user_id = %s AND name = %s",
+            (user_id, name),
+        )
+        row = cur.fetchone()
+    return None if row is None else int(row[0])
+
+
+def _current_tip(conn, allowed: list[int]) -> int:
+    """Highest visible message id -- where a brand-new subscription starts."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE account_id = ANY(%s)",
+            (allowed,),
+        )
+        return int(cur.fetchone()[0])
+
+
+def _create_subscription(conn, user_id: int, name: str, cursor: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO channel_subscriptions (user_id, name, cursor) VALUES (%s, %s, %s)",
+            (user_id, name, cursor),
+        )
+
 
 @router.get("")
 def changes(
     request: Request,
     since: str | None = Query(default=None),
+    subscription: str | None = Query(default=None),
     user=Depends(get_authenticated_user),
 ) -> dict[str, Any]:
     """Return messages whose id > since cursor (or recent if no cursor).
@@ -49,7 +99,21 @@ def changes(
     returned id=N+1 immediately, the client would advance past N and never
     see it. The horizon trades a few seconds of latency for monotonic
     delivery.
+
+    ``subscription=<name>`` is a server-side alternative to ``since``, so a
+    polling client (e.g. kastellan's email channel) can be stateless: poll,
+    process, ``POST /v1/changes/ack``. Mutually exclusive with ``since`` --
+    mixing a server-side and a client-side cursor is rejected with 400. A
+    subscription that has never been acked starts at the *current tip*
+    (this call's response is empty) rather than the backlog, so a client
+    that subscribes for the first time never replays old mail as new. This
+    endpoint never advances a subscription's cursor itself; only
+    ``POST /v1/changes/ack`` does.
     """
+    if subscription is not None and since is not None:
+        raise ValidationFailed("subscription and since are mutually exclusive")
+
+    sub_name = _validate_subscription_name(subscription) if subscription is not None else None
     since_id = None if since is None else parse_int_id(since, field="since cursor")
 
     serve_cfg: ServeConfig = getattr(request.app.state, "serve_config", None) or ServeConfig()
@@ -60,6 +124,22 @@ def changes(
         allowed = allowed_account_ids(conn, user.id)
         if not allowed:
             return {"new_messages": [], "next_cursor": since or "0"}
+
+        if sub_name is not None:
+            stored_cursor = _subscription_cursor(conn, user.id, sub_name)
+            if stored_cursor is None:
+                # Brand-new subscription: start at the tip, not the
+                # backlog -- see the docstring note above.
+                tip = _current_tip(conn, allowed)
+                _create_subscription(conn, user.id, sub_name, tip)
+                conn.commit()
+                return {"new_messages": [], "next_cursor": str(tip)}
+            since_id = stored_cursor
+
+        fallback_cursor = since if since is not None else (
+            str(since_id) if since_id is not None else "0"
+        )
+
         with conn.cursor() as cur:
             if since_id is None:
                 # Initial-load order:
@@ -114,5 +194,35 @@ def changes(
             "account": {"id": str(account_id), "name": account_name},
         })
 
-    next_cursor = str(max_id) if max_id else (since or "0")
+    next_cursor = str(max_id) if max_id else fallback_cursor
     return {"new_messages": new_messages, "next_cursor": next_cursor}
+
+
+@router.post("/ack", status_code=204)
+def ack(
+    request: Request,
+    payload: dict[str, Any],
+    user=Depends(get_authenticated_user),
+) -> Response:
+    """Advance a subscription's cursor. Monotonic: never rewinds.
+
+    Body: ``{"subscription": "<name>", "cursor": "<id>"}``. Creates the
+    subscription row if it doesn't exist yet (a caller may ack before ever
+    polling). ``GREATEST`` keeps the update monotonic, so a stale or
+    replayed ack can never resurface already-processed messages.
+    """
+    name = _validate_subscription_name(payload.get("subscription"))
+    cursor = parse_int_id(str(payload.get("cursor")), field="cursor")
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO channel_subscriptions (user_id, name, cursor)
+                        VALUES (%s, %s, %s)
+                   ON CONFLICT (user_id, name) DO UPDATE
+                        SET cursor = GREATEST(channel_subscriptions.cursor, EXCLUDED.cursor),
+                            updated_at = now()""",
+                (user.id, name, cursor),
+            )
+        conn.commit()
+    return Response(status_code=204)

@@ -7,7 +7,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response, status
+from pydantic import BaseModel
 
 from localmail.api.acl import allowed_account_ids
 from localmail.api.errors import ValidationFailed
@@ -18,6 +19,12 @@ from localmail.serve.middleware import get_authenticated_user
 router = APIRouter()
 
 _DEFAULT_LIMIT = 200
+
+
+class AckRequest(BaseModel):
+    subscription: str
+    cursor: str
+
 
 _MAX_SUBSCRIPTION_NAME = 64
 _SUBSCRIPTION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -49,12 +56,23 @@ def _subscription_cursor(conn, user_id: int, name: str) -> int | None:
     return None if row is None else int(row[0])
 
 
-def _current_tip(conn, allowed: list[int]) -> int:
-    """Highest visible message id -- where a brand-new subscription starts."""
+def _current_tip(conn, allowed: list[int], horizon_s: float) -> int:
+    """Highest visible message id -- where a brand-new subscription starts.
+
+    Applies the same safe-horizon predicate as the `since_id` branch below
+    (`date_received < now() - horizon`). Without it, a message whose insert
+    transaction hasn't committed/cleared the horizon yet could get a lower
+    id than one that already has (commit order != id allocation order); if
+    the tip were the raw MAX(id), a fresh subscription's starting cursor
+    could land *past* that not-yet-visible message, and no later poll would
+    ever return it -- silent, permanent loss, not just delay.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE account_id = ANY(%s)",
-            (allowed,),
+            """SELECT COALESCE(MAX(id), 0) FROM messages
+                WHERE account_id = ANY(%s)
+                  AND date_received < now() - make_interval(secs => %s)""",
+            (allowed, horizon_s),
         )
         return int(cur.fetchone()[0])
 
@@ -130,7 +148,7 @@ def changes(
             if stored_cursor is None:
                 # Brand-new subscription: start at the tip, not the
                 # backlog -- see the docstring note above.
-                tip = _current_tip(conn, allowed)
+                tip = _current_tip(conn, allowed, horizon_s)
                 _create_subscription(conn, user.id, sub_name, tip)
                 conn.commit()
                 return {"new_messages": [], "next_cursor": str(tip)}
@@ -198,10 +216,10 @@ def changes(
     return {"new_messages": new_messages, "next_cursor": next_cursor}
 
 
-@router.post("/ack", status_code=204)
+@router.post("/ack", status_code=status.HTTP_204_NO_CONTENT)
 def ack(
+    body: AckRequest,
     request: Request,
-    payload: dict[str, Any],
     user=Depends(get_authenticated_user),
 ) -> Response:
     """Advance a subscription's cursor. Monotonic: never rewinds.
@@ -211,8 +229,8 @@ def ack(
     polling). ``GREATEST`` keeps the update monotonic, so a stale or
     replayed ack can never resurface already-processed messages.
     """
-    name = _validate_subscription_name(payload.get("subscription"))
-    cursor = parse_int_id(str(payload.get("cursor")), field="cursor")
+    name = _validate_subscription_name(body.subscription)
+    cursor = parse_int_id(body.cursor, field="cursor")
     pool = request.app.state.pool
     with pool.connection() as conn:
         with conn.cursor() as cur:
@@ -225,4 +243,4 @@ def ack(
                 (user.id, name, cursor),
             )
         conn.commit()
-    return Response(status_code=204)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

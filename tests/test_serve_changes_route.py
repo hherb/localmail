@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -382,6 +383,46 @@ def test_subscription_and_since_mutually_exclusive_400(client) -> None:
     r = client.get("/v1/changes", params={"subscription": "kastellan", "since": "0"})
     assert r.status_code == 400
     assert r.headers["content-type"].startswith("application/problem+json")
+
+
+def test_fresh_subscription_tip_respects_safe_horizon(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    """A fresh subscription's starting cursor must not jump past a message
+    that hasn't cleared the safe horizon yet.
+
+    Concurrent sync transactions can commit out of `id` allocation order
+    (see the module docstring). If a brand-new subscription's cursor were
+    the raw `MAX(id)` instead of the horizon-filtered tip, a message still
+    inside the horizon window could get a cursor set at-or-past its own id
+    -- and since the cursor only moves forward via ack, that message would
+    never be returned by any later poll. Silent, permanent loss, not just
+    delay.
+
+    Needs its own (non-zero) horizon, so this uses a standalone `TestClient`
+    rather than the `client` fixture (bound to `_TEST_SERVE_CFG`'s
+    `changes_safe_horizon_s=0`).
+    """
+    horizon_cfg = ServeConfig(changes_safe_horizon_s=1)
+    now = datetime.now(timezone.utc)
+    in_horizon_id = _seed_msg(db_conn, now, "aa")
+    db_conn.commit()
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=horizon_cfg))
+    headers = {"Authorization": f"Bearer {api_token}"}
+
+    # The message is still inside the 1s horizon: the fresh subscription's
+    # cursor must start at 0, not at (or past) `in_horizon_id`. Without the
+    # fix, `next_cursor` would be `str(in_horizon_id)` here.
+    first = c.get("/v1/changes", params={"subscription": "kastellan"}, headers=headers).json()
+    assert first["new_messages"] == []
+    assert first["next_cursor"] == "0"
+
+    # Once the message clears the horizon, the same subscription (cursor
+    # still 0) must deliver it on a later poll -- proving it wasn't lost.
+    time.sleep(1.1)
+    second = c.get("/v1/changes", params={"subscription": "kastellan"}, headers=headers).json()
+    assert [m["message_id"] for m in second["new_messages"]] == [str(in_horizon_id)]
 
 
 def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db_conn) -> None:

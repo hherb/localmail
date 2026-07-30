@@ -446,6 +446,37 @@ call, with or without a `since` cursor). Clients use `/v1/messages`
 for initial mail-list load and history scroll, and `/v1/changes` for
 polling new arrivals.
 
+### Server-side polling cursors
+
+A client that keeps its own `since` cursor re-reads the 200-message tail
+whenever it restarts. That is harmless for a mail UI, but not for a
+consumer that turns each new message into work — it would replay old
+mail. Such a client can stay stateless by letting the server hold the
+cursor:
+
+```
+GET  /v1/changes?subscription=my-agent      → {"new_messages": [...], "next_cursor": "1234"}
+POST /v1/changes/ack  {"subscription": "my-agent", "cursor": "1234"}   → 204
+```
+
+Poll, process, ack. Semantics:
+
+- `subscription` and `since` are **mutually exclusive** (400) — pick a
+  server-side or a client-side cursor, not both.
+- **First use of a name starts at the current tip**, so the first poll
+  returns nothing and a new subscriber never replays history. Poll once
+  at startup to establish the subscription before you need it.
+- Cursors are scoped per api-user *and* per name, and are **only**
+  advanced by an ack — polling never advances them, so a crash between
+  poll and ack redelivers rather than drops.
+- **Acks never rewind.** A stale or replayed ack is a no-op, so retries
+  are safe. For the same reason a cursor past the newest message is
+  rejected (400) instead of silencing the subscription: only ack a
+  `next_cursor` you were actually given.
+- A name is 1–64 chars of `[A-Za-z0-9_-]`, capped at
+  `[serve] max_subscriptions_per_user` (default 32) distinct names per
+  user. Use a small set of stable names, not one per process or run.
+
 `GET /v1/search` supports two cursor flavours, transparently:
 
 - **Pool cursor** (`"<token>:<page>"`) — paged result from the

@@ -5,7 +5,7 @@ import ipaddress
 from pathlib import Path
 
 from cryptography import x509
-from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID
+from cryptography.x509.oid import ExtendedKeyUsageOID
 
 from localmail.serve.tls import (
     cert_fingerprint_sha256_hex,
@@ -18,8 +18,8 @@ def _load(cert_path: Path) -> x509.Certificate:
 
 
 def _san(cert: x509.Certificate) -> x509.SubjectAlternativeName:
-    return cert.extensions.get_extension_for_oid(
-        ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+    return cert.extensions.get_extension_for_class(
+        x509.SubjectAlternativeName
     ).value
 
 
@@ -52,11 +52,12 @@ def test_cert_fingerprint_is_64_hex_chars(tmp_path: Path) -> None:
 
 
 # --- robustness for a fresh WireGuard/IP deployment ----------------------------
-# The kastellan egress proxy re-originates TLS with rustls-webpki, which is
-# stricter than openssl: an IP connection matches only an IPAddress SAN (never a
-# DNSName), and a self-signed CA cert served as the leaf is rejected
-# (CaUsedAsEndEntity). The generated cert must therefore be a non-CA server leaf
-# with correctly-typed SANs.
+# The kastellan egress proxy re-originates TLS with rustls-webpki, which matches
+# an IP connection only against an IPAddress SAN — never a DNSName holding an IP
+# literal. That SAN typing is the behavioural fix. The BasicConstraints / EKU /
+# KeyUsage assertions below pin extensions that were previously absent
+# altogether, so a later edit can't silently drop the explicit server-leaf shape
+# stricter validators want.
 
 
 def test_ip_hostname_becomes_an_ip_san_not_a_dns_san(tmp_path: Path) -> None:
@@ -72,9 +73,7 @@ def test_cert_is_a_non_ca_leaf(tmp_path: Path) -> None:
     cert = tmp_path / "cert.pem"
     key = tmp_path / "key.pem"
     ensure_self_signed_cert(cert_path=cert, key_path=key, hostname="10.0.0.3")
-    bc = _load(cert).extensions.get_extension_for_oid(
-        ExtensionOID.BASIC_CONSTRAINTS
-    ).value
+    bc = _load(cert).extensions.get_extension_for_class(x509.BasicConstraints).value
     assert bc.ca is False
 
 
@@ -82,10 +81,17 @@ def test_cert_has_server_auth_eku(tmp_path: Path) -> None:
     cert = tmp_path / "cert.pem"
     key = tmp_path / "key.pem"
     ensure_self_signed_cert(cert_path=cert, key_path=key, hostname="10.0.0.3")
-    eku = _load(cert).extensions.get_extension_for_oid(
-        ExtensionOID.EXTENDED_KEY_USAGE
-    ).value
+    eku = _load(cert).extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
     assert ExtendedKeyUsageOID.SERVER_AUTH in eku
+
+
+def test_cert_has_digital_signature_key_usage(tmp_path: Path) -> None:
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    ensure_self_signed_cert(cert_path=cert, key_path=key, hostname="10.0.0.3")
+    ku = _load(cert).extensions.get_extension_for_class(x509.KeyUsage).value
+    assert ku.digital_signature is True
+    assert ku.key_cert_sign is False
 
 
 def test_cert_always_covers_loopback_and_keeps_dns_names(tmp_path: Path) -> None:

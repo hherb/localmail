@@ -125,7 +125,7 @@ User-facing config lives at `~/.config/localmail/config.toml` (override with
 Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
 `attachment_blobs`, `attachment_text`, `attachment_chunks`,
 `failed_messages`, `failed_extractions`, `transient_extractions`,
-`api_users`, `api_tokens`,
+`api_users`, `api_tokens`, `channel_subscriptions`,
 `user_accounts`, `schema_migrations`. Migration `0020_accounts_canonical.sql`
 extended `accounts` with `folder_allow`, `folder_deny`, `folder_deny_flags`,
 `sync_enabled`, `updated_at`, lifted the `NOT NULL` constraint from
@@ -1171,6 +1171,55 @@ for the full design.
     `searcher._cache` or `searcher._cfg`. The accessor's `user_id`
     scoping mirrors `continue_page` / `grow_pool` exactly. Tests in
     `tests/test_searcher_pool_metadata.py` enforce.
+- **Server-side subscription cursors on `/v1/changes`**: migration
+  `0032_channel_subscriptions.sql` adds `channel_subscriptions`
+  (one row per `(user_id, name)`, `cursor BIGINT`, FK to
+  `api_users` `ON DELETE CASCADE`). `GET /v1/changes?subscription=<name>`
+  reads the stored cursor instead of a client-supplied `since` (the two
+  are **mutually exclusive**, 400 if both are given);
+  `POST /v1/changes/ack {"subscription","cursor"}` → 204 advances it.
+  Lets a polling client be stateless — poll, process, ack — instead of
+  re-reading the 200-message tail after every restart. Invariants, each
+  with a test in `tests/test_serve_changes_route.py`:
+  - **A fresh subscription primes at the current tip, not the backlog**,
+    so a first-time subscriber never replays old mail as new work.
+    The tip is `_current_tip` — `MAX(id)` **with the same
+    `changes_safe_horizon_s` filter the `since` branch applies**. Using a
+    raw `MAX(id)` here would be a silent permanent-loss bug: a tx that
+    allocated a lower id can commit after one that allocated a higher id,
+    so the cursor could start past a not-yet-visible message that no later
+    poll would ever return. Note the horizon **bounds** this window rather
+    than closing it — `date_received` defaults to the *transaction*
+    timestamp and `sync_mailbox` commits per 50-message batch, so a batch
+    slower than the horizon still races (pre-existing, applies equally to
+    `since`).
+  - **Acks are monotonic** (`GREATEST` in the upsert), so a stale or
+    replayed ack cannot resurface processed messages.
+  - **Creation is atomic.** `_claim_subscription` uses `ON CONFLICT
+    (user_id, name) DO NOTHING RETURNING cursor` and the loser of a race
+    re-reads the winner's cursor. A bare INSERT here raised
+    `UniqueViolation` on two simultaneous first polls, which escaped as a
+    **500** (only `APIError` subclasses reach the problem+json handler).
+  - **An ack past the archive's highest `messages.id` is rejected (400).**
+    Because acks are monotonic there is no API path back, so an
+    out-of-range value (a timestamp, an overflowing BIGINT → a raw
+    `NumericValueOutOfRange` 500) would silence the subscription for good.
+    The bound comes from `_max_message_id`, which is deliberately
+    **global — no ACL, no horizon** — because Postgres rewrites `MAX(id)`
+    on the PK into a one-row `Index Only Scan Backward`. Do not "tighten"
+    it to reuse `_current_tip`: that plan is an index scan over all of the
+    caller's rows, acceptable once per subscription but not on every ack.
+  - **Row growth is capped** at `serve.max_subscriptions_per_user`
+    (default 32) on both the GET and the ack create paths, since a client
+    deriving the name from a UUID would otherwise grow the table without
+    bound. Advisory only — concurrent creates at the cap can overshoot by
+    one; it is a resource guard, not a security boundary.
+
+  Known gaps, filed not fixed: the SQL lives in `serve/routes/changes.py`
+  rather than `api/`, so **MCP tools cannot use subscriptions** (#224); there
+  is no reset/delete endpoint and the first `GET` has a write side effect
+  (#225); and the safe-horizon precondition above is undocumented on the
+  `since` path too (#227).
 
 ## MCP server (search Phase 3)
 
@@ -1481,10 +1530,13 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
 - **DB tests** TRUNCATE before each test (see the `db_conn` / `pool` fixtures).
   Tests must work against the live test DB; never `DROP TABLE`.
 - **No `cur.fetchone()[0]` without `assert row is not None` first** — mypy is
-  enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it.
+  enabled (`[tool.mypy]` in `pyproject.toml`) and will flag it. Note that mypy
+  only catches this when the `conn` parameter is annotated
+  (`conn: psycopg.Connection`); on an unannotated `conn` the cursor is `Any`
+  and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0031_oauth_resource_indicator.sql`; next free slot `0032_*.sql`.
+  Latest is `0032_channel_subscriptions.sql`; next free slot `0033_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

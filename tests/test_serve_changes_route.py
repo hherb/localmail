@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -10,7 +11,11 @@ from fastapi.testclient import TestClient
 
 from localmail.config import ServeConfig
 from localmail.serve.app import create_app
-from localmail.serve.routes.changes import _DEFAULT_LIMIT
+from localmail.serve.routes.changes import (
+    _DEFAULT_LIMIT,
+    _claim_subscription,
+    _subscription_cursor,
+)
 
 # Tests insert + read messages within the same millisecond; the production
 # safe-horizon would mask every just-seeded row. Drop it to 0 so the test
@@ -362,11 +367,12 @@ def test_subscriptions_are_per_user_and_per_name(client, other_client, seed_mess
     ids = seed_messages(2)
     client.post("/v1/changes/ack", json={"subscription": "kastellan", "cursor": str(ids[1])})
 
+    want = [str(i) for i in ids]
     other_name = client.get("/v1/changes", params={"subscription": "gui"}).json()
-    assert len(other_name["new_messages"]) == 2
+    assert [m["message_id"] for m in other_name["new_messages"]] == want
 
     other_user_resp = other_client.get("/v1/changes", params={"subscription": "kastellan"}).json()
-    assert len(other_user_resp["new_messages"]) == 2
+    assert [m["message_id"] for m in other_user_resp["new_messages"]] == want
 
 
 def test_unknown_subscription_starts_from_tip_not_backlog(client, seed_messages):
@@ -383,6 +389,115 @@ def test_subscription_and_since_mutually_exclusive_400(client) -> None:
     r = client.get("/v1/changes", params={"subscription": "kastellan", "since": "0"})
     assert r.status_code == 400
     assert r.headers["content-type"].startswith("application/problem+json")
+
+
+@pytest.mark.parametrize("bad", ["", "a" * 65, "has space", "punc!", "sl/ash", "uniçode"])
+def test_invalid_subscription_name_is_400(client, bad: str) -> None:
+    """The name charset/length guard rejects on both the GET and the ack path."""
+    r = client.get("/v1/changes", params={"subscription": bad})
+    assert r.status_code == 400, r.text
+    assert r.headers["content-type"].startswith("application/problem+json")
+
+    r = client.post("/v1/changes/ack", json={"subscription": bad, "cursor": "0"})
+    assert r.status_code == 400, r.text
+
+
+def test_ack_before_first_poll_creates_the_subscription(client, seed_messages):
+    """The ack docstring promises a caller may ack before ever polling."""
+    ids = seed_messages(3)
+    r = client.post("/v1/changes/ack",
+                    json={"subscription": "ack-first", "cursor": str(ids[1])})
+    assert r.status_code == 204
+
+    after = client.get("/v1/changes", params={"subscription": "ack-first"}).json()
+    assert [m["message_id"] for m in after["new_messages"]] == [str(ids[2])]
+
+
+def test_ack_past_the_highest_message_id_is_400(client, seed_messages):
+    """An out-of-range ack must not be accepted.
+
+    Acks are monotonic, so there is no way to walk one back over the API: a
+    client that sent a timestamp (or a value overflowing BIGINT) would silence
+    the subscription permanently instead of getting an error.
+    """
+    client.get("/v1/changes", params={"subscription": "kastellan"})
+    ids = seed_messages(2)
+
+    for bad in (str(ids[-1] + 1), str(2**63), "9" * 40):
+        r = client.post("/v1/changes/ack",
+                        json={"subscription": "kastellan", "cursor": bad})
+        assert r.status_code == 400, f"cursor={bad}: {r.status_code} {r.text}"
+        assert r.headers["content-type"].startswith("application/problem+json")
+
+    # The rejected acks left the cursor alone, so the mail is still deliverable.
+    still = client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert [m["message_id"] for m in still["new_messages"]] == [str(i) for i in ids]
+
+
+def test_subscription_count_is_capped_per_user(db_dsn, db_conn, api_user, api_token,
+                                               _shared_account):
+    """A client deriving the name from a UUID must not grow the table forever."""
+    _grant(db_conn, api_user.id, _shared_account)
+    c = TestClient(
+        create_app(db_dsn=db_dsn, searcher=None,
+                   serve_config=ServeConfig(changes_safe_horizon_s=0,
+                                            max_subscriptions_per_user=2)),
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert c.get("/v1/changes", params={"subscription": "one"}).status_code == 200
+    assert c.get("/v1/changes", params={"subscription": "two"}).status_code == 200
+
+    r = c.get("/v1/changes", params={"subscription": "three"})
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    # An existing subscription still works past the cap.
+    assert c.get("/v1/changes", params={"subscription": "one"}).status_code == 200
+    assert c.post("/v1/changes/ack",
+                  json={"subscription": "one", "cursor": "0"}).status_code == 204
+    # ...and the ack path is capped too.
+    assert c.post("/v1/changes/ack",
+                  json={"subscription": "four", "cursor": "0"}).status_code == 400
+
+
+def test_concurrent_first_claim_yields_one_winner_not_a_unique_violation(
+    db_dsn: str, db_conn, api_user,
+) -> None:
+    """Two simultaneous first polls of the same new name must not 500.
+
+    Both read no stored cursor and both reach `_claim_subscription`; the
+    `ON CONFLICT DO NOTHING` makes exactly one of them the creator instead of
+    letting the loser raise `UniqueViolation` (which escapes as a 500 -- only
+    `APIError` subclasses reach the problem+json handler).
+
+    Exercised at the helper level with a barrier: driving it through two
+    TestClients could not guarantee the interleaving that triggers it.
+    """
+    results: list[bool] = []
+    errors: list[Exception] = []
+    barrier = threading.Barrier(2)
+
+    def claim() -> None:
+        try:
+            with psycopg.connect(db_dsn) as conn:
+                assert _subscription_cursor(conn, api_user.id, "racy") is None
+                barrier.wait(timeout=10)
+                results.append(_claim_subscription(conn, api_user.id, "racy", 7))
+                conn.commit()
+        except Exception as exc:
+            # Recorded rather than raised: an exception in a worker thread
+            # would not fail the test, and a UniqueViolation here is exactly
+            # the regression being pinned.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert errors == []
+    assert sorted(results) == [False, True]
+    assert _subscription_cursor(db_conn, api_user.id, "racy") == 7
 
 
 def test_fresh_subscription_tip_respects_safe_horizon(

@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import psycopg
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel
 
@@ -30,14 +31,19 @@ _MAX_SUBSCRIPTION_NAME = 64
 _SUBSCRIPTION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def _validate_subscription_name(name: object) -> str:
+def _validate_subscription_name(name: str) -> str:
     """Validate a wire-format subscription name.
 
-    Non-empty, at most `_MAX_SUBSCRIPTION_NAME` chars, `[A-Za-z0-9_-]+` only
-    -- keeps it safe to use as a plain SQL parameter and a log/URL token.
+    Non-empty, at most `_MAX_SUBSCRIPTION_NAME` chars, `[A-Za-z0-9_-]+` only.
+    The charset restriction is about keeping the name a clean log/URL token and
+    bounding the row -- every query below passes it as a bound parameter, so it
+    carries no SQL-injection burden.
     """
-    if not isinstance(name, str) or not name or len(name) > _MAX_SUBSCRIPTION_NAME \
-            or not _SUBSCRIPTION_NAME_RE.match(name):
+    if (
+        not name
+        or len(name) > _MAX_SUBSCRIPTION_NAME
+        or not _SUBSCRIPTION_NAME_RE.match(name)
+    ):
         raise ValidationFailed(
             f"subscription must be 1-{_MAX_SUBSCRIPTION_NAME} chars of "
             f"[A-Za-z0-9_-], got {name!r}"
@@ -45,7 +51,7 @@ def _validate_subscription_name(name: object) -> str:
     return name
 
 
-def _subscription_cursor(conn, user_id: int, name: str) -> int | None:
+def _subscription_cursor(conn: psycopg.Connection, user_id: int, name: str) -> int | None:
     """Stored cursor for (user, name); None when the subscription is new."""
     with conn.cursor() as cur:
         cur.execute(
@@ -56,7 +62,7 @@ def _subscription_cursor(conn, user_id: int, name: str) -> int | None:
     return None if row is None else int(row[0])
 
 
-def _current_tip(conn, allowed: list[int], horizon_s: float) -> int:
+def _current_tip(conn: psycopg.Connection, allowed: list[int], horizon_s: float) -> int:
     """Highest visible message id -- where a brand-new subscription starts.
 
     Applies the same safe-horizon predicate as the `since_id` branch below
@@ -66,6 +72,11 @@ def _current_tip(conn, allowed: list[int], horizon_s: float) -> int:
     the tip were the raw MAX(id), a fresh subscription's starting cursor
     could land *past* that not-yet-visible message, and no later poll would
     ever return it -- silent, permanent loss, not just delay.
+
+    Runs once per subscription lifetime (first poll only). The ACL + horizon
+    predicates make it an index scan over the caller's accounts rather than a
+    one-row backward walk, which is why `_max_message_id` -- on the per-ack
+    path -- deliberately does not reuse it.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -74,14 +85,74 @@ def _current_tip(conn, allowed: list[int], horizon_s: float) -> int:
                   AND date_received < now() - make_interval(secs => %s)""",
             (allowed, horizon_s),
         )
-        return int(cur.fetchone()[0])
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
 
 
-def _create_subscription(conn, user_id: int, name: str, cursor: int) -> None:
+def _max_message_id(conn: psycopg.Connection) -> int:
+    """Upper bound for an acceptable ack cursor.
+
+    Deliberately global -- no ACL and no horizon predicate -- because Postgres
+    rewrites `MAX(id)` on the primary key into a one-row `Index Only Scan
+    Backward`, so this stays O(1) on a path that runs on *every* ack. The
+    ACL-scoped, horizon-filtered `_current_tip` costs an index scan over all of
+    the caller's rows, which is fine once per subscription but not per poll.
+
+    A loose bound is all that's needed: it exists to reject a cursor that could
+    not have come from any response (a timestamp, a Message-Id, an overflowing
+    BIGINT). That case matters because acks are monotonic, so a cursor set past
+    the archive would silence the subscription permanently.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT COALESCE(MAX(id), 0) FROM messages")
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _claim_subscription(
+    conn: psycopg.Connection, user_id: int, name: str, cursor: int
+) -> bool:
+    """Create the subscription row at `cursor`; True when this call created it.
+
+    `ON CONFLICT DO NOTHING RETURNING` makes the create atomic. Two
+    simultaneous first polls of the same new name both read no stored cursor,
+    so both reach here; exactly one inserts and the loser gets no row back
+    (rather than a `UniqueViolation` escaping as a 500) and re-reads the
+    winner's cursor.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO channel_subscriptions (user_id, name, cursor) VALUES (%s, %s, %s)",
+            """INSERT INTO channel_subscriptions (user_id, name, cursor)
+                    VALUES (%s, %s, %s)
+               ON CONFLICT (user_id, name) DO NOTHING
+               RETURNING cursor""",
             (user_id, name, cursor),
+        )
+        return cur.fetchone() is not None
+
+
+def _enforce_subscription_cap(conn: psycopg.Connection, user_id: int, cap: int) -> None:
+    """Bound how many subscription rows one api-user can create.
+
+    Both `GET ?subscription=` and `POST /ack` create a row on first use, so a
+    client that derives the name from a UUID or timestamp would otherwise grow
+    the table without limit. Advisory, not a security boundary: two concurrent
+    creates at `cap - 1` can both pass and leave `cap + 1` rows, which is
+    harmless for a resource guard and not worth a lock.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM channel_subscriptions WHERE user_id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    if int(row[0]) >= cap:
+        raise ValidationFailed(
+            f"subscription limit reached ({cap} per user); ack or reuse an "
+            "existing subscription instead of creating a new name"
         )
 
 
@@ -127,6 +198,9 @@ def changes(
     that subscribes for the first time never replays old mail as new. This
     endpoint never advances a subscription's cursor itself; only
     ``POST /v1/changes/ack`` does.
+
+    First use of a name creates the row, capped at
+    ``serve.max_subscriptions_per_user`` names per api-user (400 past the cap).
     """
     if subscription is not None and since is not None:
         raise ValidationFailed("subscription and since are mutually exclusive")
@@ -138,25 +212,35 @@ def changes(
     horizon_s = serve_cfg.changes_safe_horizon_s
     pool = request.app.state.pool
     new_messages: list[dict[str, Any]] = []
+    # Bound before the connection block so the tail of this function can never
+    # read it unassigned, whatever early returns get added inside.
+    fallback_cursor = since or "0"
     with pool.connection() as conn:
         allowed = allowed_account_ids(conn, user.id)
         if not allowed:
-            return {"new_messages": [], "next_cursor": since or "0"}
+            return {"new_messages": [], "next_cursor": fallback_cursor}
 
         if sub_name is not None:
             stored_cursor = _subscription_cursor(conn, user.id, sub_name)
             if stored_cursor is None:
                 # Brand-new subscription: start at the tip, not the
                 # backlog -- see the docstring note above.
+                _enforce_subscription_cap(
+                    conn, user.id, serve_cfg.max_subscriptions_per_user
+                )
                 tip = _current_tip(conn, allowed, horizon_s)
-                _create_subscription(conn, user.id, sub_name, tip)
+                created = _claim_subscription(conn, user.id, sub_name, tip)
                 conn.commit()
-                return {"new_messages": [], "next_cursor": str(tip)}
+                if created:
+                    return {"new_messages": [], "next_cursor": str(tip)}
+                # A concurrent first poll won the insert; adopt its cursor.
+                stored_cursor = _subscription_cursor(conn, user.id, sub_name)
+                if stored_cursor is None:
+                    stored_cursor = tip
             since_id = stored_cursor
 
-        fallback_cursor = since if since is not None else (
-            str(since_id) if since_id is not None else "0"
-        )
+        if since_id is not None:
+            fallback_cursor = str(since_id)
 
         with conn.cursor() as cur:
             if since_id is None:
@@ -228,11 +312,28 @@ def ack(
     subscription row if it doesn't exist yet (a caller may ack before ever
     polling). ``GREATEST`` keeps the update monotonic, so a stale or
     replayed ack can never resurface already-processed messages.
+
+    A cursor above the archive's highest ``messages.id`` is rejected with 400.
+    Because the update is monotonic there is no way to walk such a cursor back
+    over the API, so an out-of-range ack -- a client sending a timestamp, or a
+    value that overflows ``BIGINT`` -- would otherwise silence the
+    subscription permanently.
     """
     name = _validate_subscription_name(body.subscription)
     cursor = parse_int_id(body.cursor, field="cursor")
+    serve_cfg: ServeConfig = getattr(request.app.state, "serve_config", None) or ServeConfig()
     pool = request.app.state.pool
     with pool.connection() as conn:
+        max_id = _max_message_id(conn)
+        if cursor > max_id:
+            raise ValidationFailed(
+                f"cursor {cursor} is past the highest message id ({max_id}); "
+                "ack only a cursor returned by GET /v1/changes"
+            )
+        if _subscription_cursor(conn, user.id, name) is None:
+            _enforce_subscription_cap(
+                conn, user.id, serve_cfg.max_subscriptions_per_user
+            )
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO channel_subscriptions (user_id, name, cursor)

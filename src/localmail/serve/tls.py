@@ -67,12 +67,19 @@ def _san_entries(hostname: str) -> list[x509.GeneralName]:
 def _build_cert(hostname: str) -> tuple[bytes, bytes]:
     """Return (cert_pem, key_pem) for a fresh self-signed ECDSA P-256 pair.
 
-    The certificate is a **non-CA server leaf** (``BasicConstraints ca=False`` +
-    ``serverAuth`` EKU) with correctly-typed SANs (see :func:`_san_entries`), so
-    strict validators such as rustls-webpki accept it as a server end-entity
-    certificate — including when ``hostname`` is an IP literal. A cert marked
-    ``CA:TRUE`` served as the leaf is rejected by rustls with
-    ``CaUsedAsEndEntity``; this shape avoids that.
+    The certificate is an explicit **server leaf**: correctly-typed SANs (see
+    :func:`_san_entries`), ``BasicConstraints ca=False``, a ``serverAuth`` EKU,
+    and a ``digitalSignature`` key usage.
+
+    Only the SAN typing changes behaviour for rustls-webpki — an IP connection
+    matches an ``IPAddress`` SAN and never a ``DNSName`` holding an IP literal,
+    which is what broke IP/WireGuard deployments. The other three extensions
+    state what was previously left implicit: earlier certs carried no
+    ``BasicConstraints`` at all (absent is already "not a CA", so ``ca=False``
+    is a no-op for webpki), no EKU, and no ``KeyUsage``. Spelling all three out
+    keeps stricter validators — macOS/Windows trust evaluation, anything that
+    demands a present-and-correct EKU or ``digitalSignature`` for ECDSA — from
+    having to guess.
     """
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([
@@ -98,6 +105,20 @@ def _build_cert(hostname: str) -> tuple[bytes, bytes]:
         .add_extension(
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
             critical=False,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
         )
         .sign(key, hashes.SHA256())
     )

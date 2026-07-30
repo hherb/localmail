@@ -399,6 +399,15 @@ def test_test_connection_oauth2_returns_400_not_500(admin_client):
         __import__("ssl").SSLError("tls handshake failed"),
         __import__("imaplib").IMAP4.error("login failed"),
         __import__("imapclient").exceptions.LoginError("authentication failed"),
+        # oauth2 accounts fail XOAUTH2 at the *token refresh*, before any IMAP
+        # traffic. Neither of these is an OSError, so both escaped as a 500
+        # until GoogleAuthError joined CONNECT_FAILURE_EXC_TYPES.
+        __import__("google.auth.exceptions", fromlist=["x"]).RefreshError(
+            "invalid_grant: token revoked"
+        ),
+        __import__("google.auth.exceptions", fromlist=["x"]).TransportError(
+            "could not reach oauth2.googleapis.com"
+        ),
     ],
 )
 def test_test_connection_hard_failure_returns_400_not_500(

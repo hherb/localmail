@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
 
+import google.auth.exceptions
 import imapclient.exceptions
 import psycopg
 from imapclient import IMAPClient
@@ -391,6 +392,13 @@ CONNECT_FAILURE_EXC_TYPES: tuple[type[Exception], ...] = (
     OSError,
     imaplib.IMAP4.error,
     imapclient.exceptions.IMAPClientError,
+    # Gmail (oauth2) accounts fail the XOAUTH2 token refresh with a
+    # RefreshError/TransportError (both GoogleAuthError subclasses, neither an
+    # OSError) when the refresh token is revoked/expired or Google is
+    # unreachable — the single most likely real connect failure for oauth2
+    # accounts. Classify it as a friendly connect failure (#158) rather than
+    # letting it escape as a 500.
+    google.auth.exceptions.GoogleAuthError,
 )
 
 

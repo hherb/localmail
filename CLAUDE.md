@@ -380,6 +380,64 @@ them), and attachment-only messages get synthesized
 so they remain searchable and visible (original bytes/filenames are intact
 in `messages.attachments` + the blobs tree).
 
+### Concurrent writers: the IDLE thread vs the poll thread (#231)
+
+The two per-account threads are **not** partitioned by message. The IDLE thread
+owns INBOX and the poll thread owns every other folder, but Gmail delivers one
+Message-Id to INBOX *and* several labels at once, so both threads routinely
+process the same message concurrently, on separate pool connections. Three
+invariants follow; all are pinned by
+[tests/test_sync_concurrent_writers.py](tests/test_sync_concurrent_writers.py).
+
+- **`upsert_message` is check-then-INSERT, so the check can lose.** The INSERT
+  carries `ON CONFLICT DO NOTHING`; on no `RETURNING` row it re-reads the
+  winner's id and reports `inserted=False`. Without this the loser raised
+  `UniqueViolation`, which `process_one_message` recorded in `failed_messages`
+  **as if the message were malformed** — polluting `list-failed` with healthy
+  mail.
+
+  **The re-read depends on READ COMMITTED** (psycopg's default). The conflicting
+  INSERT blocks on the speculative-insert lock until the winner commits or
+  aborts, and the SELECT then takes a fresh per-statement snapshot that includes
+  it. Under REPEATABLE READ the INSERT raises `SerializationFailure` instead —
+  do **not** raise the isolation level on the sync path without revisiting
+  `upsert_message`.
+
+  `DO NOTHING` carries **no conflict target**, because the dedup key spans two
+  partial unique indexes (`messages_acct_msgid_uniq`,
+  `messages_acct_rawsha_uniq`) and one target can't cover both. It therefore
+  also swallows a violation of some *other* unique constraint (a desynced
+  `messages_id_seq` after a restore without `setval`), so the no-match branch
+  raises a named `RuntimeError` rather than asserting — a bare `AssertionError`
+  would be a *worse* `failed_messages` entry than the `UniqueViolation` it
+  replaced, and vanishes under `python -O`.
+
+- **Attachment blob temps are per-writer.** Each writer uses
+  `<sha>.<pid>.<uuid>.tmp`, never a shared `<sha>.tmp`. With a shared name one
+  writer could truncate (open-for-write) the temp another was about to
+  `replace()` into place, installing a **short or zero-length blob at the
+  canonical content-addressed path**. Both writers hold identical bytes, so
+  whichever `replace` wins is correct. Do not "simplify" this back to a shared
+  name. The cost is that a hard kill (SIGKILL/OOM/power loss) between write and
+  replace now strands a temp nothing collects — tracked by #237; the old shared
+  name was accidentally self-limiting.
+
+- **Every blocking IMAP call is bounded** by `[daemon] imap_timeout_s`
+  (default 60s), threaded through `WorkerContext.imap_timeout_s`. Unbounded,
+  imapclient blocks forever on a network black-hole and the worker holds its
+  pool connection, never observes the stop event, and gets respawned as a
+  duplicate on the next reconcile — the IMAP analogue of the Postgres bounds in
+  `daemon.db_*_timeout*` (#140/#142). It is **operator-tunable rather than a
+  constant** because it is a per-recv bound: a slow-but-progressing FETCH is
+  safe, but a server-side stall with nothing on the wire (a Gmail SEARCH over a
+  very large `\All` folder) is indistinguishable from a black-hole, and the
+  resulting `socket.timeout` makes the IDLE/poll loops livelock in
+  reconnect-with-backoff. IDLE waits are unaffected — imapclient's
+  `idle_check()` drops the socket to non-blocking and polls on its own timeout,
+  restoring this one in a `finally`. The admin "Test connection" probe uses its
+  own much shorter `accounts.PROBE_TIMEOUT_SECONDS` because it runs
+  synchronously inside a request and holds a threadpool slot.
+
 ## Search subsystem (Phases 1 + 2 shipped)
 
 Hybrid lexical (tsvector) + vector (pgvector) search over messages and

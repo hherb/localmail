@@ -51,6 +51,7 @@ def _one_inbox_session(ctx: WorkerContext) -> None:
         ctx.account,
         ssl=ctx.ssl,
         gmail_client_secrets=ctx.gmail_client_secrets,
+        timeout=ctx.imap_timeout_s,
     ) as imap:
         safe_heartbeat(ctx.pool, worker_kind="idle",
                        account_id=ctx.account_id, state="connecting")

@@ -50,6 +50,15 @@ db_tcp_user_timeout_ms = 30000
 # is a latency optimization. Set command_listen_enabled = false to disable.
 # command_listen_enabled = true
 # command_listen_poll_seconds = 5.0
+# Socket bound (seconds) for every blocking IMAP call the workers make — the
+# IMAP-side analogue of the db_*_timeout knobs above. Unbounded, imapclient
+# blocks forever on a network black-hole and the worker pins its pool
+# connection and stops observing the stop event. This is a *per-recv* bound, so
+# a slow-but-progressing bulk FETCH is safe. Raise it if an account livelocks
+# in reconnect-with-backoff: a server-side stall with nothing on the wire (a
+# Gmail SEARCH over a very large \All folder) looks the same as a black-hole
+# and will otherwise time out on every retry. IDLE waits are unaffected.
+imap_timeout_s = 60.0
 
 [serve]
 # Admin UI signing keys. Required when admin UI is in use.

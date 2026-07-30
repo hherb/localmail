@@ -15,6 +15,14 @@ from . import secrets
 from .config import AccountConfig
 from .oauth_gmail import fresh_access_token
 
+# Fallback socket timeout for every blocking IMAP call (connect/login/select/
+# search/fetch/list) when a caller passes no explicit bound. Without any bound
+# imapclient blocks forever on a network black-hole (dropped packets, no RST).
+# The daemon and CLI paths pass `[daemon] imap_timeout_s` instead — see the
+# rationale on `DaemonConfig.imap_timeout_s`, which is the operator-tunable
+# knob; this constant only keeps the bound non-infinite by default.
+DEFAULT_IMAP_TIMEOUT_SECONDS = 60.0
+
 
 @contextmanager
 def open_connection(
@@ -22,8 +30,11 @@ def open_connection(
     *,
     ssl: bool = True,
     gmail_client_secrets: Path | None = None,
+    timeout: float = DEFAULT_IMAP_TIMEOUT_SECONDS,
 ) -> Iterator[IMAPClient]:
-    client = IMAPClient(host=account.imap_host, port=account.imap_port, ssl=ssl)
+    client = IMAPClient(
+        host=account.imap_host, port=account.imap_port, ssl=ssl, timeout=timeout
+    )
     try:
         if account.auth_method == "password":
             password = secrets.get_password(account.name)

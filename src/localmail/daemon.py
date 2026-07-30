@@ -161,6 +161,7 @@ class Daemon:
             gmail_client_secrets=self._gmail_secrets(),
             stop=stop_event,
             ssl=self.ssl,
+            imap_timeout_s=self.cfg.daemon.imap_timeout_s,
         )
         t_idle = threading.Thread(
             target=run_inbox_idle_loop, args=(ctx,),

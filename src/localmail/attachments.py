@@ -25,7 +25,9 @@ messages and accounts.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import uuid
 from pathlib import Path
 
 import psycopg
@@ -81,9 +83,26 @@ def write_attachments(
 
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_suffix(path.suffix + ".tmp")
-                tmp.write_bytes(att.payload)
-                tmp.replace(path)
+                # Unique temp name per writer: the daemon runs two threads per
+                # account (IDLE + poll) and Gmail delivers the same message to
+                # INBOX and other labels at once, so two threads can write the
+                # same blob concurrently. A shared `<sha>.tmp` let one writer
+                # truncate the temp the other was about to atomically `replace`
+                # into place, installing a corrupted (short/zero) blob at the
+                # canonical path. A uuid suffix keeps each writer's temp private;
+                # both hold identical bytes, so whichever `replace` wins is
+                # correct. content-addressed, so a redundant write is harmless.
+                #
+                # A hard kill (SIGKILL/OOM/power loss) between the write and the
+                # replace strands the temp: unlike the old shared name, nothing
+                # reuses or overwrites it. Collecting those needs a sweep — #237.
+                tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+                try:
+                    tmp.write_bytes(att.payload)
+                    tmp.replace(path)
+                except BaseException:
+                    tmp.unlink(missing_ok=True)
+                    raise
 
             cur.execute(
                 """

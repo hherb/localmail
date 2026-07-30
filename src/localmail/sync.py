@@ -148,6 +148,7 @@ def upsert_message(
                 %s, %s, %s, %s, %s,
                 %s, %s
             )
+            ON CONFLICT DO NOTHING
             RETURNING id
             """,
             (
@@ -172,8 +173,42 @@ def upsert_message(
             ),
         )
         row = cur.fetchone()
-        assert row is not None
-        return row[0], True
+        if row is not None:
+            return row[0], True
+        # Lost a race: a concurrent writer (the daemon runs an IDLE thread on
+        # INBOX and a poll thread on other folders per account, and Gmail
+        # delivers the same Message-Id to several labels at once) inserted this
+        # message between our existence check and INSERT. ON CONFLICT DO NOTHING
+        # suppressed the duplicate insert; re-read the winner's id so this call
+        # returns the shared row instead of raising UniqueViolation and being
+        # recorded as a spurious poison-pill in failed_messages.
+        #
+        # The re-read seeing the winner's row depends on READ COMMITTED (psycopg's
+        # default): the conflicting INSERT blocks on the speculative-insert lock
+        # until the winner commits or aborts, and this SELECT then takes a fresh
+        # per-statement snapshot that includes it. Under REPEATABLE READ the
+        # INSERT raises SerializationFailure instead — do not raise the isolation
+        # level on the sync path without revisiting this.
+        existing = _existing_message_id(
+            cur,
+            account_id=account_id,
+            message_id=parsed.message_id,
+            raw_sha256=parsed.raw_sha256,
+        )
+        if existing is None:
+            # DO NOTHING has no conflict target (the dedup key spans two partial
+            # unique indexes, so one target can't cover both), which means it
+            # also swallows a violation of some *other* unique constraint — e.g.
+            # a desynced messages_id_seq after a restore without setval. Fail
+            # loudly and legibly rather than returning None as an id.
+            raise RuntimeError(
+                "INSERT INTO messages conflicted but no row matches the dedup key "
+                f"(account_id={account_id}, message_id={parsed.message_id!r}, "
+                f"raw_sha256={parsed.raw_sha256.hex()}): the conflict came from an "
+                "unexpected constraint, not the per-account Message-Id/raw-SHA "
+                "dedup indexes"
+            )
+        return existing, False
 
 
 def upsert_label(

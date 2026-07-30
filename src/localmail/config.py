@@ -133,6 +133,25 @@ class DaemonConfig(BaseModel):
     # event (seconds). Bounds shutdown latency of the listener thread; small so
     # a stopping daemon's listener exits promptly, large enough not to busy-spin.
     command_listen_poll_seconds: float = 5.0
+    # Socket timeout for every blocking IMAP call the workers make (connect,
+    # login, select, search, fetch, list). The IMAP-side analogue of the
+    # `db_*_timeout` bounds above: without it imapclient blocks forever on a
+    # network black-hole (packets dropped, no RST), and the worker holds its
+    # shared pool connection, never observes the stop event, and gets respawned
+    # as a duplicate on the next reconcile.
+    #
+    # This is a *per-recv* bound, so a slow-but-progressing bulk FETCH is safe —
+    # it only fires when no bytes arrive for this long. It is tunable (rather
+    # than a module constant) because a server-side stall with nothing on the
+    # wire — a Gmail SEARCH/SELECT over a very large `\All` folder — would
+    # otherwise be indistinguishable from a black-hole: the timeout raises
+    # socket.timeout, the IDLE/poll loops treat it as a crashed session, and the
+    # account livelocks in reconnect-with-backoff and never syncs. Operators
+    # seeing that must be able to raise the bound without editing source.
+    #
+    # IDLE waits are unaffected: imapclient's idle_check() drops the socket to
+    # non-blocking and polls on its own timeout, restoring this one afterwards.
+    imap_timeout_s: float = 60.0
 
 
 class ServeConfig(BaseModel):

@@ -92,12 +92,17 @@ def write_attachments(
                 # canonical path. A uuid suffix keeps each writer's temp private;
                 # both hold identical bytes, so whichever `replace` wins is
                 # correct. content-addressed, so a redundant write is harmless.
+                #
+                # A hard kill (SIGKILL/OOM/power loss) between the write and the
+                # replace strands the temp: unlike the old shared name, nothing
+                # reuses or overwrites it. Collecting those needs a sweep — #237.
                 tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
                 try:
                     tmp.write_bytes(att.payload)
                     tmp.replace(path)
-                finally:
+                except BaseException:
                     tmp.unlink(missing_ok=True)
+                    raise
 
             cur.execute(
                 """

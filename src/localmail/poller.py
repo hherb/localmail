@@ -67,6 +67,7 @@ def _one_poll_pass(ctx: WorkerContext) -> dict[str, int]:
         ctx.account,
         ssl=ctx.ssl,
         gmail_client_secrets=ctx.gmail_client_secrets,
+        timeout=ctx.imap_timeout_s,
     ) as imap:
         account_id = ctx.account_id
         safe_heartbeat(ctx.pool, worker_kind="poll",

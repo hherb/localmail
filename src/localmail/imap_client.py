@@ -15,14 +15,12 @@ from . import secrets
 from .config import AccountConfig
 from .oauth_gmail import fresh_access_token
 
-# Socket timeout for every blocking IMAP call (connect/login/select/search/
-# fetch/list). Without it imapclient blocks forever on a network black-hole
-# (dropped packets, no RST): a sync/poll worker would then hold its shared
-# DB-pool connection indefinitely, never observe the daemon stop event, and
-# get respawned as a duplicate on the next reconcile. IDLE waits use their own
-# bounded idle_check(timeout=...) and are unaffected. A stall past this bound
-# surfaces as socket.timeout, which the IDLE/poll loops treat as a normal
-# reconnect-with-backoff.
+# Fallback socket timeout for every blocking IMAP call (connect/login/select/
+# search/fetch/list) when a caller passes no explicit bound. Without any bound
+# imapclient blocks forever on a network black-hole (dropped packets, no RST).
+# The daemon and CLI paths pass `[daemon] imap_timeout_s` instead — see the
+# rationale on `DaemonConfig.imap_timeout_s`, which is the operator-tunable
+# knob; this constant only keeps the bound non-infinite by default.
 DEFAULT_IMAP_TIMEOUT_SECONDS = 60.0
 
 

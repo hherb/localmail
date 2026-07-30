@@ -381,7 +381,8 @@ def sync_cmd(ctx: click.Context, account_name: str | None,
             account = account_config_from_row(row)
             click.echo(f"--- syncing {account.name} ---")
             with open_connection(
-                account, ssl=not no_ssl, gmail_client_secrets=gmail_secrets
+                account, ssl=not no_ssl, gmail_client_secrets=gmail_secrets,
+                timeout=cfg.daemon.imap_timeout_s,
             ) as imap:
                 results = sync_account(
                     conn, imap, account=account, account_id=row.id,
@@ -553,6 +554,7 @@ def backfill_internal_date_cmd(
                 account_id = int(row[0])
             with open_connection(
                 account, ssl=not no_ssl, gmail_client_secrets=gmail_secrets,
+                timeout=cfg.daemon.imap_timeout_s,
             ) as imap:
                 scanned, updated = backfill_internal_date(
                     conn, imap,

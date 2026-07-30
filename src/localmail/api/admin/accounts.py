@@ -356,6 +356,15 @@ class FolderInfo:
     flags: tuple[str, ...]
 
 
+# Socket bound for the admin "Test connection" probe. Deliberately much shorter
+# than the daemon's `[daemon] imap_timeout_s`: this runs synchronously inside a
+# request and holds a FastAPI threadpool slot for its whole duration, and an
+# operator clicking Test connection wants a verdict, not a minute of spinner. A
+# genuinely reachable server answers in well under this; anything slower is the
+# failure the probe exists to report.
+PROBE_TIMEOUT_SECONDS = 15.0
+
+
 def _open_imap_connection(
     account: Account, *, gmail_client_secrets: Path | None = None
 ) -> AbstractContextManager[IMAPClient]:
@@ -371,7 +380,11 @@ def _open_imap_connection(
         auth_method=account.auth_method,  # type: ignore[arg-type]
         oauth_provider=account.oauth_provider,  # type: ignore[arg-type]
     )
-    return _imap.open_connection(cfg, gmail_client_secrets=gmail_client_secrets)
+    return _imap.open_connection(
+        cfg,
+        gmail_client_secrets=gmail_client_secrets,
+        timeout=PROBE_TIMEOUT_SECONDS,
+    )
 
 
 # Exception types a *genuine* IMAP connect failure raises — wrong host/port

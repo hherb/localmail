@@ -12,6 +12,7 @@ from pathlib import Path
 from psycopg_pool import ConnectionPool
 
 from .config import AccountConfig
+from .imap_client import DEFAULT_IMAP_TIMEOUT_SECONDS
 
 
 @dataclass
@@ -25,3 +26,4 @@ class WorkerContext:
     gmail_client_secrets: Path | None
     stop: threading.Event
     ssl: bool = True
+    imap_timeout_s: float = DEFAULT_IMAP_TIMEOUT_SECONDS

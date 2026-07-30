@@ -5,20 +5,82 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
+import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 _CERT_TTL_DAYS = 365 * 10
 
 
+def _san_entries(hostname: str) -> list[x509.GeneralName]:
+    """Build the Subject Alternative Name list for a self-signed server cert.
+
+    Each name is typed correctly: a value that parses as an IP address becomes
+    an ``IPAddress`` SAN, otherwise a ``DNSName``. This matters because strict
+    TLS validators (e.g. rustls-webpki, which the kastellan egress proxy uses on
+    its re-origination leg) match an *IP* connection only against an
+    ``IPAddress`` SAN — a ``DNSName`` holding an IP literal never matches. So a
+    server that binds an IP (a WireGuard/LAN deployment) must carry that IP as an
+    ``IPAddress`` SAN, not a ``DNSName``.
+
+    Loopback (``127.0.0.1``, ``::1``, ``localhost``) and the machine's own
+    hostname are always included, so a fresh deployment is reachable by its bind
+    IP, via loopback, and by name — without the operator having to hand-craft a
+    cert. Entries are de-duplicated; order is stable (bind name first).
+    """
+    names: list[x509.GeneralName] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(value: str) -> None:
+        if not value:
+            return
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            entry: x509.GeneralName = x509.DNSName(value)
+            key = ("dns", value)
+        else:
+            entry = x509.IPAddress(ip)
+            key = ("ip", str(ip))
+        if key not in seen:
+            seen.add(key)
+            names.append(entry)
+
+    add(hostname)
+    add("127.0.0.1")
+    add("::1")
+    add("localhost")
+    try:
+        add(socket.gethostname())
+    except OSError:
+        pass
+    return names
+
+
 def _build_cert(hostname: str) -> tuple[bytes, bytes]:
-    """Return (cert_pem, key_pem) for a fresh self-signed ECDSA P-256 pair."""
+    """Return (cert_pem, key_pem) for a fresh self-signed ECDSA P-256 pair.
+
+    The certificate is an explicit **server leaf**: correctly-typed SANs (see
+    :func:`_san_entries`), ``BasicConstraints ca=False``, a ``serverAuth`` EKU,
+    and a ``digitalSignature`` key usage.
+
+    Only the SAN typing changes behaviour for rustls-webpki — an IP connection
+    matches an ``IPAddress`` SAN and never a ``DNSName`` holding an IP literal,
+    which is what broke IP/WireGuard deployments. The other three extensions
+    state what was previously left implicit: earlier certs carried no
+    ``BasicConstraints`` at all (absent is already "not a CA", so ``ca=False``
+    is a no-op for webpki), no EKU, and no ``KeyUsage``. Spelling all three out
+    keeps stricter validators — macOS/Windows trust evaluation, anything that
+    demands a present-and-correct EKU or ``digitalSignature`` for ECDSA — from
+    having to guess.
+    """
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, hostname),
@@ -33,8 +95,30 @@ def _build_cert(hostname: str) -> tuple[bytes, bytes]:
         .not_valid_before(datetime.now(timezone.utc) - timedelta(minutes=1))
         .not_valid_after(datetime.now(timezone.utc) + timedelta(days=_CERT_TTL_DAYS))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(hostname), x509.DNSName("localhost")]),
+            x509.SubjectAlternativeName(_san_entries(hostname)),
             critical=False,
+        )
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
         )
         .sign(key, hashes.SHA256())
     )

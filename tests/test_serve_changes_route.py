@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
 from localmail.config import ServeConfig
 from localmail.serve.app import create_app
-from localmail.serve.routes.changes import _DEFAULT_LIMIT
+from localmail.serve.routes.changes import (
+    _DEFAULT_LIMIT,
+    _claim_subscription,
+    _subscription_cursor,
+)
 
 # Tests insert + read messages within the same millisecond; the production
 # safe-horizon would mask every just-seeded row. Drop it to 0 so the test
@@ -230,6 +237,307 @@ def test_changes_no_cursor_caps_at_default_limit_in_desc_order(
     returned_ids = [int(m["message_id"]) for m in new_messages]
     assert returned_ids == sorted(returned_ids, reverse=True)
     assert returned_ids[0] == seeded_ids[-1]
+
+
+@pytest.fixture
+def _shared_account(db_conn) -> int:
+    """The one test account both `client` and `other_client` are granted.
+
+    Decoupled from `seed_messages` so account grants are in place *before*
+    any messages exist -- required for the "fresh subscription primes at
+    the current (possibly empty) tip" tests below, where a subscription is
+    established via a GET before any mail has been seeded.
+    """
+    return _ensure_account(db_conn)
+
+
+@pytest.fixture
+def other_user(db_conn):
+    """A second api user, distinct from the primary `api_user` (alice)."""
+    from localmail.api.auth import create_user, reset_login_rate_limiter
+    reset_login_rate_limiter(db_conn)
+    db_conn.commit()
+    uid = create_user(db_conn, "bob", "hunter3")
+    db_conn.commit()
+    return uid
+
+
+@pytest.fixture
+def other_token(db_conn, other_user):
+    from localmail.api.auth import login
+    token, _expires = login(db_conn, "bob", "hunter3")
+    db_conn.commit()
+    return token
+
+
+def _grant(db_conn, user_id: int, account_id: int) -> None:
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_accounts (user_id, account_id) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (user_id, account_id),
+        )
+    db_conn.commit()
+
+
+@pytest.fixture
+def client(db_dsn, db_conn, api_user, api_token, _shared_account):
+    """Authenticated TestClient bound to the primary seeded user (alice),
+    already granted access to the shared test account."""
+    _grant(db_conn, api_user.id, _shared_account)
+    return TestClient(
+        create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG),
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+
+
+@pytest.fixture
+def other_client(db_dsn, db_conn, other_user, other_token, _shared_account):
+    """Authenticated TestClient bound to a second user (bob), also granted
+    access to the shared test account."""
+    _grant(db_conn, other_user, _shared_account)
+    return TestClient(
+        create_app(db_dsn=db_dsn, searcher=None, serve_config=_TEST_SERVE_CFG),
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+
+@pytest.fixture
+def seed_messages(db_conn):
+    """Returns a callable that seeds `n` messages on the shared test account
+    and returns their (ascending) message ids."""
+    def _seed(n: int) -> list[int]:
+        now = datetime.now(timezone.utc)
+        ids = [
+            _seed_msg(db_conn, now - timedelta(minutes=(n - i)), f"{i:02x}")
+            for i in range(n)
+        ]
+        db_conn.commit()
+        return ids
+    return _seed
+
+
+def test_subscription_returns_only_unacked_then_advances(client, seed_messages):
+    """A named subscription is a server-side cursor: poll, ack, poll again.
+
+    Establishes the subscription *before* any mail exists -- mirroring the
+    real client lifecycle (subscribe once, then mail arrives) -- so this
+    test doesn't collide with the separate "fresh subscription starts at
+    the tip, not the backlog" rule covered by
+    `test_unknown_subscription_starts_from_tip_not_backlog` below.
+    """
+    client.get("/v1/changes", params={"subscription": "kastellan"})
+
+    ids = seed_messages(3)  # returns ascending message ids
+
+    first = client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert [m["message_id"] for m in first["new_messages"]] == [str(i) for i in ids]
+
+    # Ack only the first message; the next poll must resume from there.
+    r = client.post("/v1/changes/ack",
+                    json={"subscription": "kastellan", "cursor": str(ids[0])})
+    assert r.status_code == 204
+
+    second = client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert [m["message_id"] for m in second["new_messages"]] == [str(i) for i in ids[1:]]
+
+
+def test_ack_never_rewinds(client, seed_messages):
+    """A stale/replayed ack must not resurface already-acked messages."""
+    ids = seed_messages(2)
+    client.post("/v1/changes/ack", json={"subscription": "kastellan", "cursor": str(ids[1])})
+    client.post("/v1/changes/ack", json={"subscription": "kastellan", "cursor": str(ids[0])})
+
+    after = client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert after["new_messages"] == []
+
+
+def test_subscriptions_are_per_user_and_per_name(client, other_client, seed_messages):
+    """One subscription's cursor must not affect another's.
+
+    Primes the sibling subscriptions ("gui" for alice, "kastellan" for bob)
+    before mail exists, for the same reason as
+    `test_subscription_returns_only_unacked_then_advances` above: isolating
+    the ack-scoping behaviour under test from the fresh-subscription
+    tip-start rule.
+    """
+    client.get("/v1/changes", params={"subscription": "gui"})
+    other_client.get("/v1/changes", params={"subscription": "kastellan"})
+
+    ids = seed_messages(2)
+    client.post("/v1/changes/ack", json={"subscription": "kastellan", "cursor": str(ids[1])})
+
+    want = [str(i) for i in ids]
+    other_name = client.get("/v1/changes", params={"subscription": "gui"}).json()
+    assert [m["message_id"] for m in other_name["new_messages"]] == want
+
+    other_user_resp = other_client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert [m["message_id"] for m in other_user_resp["new_messages"]] == want
+
+
+def test_unknown_subscription_starts_from_tip_not_backlog(client, seed_messages):
+    """A fresh subscription must NOT replay history as if it were new mail."""
+    seed_messages(3)
+    fresh = client.get("/v1/changes", params={"subscription": "brand-new"}).json()
+    assert fresh["new_messages"] == []
+    assert fresh["next_cursor"] != "0"
+
+
+def test_subscription_and_since_mutually_exclusive_400(client) -> None:
+    """Passing both `subscription` and `since` is a 400 -- a caller must not
+    be able to accidentally mix server-side and client-side cursors."""
+    r = client.get("/v1/changes", params={"subscription": "kastellan", "since": "0"})
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+
+
+@pytest.mark.parametrize("bad", ["", "a" * 65, "has space", "punc!", "sl/ash", "uniçode"])
+def test_invalid_subscription_name_is_400(client, bad: str) -> None:
+    """The name charset/length guard rejects on both the GET and the ack path."""
+    r = client.get("/v1/changes", params={"subscription": bad})
+    assert r.status_code == 400, r.text
+    assert r.headers["content-type"].startswith("application/problem+json")
+
+    r = client.post("/v1/changes/ack", json={"subscription": bad, "cursor": "0"})
+    assert r.status_code == 400, r.text
+
+
+def test_ack_before_first_poll_creates_the_subscription(client, seed_messages):
+    """The ack docstring promises a caller may ack before ever polling."""
+    ids = seed_messages(3)
+    r = client.post("/v1/changes/ack",
+                    json={"subscription": "ack-first", "cursor": str(ids[1])})
+    assert r.status_code == 204
+
+    after = client.get("/v1/changes", params={"subscription": "ack-first"}).json()
+    assert [m["message_id"] for m in after["new_messages"]] == [str(ids[2])]
+
+
+def test_ack_past_the_highest_message_id_is_400(client, seed_messages):
+    """An out-of-range ack must not be accepted.
+
+    Acks are monotonic, so there is no way to walk one back over the API: a
+    client that sent a timestamp (or a value overflowing BIGINT) would silence
+    the subscription permanently instead of getting an error.
+    """
+    client.get("/v1/changes", params={"subscription": "kastellan"})
+    ids = seed_messages(2)
+
+    for bad in (str(ids[-1] + 1), str(2**63), "9" * 40):
+        r = client.post("/v1/changes/ack",
+                        json={"subscription": "kastellan", "cursor": bad})
+        assert r.status_code == 400, f"cursor={bad}: {r.status_code} {r.text}"
+        assert r.headers["content-type"].startswith("application/problem+json")
+
+    # The rejected acks left the cursor alone, so the mail is still deliverable.
+    still = client.get("/v1/changes", params={"subscription": "kastellan"}).json()
+    assert [m["message_id"] for m in still["new_messages"]] == [str(i) for i in ids]
+
+
+def test_subscription_count_is_capped_per_user(db_dsn, db_conn, api_user, api_token,
+                                               _shared_account):
+    """A client deriving the name from a UUID must not grow the table forever."""
+    _grant(db_conn, api_user.id, _shared_account)
+    c = TestClient(
+        create_app(db_dsn=db_dsn, searcher=None,
+                   serve_config=ServeConfig(changes_safe_horizon_s=0,
+                                            max_subscriptions_per_user=2)),
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert c.get("/v1/changes", params={"subscription": "one"}).status_code == 200
+    assert c.get("/v1/changes", params={"subscription": "two"}).status_code == 200
+
+    r = c.get("/v1/changes", params={"subscription": "three"})
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    # An existing subscription still works past the cap.
+    assert c.get("/v1/changes", params={"subscription": "one"}).status_code == 200
+    assert c.post("/v1/changes/ack",
+                  json={"subscription": "one", "cursor": "0"}).status_code == 204
+    # ...and the ack path is capped too.
+    assert c.post("/v1/changes/ack",
+                  json={"subscription": "four", "cursor": "0"}).status_code == 400
+
+
+def test_concurrent_first_claim_yields_one_winner_not_a_unique_violation(
+    db_dsn: str, db_conn, api_user,
+) -> None:
+    """Two simultaneous first polls of the same new name must not 500.
+
+    Both read no stored cursor and both reach `_claim_subscription`; the
+    `ON CONFLICT DO NOTHING` makes exactly one of them the creator instead of
+    letting the loser raise `UniqueViolation` (which escapes as a 500 -- only
+    `APIError` subclasses reach the problem+json handler).
+
+    Exercised at the helper level with a barrier: driving it through two
+    TestClients could not guarantee the interleaving that triggers it.
+    """
+    results: list[bool] = []
+    errors: list[Exception] = []
+    barrier = threading.Barrier(2)
+
+    def claim() -> None:
+        try:
+            with psycopg.connect(db_dsn) as conn:
+                assert _subscription_cursor(conn, api_user.id, "racy") is None
+                barrier.wait(timeout=10)
+                results.append(_claim_subscription(conn, api_user.id, "racy", 7))
+                conn.commit()
+        except Exception as exc:
+            # Recorded rather than raised: an exception in a worker thread
+            # would not fail the test, and a UniqueViolation here is exactly
+            # the regression being pinned.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert errors == []
+    assert sorted(results) == [False, True]
+    assert _subscription_cursor(db_conn, api_user.id, "racy") == 7
+
+
+def test_fresh_subscription_tip_respects_safe_horizon(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    """A fresh subscription's starting cursor must not jump past a message
+    that hasn't cleared the safe horizon yet.
+
+    Concurrent sync transactions can commit out of `id` allocation order
+    (see the module docstring). If a brand-new subscription's cursor were
+    the raw `MAX(id)` instead of the horizon-filtered tip, a message still
+    inside the horizon window could get a cursor set at-or-past its own id
+    -- and since the cursor only moves forward via ack, that message would
+    never be returned by any later poll. Silent, permanent loss, not just
+    delay.
+
+    Needs its own (non-zero) horizon, so this uses a standalone `TestClient`
+    rather than the `client` fixture (bound to `_TEST_SERVE_CFG`'s
+    `changes_safe_horizon_s=0`).
+    """
+    horizon_cfg = ServeConfig(changes_safe_horizon_s=1)
+    now = datetime.now(timezone.utc)
+    in_horizon_id = _seed_msg(db_conn, now, "aa")
+    db_conn.commit()
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None, serve_config=horizon_cfg))
+    headers = {"Authorization": f"Bearer {api_token}"}
+
+    # The message is still inside the 1s horizon: the fresh subscription's
+    # cursor must start at 0, not at (or past) `in_horizon_id`. Without the
+    # fix, `next_cursor` would be `str(in_horizon_id)` here.
+    first = c.get("/v1/changes", params={"subscription": "kastellan"}, headers=headers).json()
+    assert first["new_messages"] == []
+    assert first["next_cursor"] == "0"
+
+    # Once the message clears the horizon, the same subscription (cursor
+    # still 0) must deliver it on a later poll -- proving it wasn't lost.
+    time.sleep(1.1)
+    second = c.get("/v1/changes", params={"subscription": "kastellan"}, headers=headers).json()
+    assert [m["message_id"] for m in second["new_messages"]] == [str(in_horizon_id)]
 
 
 def test_changes_idempotent_when_no_new_messages(db_dsn: str, api_token: str, db_conn) -> None:

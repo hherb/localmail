@@ -147,6 +147,13 @@ class ServeConfig(BaseModel):
     # sync transactions that genuinely take longer.
     changes_safe_horizon_s: int = 5
 
+    # `GET /v1/changes?subscription=` and `POST /v1/changes/ack` both create a
+    # `channel_subscriptions` row on first use of a name, so a client that
+    # derives the name from a UUID or timestamp would grow the table without
+    # bound. A polling deployment needs a handful of stable names; the cap only
+    # has to be generous enough that a legitimate client never trips it.
+    max_subscriptions_per_user: int = 32
+
     # Admin UI signing keys. Empty default = admin UI disabled; populated
     # only when the operator opts in by setting them in config.toml. Both
     # keys must be at least 32 base64url characters (~24 bytes decoded).

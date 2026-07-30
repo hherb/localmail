@@ -85,6 +85,32 @@ def test_verify_token_returns_none_for_disabled_user(db_conn: psycopg.Connection
     assert verify_token(db_conn, tok) is None
 
 
+def test_verify_token_rejects_token_issued_before_session_revocation(
+    db_conn: psycopg.Connection,
+) -> None:
+    """Regression: revoke-sessions / revoke-admin-sessions must also cut off
+    bearer tokens, not just admin cookies. A token issued before
+    sessions_invalidated_at stops authenticating; one issued after survives."""
+    uid = _make_user(db_conn)
+    old_tok, _ = issue_token(db_conn, uid)
+    db_conn.commit()
+    assert verify_token(db_conn, old_tok) is not None
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_users SET sessions_invalidated_at = now() WHERE id = %s",
+            (uid,),
+        )
+    db_conn.commit()
+
+    # The pre-revocation token is now invalid...
+    assert verify_token(db_conn, old_tok) is None
+    # ...but a freshly-issued token (created_at after the cutoff) works.
+    new_tok, _ = issue_token(db_conn, uid)
+    db_conn.commit()
+    assert verify_token(db_conn, new_tok) is not None
+
+
 def test_verify_token_updates_last_used_at(db_conn: psycopg.Connection) -> None:
     uid = _make_user(db_conn)
     tok, _ = issue_token(db_conn, uid)

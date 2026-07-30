@@ -155,12 +155,22 @@ def revoke_admin(conn: psycopg.Connection, *, username: str) -> None:
 
 
 def revoke_admin_sessions(conn: psycopg.Connection, *, username: str) -> None:
-    """Invalidate every outstanding admin cookie for the named user.
+    """Invalidate every outstanding credential for the named user.
 
-    Sets ``sessions_invalidated_at = now()``. The next request bearing a
-    token whose ``issued_at`` predates that moment is rejected with
-    :class:`SessionInvalidated` and the dependency layer redirects the
-    admin back to ``/admin/login``.
+    Sets ``sessions_invalidated_at = now()``. Three surfaces read it, all
+    comparing the credential's own issue time against the cutoff:
+
+    * **admin cookies** — rejected with :class:`SessionInvalidated`; the
+      dependency layer redirects the admin back to ``/admin/login``.
+    * **bearer tokens** (``api.auth.verify_token``) — every ``/v1/*``
+      endpoint, ``/mcp``, and the desktop GUI stop authenticating, including
+      OAuth-minted access tokens.
+    * **OAuth refresh tokens** (``mcp.oauth.refresh.load_refresh``) — so a
+      revoked client cannot simply mint a fresh access token and carry on.
+
+    Effect is therefore wider than the name suggests: the user is signed out
+    of the desktop client and every agent holding a token for them stops
+    working until they authenticate again.
 
     Idempotent: a second call just bumps the timestamp forward, catching
     any token that sneaked in between the two calls. Raises
@@ -168,9 +178,8 @@ def revoke_admin_sessions(conn: psycopg.Connection, *, username: str) -> None:
     to revoke and we'd rather signal the typo than silently no-op.
 
     Works on every ``api_users`` row, not only admins: the column lives
-    on ``api_users`` and a future cookie-session path for non-admins
-    would reuse the same mechanism. Refusing here would force a parallel
-    implementation later.
+    on ``api_users`` and the bearer/refresh paths above already apply to
+    non-admins. Refusing here would force a parallel implementation.
     """
     with conn.cursor() as cur:
         cur.execute(

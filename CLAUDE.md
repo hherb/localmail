@@ -646,6 +646,37 @@ for the full design.
   [docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md](docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md).
   Do NOT also set `uvicorn --forwarded-allow-ips`; it rewrites
   `request.client.host` before our admission check and collapses it.
+- **Session revocation covers all three credential kinds**: bumping
+  `api_users.sessions_invalidated_at` (via `localmail
+  revoke-admin-sessions USERNAME`, the `/admin/users` panel, or
+  `POST /v1/admin/users/{id}/revoke-sessions`) is enforced in **three**
+  independent SELECTs, each comparing the credential's own issue time
+  against the cutoff. All three are required for revocation to be
+  terminal; drop any one and the operator's "I cut off that leaked
+  credential" belief is false:
+  - **admin cookies** — `get_admin_user` (`to_timestamp(issued_at) <
+    sessions_invalidated_at` → `SessionInvalidated` → 303 to
+    `/admin/login`). See the #113 bullet below.
+  - **bearer tokens** — `api.auth.verify_token` (`t.created_at >=
+    u.sessions_invalidated_at`). Covers every `/v1/*` endpoint, `/mcp`
+    (`mcp.auth.LocalmailTokenVerifier` and `oauth.access.load_access` both
+    wrap `verify_token`), and the desktop GUI. Without it a leaked bearer
+    stayed valid for its full TTL — up to 30 days.
+  - **OAuth refresh tokens** — `mcp.oauth.refresh.load_refresh`
+    (`r.created_at >= u.sessions_invalidated_at`). Without it the bearer
+    check above buys only ~1 hour: the client presents its refresh token,
+    `access.mint_access` stamps the successor `created_at = now()` (past the
+    cutoff, so valid), and a fresh 30-day sliding refresh comes with it. A
+    revoked token lands on `rotate_refresh`'s **`unknown`** outcome, not
+    `reuse` — revocation is an operator action, not evidence of a stolen
+    copy, so the family is left intact.
+
+  `NULL` means "never revoked" and is the default, so nothing changes for a
+  user who has never been revoked. The cutoff is a moment, not a ban:
+  credentials minted *after* it authenticate normally, which is what makes
+  "revoke, then log in again" work. Login-issued tokens
+  (`oauth_refresh_family_id IS NULL`) and OAuth-issued ones are treated
+  identically here.
 - **Admin session revocation (#113)**: migration
   `0022_api_users_sessions_invalidated_at.sql` adds a nullable
   `sessions_invalidated_at TIMESTAMPTZ` column on `api_users`. The
@@ -657,10 +688,11 @@ for the full design.
   `/admin/login`. NULL means "never revoked" and is the default.
   Operators bump the column shell-side via
   `localmail revoke-admin-sessions USERNAME`; admin privileges are
-  untouched (use `revoke-admin` for that). The check is opt-in:
-  callers that don't pass `issued_at` (CLI lookups, smoke paths)
-  skip the comparison entirely so they keep working on a
-  revoked user.
+  untouched (use `revoke-admin` for that). The **cookie** check is
+  opt-in: callers that don't pass `issued_at` (CLI lookups, smoke
+  paths) skip the comparison entirely so they keep working on a
+  revoked user. The bearer and refresh checks above are *not* opt-in
+  — they are unconditional predicates in the token lookup itself.
 - **DB-canonical accounts + admin CRUD (Sub-plan 2A)**: migration
   `0020_accounts_canonical.sql` makes `accounts` the write-authoritative
   store for IMAP configuration — adding `folder_allow`, `folder_deny`,

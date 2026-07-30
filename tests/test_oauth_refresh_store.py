@@ -89,6 +89,53 @@ def test_re_enabled_user_refresh_loads_again(db_conn):
     assert refresh.load_refresh(db_conn, raw) is not None
 
 
+def _revoke_sessions(conn, uid):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_users SET sessions_invalidated_at = now() WHERE id = %s",
+            (uid,),
+        )
+    conn.commit()
+
+
+def test_session_revocation_kills_refresh_token(db_conn):
+    """Revoking sessions must be terminal for an OAuth client, not a 1-hour
+    inconvenience: cutting off only the access token leaves the refresh token
+    free to mint a successor stamped `created_at = now()` — past the cutoff,
+    hence valid again, with a fresh sliding refresh behind it."""
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    assert refresh.load_refresh(db_conn, raw) is not None
+    _revoke_sessions(db_conn, uid)
+    assert refresh.load_refresh(db_conn, raw) is None
+
+
+def test_rotate_rejected_after_session_revocation(db_conn):
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    _revoke_sessions(db_conn, uid)
+    # "unknown", not "reuse": revocation is an operator action, not evidence of
+    # a stolen copy, so the family must not be nuked.
+    res = refresh.rotate_refresh(db_conn, raw, ttl_s=100)
+    assert res.outcome == "unknown"
+    assert res.family_id is None
+
+
+def test_refresh_minted_after_revocation_still_loads(db_conn):
+    """The cutoff is a moment, not a ban: re-consenting after revocation has to
+    work or the operator has locked the user out permanently."""
+    uid = _seed(db_conn)
+    old = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    _revoke_sessions(db_conn, uid)
+    new = refresh.mint_refresh(db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100)
+    db_conn.commit()
+    assert refresh.load_refresh(db_conn, old) is None
+    assert refresh.load_refresh(db_conn, new) is not None
+
+
 def _raw_lookup(conn, raw):
     from localmail.api.auth import hash_token
     with conn.cursor() as cur:

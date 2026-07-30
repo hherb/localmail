@@ -15,7 +15,7 @@ import math
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import MINYEAR, datetime, timezone
 from typing import Any, Literal
 
@@ -61,6 +61,51 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
     if dt is None:
         return (0, _DATE_SORT_NULL_SENTINEL)
     return (1, dt)
+
+
+# No account has a non-positive id (serial PKs start at 1), so an
+# `account_id = ANY(ARRAY[_NO_ACCOUNT_SENTINEL])` clause matches nothing.
+# Deliberately a SQL-level sentinel rather than an early "empty page" return:
+# it guarantees the clause is emitted no matter which retrieval branch runs,
+# and every branch already returns its own SearchPage shape (pool token vs
+# keyset vs neither). The cost is one wasted query embedding on a path that
+# is unreachable via `run_search` (which short-circuits an empty intersection
+# in `_scope_filters_by_acl`) and otherwise only reached by a CLI typo.
+_NO_ACCOUNT_SENTINEL = -1
+
+
+def _clamp_account_ids_to_acl(
+    parsed: ParsedQuery, allowed_account_ids: list[int] | None
+) -> ParsedQuery:
+    """Force ``parsed.filters.account_ids`` to a subset of the caller's ACL.
+
+    The API/MCP layers express the per-user ACL by injecting ``account_id:``
+    tokens into the query string, but a caller can smuggle *additional*
+    ``account_id:`` tokens through the free-text query — ``parse_query`` unions
+    every ``account_id:`` token (whatever its origin) into one list, which
+    OR-widens the ``m.account_id = ANY(...)`` predicate past the ACL. Applying
+    the intersection here — unconditionally, after parsing and any smart
+    rewrite, before retrieval and before the pool is cached — makes the ACL a
+    hard bound no DSL token can escape. An empty intersection collapses to a
+    sentinel that matches no account (an empty list is falsy in ``_filter_sql``
+    and would otherwise drop the clause entirely, meaning "all accounts").
+
+    ``allowed_account_ids=None`` means "no ACL to apply" and returns ``parsed``
+    untouched — CLI / local callers keep full DSL power. An *empty* list is a
+    real (if degenerate) ACL granting nothing, and collapses to the sentinel.
+
+    The sibling ``filters.accounts`` (ids resolved from ``account:NAME``) needs
+    no clamp: ``_filter_sql`` emits it as its own ``AND`` clause, so it can only
+    intersect with this one, never widen it.
+    """
+    if allowed_account_ids is None:
+        return parsed
+    allowed = set(allowed_account_ids)
+    current = parsed.filters.account_ids
+    clamped = sorted(set(current) & allowed) if current else sorted(allowed)
+    if not clamped:
+        clamped = [_NO_ACCOUNT_SENTINEL]
+    return replace(parsed, filters=replace(parsed.filters, account_ids=clamped))
 
 
 log = logging.getLogger("localmail.search.searcher")
@@ -393,8 +438,10 @@ class Searcher:
                 "search: account name(s) %s do not exist; matching no rows for that filter",
                 unknown,
             )
-        ids = list(found.values())
-        from dataclasses import replace
+        # Every name unknown -> [] would be falsy in `_filter_sql`, dropping the
+        # clause and matching *every* account: the opposite of the warning we
+        # just logged. Same empty-list trap as the ACL clamp, same sentinel.
+        ids = list(found.values()) or [_NO_ACCOUNT_SENTINEL]
         return replace(parsed, filters=replace(parsed.filters, accounts=ids))
 
     def _list_recent_messages(
@@ -873,6 +920,7 @@ class Searcher:
         user_id: int | None = None,
         sort: SortMode = "rank",
         keyset_cursor: KeysetCursor | None = None,
+        allowed_account_ids: list[int] | None = None,
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
 
@@ -913,7 +961,7 @@ class Searcher:
                     max_expansion_terms=cfg.rewriter_max_expansion_terms,
                 )
                 rewrite_status = APPLIED
-            except (httpx.HTTPError, RewriteParseError) as exc:
+            except (httpx.HTTPError, httpx.InvalidURL, RewriteParseError) as exc:
                 rewrite_status = FAILED
                 rewrite_note_code = classify_rewrite_failure(exc)
                 rewrite_note = note_for_code(
@@ -921,6 +969,14 @@ class Searcher:
                 )
                 log.warning("smart rewrite skipped: %s", exc)
             timing["rewrite"] = (time.monotonic() - t) * 1000
+
+        # Hard ACL clamp: no `account_id:` DSL token (from the injected ACL
+        # scope OR smuggled through free text) may widen the account set past
+        # the caller's grant. Applied after any smart rewrite and before every
+        # retrieval branch, so the cached pool inherits the clamped filter and
+        # continuation pages stay scoped too. None (CLI / local callers) is a
+        # no-op inside the helper, so this call is unconditional.
+        parsed = _clamp_account_ids_to_acl(parsed, allowed_account_ids)
 
         # sort=date with free_text: lexical+keyset, unbounded. The hybrid
         # path caps at ``rerank_pool_size`` candidates fused by RRF, so a

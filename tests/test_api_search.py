@@ -212,6 +212,15 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     assert out["next_cursor"] is None
 
 
+def test_run_search_forwards_allowed_account_ids_to_searcher() -> None:
+    """The ACL clamp is enforced Searcher-side; run_search must hand it the
+    full grant so a smuggled `account_id:` free-text token can't widen scope."""
+    s = _fake_searcher_for_smart(smart_available=True, page_status="not_requested")
+    run_search(searcher=s, free_text="invoice account_id:7", filters={},
+               limit=20, allowed_account_ids=[5], user_id=9)
+    assert s.search.call_args.kwargs["allowed_account_ids"] == [5]
+
+
 def _fake_searcher_for_smart(
     *, smart_available: bool, page_status: str = "not_requested",
     page_note=None, page_note_code=None,

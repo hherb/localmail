@@ -187,7 +187,8 @@ def run_search(
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
         page = searcher.search(query, page_size=limit, user_id=user_id,
-                               sort=sort, smart=effective_smart)
+                               sort=sort, smart=effective_smart,
+                               allowed_account_ids=allowed_account_ids)
     elif is_keyset_cursor(cursor):
         # Keyset cursor → lexical-date continuation. The cursor carries
         # only (ts, id); the query + filters come from the request body
@@ -197,7 +198,8 @@ def run_search(
         keyset = decode_keyset_cursor(cursor)
         query = build_query_string(free_text=free_text, filters=scoped_filters)
         page = searcher.search(query, page_size=limit, user_id=user_id,
-                               sort=sort, keyset_cursor=keyset)
+                               sort=sort, keyset_cursor=keyset,
+                               allowed_account_ids=allowed_account_ids)
     else:
         parsed = decode_search_cursor(cursor)
         page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)

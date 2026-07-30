@@ -148,6 +148,7 @@ def upsert_message(
                 %s, %s, %s, %s, %s,
                 %s, %s
             )
+            ON CONFLICT DO NOTHING
             RETURNING id
             """,
             (
@@ -172,8 +173,23 @@ def upsert_message(
             ),
         )
         row = cur.fetchone()
-        assert row is not None
-        return row[0], True
+        if row is not None:
+            return row[0], True
+        # Lost a race: a concurrent writer (the daemon runs an IDLE thread on
+        # INBOX and a poll thread on other folders per account, and Gmail
+        # delivers the same Message-Id to several labels at once) inserted this
+        # message between our existence check and INSERT. ON CONFLICT DO NOTHING
+        # suppressed the duplicate insert; re-read the winner's id so this call
+        # returns the shared row instead of raising UniqueViolation and being
+        # recorded as a spurious poison-pill in failed_messages.
+        existing = _existing_message_id(
+            cur,
+            account_id=account_id,
+            message_id=parsed.message_id,
+            raw_sha256=parsed.raw_sha256,
+        )
+        assert existing is not None
+        return existing, False
 
 
 def upsert_label(

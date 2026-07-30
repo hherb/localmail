@@ -1504,12 +1504,16 @@ def revoke_admin_cmd(ctx: click.Context, username: str) -> None:
 @click.argument("username")
 @click.pass_context
 def revoke_admin_sessions_cmd(ctx: click.Context, username: str) -> None:
-    """Invalidate every outstanding admin cookie for USERNAME.
+    """Invalidate every outstanding credential for USERNAME.
 
-    Bumps `api_users.sessions_invalidated_at` to now() so the next request
-    bearing a token minted before this moment is rejected and the admin is
-    redirected to /admin/login. Admin privileges themselves are unaffected
-    — use `revoke-admin` for that.
+    Bumps `api_users.sessions_invalidated_at` to now(), so any credential
+    minted before this moment stops working: admin cookies (redirected to
+    /admin/login), bearer tokens on every /v1/* endpoint and /mcp — which
+    signs USERNAME out of the desktop GUI — and OAuth refresh tokens, so an
+    agent cannot mint a replacement access token. USERNAME simply logs in
+    again to get working credentials.
+
+    Admin privileges themselves are unaffected — use `revoke-admin` for that.
     """
     from localmail.api.admin.auth import UserNotFound, revoke_admin_sessions
 

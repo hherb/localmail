@@ -283,7 +283,9 @@ def set_grant(
 
 
 def revoke_sessions(conn: psycopg.Connection, user_id: int) -> None:
-    """Invalidate the user's outstanding admin cookies. Raises UserNotFound."""
+    """Invalidate every outstanding credential for the user: admin cookies,
+    bearer tokens (``/v1/*``, ``/mcp``, the desktop GUI), and OAuth refresh
+    tokens. Raises UserNotFound. See ``admin.auth.revoke_admin_sessions``."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE api_users SET sessions_invalidated_at = now() WHERE id = %s",

@@ -84,10 +84,19 @@ def mint_refresh(
 
 
 def load_refresh(conn: psycopg.Connection, raw_token: str) -> RefreshRow | None:
-    """Load a *live* (not consumed, not expired, user enabled) refresh row.
+    """Load a *live* (not consumed, not expired, user enabled, not revoked) row.
 
     The ``consumed_at IS NULL`` filter hides tombstones; the ``api_users`` JOIN
     + ``disabled_at IS NULL`` mirrors ``api.auth.verify_token`` (RFC 9700 §4.13).
+
+    The ``sessions_invalidated_at`` predicate mirrors ``verify_token`` too, and
+    is what makes session revocation actually terminal for an OAuth client:
+    cutting off only the access token buys ~1 hour, because the client would
+    just present its refresh token and ``mint_access`` would stamp the
+    successor with ``created_at = now()`` — past the cutoff, so valid again,
+    with a fresh 30-day sliding refresh behind it. Rotation resetting
+    ``created_at`` on successors is harmless: once this query rejects, no
+    successor can be minted.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -96,7 +105,9 @@ def load_refresh(conn: psycopg.Connection, raw_token: str) -> RefreshRow | None:
             "FROM oauth_refresh_tokens r "
             "JOIN api_users u ON u.id = r.user_id "
             "WHERE r.token_sha256 = %s AND r.expires_at > now() "
-            "  AND r.consumed_at IS NULL AND u.disabled_at IS NULL",
+            "  AND r.consumed_at IS NULL AND u.disabled_at IS NULL "
+            "  AND (u.sessions_invalidated_at IS NULL "
+            "       OR r.created_at >= u.sessions_invalidated_at)",
             (hash_token(raw_token),),
         )
         row = cur.fetchone()
@@ -176,7 +187,8 @@ def rotate_refresh(
         return RotateResult("reuse", family_id=family_id)
     row = load_refresh(conn, raw_token)
     if row is None:
-        # present but expired / user-disabled — natural, not theft.
+        # present but expired / user-disabled / session-revoked — natural, not
+        # theft, so the family is left alone.
         return RotateResult("unknown")
     # Atomically claim the token: the ``consumed_at IS NULL`` guard makes the
     # tombstone single-writer. Under READ COMMITTED a concurrent rotation of the

@@ -336,7 +336,9 @@ LAST_USED_REFRESH_SECONDS = 60
 
 
 def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | None:
-    """Look up a bearer token; return user or None for invalid/expired/disabled.
+    """Look up a bearer token; return the user, or None when the token is
+    invalid, expired, revoked (``sessions_invalidated_at``), or the user is
+    disabled.
 
     Updates last_used_at on success, but at most once per
     LAST_USED_REFRESH_SECONDS per token — polling clients (e.g. /v1/changes)

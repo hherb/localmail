@@ -1171,6 +1171,32 @@ for the full design.
     `searcher._cache` or `searcher._cfg`. The accessor's `user_id`
     scoping mirrors `continue_page` / `grow_pool` exactly. Tests in
     `tests/test_searcher_pool_metadata.py` enforce.
+- **Hard ACL clamp inside the Searcher**: the ACL is enforced in **two**
+  places, and both are load-bearing. `api/search.py::_scope_filters_by_acl`
+  intersects the caller's *structured* `account_ids` filter and
+  short-circuits an empty intersection to an empty page; but the ACL then
+  travels to the Searcher as `account_id:` **DSL tokens in the query
+  string**, and `parse_query` unions every `account_id:` token regardless of
+  origin — so a token smuggled through the untrusted free text OR-widened
+  `m.account_id = ANY(...)` past the grant. `Searcher.search` therefore takes
+  `allowed_account_ids: list[int] | None` and pipes `parsed` through
+  `_clamp_account_ids_to_acl` **after any smart rewrite and before every
+  retrieval branch** (hybrid pool, `sort=date` lexical keyset, empty-query
+  fallback), so the cached pool inherits the clamped filter and
+  `continue_page` / `grow_pool` stay scoped without re-clamping. `None` means
+  "no ACL" (CLI / local callers keep full DSL power); an **empty list** is a
+  real grant-nothing ACL. Two traps to preserve:
+  - **An empty id set collapses to `_NO_ACCOUNT_SENTINEL = -1`, never `[]`.**
+    `_filter_sql` treats an empty list as falsy and drops the clause
+    entirely — i.e. *all accounts*, the exact inverse of the intent. The same
+    trap bit `_resolve_account_names` (all `account:NAME` values unknown →
+    `accounts=[]` → matched everything while logging "matching no rows"); it
+    uses the same sentinel now.
+  - **Only `account_ids` is clamped, deliberately.** `account:NAME` resolves
+    into the separate `filters.accounts` field, which `_filter_sql` emits as
+    its own `AND` clause — it can only intersect, never widen. Same for
+    `folder_id:`, whose union is bounded by the account clause. Tests in
+    `tests/test_search_acl_clamp.py`.
 - **Server-side subscription cursors on `/v1/changes`**: migration
   `0032_channel_subscriptions.sql` adds `channel_subscriptions`
   (one row per `(user_id, name)`, `cursor BIGINT`, FK to

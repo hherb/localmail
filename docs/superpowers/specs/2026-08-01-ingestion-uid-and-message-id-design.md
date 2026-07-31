@@ -16,11 +16,17 @@ faithful model of RFC 3501. For **archive imports** the UID is synthetic —
 invented by `importer/runner.py` — and the current allocator does not respect
 the namespace it is writing into.
 
-`message_labels.uid` is **read by nothing**. Search (`search/arms.py`), browse
-(`api/browse.py`), account listing (`api/accounts.py`) and message fetch
-(`api/messages.py`) all reference `mailbox_id` only. The uid exists solely to
-satisfy the unique constraint and as the `failed_messages` retry key. This is
-what makes re-allocation a safe repair: no consumer observes the value.
+No *read* surface observes `message_labels.uid`. Search (`search/arms.py`),
+browse (`api/browse.py`), account listing (`api/accounts.py`) and message fetch
+(`api/messages.py`) all reference `mailbox_id` only.
+
+**Corrected during review.** One reader does exist: `sync.backfill_internal_date`
+uses the stored uid as an IMAP FETCH key. Re-allocation stays safe only because
+it is gated on `auth_method == 'archive'`, archive accounts have no `imap_host`,
+and the backfill requires a live connection — so a synthetic uid is never
+presented to a real server. Were that gate widened, the backfill would write
+another message's INTERNALDATE onto the row. The gate, not the absence of
+readers, is the safety argument.
 
 ## A. #215 — synthetic UID collision poison-pills legitimate messages
 
@@ -163,12 +169,41 @@ the stuck one. Every checkpoint therefore clamps through the pure
 messages are still ingested); only the resume point is held, so the next run
 re-fetches from the stuck UID.
 
-Cost: while a transient persists, that run's tail is re-fetched on the next run.
-Dedup makes the re-inserts cheap. A *persistently* empty-but-present UID (a
-server bug) loops — and emits a WARNING every run, which is the intended loud
-signal.
+### The hold must be bounded (added after review)
 
-No migration, no new table, no bogus raw bytes.
+The first draft accepted an unbounded hold, reasoning that a persistently
+empty-but-present UID would merely emit a WARNING every run. That was wrong on
+two counts, both surfaced in review and verified:
+
+1. **A zero-length message is a real permanent trigger.** `raw = b""` satisfies
+   `if not raw`, and the probe finds the message because it genuinely is there.
+   No server bug required.
+2. **The re-fetch cost is per *new mail*, not per poll.** `idle.py::_sync_inbox`
+   runs on **every** IDLE notification, so a stuck low UID in a large INBOX
+   re-downloads the whole tail every time a message arrives. That converts
+   bounded data loss into an unbounded resource loop — worse than the defect.
+
+Migration `0033_transient_fetches.sql` adds a per-`(mailbox_id, uid)` counter,
+modelled directly on `transient_extractions` (#153). Sync bumps it each time it
+holds, and once `attempt_count >= [daemon] max_body_fetch_retries` (default 5)
+it logs a distinct *"giving up"* WARNING and advances. A successful fetch clears
+the row, so the cap counts **consecutive** failures. The pure boundary
+`fetch_budget_exhausted(count, cap)` matches the shape of
+`transient_budget_exhausted`; `0` disables holding entirely.
+
+`load_attempts` reads the mailbox's held UIDs once per run so the common path (a
+message that fetches fine and has no history) costs no per-message DELETE.
+`record_attempt` runs in a nested SAVEPOINT like `record_failed_message`, and
+reports 1 on failure so bookkeeping trouble makes sync hold rather than give up
+on a count it could not read.
+
+**Also from review:** the probe is skipped once `hold_at` is set. UIDs ascend, so
+`min(highest_seen + 1, hold_at) == hold_at` from the first hold onward and the
+probe cannot change the outcome — while whatever empties one `BODY[]` tends to
+empty the whole tail, each probe being a round trip bounded only by
+`imap_timeout_s` against an already-sick server.
+
+No bogus raw bytes; one migration.
 
 ## New module: `src/localmail/uids.py`
 
@@ -185,6 +220,19 @@ not grow.
 | `max_label_uid(conn, mailbox_id)` | thin IO | `SELECT COALESCE(MAX(uid), 0) FROM message_labels WHERE mailbox_id = %s` |
 
 `conn` is annotated so mypy enforces the `fetchone()` null check.
+
+## New module: `src/localmail/fetch_retry.py`
+
+Bookkeeping for the bounded hold, kept out of `uids.py` (which stays pure
+arithmetic) and out of `sync.py` (already 800+ lines).
+
+| symbol | kind | contract |
+|---|---|---|
+| `DEFAULT_MAX_BODY_FETCH_RETRIES` | const | `5`; the single source for the `DaemonConfig` field default and the `sync_mailbox` / `WorkerContext` parameter defaults |
+| `fetch_budget_exhausted(count, cap)` | pure | `count >= cap`; `0` disables holding |
+| `load_attempts(conn, mailbox_id)` | thin IO | `{uid: attempt_count}`, read once per run |
+| `record_attempt(conn, …)` | thin IO | upsert + `RETURNING`, nested SAVEPOINT, reports 1 on failure |
+| `clear_attempts(conn, …)` | thin IO | drop the row on recovery |
 
 ## Testing
 

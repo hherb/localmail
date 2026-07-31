@@ -125,7 +125,7 @@ User-facing config lives at `~/.config/localmail/config.toml` (override with
 Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
 `attachment_blobs`, `attachment_text`, `attachment_chunks`,
 `failed_messages`, `failed_extractions`, `transient_extractions`,
-`api_users`, `api_tokens`, `channel_subscriptions`,
+`api_users`, `api_tokens`, `channel_subscriptions`, `transient_fetches`,
 `user_accounts`, `schema_migrations`. Migration `0020_accounts_canonical.sql`
 extended `accounts` with `folder_allow`, `folder_deny`, `folder_deny_flags`,
 `sync_enabled`, `updated_at`, lifted the `NOT NULL` constraint from
@@ -446,11 +446,17 @@ lives in the pure [src/localmail/uids.py](src/localmail/uids.py)
 (`next_uid_after`, `should_reallocate_uid`, `checkpoint_uidnext`, plus the one
 thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
 
-- **`message_labels.uid` is read by no consumer.** Search (`search/arms.py`),
-  browse (`api/browse.py`), account listing (`api/accounts.py`) and message
-  fetch (`api/messages.py`) all key on `mailbox_id` alone. That is precisely
-  what makes re-allocating a synthetic UID safe repair rather than data loss —
-  check this still holds before relying on it.
+- **`message_labels.uid` has exactly one reader: `sync.backfill_internal_date`,**
+  which uses it as an IMAP FETCH key. Every *read* surface — search
+  (`search/arms.py`), browse (`api/browse.py`), account listing
+  (`api/accounts.py`), message fetch (`api/messages.py`) — keys on `mailbox_id`
+  alone and never sees the uid. Re-allocation is safe only because the two can
+  never meet: it is gated on `auth_method == 'archive'`, archive accounts carry
+  no `imap_host`, and `backfill-internal-date` requires a live connection.
+  **Widening `should_reallocate_uid` (or the importer) to a live account would
+  make `backfill_internal_date` FETCH a synthetic UID against the real server
+  and write another message's INTERNALDATE onto this row.** Re-check both
+  claims before touching that gate.
 - **Imports continue from `MAX(uid) + 1` per mailbox, resolved at first touch of
   that mailbox in the run** — never a counter restarting at 0. Mailboxes resolve
   on `(account_id, name)` and the importer names them from the source's filename
@@ -473,11 +479,32 @@ thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
   longer exists). Still present, **or the probe itself raises** → transient; set
   `hold_at` and clamp the checkpoint through `checkpoint_uidnext`. The clamp is
   load-bearing: `highest_seen` is a running max, so a later UID in the same run
-  would otherwise carry the watermark past the stuck one. Cost: the run's tail
-  is re-fetched next run while a transient persists (dedup makes the re-inserts
-  cheap). `failed_messages` is **not** an option here — `raw_bytes` is `NOT NULL`
-  and retry re-parses it, so an empty-body record would fail forever or insert a
-  bogus empty message.
+  would otherwise carry the watermark past the stuck one. `failed_messages` is
+  **not** an option here — `raw_bytes` is `NOT NULL` and retry re-parses it, so
+  an empty-body record would fail forever or insert a bogus empty message.
+
+  **The probe is skipped once `hold_at` is set.** UIDs ascend, so from the first
+  hold onward `min(highest_seen + 1, hold_at) == hold_at` and the answer cannot
+  change the outcome. That matters because whatever empties one `BODY[]` tends
+  to empty the whole tail, and each probe is a round trip bounded only by
+  `imap_timeout_s` against an already-sick server while the worker pins its pool
+  connection.
+
+  **The hold is bounded** by `[daemon] max_body_fetch_retries` (default 5),
+  counted per `(mailbox_id, uid)` in `transient_fetches` (migration `0033`,
+  modelled on `transient_extractions`/#153) via
+  [src/localmail/fetch_retry.py](src/localmail/fetch_retry.py). *Still present*
+  is not *will ever be fetchable*: a **zero-length message** reads as no-body
+  (`raw = b""`) yet the probe finds it, and a corrupt store entry can omit the
+  body indefinitely — either would pin the mailbox permanently. Unbounded that is
+  worse than the bug it fixes, because the tail is re-fetched on every run and
+  `idle.py::_sync_inbox` runs on **every IDLE notification**, i.e. per new mail.
+  At the cap sync logs a distinct *"giving up"* WARNING and advances. A
+  successful fetch calls `clear_attempts`, so the cap counts **consecutive**
+  failures; the per-run `load_attempts` preload means the common no-history path
+  costs no per-message DELETE. `record_attempt` uses a nested SAVEPOINT (like
+  `record_failed_message`) and reports 1 on failure, so bookkeeping trouble
+  makes sync hold rather than give up on a count it could not read.
 
 ### Degenerate `Message-Id` (#222B)
 
@@ -1703,7 +1730,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0032_channel_subscriptions.sql`; next free slot `0033_*.sql`.
+  Latest is `0033_transient_fetches.sql`; next free slot `0034_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

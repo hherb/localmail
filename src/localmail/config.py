@@ -27,6 +27,7 @@ from pydantic import (
 # (Other localmail.api.* modules import from localmail.config freely; only
 # client_ip.py is constrained, because this is the one config→api edge.)
 from localmail.api.client_ip import TrustedProxies
+from localmail.fetch_retry import DEFAULT_MAX_BODY_FETCH_RETRIES
 
 
 class DatabaseConfig(BaseModel):
@@ -152,6 +153,17 @@ class DaemonConfig(BaseModel):
     # IDLE waits are unaffected: imapclient's idle_check() drops the socket to
     # non-blocking and polls on its own timeout, restoring this one afterwards.
     imap_timeout_s: float = 60.0
+    # #222A: how many consecutive syncs may hold the resume watermark for a UID
+    # whose FETCH returns no BODY[] while the message is still on the server.
+    # Holding is what makes a transient hiccup recoverable, but "still present"
+    # is not "will ever be fetchable" — a zero-length message or a corrupt store
+    # entry would pin the mailbox forever, re-fetching its whole tail on every
+    # run (and the IDLE thread re-syncs INBOX on *every* notification). At the
+    # cap sync logs a distinct "giving up" WARNING and advances past the UID.
+    # A successful fetch clears the count, so this bounds *consecutive*
+    # failures. Larger than the poison-pill cap of 3 because an unfetchable
+    # body is usually genuinely recoverable; `0` disables holding entirely.
+    max_body_fetch_retries: int = DEFAULT_MAX_BODY_FETCH_RETRIES
 
 
 class ServeConfig(BaseModel):

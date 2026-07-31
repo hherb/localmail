@@ -5,6 +5,7 @@
 
 import pytest
 
+from localmail.fetch_retry import fetch_budget_exhausted
 from localmail.uids import (
     ARCHIVE_AUTH_METHOD,
     checkpoint_uidnext,
@@ -48,3 +49,24 @@ class TestCheckpointUidnext:
 
     def test_a_hold_on_the_very_first_uid_resumes_at_that_uid(self):
         assert checkpoint_uidnext(0, 1) == 1
+
+
+class TestFetchBudgetExhausted:
+    """Bounds the #222A watermark hold so a permanently unfetchable UID cannot
+    pin a mailbox forever (mirrors `transient_budget_exhausted` from #153)."""
+
+    def test_first_failure_is_within_budget(self):
+        assert fetch_budget_exhausted(1, 5) is False
+
+    def test_the_attempt_before_the_cap_is_within_budget(self):
+        assert fetch_budget_exhausted(4, 5) is False
+
+    def test_reaching_the_cap_exhausts_the_budget(self):
+        assert fetch_budget_exhausted(5, 5) is True
+
+    def test_overshooting_the_cap_stays_exhausted(self):
+        assert fetch_budget_exhausted(6, 5) is True
+
+    def test_a_zero_cap_never_holds(self):
+        """An operator can opt out of holding entirely."""
+        assert fetch_budget_exhausted(1, 0) is True

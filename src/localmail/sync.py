@@ -30,6 +30,13 @@ from psycopg.types.json import Jsonb
 
 from .attachments import write_attachments
 from .config import AccountConfig
+from .fetch_retry import (
+    DEFAULT_MAX_BODY_FETCH_RETRIES,
+    clear_attempts,
+    fetch_budget_exhausted,
+    load_attempts,
+    record_attempt,
+)
 from .parser import ParsedMessage, parse_message
 from .uids import (
     checkpoint_uidnext,
@@ -632,6 +639,7 @@ def sync_mailbox(
     attachments_root: Path,
     max_messages: int | None = None,
     progress: Callable[[str], None] | None = None,
+    max_body_fetch_retries: int = DEFAULT_MAX_BODY_FETCH_RETRIES,
 ) -> int:
     """Sync a single mailbox. Returns number of newly inserted messages.
 
@@ -693,6 +701,9 @@ def sync_mailbox(
     # Lowest UID whose body we could not fetch but which is still on the server
     # (#222A). It clamps this run's resume point so the next run re-fetches it.
     hold_at: int | None = None
+    # Read once per run: the common path (a message that fetches fine and has
+    # no hold history) then costs no per-message query to clear.
+    held_attempts = load_attempts(conn, mailbox.id)
     for chunk in _batches(uids, BATCH_SIZE):
         fetched = imap.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS", b"INTERNALDATE"])
         for uid in chunk:
@@ -704,13 +715,35 @@ def sync_mailbox(
                 # or the watermark would pin forever) or a transient server
                 # hiccup (must not be silently lost). One targeted probe tells
                 # them apart.
-                if _uid_still_on_server(imap, uid, mailbox.name):
-                    log.warning(
-                        "UID %s in %s returned no body but is still present; "
-                        "holding resume point for the next run",
-                        uid, mailbox.name,
-                    )
-                    hold_at = int(uid) if hold_at is None else min(hold_at, int(uid))
+                # Once a hold is recorded the checkpoint is pinned at it (UIDs
+                # ascend, so `min(highest_seen + 1, hold_at) == hold_at` from
+                # here on) and the probe's answer cannot change the outcome.
+                # Skipping it matters: the condition that empties one BODY[]
+                # tends to empty the whole tail, and each probe is a round trip
+                # bounded only by `imap_timeout_s` against an already-sick
+                # server, while the worker holds its pool connection.
+                if hold_at is not None or _uid_still_on_server(imap, uid, mailbox.name):
+                    # "Still present" is not "will ever be fetchable" — a
+                    # zero-length message or a corrupt store entry stays present
+                    # forever — so the hold is bounded.
+                    attempts = record_attempt(conn, mailbox_id=mailbox.id, uid=int(uid))
+                    if fetch_budget_exhausted(attempts, max_body_fetch_retries):
+                        log.warning(
+                            "UID %s in %s still returned no body after %s "
+                            "attempts; giving up and advancing past it",
+                            uid, mailbox.name, attempts,
+                        )
+                        clear_attempts(conn, mailbox_id=mailbox.id, uid=int(uid))
+                        held_attempts.pop(int(uid), None)
+                        highest_seen = max(highest_seen, int(uid))
+                    else:
+                        log.warning(
+                            "UID %s in %s returned no body but is still present "
+                            "(attempt %s/%s); holding resume point for the next run",
+                            uid, mailbox.name, attempts, max_body_fetch_retries,
+                        )
+                        held_attempts[int(uid)] = attempts
+                        hold_at = int(uid) if hold_at is None else min(hold_at, int(uid))
                 else:
                     log.info(
                         "UID %s in %s was expunged before fetch; skipping",
@@ -719,6 +752,11 @@ def sync_mailbox(
                     highest_seen = max(highest_seen, int(uid))
                 seen += 1
                 continue
+
+            if int(uid) in held_attempts:
+                # Recovered: the cap counts *consecutive* failures.
+                clear_attempts(conn, mailbox_id=mailbox.id, uid=int(uid))
+                held_attempts.pop(int(uid), None)
 
             flags_list = _decode_flags(data.get(b"FLAGS") or data.get("FLAGS"))
             internal_date_raw = data.get(b"INTERNALDATE") or data.get("INTERNALDATE")
@@ -793,6 +831,7 @@ def sync_account(
     attachments_root: Path,
     max_messages: int | None = None,
     progress: Callable[[str], None] | None = None,
+    max_body_fetch_retries: int = DEFAULT_MAX_BODY_FETCH_RETRIES,
 ) -> dict[str, int]:
     """Sync every mailbox of an account. Returns {mailbox_name: inserted}.
 
@@ -825,6 +864,7 @@ def sync_account(
             attachments_root=attachments_root,
             max_messages=max_messages,
             progress=progress,
+            max_body_fetch_retries=max_body_fetch_retries,
         )
     return results
 

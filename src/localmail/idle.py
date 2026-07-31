@@ -126,6 +126,7 @@ def _sync_inbox(ctx: WorkerContext, imap: Any, account_id: int) -> int:
             account_id=account_id,
             mailbox=mailbox,
             attachments_root=ctx.attachments_root,
+            max_body_fetch_retries=ctx.max_body_fetch_retries,
         )
     if n:
         log.info("idle sync of %s/INBOX: +%d", ctx.account.name, n)

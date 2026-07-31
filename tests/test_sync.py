@@ -627,3 +627,59 @@ def test_a_failing_existence_probe_is_treated_as_transient(db_conn, tmp_path: Pa
     _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
 
     assert _uidnext(db_conn) == 2, "an unknown outcome must hold the resume point"
+
+
+def test_a_permanently_unfetchable_uid_gives_up_at_the_cap(db_conn, tmp_path: Path):
+    """The hold must be bounded (#222A follow-up).
+
+    A zero-length or corrupt-store message is "still present" forever, so an
+    unbounded hold would pin the mailbox and re-fetch its whole tail on every
+    run — and the IDLE thread re-syncs INBOX on *every* notification.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2 — never fetchable
+    imap.append("INBOX", _eml.utf8_subject())   # uid 3
+    imap.suppress_body = {2}
+
+    # cap=3: attempts 1 and 2 hold, attempt 3 is the last and gives up.
+    for expected_attempt in (1, 2):
+        _sync(db_conn, imap, account=make_account(),
+              attachments_root=tmp_path, max_body_fetch_retries=3)
+        assert _uidnext(db_conn) == 2, (
+            f"attempt {expected_attempt} is within budget and must hold")
+
+    _sync(db_conn, imap, account=make_account(),
+          attachments_root=tmp_path, max_body_fetch_retries=3)
+
+    assert _uidnext(db_conn) == 4, "at the cap sync gives up and advances"
+    db_conn.rollback()
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM transient_fetches")
+        assert cur.fetchone()[0] == 0, "giving up must not leave the row behind"
+
+
+def test_a_successful_fetch_clears_the_hold_history(db_conn, tmp_path: Path):
+    """The cap counts *consecutive* failures, so recovery must reset it."""
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2 — suppressed, then not
+    imap.suppress_body = {2}
+
+    _sync(db_conn, imap, account=make_account(),
+          attachments_root=tmp_path, max_body_fetch_retries=5)
+    db_conn.rollback()
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT attempt_count FROM transient_fetches")
+        assert [r[0] for r in cur.fetchall()] == [1]
+
+    imap.suppress_body = set()
+    _sync(db_conn, imap, account=make_account(),
+          attachments_root=tmp_path, max_body_fetch_retries=5)
+
+    db_conn.rollback()
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM transient_fetches")
+        assert cur.fetchone()[0] == 0, "history must not survive a good fetch"

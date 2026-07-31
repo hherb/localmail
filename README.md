@@ -135,6 +135,14 @@ localmail can import existing mbox files or maildir directories into an
 skipped via the existing per-account Message-Id / raw-SHA256 dedup, so
 re-running is safe.
 
+Importing **two sources whose filenames share a stem** into the same account is
+also safe. Folders are named after the source's filename stem, so
+`2023/Inbox.mbox` and `2024/Inbox.mbox` both land in a folder called `Inbox`;
+each import continues numbering where the previous one left off. Before this was
+fixed (#215) the second import restarted its numbering and every one of its
+messages was rejected into `failed_messages` — not because anything was wrong
+with them, and with no way to retry successfully.
+
 1. **Create an archive account** at `/admin/accounts` (auth method: `archive`,
    no IMAP host required), or via the CLI:
    `localmail add-account NAME` (with `auth_method = "archive"` in `config.toml`).
@@ -305,6 +313,23 @@ uv run localmail retry-failed --account N   # one account only
 Successful retries delete the `failed_messages` row and insert the message
 into `messages` via the same code path live sync uses. Persistent failures
 bump `retry_count` and `last_retry_at`.
+
+For rows belonging to an **archive** account, retry assigns a fresh message
+number rather than reusing the stored one. Imported numbers are synthetic, so a
+row left behind by the pre-#215 collision bug would otherwise clash forever and
+never recover. Live IMAP accounts keep their stored UID exactly — there it is
+the server's own identifier and a clash means something genuinely wrong, which
+should surface rather than be papered over.
+
+**Messages the server won't hand over.** If a fetch returns an empty body,
+localmail asks the server whether the message is still there. If it has been
+deleted meanwhile, sync moves past it. If it is still present — a server hiccup
+— sync deliberately does *not* advance, so the next run tries again instead of
+losing the message silently. Because a message can be permanently unfetchable
+(a zero-length message, a corrupt entry on the server), that retrying is capped
+at `[daemon] max_body_fetch_retries` (default 5) **consecutive** attempts, after
+which one distinct *"giving up"* WARNING is logged and sync moves on. A
+successful fetch resets the count; `0` disables the retrying entirely.
 
 Attachment extraction follows the same SAVEPOINT discipline but distinguishes
 two error classes (so a docling model-download blip doesn't permanently mark

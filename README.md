@@ -326,10 +326,18 @@ localmail asks the server whether the message is still there. If it has been
 deleted meanwhile, sync moves past it. If it is still present — a server hiccup
 — sync deliberately does *not* advance, so the next run tries again instead of
 losing the message silently. Because a message can be permanently unfetchable
-(a zero-length message, a corrupt entry on the server), that retrying is capped
-at `[daemon] max_body_fetch_retries` (default 5) **consecutive** attempts, after
-which one distinct *"giving up"* WARNING is logged and sync moves on. A
-successful fetch resets the count; `0` disables the retrying entirely.
+(a zero-length message, a corrupt entry on the server), that retrying stops
+after `[daemon] max_body_fetch_hold_s` (default 1800 s), at which point one
+distinct *"giving up"* WARNING is logged and sync moves on. A successful fetch
+resets the window, so it measures one **continuous** outage; `0` disables the
+retrying entirely.
+
+It is a duration rather than an attempt count on purpose. The IDLE thread
+re-syncs INBOX on *every* notification — including another mail client merely
+toggling a flag — so a count would be spent at your mailbox's traffic rate: five
+notifications in ten seconds would exhaust a five-attempt budget and drop a
+message over a blip that resolved a minute later, while the slower folder poll
+got half an hour from the same number.
 
 Attachment extraction follows the same SAVEPOINT discipline but distinguishes
 two error classes (so a docling model-download blip doesn't permanently mark

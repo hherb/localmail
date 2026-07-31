@@ -183,13 +183,30 @@ two counts, both surfaced in review and verified:
    re-downloads the whole tail every time a message arrives. That converts
    bounded data loss into an unbounded resource loop — worse than the defect.
 
-Migration `0033_transient_fetches.sql` adds a per-`(mailbox_id, uid)` counter,
-modelled directly on `transient_extractions` (#153). Sync bumps it each time it
-holds, and once `attempt_count >= [daemon] max_body_fetch_retries` (default 5)
-it logs a distinct *"giving up"* WARNING and advances. A successful fetch clears
-the row, so the cap counts **consecutive** failures. The pure boundary
-`fetch_budget_exhausted(count, cap)` matches the shape of
-`transient_budget_exhausted`; `0` disables holding entirely.
+Migration `0033_transient_fetches.sql` adds per-`(mailbox_id, uid)` hold state.
+Past `[daemon] max_body_fetch_hold_s` (default 1800) sync logs a distinct
+*"giving up"* WARNING and advances; a successful fetch clears the row, so the
+window measures one **continuous** outage. The pure boundary is
+`hold_expired(first_seen_at, now, max_hold_s)`; `0` disables holding entirely.
+
+**A duration, not an attempt count.** The first cut used a consecutive-failure
+cap modelled on `transient_extractions` (#153). That precedent does not
+transfer: its sweeps are timer-paced, so there a count *is* a duration, whereas
+`idle.py::_sync_inbox` runs on every IDLE notification — including another
+client merely toggling a flag. A count would therefore be spent at the mailbox's
+traffic rate: five notifications in ten seconds exhaust a 5-attempt budget and
+drop a message over a blip that resolved a minute later, while the poll plane
+gets 25 minutes from the same number. Nor does a count bound the re-fetch
+traffic, which comes from holding the watermark and happens per pass regardless
+of whether the pass is counted. Only elapsed time bounds both, identically on
+both planes, and means to an operator what it says.
+
+Two lifecycle rules keep the table honest. A UIDVALIDITY reset clears the
+mailbox's rows alongside `clear_mailbox_labels` — the UID space is renumbered,
+and a surviving near-expiry row would make sync give up on an unrelated new
+message at its first sighting. Each checkpoint calls `reclaim_below(resume_at)`,
+since rows under the resume point are dead by construction and would otherwise
+leak forever (routinely, because the probe skip records expunged UIDs as held).
 
 `load_attempts` reads the mailbox's held UIDs once per run so the common path (a
 message that fetches fine and has no history) costs no per-message DELETE.
@@ -197,11 +214,16 @@ message that fetches fine and has no history) costs no per-message DELETE.
 reports 1 on failure so bookkeeping trouble makes sync hold rather than give up
 on a count it could not read.
 
-**Also from review:** the probe is skipped once `hold_at` is set. UIDs ascend, so
-`min(highest_seen + 1, hold_at) == hold_at` from the first hold onward and the
-probe cannot change the outcome — while whatever empties one `BODY[]` tends to
-empty the whole tail, each probe being a round trip bounded only by
-`imap_timeout_s` against an already-sick server.
+**Also from review:** the probe is skipped once the run knows the server is
+emptying bodies for present messages — whatever empties one `BODY[]` tends to
+empty the whole tail, and each probe is a round trip bounded only by
+`imap_timeout_s` against an already-sick server, with the worker holding its pool
+connection and never checking the stop event in between.
+
+The guard is a dedicated `server_emptying_bodies` flag, **not** `hold_at`. The
+first cut used `hold_at`, which is only assigned on the still-holding branch — so
+on the run where every held UID has finally expired it stays `None` and the
+whole tail gets re-probed one UID at a time, on precisely the worst run.
 
 No bogus raw bytes; one migration.
 
@@ -228,11 +250,15 @@ arithmetic) and out of `sync.py` (already 800+ lines).
 
 | symbol | kind | contract |
 |---|---|---|
-| `DEFAULT_MAX_BODY_FETCH_RETRIES` | const | `5`; the single source for the `DaemonConfig` field default and the `sync_mailbox` / `WorkerContext` parameter defaults |
-| `fetch_budget_exhausted(count, cap)` | pure | `count >= cap`; `0` disables holding |
-| `load_attempts(conn, mailbox_id)` | thin IO | `{uid: attempt_count}`, read once per run |
-| `record_attempt(conn, …)` | thin IO | upsert + `RETURNING`, nested SAVEPOINT, reports 1 on failure |
+| `DEFAULT_MAX_BODY_FETCH_HOLD_S` | const | `1800.0`; the single source for the `DaemonConfig` field default and the `sync_mailbox` / `WorkerContext` parameter defaults |
+| `HoldState` | type | `(attempt_count, first_seen_at)` |
+| `hold_expired(first_seen_at, now, max_hold_s)` | pure | elapsed `>= max_hold_s`; `<= 0` disables holding |
+| `load_attempts(conn, mailbox_id)` | thin IO | `{uid: HoldState}`, read once per run |
+| `record_attempt(conn, …)` | thin IO | upsert + `RETURNING`; SAVEPOINT outside the try; reports a fresh hold on failure |
 | `clear_attempts(conn, …)` | thin IO | drop the row on recovery |
+| `reclaim_below(conn, …)` | thin IO | drop rows under the resume point |
+| `clear_mailbox(conn, mailbox_id)` | thin IO | drop every row (UIDVALIDITY reset) |
+| `db_now(conn)` | thin IO | server clock, comparable to `first_seen_at` |
 
 ## Testing
 

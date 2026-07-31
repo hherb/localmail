@@ -31,10 +31,13 @@ from psycopg.types.json import Jsonb
 from .attachments import write_attachments
 from .config import AccountConfig
 from .fetch_retry import (
-    DEFAULT_MAX_BODY_FETCH_RETRIES,
+    DEFAULT_MAX_BODY_FETCH_HOLD_S,
     clear_attempts,
-    fetch_budget_exhausted,
+    clear_mailbox as clear_mailbox_holds,
+    db_now,
+    hold_expired,
     load_attempts,
+    reclaim_below,
     record_attempt,
 )
 from .parser import ParsedMessage, parse_message
@@ -639,7 +642,7 @@ def sync_mailbox(
     attachments_root: Path,
     max_messages: int | None = None,
     progress: Callable[[str], None] | None = None,
-    max_body_fetch_retries: int = DEFAULT_MAX_BODY_FETCH_RETRIES,
+    max_body_fetch_hold_s: float = DEFAULT_MAX_BODY_FETCH_HOLD_S,
 ) -> int:
     """Sync a single mailbox. Returns number of newly inserted messages.
 
@@ -663,6 +666,10 @@ def sync_mailbox(
             mailbox.name, mailbox.uidvalidity, server_uidvalidity,
         )
         clear_mailbox_labels(conn, mailbox.id)
+        # The UID space is being renumbered, so hold history keyed on the old
+        # UIDs would attach to unrelated new messages — one near its expiry
+        # could make sync give up on a new message on its very first sighting.
+        clear_mailbox_holds(conn, mailbox.id)
         conn.commit()
 
     if full_sync:
@@ -701,9 +708,18 @@ def sync_mailbox(
     # Lowest UID whose body we could not fetch but which is still on the server
     # (#222A). It clamps this run's resume point so the next run re-fetches it.
     hold_at: int | None = None
+    # Whether this run has already established that the server is returning
+    # empty bodies for messages that are still present. Tracked separately from
+    # `hold_at`, which only records the *clamp* — on the run where every held
+    # UID has finally expired, `hold_at` stays None and using it as the guard
+    # would re-probe the entire tail one UID at a time.
+    server_emptying_bodies = False
     # Read once per run: the common path (a message that fetches fine and has
     # no hold history) then costs no per-message query to clear.
     held_attempts = load_attempts(conn, mailbox.id)
+    # The *server* clock, so it is comparable to `first_seen_at`, which Postgres
+    # stamped. Read once per run — a run is short next to any sane hold window.
+    now = db_now(conn)
     for chunk in _batches(uids, BATCH_SIZE):
         fetched = imap.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS", b"INTERNALDATE"])
         for uid in chunk:
@@ -715,23 +731,24 @@ def sync_mailbox(
                 # or the watermark would pin forever) or a transient server
                 # hiccup (must not be silently lost). One targeted probe tells
                 # them apart.
-                # Once a hold is recorded the checkpoint is pinned at it (UIDs
-                # ascend, so `min(highest_seen + 1, hold_at) == hold_at` from
-                # here on) and the probe's answer cannot change the outcome.
-                # Skipping it matters: the condition that empties one BODY[]
-                # tends to empty the whole tail, and each probe is a round trip
-                # bounded only by `imap_timeout_s` against an already-sick
-                # server, while the worker holds its pool connection.
-                if hold_at is not None or _uid_still_on_server(imap, uid, mailbox.name):
+                # Once the run knows the server is emptying bodies for present
+                # messages, the probe's answer cannot change what we do — and
+                # skipping it matters: whatever empties one BODY[] tends to empty
+                # the whole tail, and each probe is a round trip bounded only by
+                # `imap_timeout_s` against an already-sick server, while the
+                # worker holds its pool connection and never checks the stop
+                # event in between.
+                if server_emptying_bodies or _uid_still_on_server(imap, uid, mailbox.name):
+                    server_emptying_bodies = True
                     # "Still present" is not "will ever be fetchable" — a
                     # zero-length message or a corrupt store entry stays present
-                    # forever — so the hold is bounded.
-                    attempts = record_attempt(conn, mailbox_id=mailbox.id, uid=int(uid))
-                    if fetch_budget_exhausted(attempts, max_body_fetch_retries):
+                    # forever — so the hold is bounded in time.
+                    hold = record_attempt(conn, mailbox_id=mailbox.id, uid=int(uid))
+                    if hold_expired(hold.first_seen_at, now, max_body_fetch_hold_s):
                         log.warning(
-                            "UID %s in %s still returned no body after %s "
-                            "attempts; giving up and advancing past it",
-                            uid, mailbox.name, attempts,
+                            "UID %s in %s has returned no body since %s "
+                            "(%s attempts); giving up and advancing past it",
+                            uid, mailbox.name, hold.first_seen_at, hold.attempt_count,
                         )
                         clear_attempts(conn, mailbox_id=mailbox.id, uid=int(uid))
                         held_attempts.pop(int(uid), None)
@@ -739,10 +756,11 @@ def sync_mailbox(
                     else:
                         log.warning(
                             "UID %s in %s returned no body but is still present "
-                            "(attempt %s/%s); holding resume point for the next run",
-                            uid, mailbox.name, attempts, max_body_fetch_retries,
+                            "(attempt %s since %s); holding resume point for the "
+                            "next run",
+                            uid, mailbox.name, hold.attempt_count, hold.first_seen_at,
                         )
-                        held_attempts[int(uid)] = attempts
+                        held_attempts[int(uid)] = hold
                         hold_at = int(uid) if hold_at is None else min(hold_at, int(uid))
                 else:
                     log.info(
@@ -754,7 +772,7 @@ def sync_mailbox(
                 continue
 
             if int(uid) in held_attempts:
-                # Recovered: the cap counts *consecutive* failures.
+                # Recovered: the window measures a *continuous* outage.
                 clear_attempts(conn, mailbox_id=mailbox.id, uid=int(uid))
                 held_attempts.pop(int(uid), None)
 
@@ -805,13 +823,20 @@ def sync_mailbox(
             highest_seen = max(highest_seen, int(uid))
             seen += 1
 
+        resume_at = checkpoint_uidnext(highest_seen, hold_at)
         update_mailbox_progress(
             conn,
             mailbox_id=mailbox.id,
             uidvalidity=server_uidvalidity,
-            uidnext=checkpoint_uidnext(highest_seen, hold_at),
+            uidnext=resume_at,
             last_sync_at=datetime.now().astimezone(),
         )
+        # Hold history below the resume point is dead — sync will never look at
+        # those UIDs again, so nothing would ever clear or expire it. Chiefly
+        # this collects rows for UIDs that were really expunged but got recorded
+        # as held anyway, because the probe is skipped once the run knows the
+        # server is emptying bodies.
+        reclaim_below(conn, mailbox_id=mailbox.id, uid=resume_at)
         conn.commit()
         suffix = f", {skipped} skipped" if skipped else ""
         _emit(
@@ -831,7 +856,7 @@ def sync_account(
     attachments_root: Path,
     max_messages: int | None = None,
     progress: Callable[[str], None] | None = None,
-    max_body_fetch_retries: int = DEFAULT_MAX_BODY_FETCH_RETRIES,
+    max_body_fetch_hold_s: float = DEFAULT_MAX_BODY_FETCH_HOLD_S,
 ) -> dict[str, int]:
     """Sync every mailbox of an account. Returns {mailbox_name: inserted}.
 
@@ -864,7 +889,7 @@ def sync_account(
             attachments_root=attachments_root,
             max_messages=max_messages,
             progress=progress,
-            max_body_fetch_retries=max_body_fetch_retries,
+            max_body_fetch_hold_s=max_body_fetch_hold_s,
         )
     return results
 

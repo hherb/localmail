@@ -490,21 +490,44 @@ thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
   `imap_timeout_s` against an already-sick server while the worker pins its pool
   connection.
 
-  **The hold is bounded** by `[daemon] max_body_fetch_retries` (default 5),
-  counted per `(mailbox_id, uid)` in `transient_fetches` (migration `0033`,
-  modelled on `transient_extractions`/#153) via
+  **The hold is bounded** by `[daemon] max_body_fetch_hold_s` (default 1800),
+  tracked per `(mailbox_id, uid)` in `transient_fetches` (migration `0033`) via
   [src/localmail/fetch_retry.py](src/localmail/fetch_retry.py). *Still present*
   is not *will ever be fetchable*: a **zero-length message** reads as no-body
   (`raw = b""`) yet the probe finds it, and a corrupt store entry can omit the
   body indefinitely — either would pin the mailbox permanently. Unbounded that is
   worse than the bug it fixes, because the tail is re-fetched on every run and
   `idle.py::_sync_inbox` runs on **every IDLE notification**, i.e. per new mail.
-  At the cap sync logs a distinct *"giving up"* WARNING and advances. A
-  successful fetch calls `clear_attempts`, so the cap counts **consecutive**
-  failures; the per-run `load_attempts` preload means the common no-history path
-  costs no per-message DELETE. `record_attempt` uses a nested SAVEPOINT (like
-  `record_failed_message`) and reports 1 on failure, so bookkeeping trouble
-  makes sync hold rather than give up on a count it could not read.
+  Past the window sync logs a distinct *"giving up"* WARNING and advances; a
+  successful fetch calls `clear_attempts`, so it measures one **continuous**
+  outage. The per-run `load_attempts` preload means the common no-history path
+  costs no per-message DELETE, and `record_attempt` uses a nested SAVEPOINT with
+  the SAVEPOINT **outside** the try (like `record_failed_message`, so `ROLLBACK
+  TO` is always valid), reporting a fresh hold on failure so bookkeeping trouble
+  makes sync hold rather than give up on a history it could not read.
+
+  **A duration, not an attempt count — do not "align" it with #153.**
+  `transient_extractions`' consecutive-failure cap is the obvious analogue, but
+  that counter is driven by a timer-paced sweep, so there a count *is* a
+  duration. Here the pace is event-driven, so a count would be spent at the
+  mailbox's traffic rate: five IDLE notifications in ten seconds (another client
+  toggling flags is enough) would exhaust a 5-attempt budget and drop a message
+  over a blip that resolved a minute later, while the poll plane got 25 minutes
+  from the same number. Nor would a count bound the re-fetch traffic — that comes
+  from holding the watermark, which happens per pass regardless of counting.
+
+  **Two lifecycle rules keep the table honest.** A UIDVALIDITY reset calls
+  `clear_mailbox` alongside `clear_mailbox_labels`: the UID space is renumbered,
+  and a surviving near-expiry row would make sync give up on an unrelated new
+  message at its first sighting. Each checkpoint calls `reclaim_below(resume_at)`:
+  rows under the resume point are dead by construction (sync never revisits those
+  UIDs), and without it every expunged-but-recorded-as-held UID leaks a row
+  forever — which the probe skip below makes routine.
+
+  **The probe skip is keyed on `server_emptying_bodies`, not `hold_at`.**
+  `hold_at` is only assigned on the still-holding branch, so on the run where
+  every held UID has finally expired it stays `None` — and using it as the guard
+  would re-probe the entire tail one UID at a time, on precisely the worst run.
 
 ### Degenerate `Message-Id` (#222B)
 

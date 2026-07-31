@@ -629,7 +629,9 @@ def test_a_failing_existence_probe_is_treated_as_transient(db_conn, tmp_path: Pa
     assert _uidnext(db_conn) == 2, "an unknown outcome must hold the resume point"
 
 
-def test_a_permanently_unfetchable_uid_gives_up_at_the_cap(db_conn, tmp_path: Path):
+def test_a_permanently_unfetchable_uid_is_given_up_once_the_window_passes(
+    db_conn, tmp_path: Path,
+):
     """The hold must be bounded (#222A follow-up).
 
     A zero-length or corrupt-store message is "still present" forever, so an
@@ -643,17 +645,17 @@ def test_a_permanently_unfetchable_uid_gives_up_at_the_cap(db_conn, tmp_path: Pa
     imap.append("INBOX", _eml.utf8_subject())   # uid 3
     imap.suppress_body = {2}
 
-    # cap=3: attempts 1 and 2 hold, attempt 3 is the last and gives up.
-    for expected_attempt in (1, 2):
+    # A generous window: the hold survives repeated passes, however many.
+    for _ in range(3):
         _sync(db_conn, imap, account=make_account(),
-              attachments_root=tmp_path, max_body_fetch_retries=3)
-        assert _uidnext(db_conn) == 2, (
-            f"attempt {expected_attempt} is within budget and must hold")
+              attachments_root=tmp_path, max_body_fetch_hold_s=3600.0)
+        assert _uidnext(db_conn) == 2, "held while the window lasts"
 
+    # Same UID, window now elapsed.
     _sync(db_conn, imap, account=make_account(),
-          attachments_root=tmp_path, max_body_fetch_retries=3)
+          attachments_root=tmp_path, max_body_fetch_hold_s=0.0)
 
-    assert _uidnext(db_conn) == 4, "at the cap sync gives up and advances"
+    assert _uidnext(db_conn) == 4, "past the window sync gives up and advances"
     db_conn.rollback()
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM transient_fetches")
@@ -661,7 +663,7 @@ def test_a_permanently_unfetchable_uid_gives_up_at_the_cap(db_conn, tmp_path: Pa
 
 
 def test_a_successful_fetch_clears_the_hold_history(db_conn, tmp_path: Path):
-    """The cap counts *consecutive* failures, so recovery must reset it."""
+    """The window measures a *continuous* outage, so recovery must reset it."""
     imap = FakeIMAPClient()
     imap.add_folder("INBOX")
     imap.append("INBOX", _eml.plain())          # uid 1
@@ -669,7 +671,7 @@ def test_a_successful_fetch_clears_the_hold_history(db_conn, tmp_path: Path):
     imap.suppress_body = {2}
 
     _sync(db_conn, imap, account=make_account(),
-          attachments_root=tmp_path, max_body_fetch_retries=5)
+          attachments_root=tmp_path, max_body_fetch_hold_s=3600.0)
     db_conn.rollback()
     with db_conn.cursor() as cur:
         cur.execute("SELECT attempt_count FROM transient_fetches")
@@ -677,9 +679,60 @@ def test_a_successful_fetch_clears_the_hold_history(db_conn, tmp_path: Path):
 
     imap.suppress_body = set()
     _sync(db_conn, imap, account=make_account(),
-          attachments_root=tmp_path, max_body_fetch_retries=5)
+          attachments_root=tmp_path, max_body_fetch_hold_s=3600.0)
 
     db_conn.rollback()
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM transient_fetches")
         assert cur.fetchone()[0] == 0, "history must not survive a good fetch"
+
+
+def test_a_uidvalidity_reset_drops_stale_hold_history(db_conn, tmp_path: Path):
+    """Renumbered UIDs must not inherit an old UID's nearly-expired window.
+
+    Otherwise a brand-new message reusing that number could be given up on at
+    its very first sighting.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2 — suppressed
+    imap.suppress_body = {2}
+
+    _sync(db_conn, imap, account=make_account(),
+          attachments_root=tmp_path, max_body_fetch_hold_s=3600.0)
+    db_conn.rollback()
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM transient_fetches")
+        assert cur.fetchone()[0] == 1
+
+    imap.bump_uidvalidity("INBOX")
+    imap.suppress_body = set()
+    _sync(db_conn, imap, account=make_account(),
+          attachments_root=tmp_path, max_body_fetch_hold_s=3600.0)
+
+    db_conn.rollback()
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM transient_fetches")
+        assert cur.fetchone()[0] == 0
+
+
+def test_hold_history_below_the_resume_point_is_reclaimed(db_conn, tmp_path: Path):
+    """An expunged UID recorded as held — the probe is skipped once the run
+    knows the server is emptying bodies — would otherwise leak a row forever."""
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2
+    imap.suppress_body = {1, 2}
+
+    # Window disabled: both are given up on at once, so the watermark advances
+    # past both and no history may survive.
+    _sync(db_conn, imap, account=make_account(),
+          attachments_root=tmp_path, max_body_fetch_hold_s=0.0)
+
+    assert _uidnext(db_conn) == 3
+    db_conn.rollback()
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM transient_fetches")
+        assert cur.fetchone()[0] == 0

@@ -116,5 +116,5 @@ def _sync_folder(
             account_id=account_id,
             mailbox=mailbox,
             attachments_root=ctx.attachments_root,
-            max_body_fetch_retries=ctx.max_body_fetch_retries,
+            max_body_fetch_hold_s=ctx.max_body_fetch_hold_s,
         )

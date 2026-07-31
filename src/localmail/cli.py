@@ -388,7 +388,7 @@ def sync_cmd(ctx: click.Context, account_name: str | None,
                     conn, imap, account=account, account_id=row.id,
                     attachments_root=cfg.attachments.root,
                     max_messages=limit_per_folder, progress=click.echo,
-                    max_body_fetch_retries=cfg.daemon.max_body_fetch_retries,
+                    max_body_fetch_hold_s=cfg.daemon.max_body_fetch_hold_s,
                 )
             for folder, n in results.items():
                 click.echo(f"  {folder}: +{n} new")

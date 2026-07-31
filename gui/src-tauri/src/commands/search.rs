@@ -182,10 +182,10 @@ mod tests {
 
     #[test]
     fn search_response_deserialises_with_optional_next_cursor() {
-        let json = r#"{"results":[],"next_cursor":null,"total_estimate":null,"took_ms":3.14}"#;
+        let json = r#"{"results":[],"next_cursor":null,"total_estimate":null,"took_ms":4.25}"#;
         let resp: SearchResponse = serde_json::from_str(json).unwrap();
         assert!(resp.results.is_empty());
         assert!(resp.next_cursor.is_none());
-        assert_eq!(resp.took_ms, 3.14);
+        assert_eq!(resp.took_ms, 4.25);
     }
 }

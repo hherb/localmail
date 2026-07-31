@@ -1776,12 +1776,14 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   also has no backing field — `_account_dict` exposes no secret status and no
   `/v1/admin` endpoint reports one. Both are backend gaps. `clear_secret`
   likewise has a service function but no JSON route.
-- **Pre-existing, unrelated:** `cargo clippy --all-targets -- -D warnings`
-  fails on `gui/src-tauri/src/commands/search.rs:189` (`approx_constant`, a
-  `3.14` dummy `took_ms` in a test). It predates this work. CI *does* gate
-  clippy (`gui-ci.yml` runs `cargo clippy --locked -- -D warnings`) but
-  **without `--all-targets`**, so `#[cfg(test)]` modules are never linted —
-  hence a green `main`. Use the bare CI invocation when checking locally.
+- **`--all-targets` clippy is clean now, and CI still doesn't run it.** The
+  long-standing `approx_constant` failure in
+  `gui/src-tauri/src/commands/search.rs` (a `3.14` dummy `took_ms`) is fixed.
+  Note the underlying gap remains: CI gates clippy (`gui-ci.yml` runs `cargo
+  clippy --locked -- -D warnings`) **without `--all-targets`**, so
+  `#[cfg(test)]` modules are never linted and a lint regression inside a test
+  module will not turn `main` red. Run `cargo clippy --all-targets -- -D
+  warnings` locally when touching Rust tests.
 
 ## Conventions
 

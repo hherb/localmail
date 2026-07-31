@@ -7,7 +7,9 @@ import hashlib
 from datetime import timezone
 from email.message import EmailMessage
 
-from localmail.parser import _decode_part_text, parse_message
+import pytest
+
+from localmail.parser import _decode_part_text, normalize_message_id, parse_message
 
 from . import _eml
 
@@ -221,3 +223,51 @@ def test_text_part_get_content_unicodeerror_uses_loose_fallback(monkeypatch):
     assert out is not None
     assert "body" in out
     assert "�" in out  # the 0xe9 byte round-trips through errors="replace"
+
+
+class TestNormalizeMessageId:
+    """A degenerate Message-Id must collapse to None so the raw-SHA256 dedup
+    fallback engages instead of merging two distinct messages (#222B)."""
+
+    def test_well_formed_id_is_returned_unchanged(self):
+        assert normalize_message_id("<abc@example.com>") == "<abc@example.com>"
+
+    def test_absent_header_stays_none(self):
+        assert normalize_message_id(None) is None
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # `email.policy.default` already collapses a whitespace-only header
+            # body to "", so the pre-fix `if message_id` guard caught these.
+            "",
+            "   ",
+            "\t",
+            # These are the forms that actually reached the DB as a truthy,
+            # non-unique message_id and collapsed distinct messages.
+            "<>",
+            "< >",
+            "<\t>",
+            "  <>  ",
+        ],
+    )
+    def test_degenerate_values_become_none(self, value):
+        assert normalize_message_id(value) is None
+
+    def test_surrounding_whitespace_is_stripped(self):
+        """So '<a@b>' and ' <a@b> ' dedup as the same message."""
+        assert normalize_message_id("  <a@b>  ") == "<a@b>"
+
+
+def test_blank_message_id_header_parses_as_none():
+    p = parse_message(_eml.degenerate_message_id("first"))
+    assert p.message_id is None
+    assert p.raw_sha256 is not None
+
+
+def test_two_blank_message_id_messages_have_distinct_sha256():
+    """The dedup fallback can only keep them apart if the digests differ."""
+    a = parse_message(_eml.degenerate_message_id("first"))
+    b = parse_message(_eml.degenerate_message_id("second"))
+    assert a.message_id is None and b.message_id is None
+    assert a.raw_sha256 != b.raw_sha256

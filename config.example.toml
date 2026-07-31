@@ -59,6 +59,16 @@ db_tcp_user_timeout_ms = 30000
 # Gmail SEARCH over a very large \All folder) looks the same as a black-hole
 # and will otherwise time out on every retry. IDLE waits are unaffected.
 imap_timeout_s = 60.0
+# How long (seconds) sync keeps re-trying a UID whose FETCH returns no body
+# while the message is still on the server. Holding the resume point is what
+# makes a transient server hiccup recoverable instead of silently losing the
+# message — but a zero-length or corrupt-store message is "still present"
+# forever, so past this window sync logs a "giving up" WARNING and moves on.
+# A successful fetch resets it, so this measures one continuous outage.
+# A duration rather than an attempt count on purpose: the IDLE thread re-syncs
+# INBOX on every notification, so a count would be spent at your mail volume.
+# 0 disables holding entirely.
+# max_body_fetch_hold_s = 1800.0
 
 [serve]
 # Admin UI signing keys. Required when admin UI is in use.

@@ -162,6 +162,7 @@ class Daemon:
             stop=stop_event,
             ssl=self.ssl,
             imap_timeout_s=self.cfg.daemon.imap_timeout_s,
+            max_body_fetch_hold_s=self.cfg.daemon.max_body_fetch_hold_s,
         )
         t_idle = threading.Thread(
             target=run_inbox_idle_loop, args=(ctx,),

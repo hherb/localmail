@@ -125,7 +125,7 @@ User-facing config lives at `~/.config/localmail/config.toml` (override with
 Tables: `accounts`, `mailboxes`, `messages`, `message_labels`,
 `attachment_blobs`, `attachment_text`, `attachment_chunks`,
 `failed_messages`, `failed_extractions`, `transient_extractions`,
-`api_users`, `api_tokens`, `channel_subscriptions`,
+`api_users`, `api_tokens`, `channel_subscriptions`, `transient_fetches`,
 `user_accounts`, `schema_migrations`. Migration `0020_accounts_canonical.sql`
 extended `accounts` with `folder_allow`, `folder_deny`, `folder_deny_flags`,
 `sync_enabled`, `updated_at`, lifted the `NOT NULL` constraint from
@@ -437,6 +437,116 @@ invariants follow; all are pinned by
   restoring this one in a `finally`. The admin "Test connection" probe uses its
   own much shorter `accounts.PROBE_TIMEOUT_SECONDS` because it runs
   synchronously inside a request and holds a threadpool slot.
+
+### UID numbering: `src/localmail/uids.py` (#215, #222A)
+
+`message_labels` carries `UNIQUE (mailbox_id, uid)`. For IMAP mail the UID is
+the server's truth; for **archive imports it is invented**. All UID arithmetic
+lives in the pure [src/localmail/uids.py](src/localmail/uids.py)
+(`next_uid_after`, `should_reallocate_uid`, `checkpoint_uidnext`, plus the one
+thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
+
+- **`message_labels.uid` has exactly one reader: `sync.backfill_internal_date`,**
+  which uses it as an IMAP FETCH key. Every *read* surface — search
+  (`search/arms.py`), browse (`api/browse.py`), account listing
+  (`api/accounts.py`), message fetch (`api/messages.py`) — keys on `mailbox_id`
+  alone and never sees the uid. Re-allocation is safe only because the two can
+  never meet: it is gated on `auth_method == 'archive'`, archive accounts carry
+  no `imap_host`, and `backfill-internal-date` requires a live connection.
+  **Widening `should_reallocate_uid` (or the importer) to a live account would
+  make `backfill_internal_date` FETCH a synthetic UID against the real server
+  and write another message's INTERNALDATE onto this row.** Re-check both
+  claims before touching that gate.
+- **Imports continue from `MAX(uid) + 1` per mailbox, resolved at first touch of
+  that mailbox in the run** — never a counter restarting at 0. Mailboxes resolve
+  on `(account_id, name)` and the importer names them from the source's filename
+  stem, so `2023/Inbox.mbox` and `2024/Inbox.mbox` land in the *same* mailbox;
+  a per-run counter recycled committed UIDs and every collision poison-pilled a
+  perfectly good message into `failed_messages` (`upsert_label`'s
+  `ON CONFLICT (message_id, mailbox_id)` arbitrates the PK, not the uid index).
+  Re-import stays idempotent at the message level; only the label's uid churns
+  upward, which nothing reads.
+- **`retry_failed_messages` re-allocates the UID for archive accounts only**, and
+  re-records a still-failing row under its *stored* uid so the
+  `UNIQUE (account_id, mailbox_id, uid)` row upserts instead of multiplying.
+  This is the recovery path for rows a pre-fix import already poisoned —
+  replaying their stored uid collides forever. A live account's UID is replayed
+  verbatim: a collision there is a genuine invariant violation worth surfacing,
+  which is also why `upsert_label` was **not** made collision-tolerant.
+- **An empty `BODY[]` is probed, not assumed.** `_uid_still_on_server` runs one
+  `SEARCH UID n:n`. Gone → expunged between our SEARCH and this FETCH; advance
+  (holding the watermark would pin the mailbox forever for a message that no
+  longer exists). Still present, **or the probe itself raises** → transient; set
+  `hold_at` and clamp the checkpoint through `checkpoint_uidnext`. The clamp is
+  load-bearing: `highest_seen` is a running max, so a later UID in the same run
+  would otherwise carry the watermark past the stuck one. `failed_messages` is
+  **not** an option here — `raw_bytes` is `NOT NULL` and retry re-parses it, so
+  an empty-body record would fail forever or insert a bogus empty message.
+
+  **The probe is skipped once `hold_at` is set.** UIDs ascend, so from the first
+  hold onward `min(highest_seen + 1, hold_at) == hold_at` and the answer cannot
+  change the outcome. That matters because whatever empties one `BODY[]` tends
+  to empty the whole tail, and each probe is a round trip bounded only by
+  `imap_timeout_s` against an already-sick server while the worker pins its pool
+  connection.
+
+  **The hold is bounded** by `[daemon] max_body_fetch_hold_s` (default 1800),
+  tracked per `(mailbox_id, uid)` in `transient_fetches` (migration `0033`) via
+  [src/localmail/fetch_retry.py](src/localmail/fetch_retry.py). *Still present*
+  is not *will ever be fetchable*: a **zero-length message** reads as no-body
+  (`raw = b""`) yet the probe finds it, and a corrupt store entry can omit the
+  body indefinitely — either would pin the mailbox permanently. Unbounded that is
+  worse than the bug it fixes, because the tail is re-fetched on every run and
+  `idle.py::_sync_inbox` runs on **every IDLE notification**, i.e. per new mail.
+  Past the window sync logs a distinct *"giving up"* WARNING and advances; a
+  successful fetch calls `clear_attempts`, so it measures one **continuous**
+  outage. The per-run `load_attempts` preload means the common no-history path
+  costs no per-message DELETE, and `record_attempt` uses a nested SAVEPOINT with
+  the SAVEPOINT **outside** the try (like `record_failed_message`, so `ROLLBACK
+  TO` is always valid), reporting a fresh hold on failure so bookkeeping trouble
+  makes sync hold rather than give up on a history it could not read.
+
+  **A duration, not an attempt count — do not "align" it with #153.**
+  `transient_extractions`' consecutive-failure cap is the obvious analogue, but
+  that counter is driven by a timer-paced sweep, so there a count *is* a
+  duration. Here the pace is event-driven, so a count would be spent at the
+  mailbox's traffic rate: five IDLE notifications in ten seconds (another client
+  toggling flags is enough) would exhaust a 5-attempt budget and drop a message
+  over a blip that resolved a minute later, while the poll plane got 25 minutes
+  from the same number. Nor would a count bound the re-fetch traffic — that comes
+  from holding the watermark, which happens per pass regardless of counting.
+
+  **Two lifecycle rules keep the table honest.** A UIDVALIDITY reset calls
+  `clear_mailbox` alongside `clear_mailbox_labels`: the UID space is renumbered,
+  and a surviving near-expiry row would make sync give up on an unrelated new
+  message at its first sighting. Each checkpoint calls `reclaim_below(resume_at)`:
+  rows under the resume point are dead by construction (sync never revisits those
+  UIDs), and without it every expunged-but-recorded-as-held UID leaks a row
+  forever — which the probe skip below makes routine.
+
+  **Giving up leaves the row in place — `reclaim_below` is its only collector.**
+  When a *lower* held UID keeps the watermark below an expired one, the expired
+  UID stays reachable and is re-seen every pass; clearing its history at
+  give-up time would re-mint it a fresh window on the next pass, silently
+  undoing the give-up for as long as any lower hold lasts. The surviving row
+  keeps its `first_seen_at`, so re-sightings stay expired; a recovered fetch
+  still clears it (it is preloaded into `held_attempts`), and the checkpoint
+  reclaims it the moment the watermark truly passes.
+
+  **The probe skip is keyed on `server_emptying_bodies`, not `hold_at`.**
+  `hold_at` is only assigned on the still-holding branch, so on the run where
+  every held UID has finally expired it stays `None` — and using it as the guard
+  would re-probe the entire tail one UID at a time, on precisely the worst run.
+
+### Degenerate `Message-Id` (#222B)
+
+`parser.normalize_message_id` collapses an identity-free `Message-Id` to `None`
+so the `raw_sha256` dedup fallback engages. The form that matters is the **empty
+angle-addr** (`<>`, `< >`) — `email.policy.default` already reduces a
+whitespace-only header body to `""`, which the old `if message_id` guard caught,
+but `<>` survived as a truthy, non-unique string and collapsed distinct messages
+onto one row (discarding the second's body and attachments). The fix is
+prospective; an already-collapsed pair cannot be recovered.
 
 ## Search subsystem (Phases 1 + 2 shipped)
 
@@ -1652,7 +1762,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0032_channel_subscriptions.sql`; next free slot `0033_*.sql`.
+  Latest is `0033_transient_fetches.sql`; next free slot `0034_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

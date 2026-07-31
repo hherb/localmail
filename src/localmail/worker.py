@@ -12,6 +12,7 @@ from pathlib import Path
 from psycopg_pool import ConnectionPool
 
 from .config import AccountConfig
+from .fetch_retry import DEFAULT_MAX_BODY_FETCH_HOLD_S
 from .imap_client import DEFAULT_IMAP_TIMEOUT_SECONDS
 
 
@@ -27,3 +28,4 @@ class WorkerContext:
     stop: threading.Event
     ssl: bool = True
     imap_timeout_s: float = DEFAULT_IMAP_TIMEOUT_SECONDS
+    max_body_fetch_hold_s: float = DEFAULT_MAX_BODY_FETCH_HOLD_S

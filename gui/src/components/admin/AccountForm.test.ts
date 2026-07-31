@@ -160,6 +160,32 @@ describe("AccountForm", () => {
     ).toBeTruthy();
   });
 
+  it("never creates a new account when an edit's initial load failed", async () => {
+    // Regression: submit used to dispatch on `loaded !== null`, so a failed
+    // getAdminAccount on an edit fell through to createAdminAccount — silently
+    // creating a stray account instead of updating the opened one.
+    api.getAdminAccount.mockRejectedValueOnce("load-failed-boom");
+    const onSaved = vi.fn();
+    const { container } = render(AccountForm, {
+      props: { accountId: "5", onSaved, onCancel: vi.fn() },
+    });
+    await waitFor(() => {
+      const err = container.querySelector('[data-testid="account-form-error"]');
+      expect(err?.textContent).toContain("load-failed-boom");
+    });
+    await fireEvent.input(field(container, "field-email"), {
+      target: { value: "typed@e.rk" },
+    });
+    await submit(container);
+    await waitFor(() => {
+      const err = container.querySelector('[data-testid="account-form-error"]');
+      expect(err?.textContent).toContain("finished loading");
+    });
+    expect(api.createAdminAccount).not.toHaveBeenCalled();
+    expect(api.updateAdminAccount).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
   it("rejects a non-numeric port instead of silently dropping it", async () => {
     const { container } = render(AccountForm, {
       props: { accountId: null, onSaved: vi.fn(), onCancel: vi.fn() },

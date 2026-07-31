@@ -116,7 +116,16 @@
     }
     saving = true;
     try {
-      if (loaded !== null) {
+      // Dispatch on the edit *intent* (accountId), never on whether the row
+      // happened to load. If a GET on mount failed, `loaded` is null on an
+      // edit — falling through to create() would silently create a brand-new
+      // account instead of updating the one the operator opened.
+      if (isEdit) {
+        if (loaded === null) {
+          errorMessage =
+            "This account hasn't finished loading. Close and reopen the editor to retry.";
+          return;
+        }
         await updateAdminAccount(loaded.id, buildPatch(loaded));
       } else {
         await createAdminAccount(buildCreateInput());

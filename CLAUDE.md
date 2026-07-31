@@ -524,6 +524,15 @@ thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
   UIDs), and without it every expunged-but-recorded-as-held UID leaks a row
   forever — which the probe skip below makes routine.
 
+  **Giving up leaves the row in place — `reclaim_below` is its only collector.**
+  When a *lower* held UID keeps the watermark below an expired one, the expired
+  UID stays reachable and is re-seen every pass; clearing its history at
+  give-up time would re-mint it a fresh window on the next pass, silently
+  undoing the give-up for as long as any lower hold lasts. The surviving row
+  keeps its `first_seen_at`, so re-sightings stay expired; a recovered fetch
+  still clears it (it is preloaded into `held_attempts`), and the checkpoint
+  reclaims it the moment the watermark truly passes.
+
   **The probe skip is keyed on `server_emptying_bodies`, not `hold_at`.**
   `hold_at` is only assigned on the still-holding branch, so on the run where
   every held UID has finally expired it stays `None` — and using it as the guard

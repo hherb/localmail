@@ -629,6 +629,27 @@ def test_a_failing_existence_probe_is_treated_as_transient(db_conn, tmp_path: Pa
     assert _uidnext(db_conn) == 2, "an unknown outcome must hold the resume point"
 
 
+def test_the_probe_runs_at_most_once_per_pass(db_conn, tmp_path: Path):
+    """Once one still-present UID establishes the server is emptying bodies,
+    later empty bodies in the same pass must not probe again.
+
+    Whatever empties one BODY[] tends to empty the whole tail, and each probe
+    is a round trip bounded only by `imap_timeout_s` against an already-sick
+    server while the worker pins its pool connection.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1 — suppressed
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2 — suppressed
+    imap.append("INBOX", _eml.utf8_subject())   # uid 3 — suppressed
+    imap.suppress_body = {1, 2, 3}
+
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    # One mailbox sweep + one probe for uid 1; uids 2 and 3 reuse its verdict.
+    assert imap.search_call_count == 2
+
+
 def test_a_permanently_unfetchable_uid_is_given_up_once_the_window_passes(
     db_conn, tmp_path: Path,
 ):
@@ -660,6 +681,48 @@ def test_a_permanently_unfetchable_uid_is_given_up_once_the_window_passes(
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM transient_fetches")
         assert cur.fetchone()[0] == 0, "giving up must not leave the row behind"
+
+
+def test_an_expired_hold_stays_expired_while_a_lower_uid_clamps_the_watermark(
+    db_conn, tmp_path: Path,
+):
+    """Giving up must be sticky, even when the watermark cannot advance yet.
+
+    uid 1 is newly stuck (fresh window) and clamps the resume point below the
+    long-expired uid 2. Deleting uid 2's history at the moment it is "given up"
+    would hand it a brand-new window on the very next pass — the give-up would
+    be silently undone for as long as any lower UID holds. The expired row must
+    instead survive, window intact, until `reclaim_below` collects it once the
+    watermark genuinely passes.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1 — newly stuck, clamps
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2 — stuck far past the window
+    imap.suppress_body = {1, 2}
+
+    _sync(db_conn, imap, account=make_account(),
+          attachments_root=tmp_path, max_body_fetch_hold_s=3600.0)
+    # Backdate uid 2's first sighting to well past the window; uid 1 stays fresh.
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE transient_fetches SET first_seen_at = now() - interval '2 hours' "
+            "WHERE uid = 2"
+        )
+    db_conn.commit()
+
+    _sync(db_conn, imap, account=make_account(),
+          attachments_root=tmp_path, max_body_fetch_hold_s=3600.0)
+
+    assert _uidnext(db_conn) == 1, "uid 1 still clamps the watermark"
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT first_seen_at < now() - interval '1 hour' "
+            "FROM transient_fetches WHERE uid = 2"
+        )
+        row = cur.fetchone()
+    assert row is not None, "the given-up row must survive while it is unreachable"
+    assert row[0] is True, "…and keep its original window rather than restart it"
 
 
 def test_a_successful_fetch_clears_the_hold_history(db_conn, tmp_path: Path):

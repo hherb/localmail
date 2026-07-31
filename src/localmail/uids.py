@@ -5,10 +5,16 @@
 arithmetic for IMAP sync (#215, #222A).
 
 `message_labels` carries ``UNIQUE (mailbox_id, uid)``. For IMAP-sourced mail the
-UID is the server's truth; for archive imports it is invented here. The value is
-read by no consumer -- search, browse, account listing and message fetch all key
-on ``mailbox_id`` alone -- so re-allocating a synthetic UID is safe repair, not
-data loss.
+UID is the server's truth; for archive imports it is invented here. The stored
+uid has exactly one reader -- `sync.backfill_internal_date`, which uses it as an
+IMAP FETCH key; every read surface (search, browse, account listing, message
+fetch) keys on ``mailbox_id`` alone. Re-allocating a synthetic UID is therefore
+safe repair only because the re-allocation and the reader can never meet:
+`should_reallocate_uid` is gated on the archive auth method, archive accounts
+carry no `imap_host`, and `backfill-internal-date` requires a live connection.
+Widening that gate to a live account would make `backfill_internal_date` FETCH a
+synthetic UID against the real server and write another message's INTERNALDATE
+onto this row -- re-check both claims before touching it.
 
 Everything is pure except `max_label_uid`, which is the one thin DB read.
 """

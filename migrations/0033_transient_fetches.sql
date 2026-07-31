@@ -12,10 +12,13 @@
 -- mailbox permanently, re-fetching the whole tail on every run (and the IDLE
 -- thread re-syncs INBOX on *every* notification, so that is per new mail).
 --
--- This table bounds it, mirroring `transient_extractions` (#153): sync bumps
--- `attempt_count` each time it holds a UID, gives up and advances past it once
--- the count reaches `[daemon] max_body_fetch_retries`, and clears the row on a
--- successful fetch — so the cap counts *consecutive* failures.
+-- This table bounds it by *time*: sync gives up and advances once
+-- `first_seen_at` is older than `[daemon] max_body_fetch_hold_s`, and clears
+-- the row on a successful fetch — so the window measures one *continuous*
+-- outage. Deliberately a duration, not an attempt count à la
+-- `transient_extractions` (#153): that counter is driven by a timer-paced
+-- sweep, whereas sync passes are event-driven (one per IDLE notification), so
+-- a count here would be spent at the mailbox's traffic rate.
 
 CREATE TABLE transient_fetches (
     mailbox_id    BIGINT      NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,

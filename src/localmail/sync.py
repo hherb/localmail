@@ -750,8 +750,14 @@ def sync_mailbox(
                             "(%s attempts); giving up and advancing past it",
                             uid, mailbox.name, hold.first_seen_at, hold.attempt_count,
                         )
-                        clear_attempts(conn, mailbox_id=mailbox.id, uid=int(uid))
-                        held_attempts.pop(int(uid), None)
+                        # The row is deliberately NOT cleared here. If a lower
+                        # UID is holding the watermark, this one stays reachable
+                        # and will be re-seen next pass — deleting its history
+                        # now would hand it a fresh window then, silently
+                        # undoing the give-up for as long as any lower hold
+                        # lasts. `reclaim_below` collects the row once the
+                        # watermark genuinely passes it; a recovered fetch
+                        # clears it via the `held_attempts` path.
                         highest_seen = max(highest_seen, int(uid))
                     else:
                         log.warning(
@@ -832,10 +838,12 @@ def sync_mailbox(
             last_sync_at=datetime.now().astimezone(),
         )
         # Hold history below the resume point is dead — sync will never look at
-        # those UIDs again, so nothing would ever clear or expire it. Chiefly
-        # this collects rows for UIDs that were really expunged but got recorded
-        # as held anyway, because the probe is skipped once the run knows the
-        # server is emptying bodies.
+        # those UIDs again, so nothing would ever clear or expire it. This is
+        # also the *only* collector for given-up rows (the expired branch above
+        # leaves them in place so expiry stays sticky), and it likewise catches
+        # UIDs that were really expunged but got recorded as held anyway,
+        # because the probe is skipped once the run knows the server is
+        # emptying bodies.
         reclaim_below(conn, mailbox_id=mailbox.id, uid=resume_at)
         conn.commit()
         suffix = f", {skipped} skipped" if skipped else ""

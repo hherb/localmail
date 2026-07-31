@@ -135,9 +135,11 @@ def reclaim_below(conn: psycopg.Connection, *, mailbox_id: int, uid: int) -> Non
 
     Such a row is dead by construction: sync will never look at that UID again,
     so nothing would ever clear or expire it. Without this they accumulate
-    without bound -- most obviously for a UID that really was expunged but was
-    recorded as held anyway, because the probe is skipped once the run knows the
-    server is emptying bodies.
+    without bound. Two populations land here: **given-up rows** -- sync's
+    expired branch leaves them in place, so a lower held UID that keeps the
+    watermark below one cannot hand it a fresh window on the next pass -- and
+    UIDs that really were expunged but got recorded as held anyway, because the
+    probe is skipped once the run knows the server is emptying bodies.
     """
     with conn.cursor() as cur:
         cur.execute(

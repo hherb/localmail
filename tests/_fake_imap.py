@@ -34,6 +34,9 @@ class FakeIMAPClient:
         # Test counters so assertions can verify protocol transitions.
         self.idle_call_count = 0
         self.idle_done_call_count = 0
+        # Every search() call — sweeps and single-UID probes alike — so tests
+        # can pin how many round trips a sync pass costs (#222A probe skip).
+        self.search_call_count = 0
         # --- empty-BODY[] simulation (#222A) ---------------------------------
         # UIDs whose FETCH omits BODY[] although the message is still in the
         # mailbox: a transient server hiccup. The targeted probe finds them.
@@ -101,6 +104,7 @@ class FakeIMAPClient:
         ("N:N"), which sync uses to probe a single UID after an empty FETCH,
         reflects current reality and never reports a phantom.
         """
+        self.search_call_count += 1
         assert self._selected is not None
         if criteria == "ALL" or criteria == ["ALL"]:
             return sorted(set(self._selected.messages) | self.phantom_uids)

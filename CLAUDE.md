@@ -19,7 +19,19 @@ attachment tree without touching IMAP.
   `google-auth` + `google-auth-oauthlib`.
 - Secrets: `keyring` (service `"localmail"`, username = `<account.name>` for
   passwords, `<account.name>:refresh` for OAuth refresh tokens). Cross-platform:
-  macOS Keychain on darwin, Secret Service on Linux.
+  macOS Keychain on darwin, Secret Service on Linux. **That username scheme is
+  why account names may not contain `:` (#217)** — a password account named
+  `gmail:refresh` would otherwise `store_password` straight over the `gmail`
+  account's OAuth refresh token, and `gmail`'s next token refresh would fail.
+  The rule is the pure
+  [src/localmail/account_names.py](src/localmail/account_names.py)`::account_name_error`
+  (blank / length / separator), applied at **both** create boundaries —
+  `api.admin.accounts._validate_create_fields` (admin UI, JSON API, CLI) and
+  the `config.AccountConfig` field validator (the `init-db` TOML seed, which
+  reaches `create_account`). Names are not editable after creation
+  (`_UPDATABLE` has no `name`), so create is the whole surface. Rejecting the
+  one separator character was chosen over a conservative allowlist because an
+  allowlist would retroactively break existing configs on a re-seed.
 - Config: TOML, validated by `pydantic` v2.
 - CLI: `click`.
 - Tests: `pytest` (in-memory `keyring` backend; real Postgres at
@@ -814,12 +826,12 @@ for the full design.
   [docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md](docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md).
   Do NOT also set `uvicorn --forwarded-allow-ips`; it rewrites
   `request.client.host` before our admission check and collapses it.
-- **Session revocation covers all three credential kinds**: bumping
+- **Session revocation covers all four credential kinds**: bumping
   `api_users.sessions_invalidated_at` (via `localmail
   revoke-admin-sessions USERNAME`, the `/admin/users` panel, or
-  `POST /v1/admin/users/{id}/revoke-sessions`) is enforced in **three**
+  `POST /v1/admin/users/{id}/revoke-sessions`) is enforced in **four**
   independent SELECTs, each comparing the credential's own issue time
-  against the cutoff. All three are required for revocation to be
+  against the cutoff. All four are required for revocation to be
   terminal; drop any one and the operator's "I cut off that leaked
   credential" belief is false:
   - **admin cookies** — `get_admin_user` (`to_timestamp(issued_at) <
@@ -838,6 +850,16 @@ for the full design.
     revoked token lands on `rotate_refresh`'s **`unknown`** outcome, not
     `reuse` — revocation is an operator action, not evidence of a stolen
     copy, so the family is left intact.
+  - **OAuth authorization codes** — `mcp.oauth.codes.load_code`
+    (`c.created_at >= u.sessions_invalidated_at`, plus `u.disabled_at IS
+    NULL`), added by **#236**. The window is only
+    `oauth_authorization_code_ttl_s` (default 60 s) wide and codes are
+    single-use + PKCE-bound, but exchanging one mints an access + refresh
+    pair stamped `created_at = now()` — past the cutoff, hence valid — so
+    an honoured code hands back exactly the credentials the operator just
+    cut off. The `disabled_at` half was the older gap of the two:
+    `load_refresh` has mirrored `verify_token` on it since the M1
+    hardening (#182); `load_code` never did.
 
   `NULL` means "never revoked" and is the default, so nothing changes for a
   user who has never been revoked. The cutoff is a moment, not a ban:
@@ -1636,6 +1658,21 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   `refresh.py` still touches only `oauth_refresh_tokens` (it reports `family_id`
   as data); `access.py` owns `api_tokens`; the provider orchestrates both. Design:
   [docs/superpowers/specs/2026-06-16-access-token-family-containment-design.md](docs/superpowers/specs/2026-06-16-access-token-family-containment-design.md).
+- **Authorization-code single-use survives a failed exchange (#219):**
+  `provider._exchange_code_sync` **commits the `consume_code` DELETE on its own**
+  before minting anything. The burn and the mint used to share one transaction,
+  so every failure path after the DELETE — the disabled-user branch's explicit
+  `conn.rollback()`, or psycopg's rollback-on-exception from
+  `mint_refresh`/`mint_access`/`touch_last_used` — took the DELETE with it and
+  **resurrected the code** for the rest of its TTL, violating RFC 6749 §4.1.2. A
+  client auto-retry (or a replay by anyone holding a copy) could then still
+  exchange it; PKCE bounded the blast radius, which is why this was Medium not
+  High. The trade is deliberate and in the right direction: a post-burn failure
+  now costs the user a fresh consent round trip rather than leaving a replayable
+  code. Contrast `refresh.rotate_refresh`, which needs no such split because its
+  failure branches have no pending writes to lose. The concurrency guarantee is
+  unchanged — a second exchange's DELETE blocks on the row lock, then matches 0
+  rows and raises `invalid_grant`.
 - **RFC 8707 resource indicators (shipped):** `/authorize` validates the
   client's `resource` against a configurable accepted set
   (`McpConfig.resource_indicators`, default

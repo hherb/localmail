@@ -26,6 +26,7 @@ from psycopg.types.json import Jsonb
 
 from localmail import imap_client as _imap
 from localmail import secrets as _secrets
+from localmail.account_names import account_name_error
 from localmail.api.errors import NotFound
 from localmail.config import AccountConfig as _AccountConfig
 
@@ -137,7 +138,6 @@ class AccountFieldError(ValueError):
     """Raised when field validation rejects a create/update."""
 
 
-_NAME_MAX = 128
 _HOSTNAME_MAX = 255
 _PORT_MIN = 1
 _PORT_MAX = 65535
@@ -183,10 +183,9 @@ def _validate_create_fields(*, name: str, email_address: str,
                              auth_method: str, imap_host: str | None,
                              imap_port: int | None,
                              oauth_provider: str | None) -> None:
-    if not name or not name.strip():
-        raise AccountFieldError("name must not be blank")
-    if len(name) > _NAME_MAX:
-        raise AccountFieldError(f"name longer than {_NAME_MAX} chars")
+    name_error = account_name_error(name)
+    if name_error is not None:
+        raise AccountFieldError(name_error)
     _validate_email(email_address)
     _validate_combo(
         auth_method=auth_method, imap_host=imap_host,

@@ -21,6 +21,8 @@ from pydantic import (
     model_validator,
 )
 
+from localmail.account_names import account_name_error
+
 # Imported (not redefined) so client_ip.py is the single source of truth for
 # the TrustedProxies alias. client_ip.py must remain free of any
 # localmail.config import — adding one would close a cycle through this line.
@@ -330,6 +332,16 @@ class AccountConfig(BaseModel):
     # `[daemon].poll_seconds`. Kept parseable for back-compat only — an
     # existing per-account value is silently ignored, never an error.
     poll_seconds: int | None = None
+
+    @field_validator("name", mode="after")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        # Same rule as the admin service layer: a TOML block is a create
+        # boundary too, since `init-db` seeds it through `create_account`.
+        error = account_name_error(v)
+        if error is not None:
+            raise ValueError(error)
+        return v
 
 
 class SearchConfig(BaseModel):

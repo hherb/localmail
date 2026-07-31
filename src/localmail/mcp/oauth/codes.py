@@ -55,14 +55,30 @@ def mint_code(
 
 
 def load_code(conn: psycopg.Connection, raw_code: str) -> CodeRow | None:
-    """Return the unexpired code row, or None. Does not consume it."""
+    """Return the unexpired code row of an enabled, non-revoked user, or None.
+    Does not consume it.
+
+    The ``api_users`` JOIN mirrors ``refresh.load_refresh`` (and through it
+    ``api.auth.verify_token``), so revocation is terminal for all three
+    credential kinds rather than two: exchanging a code mints an access +
+    refresh pair stamped ``created_at = now()`` — past the cutoff, hence valid
+    — so honouring the code would hand back exactly the credentials the
+    operator just cut off. ``disabled_at`` is the same argument (RFC 9700
+    §4.13). The window is only ``oauth_authorization_code_ttl_s`` (default 60 s)
+    wide, but a user disabled *during* the consent round trip should fail
+    closed, not complete.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT client_id, user_id, redirect_uri, "
-            "redirect_uri_provided_explicitly, code_challenge, scopes, expires_at, "
-            "resource "
-            "FROM oauth_authorization_codes "
-            "WHERE code_sha256 = %s AND expires_at > now()",
+            "SELECT c.client_id, c.user_id, c.redirect_uri, "
+            "c.redirect_uri_provided_explicitly, c.code_challenge, c.scopes, "
+            "c.expires_at, c.resource "
+            "FROM oauth_authorization_codes c "
+            "JOIN api_users u ON u.id = c.user_id "
+            "WHERE c.code_sha256 = %s AND c.expires_at > now() "
+            "  AND u.disabled_at IS NULL "
+            "  AND (u.sessions_invalidated_at IS NULL "
+            "       OR c.created_at >= u.sessions_invalidated_at)",
             (hash_token(raw_code),),
         )
         row = cur.fetchone()

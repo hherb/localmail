@@ -117,6 +117,26 @@ def test_duplicate_account_names_rejected(tmp_path: Path):
         load_config(p)
 
 
+def test_account_name_with_colon_rejected(tmp_path: Path):
+    """#217: the TOML seed is a create boundary too — a name carrying the
+    keyring subkey separator must not reach `create_account` via `init-db`."""
+    p = write(
+        tmp_path / "c.toml",
+        """
+        [database]
+        dsn = "postgresql:///localmail"
+
+        [[accounts]]
+        name = "gmail:refresh"
+        email = "a@example.com"
+        imap_host = "imap.example.com"
+        auth_method = "password"
+        """,
+    )
+    with pytest.raises(ValidationError, match="refresh"):
+        load_config(p)
+
+
 def test_distinct_account_names_accepted(tmp_path: Path):
     """Distinct names per account load fine — the validator is duplicate-only."""
     p = write(

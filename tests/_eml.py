@@ -73,6 +73,26 @@ def no_message_id() -> bytes:
     return msg.as_bytes()
 
 
+def degenerate_message_id(body: str, *, header_value: str = "<>") -> bytes:
+    """A message whose Message-Id header is present but carries no identity (#222B).
+
+    Built by hand: `EmailMessage.__setitem__` would not emit these forms.
+
+    The default is an **empty angle-addr**, which is the form that actually
+    reaches the parser intact -- `email.policy.default` already collapses a
+    whitespace-only header body to `""` (so the pre-fix `if message_id` guard
+    caught those), but `<>` survives as a truthy, non-unique string.
+    """
+    return (
+        b"From: alice@example.com\r\n"
+        b"To: bob@example.com\r\n"
+        b"Subject: degenerate\r\n"
+        b"Date: Wed, 01 Jan 2025 12:00:00 +0000\r\n"
+        b"Message-Id: " + header_value.encode() + b"\r\n"
+        b"\r\n" + body.encode() + b"\r\n"
+    )
+
+
 def two_attachments_same_name() -> bytes:
     msg = EmailMessage()
     msg["From"] = "alice@example.com"

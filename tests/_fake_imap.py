@@ -34,6 +34,14 @@ class FakeIMAPClient:
         # Test counters so assertions can verify protocol transitions.
         self.idle_call_count = 0
         self.idle_done_call_count = 0
+        # --- empty-BODY[] simulation (#222A) ---------------------------------
+        # UIDs whose FETCH omits BODY[] although the message is still in the
+        # mailbox: a transient server hiccup. The targeted probe finds them.
+        self.suppress_body: set[int] = set()
+        # UIDs the *sweep* reports but that are no longer in the mailbox: the
+        # message was expunged between SEARCH and FETCH. Neither the FETCH nor
+        # the targeted probe finds them.
+        self.phantom_uids: set[int] = set()
 
     # --- test setup helpers (not part of the IMAP protocol) ------------------
 
@@ -85,22 +93,30 @@ class FakeIMAPClient:
         }
 
     def search(self, criteria) -> list[int]:
+        """SEARCH over the selected folder.
+
+        The open-ended sweep forms sync uses ("ALL", "N:*") also report
+        `phantom_uids` — modelling a message that was still listed when the
+        mailbox was swept but has since been expunged. The closed-range form
+        ("N:N"), which sync uses to probe a single UID after an empty FETCH,
+        reflects current reality and never reports a phantom.
+        """
         assert self._selected is not None
         if criteria == "ALL" or criteria == ["ALL"]:
-            return list(self._selected.messages.keys())
+            return sorted(set(self._selected.messages) | self.phantom_uids)
         if isinstance(criteria, list) and len(criteria) == 2 and criteria[0] == "UID":
             spec = criteria[1]
             lo_s, _, hi_s = spec.partition(":")
             lo = int(lo_s)
-            uids = list(self._selected.messages.keys())
             if hi_s == "*":
+                uids = sorted(set(self._selected.messages) | self.phantom_uids)
                 hits = [u for u in uids if u >= lo]
                 if not hits and uids:
                     # Emulate the IMAP quirk that "N:*" always returns at least one UID.
                     return [max(uids)]
                 return hits
             hi = int(hi_s)
-            return [u for u in uids if lo <= u <= hi]
+            return [u for u in sorted(self._selected.messages) if lo <= u <= hi]
         raise NotImplementedError(f"unsupported search criteria: {criteria!r}")
 
     # IDLE protocol surface (test-only, deterministic).
@@ -132,8 +148,8 @@ class FakeIMAPClient:
             if entry is None:
                 continue
             raw, flags, internal_date = entry
-            out[int(uid)] = {
-                b"BODY[]": raw, b"FLAGS": flags, b"UID": int(uid),
-                b"INTERNALDATE": internal_date,
-            }
+            item = {b"FLAGS": flags, b"UID": int(uid), b"INTERNALDATE": internal_date}
+            if int(uid) not in self.suppress_body:
+                item[b"BODY[]"] = raw
+            out[int(uid)] = item
         return out

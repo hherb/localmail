@@ -167,6 +167,30 @@ def _attachments(msg: EmailMessage) -> list[Attachment]:
     return out
 
 
+def normalize_message_id(value: str | None) -> str | None:
+    """Collapse a degenerate `Message-Id` to None so raw-SHA dedup engages (#222B).
+
+    Dedup falls back to `messages.raw_sha256` only when `message_id IS NULL`. A
+    header that is present but blank -- `Message-Id:` with nothing but
+    whitespace, or an empty angle-addr `<>` from a broken MTA -- is non-None and
+    non-unique, so two distinct messages carrying it would collapse onto one row
+    and the second message's body and attachments would be discarded.
+
+    Surrounding whitespace is stripped so `<a@b>` and ` <a@b> ` are one message;
+    `email.policy.default` already unfolds and strips well-formed headers, so
+    this only bites on the degenerate ones.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    # An empty angle-addr carries no identity, only punctuation.
+    if stripped.startswith("<") and stripped.endswith(">") and not stripped[1:-1].strip():
+        return None
+    return stripped
+
+
 def parse_message(raw: bytes) -> ParsedMessage:
     msg = email.message_from_bytes(raw, _class=EmailMessage, policy=email.policy.default)
     assert isinstance(msg, EmailMessage)
@@ -174,8 +198,8 @@ def parse_message(raw: bytes) -> ParsedMessage:
     from_addr, from_name = _from_pair(msg)
     text, html = _bodies(msg)
 
-    message_id = msg.get("Message-Id")
-    message_id = str(message_id) if message_id else None
+    raw_message_id = msg.get("Message-Id")
+    message_id = normalize_message_id(str(raw_message_id) if raw_message_id else None)
 
     in_reply_to = msg.get("In-Reply-To")
     in_reply_to = str(in_reply_to) if in_reply_to else None

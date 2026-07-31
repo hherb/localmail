@@ -94,8 +94,18 @@ a non-None, non-unique string, so two distinct messages sharing it in one
 account collapse onto one `messages` row — the second message's subject, body
 and attachments are discarded and only its `message_labels` row is added.
 
-`parse_message` currently does `str(message_id) if message_id else None`, which
-catches `""` but not `"   "` and not an empty angle-addr `"<>"`.
+`parse_message` currently does `str(message_id) if message_id else None`.
+
+**Corrected during implementation.** The issue describes the trigger as
+`Message-Id: <whitespace>`, which is ambiguous. Probing the parser showed the
+whitespace-only case was **already safe**: `email.policy.default` collapses a
+header body of `"   "` or `"\t"` to `""`, which the `if message_id` guard
+catches. The form that actually reaches the DB intact is the **empty
+angle-addr** — `<>`, `< >`, `<\t>` — which parses to a truthy, non-unique
+string. The first version of the DB regression test used a whitespace-only
+header and passed with the fix reverted; switching the fixture to `<>` made it
+fail with `{'INBOX': 1} == {'INBOX': 2}`, i.e. one message swallowing the other.
+The fix covers both classes regardless.
 
 ### Fix
 

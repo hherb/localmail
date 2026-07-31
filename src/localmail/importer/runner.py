@@ -22,6 +22,7 @@ import psycopg
 from localmail.importer.job_state import should_checkpoint
 from localmail.importer.sources import ImportedMessage, iter_maildir, iter_mbox
 from localmail.sync import process_one_message, record_failed_message, upsert_mailbox
+from localmail.uids import max_label_uid
 
 log = logging.getLogger(__name__)
 
@@ -147,7 +148,12 @@ def run_import(
                     delimiter=None, flags=[])
                 conn.commit()
                 mailbox_ids[msg.mailbox_name] = mb.id
-                uid_counters[msg.mailbox_name] = 0
+                # Continue past whatever a previous import left in this mailbox
+                # (#215). Mailboxes resolve on (account_id, name), so two
+                # sources sharing a filename stem land here together; a counter
+                # restarting at 0 would recycle committed UIDs and every
+                # collision would poison-pill a perfectly good message.
+                uid_counters[msg.mailbox_name] = max_label_uid(conn, mb.id)
             uid_counters[msg.mailbox_name] += 1
             uid = uid_counters[msg.mailbox_name]
             mailbox_id = mailbox_ids[msg.mailbox_name]

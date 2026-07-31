@@ -438,6 +438,57 @@ invariants follow; all are pinned by
   own much shorter `accounts.PROBE_TIMEOUT_SECONDS` because it runs
   synchronously inside a request and holds a threadpool slot.
 
+### UID numbering: `src/localmail/uids.py` (#215, #222A)
+
+`message_labels` carries `UNIQUE (mailbox_id, uid)`. For IMAP mail the UID is
+the server's truth; for **archive imports it is invented**. All UID arithmetic
+lives in the pure [src/localmail/uids.py](src/localmail/uids.py)
+(`next_uid_after`, `should_reallocate_uid`, `checkpoint_uidnext`, plus the one
+thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
+
+- **`message_labels.uid` is read by no consumer.** Search (`search/arms.py`),
+  browse (`api/browse.py`), account listing (`api/accounts.py`) and message
+  fetch (`api/messages.py`) all key on `mailbox_id` alone. That is precisely
+  what makes re-allocating a synthetic UID safe repair rather than data loss —
+  check this still holds before relying on it.
+- **Imports continue from `MAX(uid) + 1` per mailbox, resolved at first touch of
+  that mailbox in the run** — never a counter restarting at 0. Mailboxes resolve
+  on `(account_id, name)` and the importer names them from the source's filename
+  stem, so `2023/Inbox.mbox` and `2024/Inbox.mbox` land in the *same* mailbox;
+  a per-run counter recycled committed UIDs and every collision poison-pilled a
+  perfectly good message into `failed_messages` (`upsert_label`'s
+  `ON CONFLICT (message_id, mailbox_id)` arbitrates the PK, not the uid index).
+  Re-import stays idempotent at the message level; only the label's uid churns
+  upward, which nothing reads.
+- **`retry_failed_messages` re-allocates the UID for archive accounts only**, and
+  re-records a still-failing row under its *stored* uid so the
+  `UNIQUE (account_id, mailbox_id, uid)` row upserts instead of multiplying.
+  This is the recovery path for rows a pre-fix import already poisoned —
+  replaying their stored uid collides forever. A live account's UID is replayed
+  verbatim: a collision there is a genuine invariant violation worth surfacing,
+  which is also why `upsert_label` was **not** made collision-tolerant.
+- **An empty `BODY[]` is probed, not assumed.** `_uid_still_on_server` runs one
+  `SEARCH UID n:n`. Gone → expunged between our SEARCH and this FETCH; advance
+  (holding the watermark would pin the mailbox forever for a message that no
+  longer exists). Still present, **or the probe itself raises** → transient; set
+  `hold_at` and clamp the checkpoint through `checkpoint_uidnext`. The clamp is
+  load-bearing: `highest_seen` is a running max, so a later UID in the same run
+  would otherwise carry the watermark past the stuck one. Cost: the run's tail
+  is re-fetched next run while a transient persists (dedup makes the re-inserts
+  cheap). `failed_messages` is **not** an option here — `raw_bytes` is `NOT NULL`
+  and retry re-parses it, so an empty-body record would fail forever or insert a
+  bogus empty message.
+
+### Degenerate `Message-Id` (#222B)
+
+`parser.normalize_message_id` collapses an identity-free `Message-Id` to `None`
+so the `raw_sha256` dedup fallback engages. The form that matters is the **empty
+angle-addr** (`<>`, `< >`) — `email.policy.default` already reduces a
+whitespace-only header body to `""`, which the old `if message_id` guard caught,
+but `<>` survived as a truthy, non-unique string and collapsed distinct messages
+onto one row (discarding the second's body and attachments). The fix is
+prospective; an already-collapsed pair cannot be recovered.
+
 ## Search subsystem (Phases 1 + 2 shipped)
 
 Hybrid lexical (tsvector) + vector (pgvector) search over messages and

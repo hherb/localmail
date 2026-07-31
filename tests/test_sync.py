@@ -517,3 +517,113 @@ def test_messages_without_message_id_dedup_via_sha(db_conn, tmp_path: Path):
         assert cur.fetchone()[0] == 1
 
 
+
+
+def test_two_messages_with_blank_message_id_stay_distinct(db_conn, tmp_path: Path):
+    """#222B: a present-but-blank Message-Id must not collapse distinct mail.
+
+    Both messages carry `Message-Id:` with nothing but whitespace. Before the
+    fix the header parsed as a non-None, non-unique string, so the second
+    message deduped onto the first's row and its body was discarded.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.degenerate_message_id("first body"))
+    imap.append("INBOX", _eml.degenerate_message_id("second body"))
+
+    results = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    assert results == {"INBOX": 2}
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages WHERE message_id IS NULL")
+        assert cur.fetchone()[0] == 2
+        cur.execute("SELECT count(DISTINCT raw_sha256) FROM messages")
+        assert cur.fetchone()[0] == 2
+
+
+# --- empty BODY[] on FETCH: expunged vs transient (#222A) ---------------------
+
+
+def _uidnext(conn, name: str = "INBOX") -> int:
+    conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute("SELECT uidnext FROM mailboxes WHERE name=%s", (name,))
+        return cur.fetchone()[0]
+
+
+def test_expunged_uid_does_not_hold_the_resume_watermark(db_conn, tmp_path: Path):
+    """A UID swept but since expunged is unrecoverable — advance past it.
+
+    Holding the watermark here would pin the mailbox forever, re-fetching the
+    whole tail on every run for a message that no longer exists.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2
+    imap.phantom_uids = {3}                     # swept, already gone
+
+    results = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    assert results == {"INBOX": 2}
+    assert _uidnext(db_conn) == 4, "must advance past the expunged UID"
+
+
+def test_transient_empty_body_holds_the_watermark_and_the_next_run_recovers(
+    db_conn, tmp_path: Path,
+):
+    """A UID still on the server but returning no BODY[] must not be lost.
+
+    uid 2's body is suppressed while uids 1 and 3 ingest normally. Because
+    `highest_seen` is a running max, uid 3 would otherwise carry the watermark
+    past uid 2 and the message would be skipped permanently.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2 — suppressed
+    imap.append("INBOX", _eml.utf8_subject())   # uid 3
+    imap.suppress_body = {2}
+
+    first = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    assert first == {"INBOX": 2}
+    assert _uidnext(db_conn) == 2, "the resume point must be clamped to the stuck UID"
+
+    imap.suppress_body = set()  # hiccup clears
+    second = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    assert second == {"INBOX": 1}, "the held-back message is picked up next run"
+    assert _uidnext(db_conn) == 4
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages")
+        assert cur.fetchone()[0] == 3
+        cur.execute("SELECT count(*) FROM failed_messages")
+        assert cur.fetchone()[0] == 0
+
+
+def test_a_failing_existence_probe_is_treated_as_transient(db_conn, tmp_path: Path):
+    """If the probe itself errors we cannot tell expunged from transient.
+
+    Assuming "still there" costs one re-fetch next run; assuming "gone" would
+    silently drop a real message, so the probe fails safe.
+    """
+    imap = FakeIMAPClient()
+    imap.add_folder("INBOX")
+    imap.append("INBOX", _eml.plain())          # uid 1
+    imap.append("INBOX", _eml.multipart_alt())  # uid 2 — suppressed
+    imap.suppress_body = {2}
+
+    real_search = imap.search
+
+    def flaky_search(criteria):
+        # Only the single-UID probe fails; the mailbox sweep still works.
+        if isinstance(criteria, list) and criteria[:1] == ["UID"] and ":*" not in criteria[1]:
+            raise OSError("probe blew up")
+        return real_search(criteria)
+
+    imap.search = flaky_search  # type: ignore[method-assign]
+
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    assert _uidnext(db_conn) == 2, "an unknown outcome must hold the resume point"

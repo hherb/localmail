@@ -31,6 +31,12 @@ from psycopg.types.json import Jsonb
 from .attachments import write_attachments
 from .config import AccountConfig
 from .parser import ParsedMessage, parse_message
+from .uids import (
+    checkpoint_uidnext,
+    max_label_uid,
+    next_uid_after,
+    should_reallocate_uid,
+)
 
 log = logging.getLogger(__name__)
 
@@ -370,13 +376,21 @@ def retry_failed_messages(
     """Re-attempt every row in `failed_messages` (optionally scoped to one
     account). Successful re-imports DELETE the row; failures bump retry_count.
     Returns `(succeeded, still_failing)`.
+
+    A row belonging to an **archive** account is retried under a freshly
+    allocated UID (#215). Its stored UID is synthetic, and if a later import
+    consumed it in the meantime, replaying it collides on
+    ``UNIQUE (mailbox_id, uid)`` on every attempt, forever. A live account's UID
+    is the server's truth and is always replayed verbatim -- a collision there
+    is a genuine invariant violation worth surfacing rather than papering over.
     """
     sql = """
-        SELECT id, account_id, mailbox_id, uid, raw_bytes
-        FROM failed_messages
+        SELECT f.id, f.account_id, f.mailbox_id, f.uid, f.raw_bytes, a.auth_method
+        FROM failed_messages f
+        JOIN accounts a ON a.id = f.account_id
         {where}
-        ORDER BY id
-    """.format(where="WHERE account_id = %s" if account_id is not None else "")
+        ORDER BY f.id
+    """.format(where="WHERE f.account_id = %s" if account_id is not None else "")
     params: tuple = (account_id,) if account_id is not None else ()
 
     succeeded = 0
@@ -385,7 +399,12 @@ def retry_failed_messages(
         cur.execute(sql, params)
         rows = cur.fetchall()
 
-    for row_id, acct_id, mailbox_id, uid, raw in rows:
+    for row_id, acct_id, mailbox_id, uid, raw, auth_method in rows:
+        attempt_uid = (
+            next_uid_after(max_label_uid(conn, mailbox_id))
+            if should_reallocate_uid(auth_method)
+            else int(uid)
+        )
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT retry")
         try:
@@ -393,7 +412,7 @@ def retry_failed_messages(
                 conn,
                 account_id=acct_id,
                 mailbox_id=mailbox_id,
-                uid=int(uid),
+                uid=attempt_uid,
                 raw=bytes(raw),
                 flags=[],  # flags weren't stored; safe default
                 attachments_root=attachments_root,
@@ -407,6 +426,10 @@ def retry_failed_messages(
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT retry")
                 cur.execute("RELEASE SAVEPOINT retry")
+            # Re-record under the *stored* uid, not `attempt_uid`: the row is
+            # keyed UNIQUE (account_id, mailbox_id, uid), so this upserts the
+            # same row and bumps retry_count instead of accumulating a new row
+            # per re-allocated attempt.
             record_failed_message(
                 conn,
                 account_id=acct_id,
@@ -579,6 +602,27 @@ def _filter_new_uids(uids: list[int], known_uidnext: int | None) -> list[int]:
     return sorted(u for u in uids if u >= known_uidnext)
 
 
+def _uid_still_on_server(imap: ImapLike, uid: int, mailbox_name: str) -> bool:
+    """Whether `uid` is still in the selected mailbox (#222A).
+
+    Called only after a FETCH returned no ``BODY[]``, to tell a message expunged
+    between SEARCH and FETCH from a transient server hiccup. The closed-range
+    form ``UID n:n`` is used rather than a bare UID: both are valid IMAP, and
+    the closed form cannot be misread as an open range.
+
+    A failing probe answers **True** — assuming "still there" costs one re-fetch
+    next run, while assuming "gone" silently drops a real message.
+    """
+    try:
+        return bool(imap.search(["UID", f"{uid}:{uid}"]))
+    except Exception:
+        log.warning(
+            "UID %s in %s: existence probe failed; assuming transient",
+            uid, mailbox_name, exc_info=True,
+        )
+        return True
+
+
 def sync_mailbox(
     conn: psycopg.Connection,
     imap: ImapLike,
@@ -646,14 +690,33 @@ def sync_mailbox(
     skipped = 0
     seen = 0
     highest_seen = (mailbox.uidnext or 1) - 1
+    # Lowest UID whose body we could not fetch but which is still on the server
+    # (#222A). It clamps this run's resume point so the next run re-fetches it.
+    hold_at: int | None = None
     for chunk in _batches(uids, BATCH_SIZE):
         fetched = imap.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS", b"INTERNALDATE"])
         for uid in chunk:
             data = fetched.get(uid) or fetched.get(int(uid)) or {}
             raw = data.get(b"BODY[]") or data.get("BODY[]")
             if not raw:
-                log.warning("UID %s in %s returned no body; skipping", uid, mailbox.name)
-                highest_seen = max(highest_seen, int(uid))
+                # An empty BODY[] is either a message expunged between our
+                # SEARCH and this FETCH (nothing to recover — advance past it,
+                # or the watermark would pin forever) or a transient server
+                # hiccup (must not be silently lost). One targeted probe tells
+                # them apart.
+                if _uid_still_on_server(imap, uid, mailbox.name):
+                    log.warning(
+                        "UID %s in %s returned no body but is still present; "
+                        "holding resume point for the next run",
+                        uid, mailbox.name,
+                    )
+                    hold_at = int(uid) if hold_at is None else min(hold_at, int(uid))
+                else:
+                    log.info(
+                        "UID %s in %s was expunged before fetch; skipping",
+                        uid, mailbox.name,
+                    )
+                    highest_seen = max(highest_seen, int(uid))
                 seen += 1
                 continue
 
@@ -708,7 +771,7 @@ def sync_mailbox(
             conn,
             mailbox_id=mailbox.id,
             uidvalidity=server_uidvalidity,
-            uidnext=highest_seen + 1,
+            uidnext=checkpoint_uidnext(highest_seen, hold_at),
             last_sync_at=datetime.now().astimezone(),
         )
         conn.commit()

@@ -15,7 +15,11 @@ failures.
 """
 from __future__ import annotations
 
+import logging
+
 import psycopg
+
+log = logging.getLogger(__name__)
 
 #: Consecutive held attempts before sync gives up on a UID and advances past
 #: it. Larger than the poison-pill cap because an unfetchable body is usually
@@ -52,13 +56,16 @@ def record_attempt(conn: psycopg.Connection, *, mailbox_id: int, uid: int) -> in
     """Count one held attempt for `uid`; return its new consecutive total.
 
     Runs in a nested SAVEPOINT so a bookkeeping failure cannot abort the batch
-    it is reporting on -- the same guarantee `record_failed_message` gives.
-    On failure it reports 1 (this attempt), which keeps sync holding rather
-    than giving up on a UID whose real count it could not read.
+    it is reporting on -- the same guarantee `record_failed_message` gives, and
+    deliberately the same shape: the SAVEPOINT is established *outside* the try,
+    so `ROLLBACK TO` in the handler is always valid.
+
+    On failure it reports 1 (this attempt), which keeps sync holding rather than
+    giving up on a UID whose real count it could not read.
     """
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SAVEPOINT transient_fetch")
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT transient_fetch")
+        try:
             cur.execute(
                 """
                 INSERT INTO transient_fetches (mailbox_id, uid, attempt_count)
@@ -74,11 +81,15 @@ def record_attempt(conn: psycopg.Connection, *, mailbox_id: int, uid: int) -> in
             assert row is not None
             cur.execute("RELEASE SAVEPOINT transient_fetch")
             return int(row[0])
-    except Exception:
-        with conn.cursor() as cur:
+        except Exception:
             cur.execute("ROLLBACK TO SAVEPOINT transient_fetch")
             cur.execute("RELEASE SAVEPOINT transient_fetch")
-        return 1
+            log.exception(
+                "could not count a held fetch for UID %s in mailbox %s; "
+                "treating it as the first attempt",
+                uid, mailbox_id,
+            )
+            return 1
 
 
 def clear_attempts(conn: psycopg.Connection, *, mailbox_id: int, uid: int) -> None:

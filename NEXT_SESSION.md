@@ -1,210 +1,261 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-07-24 UTC (session 7).** Shipped **admin-mode GUI phase
-> 4 — the Daemon panel** on branch `feat/admin-mode-gui-daemon-panel`
-> (1 feature commit `13e4afb` + this handoff commit), **not yet pushed / no PR
-> yet**. The desktop app's Admin overlay now has a working **Daemon** tab:
-> self-refreshing status + heartbeats + recent log, lifecycle controls (gated
-> on external supervision), reload, and per-account restart-sync.
-> **Next step: push + open PR — see §0.**
+> **Status as of 2026-07-31 21:07 UTC (session 8).** Cleared two stale green PRs
+> off `main`, then shipped the **ingestion correctness cluster** — #215 and both
+> halves of #222 — on branch `fix/ingestion-uid-and-message-id`, pushed as
+> **[PR #238](https://github.com/hherb/localmail/pull/238)**.
+> **Next step: confirm CI green and merge #238 — see §0.**
 >
-> **Note on the previous handoff:** session 6's NEXT_SESSION.md said "merge PR
-> #205" (§0). That is **done** — PR #205 merged as `bea1eb6`, branch deleted.
-> This session started from a clean `main` and built the next slice (§1 of the
-> old handoff, "Admin GUI phase 4 — Daemon panel").
+> **Note on the previous handoff:** NEXT_SESSION.md was **four sessions stale** —
+> it described session 7 (Daemon panel, PR #207) and its §0 "push + open PR" was
+> long done. Sessions that shipped #209–#231 never refreshed it. If you are
+> reading a handoff whose §0 looks already-finished, check `git log` and
+> `gh pr list` before believing it.
 
 ## Project context (1-minute version)
 
 `localmail` mirrors IMAP accounts (Gmail OAuth, password) into Postgres,
 **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 Daemon: hot-reload account set, heartbeats, DB command queue, two-plane
-supervision, non-blocking lifecycle + admin panel. Web admin UI (HTMX):
-account CRUD, user management, archive imports, daemon control. Hybrid search
-(Phases 1+2) + an HTTPS GUI server + a remote MCP server + the opt-in
-`--smart` LLM query rewriter are all shipped. The MCP server can act as an
-**OAuth 2.1 authorization server** (opt-in). A Tauri 2 + Svelte 5 GUI lives
-under `gui/` — read-only viewer **plus an admin mode** (Accounts + Daemon
-panels shipped; Users + Imports still placeholders). Licensed
-AGPL-3.0-or-later (per-file SPDX headers in `src/localmail/`; **not** in
-`gui/`). See [CLAUDE.md](CLAUDE.md), [README.md](README.md).
+supervision. Web admin UI (HTMX): account CRUD, user management, archive
+imports, daemon control. Hybrid search (Phases 1+2) + an HTTPS GUI server + a
+remote MCP server (optionally a full OAuth 2.1 authorization server) + the
+opt-in `--smart` LLM query rewriter are all shipped. A Tauri 2 + Svelte 5 GUI
+lives under `gui/` — read-only viewer plus an admin mode (Accounts + Daemon
+panels shipped; Users + Imports still placeholders). Licensed AGPL-3.0-or-later
+(per-file SPDX headers in `src/localmail/`; **not** in `gui/`).
+See [CLAUDE.md](CLAUDE.md), [README.md](README.md).
 
 ## What we did this session
 
-### Admin-mode Tauri GUI — phase 4, the Daemon panel (branch `feat/admin-mode-gui-daemon-panel`)
+### 1. Cleared two stale PRs (reviewed, then merged)
 
-Continues the arc from PR #203 (phase 1 backend bearer auth) and PR #205
-(phases 2+3 shell + Accounts panel). Design:
-[docs/superpowers/specs/2026-07-23-admin-mode-tauri-gui-design.md](docs/superpowers/specs/2026-07-23-admin-mode-tauri-gui-design.md)
-("DaemonPanel" bullet + "Daemon lifecycle under launchd" flow). Built TDD
-throughout — every layer's test watched fail before implementing.
-
-**No Python changed** — the whole surface rides the existing
-`/v1/admin/daemon*` + `/v1/admin/accounts/{id}/restart-sync` JSON API, all
-`require_admin()` (bearer-capable; CSRF skipped for bearer). Confirmed: the
-Python suite is untouched (zero `.py` files in the diff).
+Both had been sitting green and unreviewed since 2026-07-30.
 
 | SHA | what |
 |---|---|
-| `13e4afb` | **feat(gui): admin-mode Daemon panel (phase 4)** — Rust proxies + TS wrapper + pure dedup helper + DaemonPanel.svelte + AdminView wiring + docs |
+| `833fa80` | **#232** — classify Gmail token-refresh failures as connect failures (#158). `google.auth.exceptions.GoogleAuthError` joins `CONNECT_FAILURE_EXC_TYPES`, so a revoked refresh token surfaces as a clean 400 instead of a 500. |
+| `9565e88` | **#233** — GUI `AccountForm` dispatches on the edit *intent* (`accountId`), not on whether the row loaded; a failed GET on mount no longer silently **creates a stray account** instead of updating. |
 
-**New files** (each with a test sibling): `gui/src-tauri/src/commands/admin/{daemon,daemon_tests}.rs`;
-`gui/src/lib/api/admin_daemon.ts`; `gui/src/lib/daemon_view.ts`;
-`gui/src/components/admin/DaemonPanel.svelte`.
-**Modified:** `commands/admin/mod.rs`, `lib.rs` (register 4 commands),
-`screens/AdminView.svelte` (Daemon tab → `<DaemonPanel />`),
-`AdminView.test.ts` + `MainView.test.ts` (stub `admin_daemon`), `README.md`,
-`CLAUDE.md`.
+### 2. Ingestion correctness cluster (branch `fix/ingestion-uid-and-message-id`, PR #238)
 
-**Four decisions worth remembering:**
+Design brainstormed and written up first:
+[docs/superpowers/specs/2026-08-01-ingestion-uid-and-message-id-design.md](docs/superpowers/specs/2026-08-01-ingestion-uid-and-message-id-design.md).
+Built TDD throughout — **and where a fix was already in place, it was
+temporarily reverted to confirm the test genuinely caught the bug.** That
+discipline paid for itself twice (see "Two things the RED phase caught" below).
 
-1. **Staleness is the server's `hb.stale` flag alone, never a client clock.**
-   `GET /v1/admin/daemon` (fused by `daemon_router.build_daemon_view`) computes
-   `stale` per heartbeat against `heartbeat_stale_seconds`. The panel renders
-   `class:daemon-stale={hb.stale}` — no `Date.now()` anywhere. Mirrors the web
-   panel + #148.
-2. **Lifecycle vs Plane-A split.** start/stop/restart are
-   `disabled={busy || view.supervise_daemon_externally}`; reload + per-account
-   restart-sync are only `disabled={busy}`. Under the user's launchd
-   deployment `supervise_daemon = false`, so `supervise_daemon_externally` is
-   true and the lifecycle buttons are correctly inert while the DB-mediated
-   controls still work. A busy-guard **409** (`isConflict`) surfaces as a
-   visible `daemon-action-message`, not an inert button.
-3. **Poll-interval unmount leak (found in code review, fixed TDD).** `onMount`
-   awaits the first `getAdminDaemon()` before assigning `pollTimer`; an unmount
-   *during* that fetch ran `onDestroy` (pollTimer still null → cleared nothing)
-   and then started a `setInterval` onto the dead component that polled
-   forever. Fixed with a `destroyed` flag checked after the await. Pinned by
-   `DaemonPanel.test.ts::"does not keep polling after unmount during the
-   initial fetch"` (fake timers; reproduces the 4-calls-instead-of-1 leak).
-4. **The unhandled-rejection CI trap (carried from #205).** Any admin panel
-   that fetches on mount MUST be stubbed in **both** `AdminView.test.ts` and
-   `MainView.test.ts` (both mount the overlay), or vitest leaks an unhandled
-   rejection while still printing "passed". Both are stubbed here.
+| SHA | what |
+|---|---|
+| `6e059de` | spec |
+| `a650baa` | the three fixes + pure `src/localmail/uids.py` |
+| `40eea4b` | review follow-ups: bound the hold (migration `0033`), skip redundant probes, correct a false docs claim |
+| `358f256` | README: same-stem imports, archive retry re-allocation, empty-body cap |
 
-**Verification (all run this session, all green):**
-- `cd gui && npm run check` → **321 files, 0 errors, 0 warnings**
-- `cd gui && npm test` → **386 passed** (46 files; was 361/43 on `main`), no
-  "Unhandled Errors" block (only the carried jsdom `getContext` noise).
-- `cd gui && npm run build` → succeeds
-- `cd gui/src-tauri && cargo test` → **103 passed** (was 95)
-- `cargo clippy --locked -- -D warnings` → clean (exact CI invocation)
+**#215 (High) — import UID collision poison-pilled healthy messages.** Imports
+invent synthetic UIDs from a per-run counter restarting at 0, and mailboxes
+resolve on `(account_id, name)` from the source's filename stem — so
+`2023/Inbox.mbox` then `2024/Inbox.mbox` into one archive account recycled
+committed UIDs and every collision on `message_labels UNIQUE (mailbox_id, uid)`
+sent a good message to `failed_messages`. Non-recoverable: `retry-failed`
+replayed the same stored uid. Now: continue from `MAX(uid) + 1` per mailbox;
+`retry_failed_messages` re-allocates **for archive accounts only** (the recovery
+path for already-poisoned rows). Live accounts replay verbatim — a clash there is
+a real invariant violation, which is also why `upsert_label` was deliberately
+**not** made collision-tolerant.
+
+**#222B — degenerate `Message-Id`.** An empty angle-addr (`<>`) parsed as a
+truthy, non-unique string and collapsed distinct messages onto one row.
+`parser.normalize_message_id` returns `None` for it; `raw_sha256` dedup engages.
+
+**#222A — empty `BODY[]`.** One `SEARCH UID n:n` probe now separates expunged
+(advance) from still-present (hold the resume point via the pure
+`checkpoint_uidnext`; next run re-fetches). A failing probe assumes transient.
+The hold is **bounded** by `[daemon] max_body_fetch_retries` (default 5,
+consecutive) via migration `0033_transient_fetches`.
+
+**Two new pure modules** (project convention — logic out of the 800-line
+`sync.py`): [src/localmail/uids.py](src/localmail/uids.py) (UID arithmetic) and
+[src/localmail/fetch_retry.py](src/localmail/fetch_retry.py) (bounded-hold
+bookkeeping).
+
+**Two things the RED phase caught — worth internalising:**
+
+1. **The first #222B regression test passed with the fix reverted.** It used a
+   whitespace-only `Message-Id`, which `email.policy.default` already collapses
+   to `""` — so the pre-existing `if message_id` guard caught it. The issue's
+   own description ("`Message-Id: <whitespace>`") pointed at the wrong form. Only
+   after switching the fixture to `<>` did it fail (`{'INBOX': 1} == {'INBOX': 2}`
+   — one message swallowing the other). **A bug report's stated trigger is a
+   hypothesis; verify it reproduces before trusting the test.**
+2. **The first bounded-hold test encoded the wrong arithmetic** (expected `cap=2`
+   to allow two holds). `fetch_budget_exhausted(count, cap) = count >= cap`
+   matches `transient_budget_exhausted`, so the cap-th attempt is the one that
+   gives up. Fixed the test, not the code.
+
+**Three review findings, all verified against the code before acting:**
+
+1. **The hold was unbounded** — and "still present on the server" is not "will
+   ever be fetchable". A **zero-length message** satisfies `if not raw`
+   (`raw = b""`) while the probe genuinely finds it, and `idle.py::_sync_inbox`
+   runs on **every IDLE notification**, so a stuck low UID re-downloads the whole
+   INBOX tail *per new mail*. Unbounded, the fix was worse than the defect. Fixed
+   with migration `0033` + config cap (modelled on `transient_extractions`/#153).
+2. **Redundant probes.** Once `hold_at` is set the checkpoint is pinned
+   (`min(highest_seen+1, hold_at) == hold_at`, UIDs ascend), so the probe cannot
+   change the outcome — while whatever empties one `BODY[]` tends to empty the
+   whole tail, each probe being a round trip bounded only by `imap_timeout_s`
+   against an already-sick server. Now short-circuited.
+3. **A load-bearing docs claim was false.** I had written that
+   `message_labels.uid` is read by no consumer — the entire safety argument for
+   re-allocating it. `sync.backfill_internal_date` **does** read it, as an IMAP
+   FETCH key. Re-allocation is safe because of the **archive-account gate**, not
+   because nothing reads the column. Corrected in CLAUDE.md and the spec, with an
+   explicit warning about what widening that gate would break.
+
+**Verification (all run this session):**
+- `uv run pytest` → **1837 passed** (`test_daemon_control_socket.py` deselected —
+  known macOS `AF_UNIX path too long`)
+- `uv run mypy src/localmail` → clean, 124 source files
+- `ruff check` → clean on every touched file (the repo-wide 130 are pre-existing;
+  ruff is not configured in `pyproject.toml` and not in CI)
 
 ## What's next
 
-### 0. **Push + open PR** — CI has not run yet
-   Branch has the feature commit + this handoff commit. Not pushed.
+### 0. **Merge PR #238**
+   Pushed with CI running at handoff time. Only the pytest job gates it (no
+   `gui/` files changed).
 ```bash
-git push -u origin feat/admin-mode-gui-daemon-panel && gh pr create --fill
-gh pr checks --watch          # then squash-merge once green
+gh pr checks 238 --watch && gh pr merge 238 --squash --delete-branch
 ```
-   CI (`gui-ci.yml`) runs `npm run check && npm test && npm run build` +
-   `cargo test` + `cargo clippy --locked -- -D warnings` on ubuntu + macos.
-   All pass locally. Watch the vitest job for a green run (the #205 unhandled-
-   rejection trap is guarded here, but confirm).
+   **After merging, apply migration `0033` to the live archives** — this is the
+   first migration in a while and the daemon will not pick it up on its own:
+```bash
+uv run localmail init-db          # local (port 5532)
+# and on the DGX deployment — see the DGX memory note
+```
 
-### 1. **Admin GUI phase 5 — Users & ACL panel** *(the design's next slice)*
-   The `/v1/admin/users` JSON router is **already `require_admin()`
-   (bearer-capable)** — verified this session — so **no backend work needed**.
-   Service layer: [src/localmail/api/admin/users.py](src/localmail/api/admin/users.py).
-   **Acceptance:** a `UsersPanel.svelte` replacing the Users tab placeholder
-   that lists users and offers create / delete, per-account ACL grant/revoke
-   (a checklist over every account), `is_admin` toggle, password reset, and
-   enable/disable (`disabled_at`). Surface the **two lock-out guards as 409s**:
-   the count-based last-admin rule (`LastAdminError`) and the identity-based
-   self-action rule (no self-demote / self-delete). Mirror the web panel
-   ([serve/admin/users_panel_router.py](src/localmail/serve/admin/users_panel_router.py)
-   + [user_forms.py](src/localmail/serve/admin/user_forms.py)) for exact
-   semantics. Follow the daemon-panel shape: Rust proxies in
-   `commands/admin/users.rs` (+ split tests), TS wrapper `lib/api/admin_users.ts`,
-   pure logic in `lib/`, `UsersPanel.svelte`, and **stub the new API module in
-   both `AdminView.test.ts` and `MainView.test.ts`**.
+### 1. **#237 — orphaned blob temp files accumulate after a hard kill**
+   Directly caused by the #231 fix (per-writer `<sha>.<pid>.<uuid>.tmp` names).
+   The old shared name was accidentally self-limiting; now a SIGKILL/OOM/power
+   loss between write and `replace()` strands a temp nothing collects.
+   **Acceptance:** a sweep that removes `*.tmp` files under
+   `<attachments.root>/blobs/` older than a configurable age, run somewhere
+   sensible (daemon startup and/or a periodic worker tick), with the age as a
+   `[attachments]` or `[daemon]` knob rather than a literal. Must not delete a
+   temp an active writer is mid-`replace()` on — age-gating is what buys that,
+   so pick the default generously and say why in the config comment.
 
-### 2. **Admin GUI phase 6 — Imports panel**
-   Same shape; `/v1/admin/imports` is `require_admin()` (bearer-capable).
-   Service: [src/localmail/api/admin/imports.py](src/localmail/api/admin/imports.py).
-   **Acceptance:** create / list / cancel mbox & maildir jobs with progress
-   (inserted/skipped/failed counts, stale detection past `[imports].stale_seconds`).
-   Mirror [serve/admin/imports_panel_router.py](src/localmail/serve/admin/imports_panel_router.py).
+### 2. **#234 — make `Searcher.search`'s `allowed_account_ids` a required keyword**
+   Small and high-value: the ACL clamp shipped in #229 defaults to `None`
+   ("no ACL"), so a new caller that forgets the kwarg silently gets **full
+   cross-account access** rather than a `TypeError`.
+   **Acceptance:** the parameter is keyword-only with no default; every
+   in-repo caller passes it explicitly (CLI/local callers pass `None` to keep
+   full DSL power); tests cover that omitting it raises.
 
-### 3. **Gmail "Connect" (OAuth) — STILL BLOCKED on backend work, do not start in the GUI**
-   Unchanged from session 6. Verified again this session: `oauth_router.py` is
-   the **only** `/v1/admin/*` router still on `require_admin_session()`
-   (cookie-only) — every other one (`accounts`, `users`, `imports`, `daemon`)
-   is bearer-capable. Two independent server-side gaps:
-   - `POST /v1/admin/accounts/{id}/oauth/start` cannot be called by a bearer
-     client until `oauth_router` is swapped to `require_admin()`.
-   - The design's completion check ("poll secret status until the refresh token
-     appears") has **no backing field** — `_account_dict` exposes no secret
-     status and no `/v1/admin` endpoint reports one.
-   **Acceptance for unblocking:** `oauth/start` accepts bearer, *and* some
-   endpoint reports per-account secret presence. `clear_secret` also has a
-   service function but no JSON route. The callback is inherently
-   browser/cookie-bound (Google redirects to it), which is fine.
+### 3. **Remaining OAuth/auth correctness cluster** *(the option not taken this session)*
+   - **#236** — `oauth.codes.load_code` ignores `disabled_at` and
+     `sessions_invalidated_at`, leaving a ~60s post-revocation window in which a
+     held authorization code still exchanges. **Acceptance:** the code lookup
+     JOINs `api_users` and applies both predicates, mirroring
+     `refresh.load_refresh` (the M1 fix); a revoked user's in-flight code fails
+     closed with `invalid_grant`.
+   - **#219** — authorization-code single-use violated on mid-exchange failure.
+   - **#217** — an account name containing `:` collides with the keyring
+     username scheme (`<name>:refresh`) and can clobber an OAuth refresh token.
+     **Acceptance:** reject `:` in account names at the validation boundary
+     (`create_account` + the admin form), with a clear message.
 
-### 4. **(Carried, unrelated) `cargo clippy --all-targets -- -D warnings` fails on `main`**
+### 4. **Admin GUI phase 5 — Users & ACL panel** *(carried, still the design's next slice)*
+   `/v1/admin/users` is already `require_admin()` (bearer-capable) — **no backend
+   work needed.** Service layer:
+   [src/localmail/api/admin/users.py](src/localmail/api/admin/users.py).
+   **Acceptance:** a `UsersPanel.svelte` replacing the placeholder tab: list,
+   create, delete, per-account ACL grant/revoke (a checklist over every account),
+   `is_admin` toggle, password reset, enable/disable. Surface the **two lock-out
+   guards as 409s** — the count-based last-admin rule (`LastAdminError`) and the
+   identity-based self-action rule (no self-demote/self-delete). Mirror
+   [serve/admin/users_panel_router.py](src/localmail/serve/admin/users_panel_router.py).
+   Follow the Daemon-panel shape, and **stub the new API module in both
+   `AdminView.test.ts` and `MainView.test.ts`** (see risk 6).
+
+### 5. **(Carried) `cargo clippy --all-targets -- -D warnings` fails on `main`**
    `gui/src-tauri/src/commands/search.rs:189` uses `3.14` as a dummy `took_ms`
-   in a test → `clippy::approx_constant`. **Pre-existing**, verified again this
-   session that it is NOT on this branch's diff (my new `daemon_tests.rs` is
-   clippy-clean under `--all-targets`). CI gates clippy **without**
-   `--all-targets`, so `#[cfg(test)]` modules are never linted → `main` stays
-   green. One-character fix (e.g. `3.5`) whenever someone is in that file;
-   adding `--all-targets` to CI would require fixing it first.
+   → `clippy::approx_constant`. Pre-existing. CI gates clippy **without**
+   `--all-targets`, so `#[cfg(test)]` modules are never linted and `main` stays
+   green. One-character fix whenever someone is in that file.
 
 ## Open decisions & risks
-1. **Branch not pushed, no PR, CI unrun.** §0 above. Local checks all green.
-2. **`gui-ci` clippy runs WITHOUT `--all-targets`** — so the pre-existing
-   `search.rs:189` test-lint (§4) does not fail CI, and neither would a future
-   test-only lint. Worth adding `--all-targets` someday (after fixing §4).
-3. **Admin bearer blast radius** *(carried, tracked as #204)*: a token issued to
-   an `is_admin` user is now an admin credential — no per-token scope. The
-   daemon lifecycle/reload/restart-sync controls inherit this. Deliberate
-   (mirrors the session cookie's authority); token lives only in the OS keyring.
-4. **Two tabs are placeholders.** Users / Imports render honest "not available
-   in this build yet" text; operators use the web admin at `/admin/*`. Say this
-   out loud if anyone demos the app.
-5. **macOS test noise** *(carried)* — `test_daemon_control_socket.py` fails
-   locally on macOS (`AF_UNIX path too long`); deselect locally, Linux CI is the
-   real signal. Also carried: psycopg_pool teardown `ResourceWarning`s, the
-   websockets `DeprecationWarning` (#25), Starlette TestClient `httpx`
-   `DeprecationWarning`, and — in the gui vitest run — jsdom
-   `HTMLCanvasElement.getContext` noise from `AttachmentPreviewModal` (grep past
-   it; it is NOT an unhandled-error block).
-6. **No ROADMAP.md** *(carried)* — the `/nextsession` ROADMAP step is a no-op;
-   slice status lives in NEXT_SESSION/handoffs + the specs. README **was**
-   updated this session (Daemon panel is user-facing).
-7. **Run vitest from `gui/`, not the repo root** *(carried)* — `npx vitest` from
-   the root silently runs without gui's vite config (no svelte plugin) and fails
-   every `.svelte` import with a confusing "invalid JS syntax" parse error, and
-   drops an ungitignored `node_modules/.vite` at the repo root.
-8. **`.claude/` local files** stay untracked (incl. `.claude/scheduled_tasks.lock`).
+
+1. **Migration `0033` must be applied to live deployments** before running the
+   new code — `sync_mailbox` reads `transient_fetches` on every mailbox pass and
+   will error on a DB that has not migrated. Both the macOS and DGX deployments
+   need `localmail init-db`.
+2. **`max_body_fetch_retries` semantics are "consecutive", and the cap-th attempt
+   is the one that gives up** (`count >= cap`, matching
+   `transient_budget_exhausted`). Default 5 = four retries then drop. If a real
+   transient routinely lasts longer than five syncs, raise it — but note that
+   under IDLE a "sync" happens per new mail, so five can elapse in seconds on a
+   busy INBOX. **This is the knob to watch in production**; it is the one number
+   in this change chosen by analogy rather than measurement.
+3. **The #222B fix is prospective only.** Any pair of messages already collapsed
+   by a degenerate `Message-Id` cannot be recovered — the second message's bytes
+   were never stored. No backfill is possible; don't promise one.
+4. **The archive gate is now load-bearing in a way it wasn't before.** Widening
+   `should_reallocate_uid` (or the importer) to a live account would make
+   `sync.backfill_internal_date` FETCH a synthetic UID against the real server
+   and write **another message's** INTERNALDATE onto the row. CLAUDE.md warns
+   about this at the definition site.
+5. **Admin bearer blast radius** *(carried, #204)*: a token issued to an
+   `is_admin` user is an admin credential — no per-token scope.
+6. **CI trap** *(carried)*: any GUI admin panel that fetches on mount MUST be
+   stubbed in **both** `AdminView.test.ts` and `MainView.test.ts`, or vitest
+   leaks an unhandled rejection while still printing "passed".
+7. **macOS test noise** *(carried)* — `test_daemon_control_socket.py` fails
+   locally (`AF_UNIX path too long`); deselect it, Linux CI is the real signal.
+   Also carried: psycopg_pool teardown `ResourceWarning`s, the websockets
+   `DeprecationWarning` (#25), Starlette TestClient `httpx` `DeprecationWarning`,
+   and jsdom `HTMLCanvasElement.getContext` noise in the gui vitest run.
+8. **No ROADMAP.md** *(carried)* — the `/nextsession` ROADMAP step is a no-op;
+   slice status lives in NEXT_SESSION + `docs/handoffs/` + the specs. README
+   **was** updated this session (all three fixes are user-visible).
+9. **Run vitest from `gui/`, not the repo root** *(carried)* — from the root it
+   silently runs without gui's vite config and fails every `.svelte` import with
+   a confusing parse error.
+10. **Keep NEXT_SESSION.md current.** It went four sessions stale, which cost
+    this session a full re-orientation pass. The `/nextsession` skill's final
+    step is not optional.
 
 ## Exact commands to resume
+
 ```bash
 cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 
-git status                               # expect clean + untracked .claude lock
-git branch --show-current                # feat/admin-mode-gui-daemon-panel
-git --no-pager log --oneline -5          # HEAD = the handoff commit; feature = 13e4afb
-gh pr list --state open                  # expect none until §0 is done
+git status                               # expect clean
+git branch --show-current                # fix/ingestion-uid-and-message-id
+gh pr list --state open                  # expect #238 until §0 is done
+gh pr checks 238
 
-# §0 — push + PR:
-git push -u origin feat/admin-mode-gui-daemon-panel && gh pr create --fill
+# §0 — merge, then apply the migration locally:
+gh pr merge 238 --squash --delete-branch
+git checkout main && git pull --ff-only
+unset VIRTUAL_ENV && uv run localmail init-db
 
-# Frontend (MUST be run from gui/ — see risk #7):
+# Python test suite (deselect the macOS-only socket failure — see risk 7):
+unset VIRTUAL_ENV && uv run pytest -q --deselect tests/test_daemon_control_socket.py
+#   expect: 1837 passed
+unset VIRTUAL_ENV && uv run mypy src/localmail
+#   expect: Success, 124 source files
+
+# Frontend (untouched this session; MUST be run from gui/ — see risk 9):
 cd gui && npm run check && npm test && npm run build && cd ..
-#   expect: 0 errors / 386 passed / build ok / NO "Unhandled Errors" block
-
-# Rust (exact CI invocation):
 cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings && cd ../..
-#   expect: 103 passed, clippy clean
-#   NB: adding --all-targets surfaces the PRE-EXISTING search.rs lint — see §4
-
-# Python (unchanged by this branch; nothing to run, but to prove it):
-git --no-pager diff --stat main -- '*.py'   # expect: no output (zero .py changed)
 ```
 
-`origin/main` at `bea1eb6`; branch `feat/admin-mode-gui-daemon-panel` = feature
-`13e4afb` + this handoff commit, **not yet pushed**. Latest migration
-`0031_oauth_resource_indicator.sql`; next free slot `0032_*.sql`. Dependabot
-open alerts: **0**.
+`origin/main` at `9565e88`; branch `fix/ingestion-uid-and-message-id` =
+`6e059de` + `a650baa` + `40eea4b` + `358f256`, pushed as PR #238. Latest
+migration **`0033_transient_fetches.sql`**; next free slot `0034_*.sql`.
+Open issues: 22 (was 22 — #215 and #222 close with #238, #234–#237 were filed
+before this session). Dependabot open alerts: **0**.

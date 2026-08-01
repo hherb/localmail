@@ -19,7 +19,29 @@ attachment tree without touching IMAP.
   `google-auth` + `google-auth-oauthlib`.
 - Secrets: `keyring` (service `"localmail"`, username = `<account.name>` for
   passwords, `<account.name>:refresh` for OAuth refresh tokens). Cross-platform:
-  macOS Keychain on darwin, Secret Service on Linux.
+  macOS Keychain on darwin, Secret Service on Linux. **That username scheme is
+  why account names may not contain `:` (#217)** — a password account named
+  `gmail:refresh` would otherwise `store_password` straight over the `gmail`
+  account's OAuth refresh token, and `gmail`'s next token refresh would fail.
+  The rule is the pure
+  [src/localmail/account_names.py](src/localmail/account_names.py)`::account_name_error`
+  (blank / length / separator), applied at **both** create boundaries —
+  `api.admin.accounts._validate_create_fields` (admin UI, JSON API, CLI) and
+  `config.Config._reject_unusable_account_names` (the `init-db` TOML seed,
+  which reaches `create_account`). Names are not editable after creation
+  (`_UPDATABLE` has no `name`), so create is the whole surface. Rejecting the
+  one separator character was chosen over a conservative allowlist because an
+  allowlist would retroactively break existing configs on a re-seed.
+  **The TOML half sits on `Config`, not on the `AccountConfig` field**, because
+  `AccountConfig` doubles as the DB-row adapter
+  (`daemon_accounts.account_config_from_row`,
+  `api.admin.accounts._open_imap_connection`). A pre-#217 release could seed a
+  colon-carrying name — `create_account` only checked blank/length — and a
+  field validator would gate that existing row on *read*, turning a latent
+  keyring collision into a `ValidationError` that stops every account's sync
+  thread (`Daemon._spawn_account` is unguarded) and 500s `probe_connection`,
+  with no remedy since `name` is not updatable. Pinned by
+  `test_daemon_accounts.py::test_legacy_name_from_the_db_maps_without_raising`.
 - Config: TOML, validated by `pydantic` v2.
 - CLI: `click`.
 - Tests: `pytest` (in-memory `keyring` backend; real Postgres at
@@ -814,12 +836,12 @@ for the full design.
   [docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md](docs/superpowers/specs/2026-05-21-trust-proxy-headers-design.md).
   Do NOT also set `uvicorn --forwarded-allow-ips`; it rewrites
   `request.client.host` before our admission check and collapses it.
-- **Session revocation covers all three credential kinds**: bumping
+- **Session revocation covers all four credential kinds**: bumping
   `api_users.sessions_invalidated_at` (via `localmail
   revoke-admin-sessions USERNAME`, the `/admin/users` panel, or
-  `POST /v1/admin/users/{id}/revoke-sessions`) is enforced in **three**
+  `POST /v1/admin/users/{id}/revoke-sessions`) is enforced in **four**
   independent SELECTs, each comparing the credential's own issue time
-  against the cutoff. All three are required for revocation to be
+  against the cutoff. All four are required for revocation to be
   terminal; drop any one and the operator's "I cut off that leaked
   credential" belief is false:
   - **admin cookies** — `get_admin_user` (`to_timestamp(issued_at) <
@@ -838,6 +860,28 @@ for the full design.
     revoked token lands on `rotate_refresh`'s **`unknown`** outcome, not
     `reuse` — revocation is an operator action, not evidence of a stolen
     copy, so the family is left intact.
+  - **OAuth authorization codes** — `mcp.oauth.codes.load_code`
+    (`c.created_at >= u.sessions_invalidated_at`, plus `u.disabled_at IS
+    NULL`), added by **#236**. The window is only
+    `oauth_authorization_code_ttl_s` (default 60 s) wide and codes are
+    single-use + PKCE-bound, but exchanging one mints an access + refresh
+    pair stamped `created_at = now()` — past the cutoff, hence valid — so
+    an honoured code hands back exactly the credentials the operator just
+    cut off. The `disabled_at` half was the older gap of the two:
+    `load_refresh` has mirrored `verify_token` on it since the M1
+    hardening (#182); `load_code` never did.
+
+    **This check is load-time only, and one narrow race survives it (#241).**
+    The SDK calls `load_authorization_code` then
+    `exchange_authorization_code`, and `_exchange_code_sync` re-checks
+    nothing — it goes straight to `consume_code`. A *disabled* user is still
+    caught indirectly on that second leg (the minted refresh reads back as
+    absent through `load_refresh` → the `user_vanished` branch), but
+    `sessions_invalidated_at` is **not**: the successor refresh carries
+    `created_at = now()`, which is past the cutoff. So a revocation landing
+    between those two calls still yields a token pair. The exposure is the
+    load→exchange gap, not the full 60 s TTL, and the same race exists on the
+    refresh-rotation path.
 
   `NULL` means "never revoked" and is the default, so nothing changes for a
   user who has never been revoked. The cutoff is a moment, not a ban:
@@ -1636,6 +1680,21 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   `refresh.py` still touches only `oauth_refresh_tokens` (it reports `family_id`
   as data); `access.py` owns `api_tokens`; the provider orchestrates both. Design:
   [docs/superpowers/specs/2026-06-16-access-token-family-containment-design.md](docs/superpowers/specs/2026-06-16-access-token-family-containment-design.md).
+- **Authorization-code single-use survives a failed exchange (#219):**
+  `provider._exchange_code_sync` **commits the `consume_code` DELETE on its own**
+  before minting anything. The burn and the mint used to share one transaction,
+  so every failure path after the DELETE — the disabled-user branch's explicit
+  `conn.rollback()`, or psycopg's rollback-on-exception from
+  `mint_refresh`/`mint_access`/`touch_last_used` — took the DELETE with it and
+  **resurrected the code** for the rest of its TTL, violating RFC 6749 §4.1.2. A
+  client auto-retry (or a replay by anyone holding a copy) could then still
+  exchange it; PKCE bounded the blast radius, which is why this was Medium not
+  High. The trade is deliberate and in the right direction: a post-burn failure
+  now costs the user a fresh consent round trip rather than leaving a replayable
+  code. Contrast `refresh.rotate_refresh`, which needs no such split because its
+  failure branches have no pending writes to lose. The concurrency guarantee is
+  unchanged — a second exchange's DELETE blocks on the row lock, then matches 0
+  rows and raises `invalid_grant`.
 - **RFC 8707 resource indicators (shipped):** `/authorize` validates the
   client's `resource` against a configurable accepted set
   (`McpConfig.resource_indicators`, default
@@ -1739,12 +1798,14 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   also has no backing field — `_account_dict` exposes no secret status and no
   `/v1/admin` endpoint reports one. Both are backend gaps. `clear_secret`
   likewise has a service function but no JSON route.
-- **Pre-existing, unrelated:** `cargo clippy --all-targets -- -D warnings`
-  fails on `gui/src-tauri/src/commands/search.rs:189` (`approx_constant`, a
-  `3.14` dummy `took_ms` in a test). It predates this work. CI *does* gate
-  clippy (`gui-ci.yml` runs `cargo clippy --locked -- -D warnings`) but
-  **without `--all-targets`**, so `#[cfg(test)]` modules are never linted —
-  hence a green `main`. Use the bare CI invocation when checking locally.
+- **`--all-targets` clippy is clean now, and CI still doesn't run it.** The
+  long-standing `approx_constant` failure in
+  `gui/src-tauri/src/commands/search.rs` (a `3.14` dummy `took_ms`) is fixed.
+  Note the underlying gap remains: CI gates clippy (`gui-ci.yml` runs `cargo
+  clippy --locked -- -D warnings`) **without `--all-targets`**, so
+  `#[cfg(test)]` modules are never linted and a lint regression inside a test
+  module will not turn `main` red. Run `cargo clippy --all-targets -- -D
+  warnings` locally when touching Rust tests.
 
 ## Conventions
 

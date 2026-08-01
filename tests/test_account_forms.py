@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from localmail.account_names import account_name_error
 from localmail.api.admin.accounts import AccountFieldError
 from localmail.serve.admin import account_forms as af
 
@@ -103,6 +104,14 @@ def test_field_errors_from_maps_known_field():
     err = AccountFieldError("live accounts require imap_port in 1..65535")
     fe = af.field_errors_from(err)
     assert "imap_port" in fe
+
+
+def test_colon_name_rejection_renders_beside_the_name_field():
+    """Pin the #217 message against _FIELD_HINTS: the hints match on substrings
+    in order, so a rewording (or a reordering) could silently demote this to a
+    form-level error instead of showing it beside the offending input."""
+    err = AccountFieldError(account_name_error("gmail:refresh"))
+    assert set(af.field_errors_from(err)) == {"name"}
 
 
 def test_field_errors_from_unknown_falls_back_to_form_level():

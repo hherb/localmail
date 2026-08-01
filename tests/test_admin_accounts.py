@@ -9,6 +9,7 @@ from pathlib import Path
 import keyring
 import pytest
 
+from localmail.account_names import NAME_MAX_CHARS
 from localmail.api.admin import accounts as svc
 from localmail.api.admin.accounts import (
     Account, AccountSummary,
@@ -119,6 +120,35 @@ def test_create_account_rejects_blank_name(db_conn):
         create_account(
             db_conn,
             name='',
+            email_address='x@y.test',
+            auth_method='password',
+            imap_host='h', imap_port=993,
+            oauth_provider=None,
+            folder_allow=None, folder_deny=None, folder_deny_flags=None,
+        )
+
+
+def test_create_account_rejects_colon_in_name(db_conn):
+    """#217: the name is the keyring username, and `<name>:refresh` is the OAuth
+    refresh-token slot — so an account named `gmail:refresh` would let
+    store_password clobber the `gmail` account's refresh token."""
+    with pytest.raises(AccountFieldError, match="refresh"):
+        create_account(
+            db_conn,
+            name='gmail:refresh',
+            email_address='x@y.test',
+            auth_method='password',
+            imap_host='h', imap_port=993,
+            oauth_provider=None,
+            folder_allow=None, folder_deny=None, folder_deny_flags=None,
+        )
+
+
+def test_create_account_rejects_overlong_name(db_conn):
+    with pytest.raises(AccountFieldError):
+        create_account(
+            db_conn,
+            name='x' * (NAME_MAX_CHARS + 1),
             email_address='x@y.test',
             auth_method='password',
             imap_host='h', imap_port=993,

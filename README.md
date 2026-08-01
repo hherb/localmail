@@ -201,7 +201,7 @@ with them, and with no way to retry successfully.
 | `localmail revoke-account USERNAME ACCOUNT_NAME` | Revoke `USERNAME`'s access to `ACCOUNT_NAME`. |
 | `localmail rotate-tls --cert PATH --key PATH [--hostname H] [--force]` | Generate (or regenerate) a self-signed TLS cert + key. |
 | `localmail grant-admin USERNAME` / `localmail revoke-admin USERNAME` | Toggle `api_users.is_admin` for the admin UI. Shell-only bootstrap. |
-| `localmail revoke-admin-sessions USERNAME` | Invalidate all of `USERNAME`'s admin cookie sessions (admin privilege itself is untouched — use `revoke-admin` for that). |
+| `localmail revoke-admin-sessions USERNAME` | Invalidate every credential `USERNAME` holds — admin cookie sessions, `/v1` + `/mcp` bearer tokens, OAuth refresh tokens, and in-flight authorization codes. Credentials issued *after* the command still work, so "revoke, then log in again" is the recovery path. Admin privilege itself is untouched — use `revoke-admin` for that. |
 
 > **Upgrading to migration 0016.** Per-user account ACL is now enforced
 > at the API boundary: by default a freshly-created user can read **no**
@@ -275,6 +275,12 @@ Gmail requires OAuth2 for IMAP since 2022. To configure an OAuth2 account:
    `name` is the account's canonical key (keyring entry, database row, the
    `init-db` seed key), so it must be unique across all `[[accounts]]` blocks —
    a duplicate fails config load with an error naming the offending name.
+   It also **may not contain `:`**: the keyring stores an account's IMAP
+   password under `<name>` and its OAuth refresh token under `<name>:refresh`,
+   so a name like `gmail:refresh` would address another account's token slot.
+   Blank and over-long (>128 char) names are rejected too. The same rule
+   applies when creating an account from the admin UI, the JSON API, or the
+   CLI — names are fixed at creation, so renaming means recreating.
 
 6. **Run the consent flow once**:
 
@@ -581,7 +587,9 @@ existing api_user credentials — no new user accounts are created), and PKCE
 code exchange. Access tokens are stored in the existing `api_tokens` table, so
 the per-user account ACL and `localmail grant-account` grants are unchanged.
 Tokens auto-refresh; a browser re-login is needed only after ~30 days of
-inactivity, on revocation, on detected refresh-token reuse (a rotated token
+inactivity, on revocation (`localmail revoke-admin-sessions` cuts off access
+tokens, refresh tokens **and** any authorization code still mid-flight), on
+detected refresh-token reuse (a rotated token
 replayed → the whole refresh chain is revoked **and the access tokens issued
 from it are purged immediately** rather than lingering until expiry, RFC 9700
 §4.14.2), or if the user is disabled. localmail also validates the RFC 8707
@@ -841,6 +849,22 @@ embedding_dim = 1024
 Re-run `localmail embed-backfill` after switching models (the design
 supports coexisting `embedding_v1` / `embedding_v2` columns for in-place
 migration — see Phase 5).
+
+**Set a persistent model cache on any always-on deployment:**
+
+```toml
+[search]
+fastembed_cache_dir = "~/.cache/fastembed"
+```
+
+fastembed's default cache is `/tmp/fastembed_cache`, and most Linux distros
+clear `/tmp` on boot. After a reboot the daemon then re-downloads ~1 GB on
+startup — and if it is killed mid-download (a `Restart=always` unit whose
+service exits, say), the partially-written cache leaves a snapshot symlink
+pointing at a blob that does not exist. Every subsequent start dies with
+`onnxruntime … NO_SUCHFILE: Load model … model.onnx failed`, i.e. a restart
+loop that never converges. A cache directory outside `/tmp` avoids both the
+re-download and the loop.
 
 ### Tuning
 

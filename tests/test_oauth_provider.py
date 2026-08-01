@@ -302,6 +302,72 @@ def test_reuse_purges_access_tokens_across_whole_rotation_chain(db_conn, db_pool
         assert anyio.run(p.load_access_token, at) is None
 
 
+def _mint_code_for(pool, username):
+    """Seed a user + a live code for the standard client; return (uid, raw)."""
+    with pool.connection() as conn:
+        uid = api_auth.create_user(conn, username, "pw")
+        raw = codes.mint_code(
+            conn, client_id="cid", user_id=uid, redirect_uri="https://c/cb",
+            redirect_uri_provided_explicitly=True, code_challenge="chal",
+            scopes=[], ttl_s=60,
+        )
+        conn.commit()
+    return uid, raw
+
+
+def _set_disabled(pool, uid, value):
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE api_users SET disabled_at = %s WHERE id = %s", (value, uid)
+            )
+        conn.commit()
+
+
+def test_failed_exchange_still_burns_the_code(db_conn, db_pool):
+    """RFC 6749 §4.1.2 single-use survives a mid-exchange failure.
+
+    The consume is a DELETE inside the same transaction as the mint, so any
+    later rollback used to resurrect the code for the rest of its TTL — a
+    client auto-retry (or a replay by anyone holding a copy) could then
+    succeed. Exercised through the real disabled-user race branch: no mock.
+    """
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    uid, raw_code = _mint_code_for(db_pool, "code-burn-race")
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    assert loaded is not None
+    _set_disabled(db_pool, uid, "now()")
+    with pytest.raises(TokenError) as exc:
+        anyio.run(p.exchange_authorization_code, _client(), loaded)
+    assert exc.value.error == "invalid_grant"
+    # Re-enable before asserting: load_code filters disabled users, so this
+    # proves the *row* is gone rather than merely hidden by that filter.
+    _set_disabled(db_pool, uid, None)
+    with db_pool.connection() as conn:
+        assert codes.load_code(conn, raw_code) is None
+
+
+def test_code_stays_burned_when_minting_raises(db_conn, db_pool, monkeypatch):
+    """Same invariant for an unexpected error after the consume (a transient
+    DB fault in mint_access). Fault-injected because no real trigger for it is
+    reachable from a test."""
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    _uid, raw_code = _mint_code_for(db_pool, "code-burn-boom")
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    assert loaded is not None
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("transient failure after the code was consumed")
+
+    monkeypatch.setattr(access, "mint_access", boom)
+    with pytest.raises(RuntimeError):
+        anyio.run(p.exchange_authorization_code, _client(), loaded)
+    with db_pool.connection() as conn:
+        assert codes.load_code(conn, raw_code) is None
+
+
 def test_cross_client_code_rejected(db_conn, db_pool):
     p = _provider(db_pool)
     anyio.run(p.register_client, _client())

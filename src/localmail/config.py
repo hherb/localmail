@@ -21,6 +21,8 @@ from pydantic import (
     model_validator,
 )
 
+from localmail.account_names import account_name_error
+
 # Imported (not redefined) so client_ip.py is the single source of truth for
 # the TrustedProxies alias. client_ip.py must remain free of any
 # localmail.config import — adding one would close a cycle through this line.
@@ -631,6 +633,28 @@ class Config(BaseModel):
     imports: ImportsConfig = Field(default_factory=ImportsConfig)
     upgrade: UpgradeEstimateConfig = Field(default_factory=UpgradeEstimateConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
+
+    @model_validator(mode="after")
+    def _reject_unusable_account_names(self) -> Config:
+        # A `[[accounts]]` block is a create boundary — `init-db` seeds it
+        # through `create_account` — so it enforces the same rule as the admin
+        # service layer (#217).
+        #
+        # Deliberately here and not as an `AccountConfig` field validator:
+        # `AccountConfig` doubles as the DB-row adapter
+        # (`daemon_accounts.account_config_from_row`,
+        # `api.admin.accounts._open_imap_connection`), so a field validator
+        # would also gate rows that are *already* in the accounts table.
+        # A pre-#217 release could seed such a row — `create_account` only
+        # checked blank/length — and gating there turns a latent keyring
+        # collision into a ValidationError that takes down every account's
+        # sync thread (`Daemon._spawn_account` is unguarded) and 500s
+        # `probe_connection`, with no way back: `name` is not in `_UPDATABLE`.
+        for account in self.accounts:
+            error = account_name_error(account.name)
+            if error is not None:
+                raise ValueError(f"account {account.name!r}: {error}")
+        return self
 
     @model_validator(mode="after")
     def _reject_duplicate_account_names(self) -> Config:

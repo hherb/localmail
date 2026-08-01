@@ -44,6 +44,19 @@ def test_maps_password_row():
     )
 
 
+def test_legacy_name_from_the_db_maps_without_raising():
+    """#217's rule is a *create* boundary, not a read one.
+
+    A pre-#217 release could seed a colon-carrying name into `accounts` —
+    `create_account` only checked blank/length. Enforcing the rule on the
+    `AccountConfig` field instead of on `Config` would make this adapter raise,
+    and `Daemon._spawn_account` calls it unguarded: one legacy row would stop
+    every account's sync thread, with no remedy (`name` is not updatable).
+    """
+    cfg = account_config_from_row(_row(name="gmail:refresh"))
+    assert cfg.name == "gmail:refresh"
+
+
 def test_none_folder_lists_become_empty():
     cfg = account_config_from_row(
         _row(folder_allow=None, folder_deny=None, folder_deny_flags=None)

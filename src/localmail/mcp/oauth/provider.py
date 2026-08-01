@@ -179,9 +179,14 @@ class LocalmailASProvider(
             # dataclass and the contextmanager's __exit__ cannot set __traceback__
             # on it.
             consumed = codes.consume_code(conn, auth_code.code)
-            if not consumed:
-                conn.rollback()
-            else:
+            # Commit the burn on its own, before anything below can fail. Sharing
+            # one transaction with the mint meant a rollback took the DELETE with
+            # it and resurrected the code for the rest of its TTL, so a client
+            # auto-retry — or a replay by anyone holding a copy — could still
+            # exchange it (#219). A post-burn failure now costs a fresh consent
+            # round trip, which is the correct trade against a replayable code.
+            conn.commit()
+            if consumed:
                 refresh_raw = refresh.mint_refresh(
                     conn, client_id=client_id, user_id=user_id,
                     scopes=auth_code.scopes,

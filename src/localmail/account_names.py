@@ -13,8 +13,13 @@ plaintext IMAP password over the ``gmail`` account's OAuth refresh token, and
 that account's next token refresh would fail (#217).
 
 Shared by both validation boundaries — ``api.admin.accounts`` (admin UI, JSON
-API, CLI) and ``config.AccountConfig`` (the TOML seed) — so the two cannot
-drift.
+API, CLI) and ``config.Config`` (the TOML seed) — so the two cannot drift.
+
+Both are *create* boundaries, and that is the whole surface: the name is not
+editable afterwards (``accounts._UPDATABLE`` has no ``name``). Note the TOML
+check lives on ``Config``, not on the ``AccountConfig`` field, because
+``AccountConfig`` doubles as the DB-row adapter — see the comment on
+``Config._reject_unusable_account_names``.
 """
 
 from __future__ import annotations

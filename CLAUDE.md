@@ -27,11 +27,21 @@ attachment tree without touching IMAP.
   [src/localmail/account_names.py](src/localmail/account_names.py)`::account_name_error`
   (blank / length / separator), applied at **both** create boundaries —
   `api.admin.accounts._validate_create_fields` (admin UI, JSON API, CLI) and
-  the `config.AccountConfig` field validator (the `init-db` TOML seed, which
-  reaches `create_account`). Names are not editable after creation
+  `config.Config._reject_unusable_account_names` (the `init-db` TOML seed,
+  which reaches `create_account`). Names are not editable after creation
   (`_UPDATABLE` has no `name`), so create is the whole surface. Rejecting the
   one separator character was chosen over a conservative allowlist because an
   allowlist would retroactively break existing configs on a re-seed.
+  **The TOML half sits on `Config`, not on the `AccountConfig` field**, because
+  `AccountConfig` doubles as the DB-row adapter
+  (`daemon_accounts.account_config_from_row`,
+  `api.admin.accounts._open_imap_connection`). A pre-#217 release could seed a
+  colon-carrying name — `create_account` only checked blank/length — and a
+  field validator would gate that existing row on *read*, turning a latent
+  keyring collision into a `ValidationError` that stops every account's sync
+  thread (`Daemon._spawn_account` is unguarded) and 500s `probe_connection`,
+  with no remedy since `name` is not updatable. Pinned by
+  `test_daemon_accounts.py::test_legacy_name_from_the_db_maps_without_raising`.
 - Config: TOML, validated by `pydantic` v2.
 - CLI: `click`.
 - Tests: `pytest` (in-memory `keyring` backend; real Postgres at
@@ -860,6 +870,18 @@ for the full design.
     cut off. The `disabled_at` half was the older gap of the two:
     `load_refresh` has mirrored `verify_token` on it since the M1
     hardening (#182); `load_code` never did.
+
+    **This check is load-time only, and one narrow race survives it (#241).**
+    The SDK calls `load_authorization_code` then
+    `exchange_authorization_code`, and `_exchange_code_sync` re-checks
+    nothing — it goes straight to `consume_code`. A *disabled* user is still
+    caught indirectly on that second leg (the minted refresh reads back as
+    absent through `load_refresh` → the `user_vanished` branch), but
+    `sessions_invalidated_at` is **not**: the successor refresh carries
+    `created_at = now()`, which is past the cutoff. So a revocation landing
+    between those two calls still yields a token pair. The exposure is the
+    load→exchange gap, not the full 60 s TTL, and the same race exists on the
+    refresh-rotation path.
 
   `NULL` means "never revoked" and is the default, so nothing changes for a
   user who has never been revoked. The cutoff is a moment, not a ban:

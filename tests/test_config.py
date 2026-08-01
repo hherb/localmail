@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from localmail.config import AuthConfig, Config, ImportsConfig, LocalmailConfig, SearchConfig, load_config
+from localmail.config import (
+    AccountConfig,
+    AuthConfig,
+    Config,
+    ImportsConfig,
+    LocalmailConfig,
+    SearchConfig,
+    load_config,
+)
 
 
 def write(path: Path, body: str) -> Path:
@@ -135,6 +143,18 @@ def test_account_name_with_colon_rejected(tmp_path: Path):
     )
     with pytest.raises(ValidationError, match="refresh"):
         load_config(p)
+
+
+def test_account_name_rule_does_not_gate_the_db_row_adapter():
+    """The rule is enforced on `Config` (the TOML seed), not on the
+    `AccountConfig` field — `AccountConfig` is also how a DB row reaches the
+    daemon, and a pre-#217 row carrying a colon must still map."""
+    AccountConfig(
+        name="gmail:refresh",
+        email="a@example.com",
+        imap_host="imap.example.com",
+        auth_method="password",
+    )
 
 
 def test_distinct_account_names_accepted(tmp_path: Path):

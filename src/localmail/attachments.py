@@ -25,13 +25,12 @@ messages and accounts.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import uuid
 from pathlib import Path
 
 import psycopg
 
+from .blob_temps import new_temp_path
 from .parser import ParsedMessage
 
 _UNSAFE = re.compile(r"[/\\\x00-\x1f\x7f]")
@@ -95,8 +94,9 @@ def write_attachments(
                 #
                 # A hard kill (SIGKILL/OOM/power loss) between the write and the
                 # replace strands the temp: unlike the old shared name, nothing
-                # reuses or overwrites it. Collecting those needs a sweep — #237.
-                tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+                # reuses or overwrites it. `blob_temps` owns the name *and* the
+                # sweep that collects those (#237), so the two cannot drift.
+                tmp = new_temp_path(path)
                 try:
                     tmp.write_bytes(att.payload)
                     tmp.replace(path)

@@ -91,7 +91,7 @@ def test_smart_enriches_parsed_and_times_rewrite(db_dsn, db_conn):
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(),
                      rewriter=FakeRewriter(_smart_result()))
-        page = s.search("test", smart=True, use_cache=False)
+        page = s.search("test", allowed_account_ids=None, smart=True, use_cache=False)
     finally:
         pool.close()
     assert page.query.rewritten_text == "rich"
@@ -111,7 +111,7 @@ def test_smart_falls_through_on_rewriter_failure(db_dsn, db_conn, caplog):
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(),
                      rewriter=RaisingRewriter())
         with caplog.at_level(logging.WARNING, logger="localmail.search"):
-            page = s.search("test", smart=True, use_cache=False)
+            page = s.search("test", allowed_account_ids=None, smart=True, use_cache=False)
     finally:
         pool.close()
     assert page.rewrite_status == "failed"
@@ -129,7 +129,7 @@ def test_smart_failed_404_yields_model_pull_note(db_dsn, db_conn):
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(),
                      rewriter=Status404Rewriter())
-        page = s.search("test", smart=True, use_cache=False)
+        page = s.search("test", allowed_account_ids=None, smart=True, use_cache=False)
     finally:
         pool.close()
     assert page.rewrite_status == "failed"
@@ -152,8 +152,8 @@ def test_smart_expansion_applies_on_sort_date_path(db_dsn, db_conn):
                      rewriter=FakeRewriter(expand))
         # Without expansion, "invoice" matches nothing; with it, the
         # synonym-only "receipt" message must surface on the date path.
-        plain = s.search("invoice", sort="date", use_cache=False)
-        smart = s.search("invoice", smart=True, sort="date", use_cache=False)
+        plain = s.search("invoice", allowed_account_ids=None, sort="date", use_cache=False)
+        smart = s.search("invoice", allowed_account_ids=None, smart=True, sort="date", use_cache=False)
     finally:
         pool.close()
     assert plain.results == []

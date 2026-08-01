@@ -49,7 +49,7 @@ def test_continue_page_returns_next_page_from_cache(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        p1 = s.search("test")
+        p1 = s.search("test", allowed_account_ids=None)
         p2 = s.continue_page(p1.search_token, page=2)
     finally:
         pool.close()
@@ -67,7 +67,7 @@ def test_continue_page_beyond_pool_raises(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        p1 = s.search("test")
+        p1 = s.search("test", allowed_account_ids=None)
         with pytest.raises(PageOutOfPoolError):
             s.continue_page(p1.search_token, page=2)
     finally:
@@ -81,7 +81,7 @@ def test_grow_pool_returns_page_1_with_larger_pool(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        p1 = s.search("test")
+        p1 = s.search("test", allowed_account_ids=None)
         assert p1.pool_size <= 3
         p1_big = s.grow_pool(p1.search_token, candidates_per_arm=20)
     finally:

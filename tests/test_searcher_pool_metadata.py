@@ -86,7 +86,7 @@ def test_get_pool_metadata_returns_metadata_after_search(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        page = s.search("test")
+        page = s.search("test", allowed_account_ids=None)
         assert page.search_token is not None
 
         meta = s.get_pool_metadata(page.search_token)
@@ -110,7 +110,7 @@ def test_get_pool_metadata_scoped_to_user_id(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        page = s.search("test", user_id=1)
+        page = s.search("test", allowed_account_ids=None, user_id=1)
         token = page.search_token
         assert token is not None
 
@@ -136,7 +136,7 @@ def test_get_pool_metadata_returns_none_after_ttl_expiry(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        page = s.search("test")
+        page = s.search("test", allowed_account_ids=None)
         token = page.search_token
         assert token is not None
         # PageCache compares against monotonic clock with > TTL; sleep
@@ -168,7 +168,7 @@ def test_get_pool_metadata_does_not_extend_ttl(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        page = s.search("test")
+        page = s.search("test", allowed_account_ids=None)
         token = page.search_token
         assert token is not None
         time.sleep(0.01)

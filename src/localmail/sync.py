@@ -37,6 +37,7 @@ from .fetch_retry import (
     db_now,
     hold_expired,
     load_attempts,
+    mark_gave_up,
     reclaim_below,
     record_attempt,
 )
@@ -750,14 +751,18 @@ def sync_mailbox(
                             "(%s attempts); giving up and advancing past it",
                             uid, mailbox.name, hold.first_seen_at, hold.attempt_count,
                         )
-                        # The row is deliberately NOT cleared here. If a lower
-                        # UID is holding the watermark, this one stays reachable
-                        # and will be re-seen next pass — deleting its history
-                        # now would hand it a fresh window then, silently
-                        # undoing the give-up for as long as any lower hold
-                        # lasts. `reclaim_below` collects the row once the
-                        # watermark genuinely passes it; a recovered fetch
-                        # clears it via the `held_attempts` path.
+                        # The row is deliberately NOT cleared here — it becomes
+                        # the tombstone (#239). Two reasons it must persist:
+                        # a lower UID holding the watermark keeps this one
+                        # reachable, so deleting its history would hand it a
+                        # fresh window on the next pass and silently undo the
+                        # give-up; and it is the only queryable record that this
+                        # message was permanently lost, which
+                        # `list-failed-fetches` / `retry-failed-fetches` act on.
+                        # `mark_gave_up` never restamps, so re-sightings stay
+                        # expired; a recovered fetch clears it via the
+                        # `held_attempts` path.
+                        mark_gave_up(conn, mailbox_id=mailbox.id, uid=int(uid))
                         highest_seen = max(highest_seen, int(uid))
                     else:
                         log.warning(

@@ -58,7 +58,7 @@ def test_searcher_returns_results(db_dsn, db_conn):
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
                      reranker=_Reranker(), rewriter=None)
-        page = s.search("Berlin")
+        page = s.search("Berlin", allowed_account_ids=None)
     finally:
         pool.close()
     assert isinstance(page, SearchPage)
@@ -76,7 +76,7 @@ def test_searcher_timing_ms_populated(db_dsn, db_conn):
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
                      reranker=_Reranker(), rewriter=None)
-        page = s.search("Berlin")
+        page = s.search("Berlin", allowed_account_ids=None)
     finally:
         pool.close()
     assert "parse" in page.timing_ms
@@ -143,7 +143,7 @@ def test_searcher_empty_query_returns_messages_by_coalesce_internal_date_date_se
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
                      reranker=_Reranker(), rewriter=None)
-        page = s.search("")
+        page = s.search("", allowed_account_ids=None)
     finally:
         pool.close()
     ids = [r.message_id for r in page.results]
@@ -173,7 +173,7 @@ def test_searcher_sort_date_orders_results_by_internal_date_desc(db_dsn, db_conn
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
                      reranker=_Reranker(), rewriter=None)
-        page = s.search("berlin", sort="date")
+        page = s.search("berlin", allowed_account_ids=None, sort="date")
     finally:
         pool.close()
     ids = [r.message_id for r in page.results]
@@ -200,7 +200,7 @@ def test_searcher_sort_rank_is_default_and_uses_rerank_score(db_dsn, db_conn):
         s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
                      reranker=_Reranker(), rewriter=None)
         # _Reranker prefers candidates with the query verbatim → mid_b wins.
-        page = s.search("berlin")
+        page = s.search("berlin", allowed_account_ids=None)
     finally:
         pool.close()
     ids = [r.message_id for r in page.results]
@@ -227,7 +227,7 @@ def test_searcher_empty_query_respects_account_filter(db_dsn, db_conn):
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
                      reranker=_Reranker(), rewriter=None)
-        page = s.search(f"account_id:{acct_a_id}")
+        page = s.search(f"account_id:{acct_a_id}", allowed_account_ids=None)
     finally:
         pool.close()
     ids = [r.message_id for r in page.results]
@@ -260,10 +260,10 @@ def test_sort_date_with_text_is_unbounded_lexical_paginated(db_dsn, db_conn):
                      reranker=None, rewriter=None)
         # Walk every page until the cursor goes None.
         all_ids: list[int] = []
-        page = s.search("e-ticket", page_size=10, sort="date")
+        page = s.search("e-ticket", allowed_account_ids=None, page_size=10, sort="date")
         all_ids.extend(r.message_id for r in page.results)
         while page.next_keyset is not None:
-            page = s.search("e-ticket", page_size=10, sort="date",
+            page = s.search("e-ticket", allowed_account_ids=None, page_size=10, sort="date",
                             keyset_cursor=page.next_keyset)
             all_ids.extend(r.message_id for r in page.results)
     finally:
@@ -301,10 +301,10 @@ def test_sort_date_lexical_paginates_across_dated_then_null_tail(db_dsn, db_conn
         s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
                      reranker=None, rewriter=None)
         all_ids: list[int] = []
-        page = s.search("invoice", page_size=2, sort="date")
+        page = s.search("invoice", allowed_account_ids=None, page_size=2, sort="date")
         all_ids.extend(r.message_id for r in page.results)
         while page.next_keyset is not None:
-            page = s.search("invoice", page_size=2, sort="date",
+            page = s.search("invoice", allowed_account_ids=None, page_size=2, sort="date",
                             keyset_cursor=page.next_keyset)
             all_ids.extend(r.message_id for r in page.results)
     finally:
@@ -324,7 +324,7 @@ def test_searcher_no_cache_returns_token_none(db_dsn, db_conn):
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
                      reranker=_Reranker(), rewriter=None)
-        page = s.search("Berlin", use_cache=False)
+        page = s.search("Berlin", allowed_account_ids=None, use_cache=False)
     finally:
         pool.close()
     assert page.search_token is None

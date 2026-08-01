@@ -679,8 +679,11 @@ def test_a_permanently_unfetchable_uid_is_given_up_once_the_window_passes(
     assert _uidnext(db_conn) == 4, "past the window sync gives up and advances"
     db_conn.rollback()
     with db_conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM transient_fetches")
-        assert cur.fetchone()[0] == 0, "giving up must not leave the row behind"
+        # The row survives as a *tombstone* (#239) — it is the only record that
+        # this message is permanently absent — but no live hold is left to
+        # clamp the watermark again.
+        cur.execute("SELECT uid, gave_up_at IS NOT NULL FROM transient_fetches")
+        assert cur.fetchall() == [(2, True)]
 
 
 def test_an_expired_hold_stays_expired_while_a_lower_uid_clamps_the_watermark(
@@ -780,9 +783,14 @@ def test_a_uidvalidity_reset_drops_stale_hold_history(db_conn, tmp_path: Path):
         assert cur.fetchone()[0] == 0
 
 
-def test_hold_history_below_the_resume_point_is_reclaimed(db_conn, tmp_path: Path):
-    """An expunged UID recorded as held — the probe is skipped once the run
-    knows the server is emptying bodies — would otherwise leak a row forever."""
+def test_no_live_hold_survives_below_the_resume_point(db_conn, tmp_path: Path):
+    """A hold row below the watermark is dead — sync never revisits that UID.
+
+    Since #239 the *given-up* rows deliberately survive as tombstones, so what
+    this pins is the complementary half: nothing is left that could clamp the
+    watermark or leak as a live hold. `reclaim_below`'s own collection of
+    orphaned live holds is covered in `test_fetch_retry.py`.
+    """
     imap = FakeIMAPClient()
     imap.add_folder("INBOX")
     imap.append("INBOX", _eml.plain())          # uid 1
@@ -790,12 +798,16 @@ def test_hold_history_below_the_resume_point_is_reclaimed(db_conn, tmp_path: Pat
     imap.suppress_body = {1, 2}
 
     # Window disabled: both are given up on at once, so the watermark advances
-    # past both and no history may survive.
+    # past both and only tombstones may remain.
     _sync(db_conn, imap, account=make_account(),
           attachments_root=tmp_path, max_body_fetch_hold_s=0.0)
 
     assert _uidnext(db_conn) == 3
     db_conn.rollback()
     with db_conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM transient_fetches")
+        cur.execute(
+            "SELECT count(*) FROM transient_fetches WHERE gave_up_at IS NULL"
+        )
         assert cur.fetchone()[0] == 0
+        cur.execute("SELECT uid FROM transient_fetches ORDER BY uid")
+        assert [r[0] for r in cur.fetchall()] == [1, 2]

@@ -15,6 +15,7 @@ fetch clears the row, so the window measures one *continuous* outage.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import NamedTuple
 
@@ -135,15 +136,21 @@ def reclaim_below(conn: psycopg.Connection, *, mailbox_id: int, uid: int) -> Non
 
     Such a row is dead by construction: sync will never look at that UID again,
     so nothing would ever clear or expire it. Without this they accumulate
-    without bound. Two populations land here: **given-up rows** -- sync's
-    expired branch leaves them in place, so a lower held UID that keeps the
-    watermark below one cannot hand it a fresh window on the next pass -- and
-    UIDs that really were expunged but got recorded as held anyway, because the
-    probe is skipped once the run knows the server is emptying bodies.
+    without bound. The population that lands here is UIDs which really were
+    expunged but got recorded as held anyway, because the probe is skipped once
+    the run knows the server is emptying bodies.
+
+    **Tombstoned rows are exempt (#239).** The watermark passing a given-up UID
+    is precisely the moment its record has to survive -- that record is the only
+    trace of a permanently lost message, and `list-failed-fetches` /
+    `retry-failed-fetches` are the commands that act on it. Purging is manual
+    (`purge_gave_up`). Expiry stays sticky for re-sightings because `mark_gave_up`
+    never restamps `gave_up_at`, not because the row gets collected.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM transient_fetches WHERE mailbox_id = %s AND uid < %s",
+            "DELETE FROM transient_fetches "
+            "WHERE mailbox_id = %s AND uid < %s AND gave_up_at IS NULL",
             (mailbox_id, uid),
         )
 
@@ -166,3 +173,125 @@ def db_now(conn: psycopg.Connection) -> datetime:
         row = cur.fetchone()
         assert row is not None
         return row[0]
+
+
+# --- give-up tombstones (#239) ---------------------------------------------
+
+
+class GaveUpFetch(NamedTuple):
+    """One permanently-unfetchable UID, as `list-failed-fetches` reports it."""
+
+    account_name: str
+    mailbox_name: str
+    mailbox_id: int
+    uid: int
+    attempt_count: int
+    first_seen_at: datetime
+    gave_up_at: datetime
+
+
+def plan_uidnext_rewind(
+    tombstones: Iterable[tuple[int, int]],
+    current_uidnext: Mapping[int, int],
+) -> dict[int, int]:
+    """Map each mailbox to the resume point that re-reaches its given-up UIDs.
+
+    Pure. `tombstones` is `(mailbox_id, uid)` pairs; `current_uidnext` is each
+    mailbox's stored watermark. A mailbox appears in the result only when the
+    rewind actually moves the watermark *backwards* -- rewinding to a UID sync
+    has not reached yet would skip everything in between.
+
+    Re-scanning from the lowest given-up UID upward is safe rather than merely
+    tolerable: `upsert_message`'s existing-id check plus `ON CONFLICT DO NOTHING`
+    make every already-archived message in that range a no-op.
+    """
+    lowest: dict[int, int] = {}
+    for mailbox_id, uid in tombstones:
+        if mailbox_id not in current_uidnext:
+            continue
+        lowest[mailbox_id] = min(uid, lowest.get(mailbox_id, uid))
+    return {
+        mailbox_id: uid
+        for mailbox_id, uid in lowest.items()
+        if uid < current_uidnext[mailbox_id]
+    }
+
+
+def mark_gave_up(conn: psycopg.Connection, *, mailbox_id: int, uid: int) -> None:
+    """Tombstone `uid`: sync will never fetch it, and the operator should know.
+
+    Idempotent on the *moment*. An expired UID stays reachable while any lower
+    UID holds the watermark, so it is re-seen on every pass; restamping would
+    make `gave_up_at` read as "just now" forever and hide how long the message
+    has been missing.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE transient_fetches SET gave_up_at = COALESCE(gave_up_at, now()) "
+            "WHERE mailbox_id = %s AND uid = %s",
+            (mailbox_id, uid),
+        )
+
+
+_GAVE_UP_SELECT = """
+    SELECT a.name, m.name, t.mailbox_id, t.uid, t.attempt_count,
+           t.first_seen_at, t.gave_up_at
+    FROM transient_fetches t
+    JOIN mailboxes m ON m.id = t.mailbox_id
+    JOIN accounts  a ON a.id = m.account_id
+    WHERE t.gave_up_at IS NOT NULL
+"""
+
+
+def list_gave_up(
+    conn: psycopg.Connection,
+    *,
+    account_name: str | None = None,
+    limit: int | None = None,
+) -> list[GaveUpFetch]:
+    """Every tombstoned UID, newest give-up first."""
+    sql = _GAVE_UP_SELECT
+    params: list[object] = []
+    if account_name is not None:
+        sql += " AND a.name = %s"
+        params.append(account_name)
+    sql += " ORDER BY t.gave_up_at DESC, t.mailbox_id, t.uid"
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [GaveUpFetch(*row) for row in cur.fetchall()]
+
+
+def purge_gave_up(
+    conn: psycopg.Connection,
+    *,
+    account_name: str | None = None,
+    older_than_s: float | None = None,
+) -> int:
+    """Delete tombstones; return how many. Live holds are never touched.
+
+    Retention is this call, not a background sweep. A tombstone is written once
+    per distinct unfetchable UID and upserted after that, so the table's growth
+    is bounded by the number of genuinely broken messages. Expiring rows
+    automatically would trade that for silently discarding the only record of
+    permanently lost mail -- exactly the gap #239 closed. `failed_messages` and
+    `failed_extractions` make the same call.
+    """
+    sql = (
+        "DELETE FROM transient_fetches t"
+        " USING mailboxes m, accounts a"
+        " WHERE m.id = t.mailbox_id AND a.id = m.account_id"
+        " AND t.gave_up_at IS NOT NULL"
+    )
+    params: list[object] = []
+    if account_name is not None:
+        sql += " AND a.name = %s"
+        params.append(account_name)
+    if older_than_s is not None:
+        sql += " AND t.gave_up_at < now() - make_interval(secs => %s)"
+        params.append(older_than_s)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.rowcount

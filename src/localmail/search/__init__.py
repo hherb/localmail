@@ -8,7 +8,11 @@ Usage::
     from localmail.search import create_searcher, Searcher, SearchPage
 
     searcher = create_searcher()          # reads ~/.config/localmail/config.toml
-    page = searcher.search("quarterly report")
+    page = searcher.search("quarterly report", allowed_account_ids=None)
+
+`allowed_account_ids` is required and has no default: `None` means "no ACL"
+(the whole archive, full search-DSL power), while a list scopes every retrieval
+arm to those accounts. Multi-user callers must pass the caller's grants.
 """
 
 from __future__ import annotations

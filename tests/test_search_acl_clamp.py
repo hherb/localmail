@@ -135,3 +135,19 @@ def test_known_account_name_resolves_to_its_id(db_conn: psycopg.Connection) -> N
     parsed = parse_query("invoice account:acl-clamp-known")
     resolved = _bare_searcher()._resolve_account_names(db_conn, parsed)
     assert resolved.filters.accounts == [account_id]
+
+
+def test_search_requires_an_explicit_allowed_account_ids() -> None:
+    """Omitting the ACL must be a TypeError, never a silent full-archive search.
+
+    `allowed_account_ids=None` is a legitimate value ("no ACL", used by the CLI
+    and the acceptance harnesses), so it cannot also be the default: a new
+    caller that forgets the kwarg would inherit unscoped access with no type
+    error and no test failure. Requiring it makes "no ACL" a decision recorded
+    at the call site.
+    """
+    import inspect
+
+    param = inspect.signature(Searcher.search).parameters["allowed_account_ids"]
+    assert param.default is inspect.Parameter.empty
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY

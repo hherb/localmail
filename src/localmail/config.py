@@ -38,6 +38,15 @@ class DatabaseConfig(BaseModel):
 
 class AttachmentsConfig(BaseModel):
     root: Path = Path("~/localmail")
+    # Age gate for `localmail sweep-blob-temps` and the daemon's startup sweep
+    # (#237). A stranded temp is one a hard kill (SIGKILL/OOM/power loss) left
+    # between write and atomic replace; nothing else collects it. Deliberately
+    # generous — a real attachment write finishes in milliseconds, so 24h buys
+    # an enormous margin against ever deleting a temp a live writer still owns.
+    # Floored at 1s because that margin is the *only* thing protecting a live
+    # writer: at 0 the sweep deletes a temp whose `replace()` has not run yet,
+    # failing the write and poison-pilling a healthy message.
+    temp_max_age_s: int = Field(default=86_400, ge=1)
 
     @field_validator("root", mode="after")
     @classmethod

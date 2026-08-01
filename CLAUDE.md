@@ -69,6 +69,9 @@ uv run localmail lang-backfill                 # one-shot body_lang detection fo
 uv run localmail backfill-internal-date [--account N]  # IMAP INTERNALDATE for legacy rows
 uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
 uv run localmail retry-failed-extractions      # re-attempt every failed extraction
+uv run localmail list-failed-fetches [--account N] [--limit K]   # UIDs whose BODY[] sync gave up on
+uv run localmail retry-failed-fetches [--account N] [--forget] [--dry-run]  # rewind uidnext to re-fetch them
+uv run localmail sweep-blob-temps [--dry-run] [--max-age-seconds S]  # collect stranded blob temps
 uv run localmail estimate-upgrade [--format text|json]   # pre-flight size/duration for lock-heavy migrations
 # see docs/operations/upgrade-runbook.md
 # search-status reports Phase 2 attachment_text/attachment_chunks counts and
@@ -104,6 +107,8 @@ src/localmail/
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
   attachments.py    # write_attachments(conn, parsed, root) -> JSONB rows (content-addressable)
+  blob_temps.py     # writer temp naming (new_temp_path) + its collector (sweep_blob_temps) (#237)
+  fetch_retry.py    # bounded BODY[] hold (#222A) + give-up tombstones/rewind planner (#239)
   sync.py           # upsert_*, process_one_message, sync_mailbox, sync_account,
                     #   record_failed_message, retry_failed_messages, folders_to_sync
   worker.py         # WorkerContext shared by daemon threads
@@ -125,7 +130,7 @@ src/localmail/
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + PEP562 back-compat re-exports
     rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0031_oauth_resource_indicator.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0034_transient_fetches_gave_up.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -440,9 +445,36 @@ invariants follow; all are pinned by
   `replace()` into place, installing a **short or zero-length blob at the
   canonical content-addressed path**. Both writers hold identical bytes, so
   whichever `replace` wins is correct. Do not "simplify" this back to a shared
-  name. The cost is that a hard kill (SIGKILL/OOM/power loss) between write and
-  replace now strands a temp nothing collects — tracked by #237; the old shared
-  name was accidentally self-limiting.
+  name.
+
+  The cost is that a hard kill (SIGKILL/OOM/power loss) between write and
+  replace strands a temp — the old shared name was accidentally self-limiting,
+  since the next writer of that blob reopened the identical path. **#237 adds
+  the collector**: [src/localmail/blob_temps.py](src/localmail/blob_temps.py)
+  owns *both* the minting (`new_temp_path`, called by `write_attachments`) and
+  the matching (`is_writer_temp`), so a rename of the format can never silently
+  strand every future orphan. `sweep_blob_temps` runs at `Daemon.start_workers`
+  (best-effort — a leaked temp costs disk, a raise costs the daemon) and on
+  demand via `localmail sweep-blob-temps [--dry-run]`.
+
+  **The gate is age, not pid liveness**, even though the pid is right there in
+  the name: that pid's process may be long gone *and* its number recycled, and
+  unlike `import_jobs.owner_pid` (#162) there is no row recording the owning
+  host to disambiguate. `[attachments] temp_max_age_s` (default 86400) is what
+  keeps a live writer's temp safe, so keep it generous — a real write finishes
+  in milliseconds and there is no upside to tightening it. Because it is the
+  *only* protection it is **floored at 1s** (`Field(ge=1)`, and
+  `--max-age-seconds` is a `click.IntRange(min=1)`): `is_expired` is
+  `now - mtime > max_age_s`, so at 0 the sweep deletes a temp whose `replace()`
+  has not run yet, failing that write and poison-pilling a healthy message. The
+  name match is
+  deliberately strict (`<64 hex>.<digits>.<32 hex>.tmp`), never a `*.tmp` glob:
+  the sweep deletes without asking, and the blob tree is a directory operators
+  poke at. A temp that vanishes *before* `stat` is **not** counted as removed —
+  the age gate never judged it, so claiming it (especially under `--dry-run`,
+  whose whole job is to say what would happen) reports an intent the sweep never
+  formed. A temp that vanishes at `unlink` **is** counted, since by then the
+  sweep had decided; its bytes are not, because it did not free them.
 
 - **Every blocking IMAP call is bounded** by `[daemon] imap_timeout_s`
   (default 60s), threaded through `WorkerContext.imap_timeout_s`. Unbounded,
@@ -546,14 +578,68 @@ thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
   UIDs), and without it every expunged-but-recorded-as-held UID leaks a row
   forever — which the probe skip below makes routine.
 
-  **Giving up leaves the row in place — `reclaim_below` is its only collector.**
-  When a *lower* held UID keeps the watermark below an expired one, the expired
-  UID stays reachable and is re-seen every pass; clearing its history at
-  give-up time would re-mint it a fresh window on the next pass, silently
-  undoing the give-up for as long as any lower hold lasts. The surviving row
-  keeps its `first_seen_at`, so re-sightings stay expired; a recovered fetch
-  still clears it (it is preloaded into `held_attempts`), and the checkpoint
-  reclaims it the moment the watermark truly passes.
+  **Giving up leaves the row in place, now as a tombstone (#239).** Two separate
+  reasons, both load-bearing. (1) When a *lower* held UID keeps the watermark
+  below an expired one, the expired UID stays reachable and is re-seen every
+  pass; clearing its history at give-up time would re-mint it a fresh window on
+  the next pass, silently undoing the give-up for as long as any lower hold
+  lasts. (2) The row is the **only queryable record that the message is
+  permanently absent** — every sibling failure path here keeps one
+  (`failed_messages`/`retry-failed`,
+  `failed_extractions`/`retry-failed-extractions`) and this one used to keep
+  nothing but a WARNING. `sync_mailbox` calls `fetch_retry.mark_gave_up`, which
+  stamps `transient_fetches.gave_up_at` (migration `0034`) via
+  `COALESCE(gave_up_at, now())` — **never restamping**, so `gave_up_at` keeps
+  meaning "since when has this message been missing" across re-sightings, and
+  expiry stays sticky because `first_seen_at` is untouched.
+  **`reclaim_below` therefore skips `gave_up_at IS NOT NULL`** — the watermark
+  passing the UID is exactly when the record must survive. It still collects
+  live holds orphaned above the old watermark (a held UID later expunged drops
+  out of SEARCH and is never re-seen).
+
+  **`mark_gave_up` runs in a nested SAVEPOINT**, like `record_attempt` beside it
+  and `record_failed_message` before both. It is bookkeeping *about* a failure
+  on the same branch of the same batch transaction, so unguarded a failure in it
+  poisons the transaction, the checkpoint right after it fails too, and the
+  whole pass dies into the worker's reconnect backoff — 49 healthy messages lost
+  to the row that was only reporting on the 50th. The realistic trigger is a
+  deploy landing the code before migration `0034` (`UndefinedColumn`).
+
+  **Ops surface:** `localmail list-failed-fetches [--account N] [--limit K]` and
+  `localmail retry-failed-fetches [--account N] [--forget] [--older-than-days D]
+  [--dry-run]`. Retry rewinds each affected mailbox's `uidnext` to its **lowest**
+  tombstoned UID via the pure `fetch_retry.plan_uidnext_rewind` (which skips a
+  mailbox whose watermark is already at or below that UID — rewinding *forward*
+  would skip mail); the re-scan of everything above is idempotent through
+  `upsert_message`'s existing-id check + `ON CONFLICT DO NOTHING`, just not free.
+  A tombstone otherwise clears on a successful re-fetch (`clear_attempts`, via
+  the `held_attempts` preload) or a UIDVALIDITY reset (`clear_mailbox` — the UID
+  space is renumbered, so the recorded uid is no longer actionable).
+
+  **Retry *arms* the tombstone (`fetch_retry.arm_for_retry`); it does not purge
+  it.** Both halves of that are load-bearing. It must **reopen the hold window**
+  (`attempt_count = 0, first_seen_at = now()`) because `load_attempts` does not
+  filter tombstones — a rewound row still carrying its original `first_seen_at`
+  expires on sight, so sync gives up again without ever re-fetching and the
+  command is a no-op that costs a full re-scan. And it must **keep the row**
+  because `mailboxes.uidnext` is not ours alone: `update_mailbox_progress` writes
+  it unconditionally from a resume point the daemon computed at the *top* of its
+  pass, so a daemon already mid-pass on that mailbox overwrites the rewind at its
+  next checkpoint. Purging there would make that silent — no re-fetch, no record,
+  and a command that reported success; armed, the same race costs one re-run,
+  which the command's own output says. `gave_up_at` is untouched by the arming
+  (the message is still absent, and has been since the original give-up), so a
+  re-driven row stays in `list-failed-fetches` until it actually arrives — which
+  is why the CLI labels the reopened `first_seen_at` **`held_since`**, not
+  `first_seen`. **Do not "simplify" this back to a purge.**
+
+  **Retention is manual, deliberately** (`--forget`, optionally scoped by
+  `--older-than-days`). A tombstone is written once per distinct unfetchable UID
+  and upserted thereafter, so growth is bounded by the number of genuinely
+  broken messages — not a runaway. An automatic sweep would trade that
+  negligible growth for silently deleting the sole record of permanently lost
+  mail, which is the failure #239 exists to end; `failed_messages` and
+  `failed_extractions` make the same call. Do not add a background expiry.
 
   **The probe skip is keyed on `server_emptying_bodies`, not `hold_at`.**
   `hold_at` is only assigned on the still-holding branch, so on the run where
@@ -1429,7 +1515,13 @@ for the full design.
   fallback), so the cached pool inherits the clamped filter and
   `continue_page` / `grow_pool` stay scoped without re-clamping. `None` means
   "no ACL" (CLI / local callers keep full DSL power); an **empty list** is a
-  real grant-nothing ACL. Two traps to preserve:
+  real grant-nothing ACL. The parameter is **keyword-only with no default**
+  (#234) — `None` has to be written at the call site. It shipped defaulted in
+  #229 and that was the residual hole: forgetting the kwarg produced a silent
+  full-archive search, no `TypeError`, no failing test — the same footgun shape
+  #67 removed from `open_attachment_bytes`. Pinned by
+  `test_search_acl_clamp.py::test_search_requires_an_explicit_allowed_account_ids`.
+  Two traps to preserve:
   - **An empty id set collapses to `_NO_ACCOUNT_SENTINEL = -1`, never `[]`.**
     `_filter_sql` treats an empty list as falsy and drops the clause
     entirely — i.e. *all accounts*, the exact inverse of the intent. The same
@@ -1823,7 +1915,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0033_transient_fetches.sql`; next free slot `0034_*.sql`.
+  Latest is `0034_transient_fetches_gave_up.sql`; next free slot `0035_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

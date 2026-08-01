@@ -182,6 +182,7 @@ def _gate_b(
     for q in suite["queries"]:
         page = searcher.search(
             q["query"],
+            allowed_account_ids=None,
             page_size=k,
             candidates_per_arm=k * 3,
             rerank_pool_size=k * 3,

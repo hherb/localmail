@@ -173,6 +173,7 @@ def _evaluate_one(
     for q in queries:
         page = searcher.search(
             q["query"],
+            allowed_account_ids=None,
             page_size=k,
             candidates_per_arm=candidates_per_arm,
             rerank_pool_size=k,

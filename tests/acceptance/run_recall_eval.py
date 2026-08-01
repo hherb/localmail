@@ -150,6 +150,7 @@ def main() -> int:
         for q in suite["queries"]:
             page = searcher.search(
                 q["query"],
+                allowed_account_ids=None,
                 page_size=args.k,
                 candidates_per_arm=args.k * 3,
                 rerank_pool_size=args.k * 3,

@@ -81,6 +81,9 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | `localmail run [--log-level …] [--no-ssl]` | Foreground daemon: per-account IDLE thread on INBOX + periodic poll thread for other folders. **Hot-reloads accounts** — add/remove/pause/resume an account or rotate its credentials and the running daemon converges within `[daemon] reload_seconds` (default 30 s), no restart needed. SIGTERM/SIGINT shut down cleanly. If Postgres is briefly unreachable at launch, startup retries with bounded exponential backoff (`[daemon] startup_backoff_initial_s`→`startup_backoff_max_s`, default 1→60 s) rather than crashing; the daemon's fresh (non-pool) connects — startup account read, reconcile, heartbeat clear — are bounded on every phase so no network fault stalls startup or hot-reload for the OS TCP default: the TCP connect by `[daemon] db_connect_timeout_s` (default 10 s), server-side query execution by `[daemon] db_statement_timeout_s` (default 30 s, `0` disables — catches a slow/stuck query), and a post-connect black-hole (packets dropped *after* connect) by `[daemon] db_tcp_user_timeout_ms` (default 30000 ms, `0` = OS default; libpq `tcp_user_timeout`, Linux-effective, ignored on platforms without `TCP_USER_TIMEOUT`). The workers' **IMAP** calls are bounded the same way by `[daemon] imap_timeout_s` (default 60 s) — without it a network black-hole blocks a worker forever, pinning its pool connection and leaving it deaf to the stop signal. It is a *per-recv* bound, so a slow but progressing download is safe; raise it if an account gets stuck reconnecting, since a server-side stall with nothing on the wire (a Gmail `SEARCH` over a very large `\All` folder) is indistinguishable from a black-hole. IDLE waits use their own bound and are unaffected. The daemon records per-thread liveness heartbeats in the `daemon_heartbeats` table — covering each account's IDLE + poll threads plus the embed/extract/reconcile process workers — and a heartbeat is considered stale after `[daemon] heartbeat_stale_seconds` (default 120 s); the admin daemon-status endpoint (2B.4) exposes this liveness state. The running daemon also drains a `daemon_commands` queue at the top of each reconcile tick — `reload-now` (converge immediately instead of waiting out `reload_seconds`), `restart-account` (tear down + respawn one account's threads, e.g. for a wedged connection), and `drain-stop` (graceful shutdown) — and `LISTEN`s for an enqueue `NOTIFY` so a queued command wakes the loop at once rather than on the next poll (disable the listener with `[daemon] command_listen_enabled = false`; its poll interval is `[daemon] command_listen_poll_seconds`, default 5 s). Enqueue these commands via the `localmail daemon` CLI subgroup or the admin HTTP routes (2B.4). |
 | `localmail list-failed [--account NAME] [--limit K]` | Show messages that sync skipped due to errors. |
 | `localmail retry-failed [--account NAME]` | Re-attempt every failed message. Successful retries move from `failed_messages` to `messages`. |
+| `localmail list-failed-fetches [--account NAME] [--limit K]` | Show messages whose body the server never handed over (sync gave up on them). |
+| `localmail retry-failed-fetches [--account NAME] [--forget] [--older-than-days N] [--dry-run]` | Rewind the affected folders so the next sync re-fetches them; `--forget` drops the records instead. Records clear when the message arrives, so the command is safely re-runnable. |
+| `localmail sweep-blob-temps [--dry-run] [--max-age-seconds S]` | Delete attachment temp files a hard kill stranded in the blob tree. |
 
 ### Daemon control (2B.4 / 2B.5)
 
@@ -344,6 +347,56 @@ toggling a flag — so a count would be spent at your mailbox's traffic rate: fi
 notifications in ten seconds would exhaust a five-attempt budget and drop a
 message over a blip that resolved a minute later, while the slower folder poll
 got half an hour from the same number.
+
+Giving up leaves a **record**, not just a log line — that message is genuinely
+absent from your archive, and you should be able to find it:
+
+```bash
+uv run localmail list-failed-fetches                 # what sync gave up on
+uv run localmail retry-failed-fetches --dry-run      # what a re-fetch would rewind
+uv run localmail retry-failed-fetches                # rewind and re-fetch
+uv run localmail retry-failed-fetches --forget       # accept the loss, drop the records
+```
+
+Retry rewinds each affected folder's resume point to the lowest given-up
+message number, so the next sync reaches it again. Everything above that point
+is re-scanned; already-archived mail is skipped, so it is always safe — but it
+is not always cheap. If the message is *still* unfetchable (often the case —
+that is why sync gave up), it takes a fresh hold on the folder's resume point,
+so the re-scan repeats on every pass until that hold runs out after
+`[daemon] max_body_fetch_hold_s` (default 30 min). On INBOX, where the daemon
+re-syncs on every new-mail notification, that can be a lot of passes. Run
+`--dry-run` first: it prints how far back each folder would be rewound, which
+is the whole cost estimate.
+
+A record is **kept** through the retry and clears only when the message
+actually arrives — until then it really is still missing, so it stays listed.
+That also makes the command safely re-runnable: if the sync daemon happened to
+be mid-pass on that folder, it can carry the resume point forward again, and
+re-running is the entire remedy.
+
+There is no automatic expiry of these records: they are the only trace of
+permanently lost mail, so removing them is your call (`--forget`, optionally
+`--older-than-days N`).
+
+### Orphaned attachment temp files
+
+Attachments are written to a private temp name and then atomically renamed into
+the content-addressed blob tree. A hard kill — SIGKILL, the OOM killer, power
+loss — landing between those two steps leaves the temp behind, and nothing
+reuses it. The sync daemon collects them at startup; you can also run it
+directly:
+
+```bash
+uv run localmail sweep-blob-temps --dry-run   # report what would be reclaimed
+uv run localmail sweep-blob-temps             # reclaim it
+```
+
+Only files older than `[attachments] temp_max_age_s` (default 24 h) are
+removed, which is what guarantees a temp an in-flight writer still owns is
+never touched. A real attachment write takes milliseconds, so there is no
+reason to lower it — and since that margin is the only protection, the setting
+is floored at one second.
 
 Attachment extraction follows the same SAVEPOINT discipline but distinguishes
 two error classes (so a docling model-download blip doesn't permanently mark
@@ -820,7 +873,9 @@ Every search response describes what happened to the rewrite via four fields:
 from localmail.search import create_searcher
 
 searcher = create_searcher()
-page = searcher.search("Berlin conference", page_size=20)
+# allowed_account_ids is required and has no default: None = no ACL (the whole
+# archive), or a list of account ids to scope every retrieval arm to.
+page = searcher.search("Berlin conference", allowed_account_ids=None, page_size=20)
 for r in page.results:
     print(r.rank, r.score, r.subject, r.snippet)
 

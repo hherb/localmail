@@ -57,7 +57,7 @@ def test_continue_page_rejects_different_user(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        p1 = s.search("test", user_id=1)
+        p1 = s.search("test", allowed_account_ids=None, user_id=1)
         # Alice's own user_id replays the cached pool.
         p1_again = s.continue_page(p1.search_token, page=1, user_id=1)
         assert p1_again.search_token == p1.search_token
@@ -75,7 +75,7 @@ def test_grow_pool_rejects_different_user(db_dsn, db_conn):
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        p1 = s.search("test", user_id=1)
+        p1 = s.search("test", allowed_account_ids=None, user_id=1)
         with pytest.raises(CacheMissError):
             s.grow_pool(p1.search_token, candidates_per_arm=10, user_id=2)
     finally:

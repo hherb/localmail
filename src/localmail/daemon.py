@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from .api.admin.daemon import (
     claim_commands,
     mark_command,
 )
+from .blob_temps import sweep_blob_temps
 from .config import Config
 from .daemon_accounts import account_config_from_row
 from .daemon_reconcile import plan_reconcile
@@ -385,9 +387,31 @@ class Daemon:
             return
         self._started = True
         self._clear_heartbeats()
+        self._sweep_blob_temps()
         for account_row in self._syncable:
             self._spawn_account(account_row)
         self._spawn_worker_threads()
+
+    def _sweep_blob_temps(self) -> None:
+        """Collect attachment temps a hard kill stranded (#237). Best-effort.
+
+        Startup is the natural moment: whatever killed the previous process is
+        exactly what leaves these behind. Never fatal — a leaked temp costs
+        disk, a raise here costs the whole daemon.
+        """
+        try:
+            result = sweep_blob_temps(
+                self.cfg.attachments.root,
+                max_age_s=self.cfg.attachments.temp_max_age_s,
+                now=time.time(),
+            )
+            if result.removed or result.errors:
+                log.info(
+                    "swept orphaned blob temps: removed=%d bytes=%d errors=%d",
+                    result.removed, result.bytes_reclaimed, result.errors,
+                )
+        except Exception:
+            log.warning("startup blob-temp sweep failed", exc_info=True)
 
     def _clear_heartbeats(self) -> None:
         """Single-instance reset: drop any heartbeat rows from a previous run

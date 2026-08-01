@@ -8,6 +8,7 @@ from __future__ import annotations
 import json as _json
 import os
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from .daemon import Daemon
 from .daemon_accounts import account_config_from_row
 from .daemon_cli import daemon_group
 from .account_seed import account_create_kwargs, seed_accounts
+from .blob_temps import sweep_blob_temps
 from .api.admin.accounts import (
     Account,
     AccountFieldError,
@@ -37,11 +39,21 @@ from .api.admin.accounts import (
 from .cli_account_resolve import Found, NotFound, plan_account_resolution
 from .cli_sync_toggle import plan_sync_toggle
 from .db import apply_migrations
+from .fetch_retry import (
+    arm_for_retry,
+    list_gave_up,
+    plan_uidnext_rewind,
+    purge_gave_up,
+)
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
 from .search import create_searcher
 from .sync import backfill_internal_date, retry_failed_messages, sync_account
 from .upgrade_estimate import ESTIMATORS, EstimateResult
+
+#: `--older-than-days` is the operator-facing unit; the service layer takes
+#: seconds like every other duration in this codebase.
+_SECONDS_PER_DAY = 86_400.0
 
 
 def _is_loopback_bind(bind: str) -> bool:
@@ -469,6 +481,160 @@ def retry_failed(ctx: click.Context, account_name: str | None) -> None:
     click.echo(f"recovered: {ok}    still failing: {still}")
 
 
+def _require_account(conn: psycopg.Connection, name: str) -> None:
+    """Reject an unknown `--account` outright.
+
+    Without it a typo scopes the query to nothing and reads back as the good
+    news "no given-up fetches".
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM accounts WHERE name = %s", (name,))
+        if cur.fetchone() is None:
+            raise click.ClickException(f"no such account: {name!r}")
+
+
+@main.command("list-failed-fetches")
+@click.option("--account", "account_name", default=None,
+              help="Restrict to one account (default: all).")
+@click.option("--limit", type=click.IntRange(min=1), default=50, show_default=True,
+              help="Maximum rows to display.")
+@click.pass_context
+def list_failed_fetches(ctx: click.Context, account_name: str | None,
+                        limit: int) -> None:
+    """Show UIDs whose body sync permanently gave up on fetching.
+
+    These messages are absent from the archive: the server kept returning an
+    empty BODY[] past `[daemon] max_body_fetch_hold_s` while still reporting the
+    UID as present (a zero-length message, or a corrupt store entry). Re-drive
+    them with `retry-failed-fetches`.
+
+    A row stays listed until the message is actually fetched — including while
+    a `retry-failed-fetches` re-drive is in flight, since until it lands the
+    message really is still missing. `held_since` is the start of the current
+    hold window (a re-drive reopens it); `gave_up` is unmoved by re-drives and
+    answers "how long has this been gone".
+    """
+    cfg = load_config(ctx.obj["config_path"])
+    with psycopg.connect(cfg.database.dsn) as conn:
+        if account_name:
+            _require_account(conn, account_name)
+        rows = list_gave_up(conn, account_name=account_name, limit=limit)
+
+    if not rows:
+        click.echo("no given-up fetches")
+        return
+    for r in rows:
+        click.echo(
+            f"{r.account_name}/{r.mailbox_name} uid={r.uid} "
+            f"attempts={r.attempt_count} held_since={r.first_seen_at:%Y-%m-%d %H:%M} "
+            f"gave_up={r.gave_up_at:%Y-%m-%d %H:%M}"
+        )
+
+
+@main.command("retry-failed-fetches")
+@click.option("--account", "account_name", default=None,
+              help="Restrict to one account (default: all).")
+@click.option("--forget", is_flag=True, default=False,
+              help="Drop the records without re-fetching (accept the loss).")
+@click.option("--older-than-days", type=float, default=None,
+              help="With --forget, only drop records older than N days.")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Report what would happen without changing anything.")
+@click.pass_context
+def retry_failed_fetches(ctx: click.Context, account_name: str | None,
+                         forget: bool, older_than_days: float | None,
+                         dry_run: bool) -> None:
+    """Re-fetch messages sync gave up on, by rewinding the mailbox watermark.
+
+    Each affected mailbox resumes from its lowest given-up UID, so the next sync
+    re-reaches it. Budget for this: everything above that UID is re-scanned, and
+    if the body is still unfetchable the UID takes a fresh hold on the watermark
+    for up to `[daemon] max_body_fetch_hold_s` — so the re-scan repeats on every
+    pass until that window runs out (on INBOX, that is every IDLE notification).
+    Re-scanning is idempotent (the existing-id check plus ON CONFLICT DO
+    NOTHING), just not free. `--dry-run` shows the rewind first.
+
+    The records are kept, not cleared: they clear when the message actually
+    arrives. That also makes this command safely re-runnable — a daemon already
+    mid-pass on an affected mailbox overwrites the rewind at its next
+    checkpoint, and re-running is then the whole remedy.
+
+    `--forget` is the retention mechanism: it drops the records without
+    rewinding, for messages you have accepted are gone. There is no automatic
+    expiry — a record is the only trace of permanently lost mail.
+    """
+    if older_than_days is not None and not forget:
+        raise click.ClickException("--older-than-days only applies with --forget")
+
+    older_than_s = (None if older_than_days is None
+                    else older_than_days * _SECONDS_PER_DAY)
+    cfg = load_config(ctx.obj["config_path"])
+    with psycopg.connect(cfg.database.dsn) as conn:
+        if account_name:
+            _require_account(conn, account_name)
+
+        if forget:
+            if dry_run:
+                doomed = list_gave_up(conn, account_name=account_name,
+                                      older_than_s=older_than_s)
+                click.echo(f"would forget: {len(doomed)}")
+                return
+            dropped = purge_gave_up(conn, account_name=account_name,
+                                    older_than_s=older_than_s)
+            conn.commit()
+            click.echo(f"forgotten: {dropped}")
+            return
+
+        rows = list_gave_up(conn, account_name=account_name)
+        if not rows:
+            click.echo("no given-up fetches")
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, uidnext FROM mailboxes WHERE id = ANY(%s)",
+                ([r.mailbox_id for r in rows],),
+            )
+            # `mailboxes.uidnext` is nullable (a mailbox row exists before its
+            # first sync). Dropping those instead of `int(None)`-ing on them
+            # feeds the planner's own "no known watermark is skipped" branch:
+            # a mailbox sync has never checkpointed has nothing to rewind to.
+            current = {
+                int(mid): int(uidnext)
+                for mid, uidnext in cur.fetchall()
+                if uidnext is not None
+            }
+            plan = plan_uidnext_rewind(
+                [(r.mailbox_id, r.uid) for r in rows], current
+            )
+            # Named per mailbox: the rewind is the expensive half of this
+            # command, and how far back it reaches is the whole cost estimate.
+            labels = {r.mailbox_id: f"{r.account_name}/{r.mailbox_name}" for r in rows}
+            for mailbox_id, resume_at in sorted(plan.items()):
+                click.echo(
+                    f"{labels[mailbox_id]}: uidnext "
+                    f"{current[mailbox_id]} -> {resume_at}"
+                )
+            if dry_run:
+                click.echo(
+                    f"would rewind {len(plan)} mailbox(es) and re-drive "
+                    f"{len(rows)} record(s)"
+                )
+                return
+            for mailbox_id, resume_at in plan.items():
+                cur.execute(
+                    "UPDATE mailboxes SET uidnext = %s WHERE id = %s",
+                    (resume_at, mailbox_id),
+                )
+        armed = arm_for_retry(conn, account_name=account_name)
+        conn.commit()
+    click.echo(
+        f"rewound {len(plan)} mailbox(es); armed {armed} record(s) for re-fetch. "
+        f"Run `localmail sync` (or wait for the daemon) to re-fetch. Records stay "
+        f"in `list-failed-fetches` until the message arrives; re-run this if a "
+        f"concurrent daemon pass carried the watermark forward again."
+    )
+
+
 @main.command("import")
 @click.argument("source_path", type=click.Path(exists=True))
 @click.option("--account", "account_name", required=True, help="Target archive account name.")
@@ -591,6 +757,36 @@ def run_cmd(ctx: click.Context, no_ssl: bool, log_level: str) -> None:
     daemon.run_forever()
 
 
+@main.command("sweep-blob-temps")
+@click.option("--max-age-seconds", "max_age_s", type=click.IntRange(min=1),
+              default=None,
+              help="Age gate in seconds (default: [attachments] temp_max_age_s).")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Report what would be reclaimed without deleting anything.")
+@click.pass_context
+def sweep_blob_temps_cmd(ctx: click.Context, max_age_s: int | None,
+                         dry_run: bool) -> None:
+    """Delete attachment temp files a hard kill stranded in the blob tree.
+
+    A SIGKILL / OOM / power loss between an attachment's write and its atomic
+    rename leaves a `<sha>.<pid>.<uuid>.tmp` that nothing reuses (#237). The
+    daemon also runs this at startup; use the command for an ad-hoc reclaim or
+    to preview with --dry-run.
+    """
+    cfg = load_config(ctx.obj["config_path"])
+    result = sweep_blob_temps(
+        cfg.attachments.root,
+        max_age_s=cfg.attachments.temp_max_age_s if max_age_s is None else max_age_s,
+        now=time.time(),
+        dry_run=dry_run,
+    )
+    verb = "would remove" if dry_run else "removed"
+    click.echo(
+        f"blob temps: scanned={result.scanned} {verb}={result.removed} "
+        f"bytes={result.bytes_reclaimed} errors={result.errors}"
+    )
+
+
 def _page_to_dict(page) -> dict:
     """Convert a SearchPage into a JSON-serializable dict."""
     out = asdict(page)
@@ -671,7 +867,8 @@ def search(ctx, query, accounts, folders, after, before, from_substr, to_substr,
     searcher = create_searcher(load_config(ctx.obj["config_path"]))
     try:
         page = searcher.search(
-            text_q, page_size=page_size, candidates_per_arm=candidates_per_arm,
+            text_q, allowed_account_ids=None,
+            page_size=page_size, candidates_per_arm=candidates_per_arm,
             rerank_pool_size=rerank_pool, use_cache=not no_cache, smart=smart,
             disable_rerank=no_rerank,
         )

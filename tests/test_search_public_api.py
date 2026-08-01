@@ -218,7 +218,7 @@ def test_searcher_returns_attachment_snippet(db_conn, require_real_embedding_mod
             reranker=None, rewriter=None,
         )
         page = searcher.search(
-            "non-disclosure obligations", page_size=10
+            "non-disclosure obligations", allowed_account_ids=None, page_size=10
         )
     finally:
         pool.close()

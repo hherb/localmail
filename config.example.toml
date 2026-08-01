@@ -10,6 +10,14 @@ dsn = "postgresql://localmail:local%40%40mail@localhost:5532/localmail"
 
 [attachments]
 root = "~/localmail"
+# Age gate for `localmail sweep-blob-temps` and the daemon's startup sweep.
+# A hard kill (SIGKILL / OOM / power loss) between an attachment's write and its
+# atomic rename strands a `<sha>.<pid>.<uuid>.tmp` nothing else collects (#237).
+# Keep this generous: a real attachment write finishes in milliseconds, and the
+# only thing the age gate protects against is deleting a temp a *live* writer
+# still owns. There is no upside to tightening it, and since it is the only
+# such protection, values below 1 second are rejected.
+temp_max_age_s = 86400   # 24 hours
 
 [daemon]
 idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling

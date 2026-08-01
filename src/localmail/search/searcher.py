@@ -911,6 +911,7 @@ class Searcher:
         self,
         query: str,
         *,
+        allowed_account_ids: list[int] | None,
         page_size: int | None = None,
         candidates_per_arm: int | None = None,
         rerank_pool_size: int | None = None,
@@ -920,9 +921,14 @@ class Searcher:
         user_id: int | None = None,
         sort: SortMode = "rank",
         keyset_cursor: KeysetCursor | None = None,
-        allowed_account_ids: list[int] | None = None,
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
+
+        `allowed_account_ids` is **required and has no default** — pass `None`
+        to mean "no ACL" (CLI and other local callers keep full DSL power), or
+        the caller's granted account ids. It is deliberately not defaulted: a
+        forgotten kwarg would silently widen a scoped caller to the whole
+        archive rather than raising.
 
         `disable_rerank=True` short-circuits the cross-encoder and ranks by
         RRF score only. Useful for low-latency or debugging paths.

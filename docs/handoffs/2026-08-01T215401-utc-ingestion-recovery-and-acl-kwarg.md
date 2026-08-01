@@ -51,9 +51,11 @@ codebase without a re-drivable row.
 - `reclaim_below` now skips `gave_up_at IS NOT NULL`. It still collects live
   holds orphaned above the old watermark (a held UID later expunged drops out of
   SEARCH and is never re-seen) — that path is still load-bearing, not dead code.
-- **`localmail list-failed-fetches` / `retry-failed-fetches`.** Retry rewinds
-  each affected mailbox's `uidnext` to its *lowest* tombstoned UID via the pure
-  `plan_uidnext_rewind`, then purges.
+- **`localmail list-failed-fetches` / `retry-failed-fetches [--dry-run]`.** Retry
+  rewinds each affected mailbox's `uidnext` to its *lowest* tombstoned UID via
+  the pure `plan_uidnext_rewind`, then **arms** the rows (`arm_for_retry`:
+  reopen the hold window, keep the record) rather than purging them. Both halves
+  are load-bearing — see the `arm_for_retry` docstring. Purging is `--forget`.
 
 **#237 (Low) — orphaned blob temps after a hard kill.** New pure module
 [src/localmail/blob_temps.py](src/localmail/blob_temps.py) owns **both** the

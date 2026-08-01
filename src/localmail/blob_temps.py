@@ -105,21 +105,32 @@ def sweep_blob_temps(
         scanned += 1
         try:
             stat = path.stat()
-            if not is_expired(mtime=stat.st_mtime, now=now, max_age_s=max_age_s):
-                continue
-            size = stat.st_size
-            if not dry_run:
-                path.unlink()
         except FileNotFoundError:
-            # Another sweep (or a writer's own cleanup) won the race. The file
-            # is gone either way, which is the outcome we wanted.
-            removed += 1
+            # Vanished before the age gate could judge it, so the sweep never
+            # decided anything about it — reporting it as removed (or, under
+            # `--dry-run`, as one we *would* remove) claims an intent we never
+            # formed about a file that may well have been young.
             continue
         except OSError:
             errors += 1
             continue
+
+        if not is_expired(mtime=stat.st_mtime, now=now, max_age_s=max_age_s):
+            continue
+        if not dry_run:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                # Another sweep (or a writer's own cleanup) won the race. The
+                # file is gone, which is the outcome we wanted — but we did not
+                # free those bytes, so they are not counted below.
+                removed += 1
+                continue
+            except OSError:
+                errors += 1
+                continue
         removed += 1
-        reclaimed += size
+        reclaimed += stat.st_size
 
     return SweepResult(
         scanned=scanned, removed=removed, bytes_reclaimed=reclaimed, errors=errors

@@ -16,6 +16,8 @@ import os
 import uuid
 from pathlib import Path
 
+import pytest
+
 from localmail.blob_temps import (
     SweepResult,
     is_expired,
@@ -188,6 +190,39 @@ def test_a_vanished_temp_is_not_an_error(tmp_path: Path) -> None:
     assert result.removed == 1
 
 
+def test_a_temp_that_vanishes_before_it_is_judged_is_not_claimed_as_removed(
+    tmp_path: Path,
+) -> None:
+    """`stat` runs before the age check, so its FileNotFoundError proves nothing.
+
+    The file may have been days old or seconds old; the sweep never found out
+    and did not delete it. Counting it as removed inflates the report, and under
+    `--dry-run` — whose entire job is to say what *would* happen — it claims an
+    intent the sweep never formed.
+    """
+    now = 1_000_000.0
+    d = _blob_dir(tmp_path, SHA)
+    young = d / temp_name(SHA, pid=1, token=uuid.uuid4().hex)
+    young.write_bytes(b"still being written")
+    _age(young, 1, now=now)
+
+    real_stat = Path.stat
+
+    def vanishing_stat(self: Path, **k: object):
+        if self.name.endswith(".tmp"):
+            raise FileNotFoundError(str(self))
+        return real_stat(self, **k)
+
+    Path.stat = vanishing_stat  # type: ignore[method-assign]
+    try:
+        result = sweep_blob_temps(tmp_path, max_age_s=86_400, now=now, dry_run=True)
+    finally:
+        Path.stat = real_stat  # type: ignore[method-assign]
+
+    assert result.removed == 0
+    assert result.errors == 0
+
+
 # --- wiring: config, writer, daemon startup, CLI ---------------------------
 
 
@@ -198,6 +233,36 @@ def test_temp_max_age_default_is_a_generous_config_knob() -> None:
     cfg = AttachmentsConfig()
     assert cfg.temp_max_age_s == 86_400
     assert AttachmentsConfig(temp_max_age_s=60).temp_max_age_s == 60
+
+
+def test_the_age_gate_cannot_be_configured_away(tmp_path: Path) -> None:
+    """The gate is the *only* thing protecting a live writer's temp.
+
+    `is_expired` is `now - mtime > max_age_s`, so at zero a temp written
+    microseconds ago is already expired and the sweep deletes a file whose
+    writer is between `write_bytes` and `replace` — turning a healthy message
+    into a `failed_messages` poison pill. Nothing legitimate needs a
+    sub-second gate, so the floor costs nothing.
+    """
+    import pydantic
+
+    from localmail.config import AttachmentsConfig
+
+    for bad in (0, -1):
+        with pytest.raises(pydantic.ValidationError):
+            AttachmentsConfig(temp_max_age_s=bad)
+
+
+def test_cli_rejects_a_non_positive_age_gate(tmp_path: Path, cli_config) -> None:
+    from click.testing import CliRunner
+
+    from localmail.cli import main
+
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(cli_config), "sweep-blob-temps", "--max-age-seconds", "0"],
+    )
+    assert result.exit_code != 0
 
 
 def test_a_temp_stranded_by_a_hard_kill_is_collected(

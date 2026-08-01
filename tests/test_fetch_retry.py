@@ -13,6 +13,7 @@ from localmail.fetch_retry import (
     clear_mailbox,
     hold_expired,
     load_attempts,
+    mark_gave_up,
     reclaim_below,
     record_attempt,
 )
@@ -129,3 +130,35 @@ def test_a_bookkeeping_failure_does_not_abort_the_surrounding_batch(db_conn):
     # The transaction must still be usable.
     assert {uid: h.attempt_count for uid, h in load_attempts(db_conn, mb).items()} == {1: 1}
     assert record_attempt(db_conn, mailbox_id=mb, uid=2).attempt_count == 1
+
+
+def test_a_tombstone_failure_does_not_abort_the_surrounding_batch(db_conn):
+    """`mark_gave_up` needs `record_attempt`'s nested SAVEPOINT for the same reason.
+
+    It runs on the same branch, inside the same batch transaction, and is the
+    same kind of bookkeeping: losing 49 healthy messages because the row that
+    records the 50th could not be stamped is the exact trade the SAVEPOINT
+    discipline exists to refuse.
+
+    The failure simulated here is the one this actually risks in production — a
+    deploy that lands the code before migration 0034. Unguarded, the
+    `UndefinedColumn` poisons the transaction, the checkpoint that follows it
+    fails too, and every sync pass meeting an unfetchable body dies into the
+    worker's reconnect backoff. The DDL is rolled back with the enclosing
+    SAVEPOINT (and again when the fixture closes the connection).
+    """
+    mb = _mailbox(db_conn)
+    record_attempt(db_conn, mailbox_id=mb, uid=1)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SAVEPOINT pre_0034")
+        cur.execute("ALTER TABLE transient_fetches DROP COLUMN gave_up_at")
+    try:
+        mark_gave_up(db_conn, mailbox_id=mb, uid=1)
+        # The transaction must still be usable for the batch's real work.
+        assert record_attempt(db_conn, mailbox_id=mb, uid=2).attempt_count == 1
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute("ROLLBACK TO SAVEPOINT pre_0034")
+
+    assert {uid: h.attempt_count for uid, h in load_attempts(db_conn, mb).items()} == {1: 1}

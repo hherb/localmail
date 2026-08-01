@@ -10,7 +10,12 @@ a corrupt store entry can omit the body indefinitely -- so a hold expires after
 `[daemon] max_body_fetch_hold_s`, tracked per `(mailbox_id, uid)`. A successful
 fetch clears the row, so the window measures one *continuous* outage.
 
-`hold_expired` is the pure boundary; the rest is thin IO.
+Past that window sync gives up and advances, leaving the row behind as a
+tombstone (#239) — the only queryable record that the message is permanently
+absent, and what `list-failed-fetches` / `retry-failed-fetches` act on.
+
+`hold_expired` and `plan_uidnext_rewind` are the pure boundaries; the rest is
+thin IO.
 """
 from __future__ import annotations
 
@@ -224,13 +229,98 @@ def mark_gave_up(conn: psycopg.Connection, *, mailbox_id: int, uid: int) -> None
     UID holds the watermark, so it is re-seen on every pass; restamping would
     make `gave_up_at` read as "just now" forever and hide how long the message
     has been missing.
+
+    Nested SAVEPOINT for `record_attempt`'s reason, on the same branch of the
+    same batch transaction: this is bookkeeping *about* a failure and must not
+    become one. Unguarded, a failure here poisons the transaction, so the
+    checkpoint that follows fails too and the whole pass dies into the worker's
+    reconnect backoff — 49 healthy messages lost to the row that was only
+    reporting on the 50th. The realistic trigger is a deploy landing this code
+    before migration `0034`.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE transient_fetches SET gave_up_at = COALESCE(gave_up_at, now()) "
-            "WHERE mailbox_id = %s AND uid = %s",
-            (mailbox_id, uid),
-        )
+        cur.execute("SAVEPOINT gave_up")
+        try:
+            cur.execute(
+                "UPDATE transient_fetches SET gave_up_at = COALESCE(gave_up_at, now()) "
+                "WHERE mailbox_id = %s AND uid = %s",
+                (mailbox_id, uid),
+            )
+            cur.execute("RELEASE SAVEPOINT gave_up")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT gave_up")
+            cur.execute("RELEASE SAVEPOINT gave_up")
+            log.exception(
+                "could not record giving up on UID %s in mailbox %s; sync has "
+                "still advanced past it, but it will not appear in "
+                "`list-failed-fetches`",
+                uid, mailbox_id,
+            )
+
+
+def _gave_up_scope(
+    *,
+    account_name: str | None,
+    older_than_s: float | None = None,
+) -> tuple[str, list[object]]:
+    """Shared scope predicate for the tombstone statements: `(sql, params)`.
+
+    One emitter so `list_gave_up` (what `--dry-run` previews), `arm_for_retry`
+    (what a re-drive touches) and `purge_gave_up` (what `--forget` deletes) can
+    never disagree about which rows they are talking about. Every caller uses
+    the aliases `t` and `a`.
+    """
+    sql = ""
+    params: list[object] = []
+    if account_name is not None:
+        sql += " AND a.name = %s"
+        params.append(account_name)
+    if older_than_s is not None:
+        sql += " AND t.gave_up_at < now() - make_interval(secs => %s)"
+        params.append(older_than_s)
+    return sql, params
+
+
+def arm_for_retry(
+    conn: psycopg.Connection, *, account_name: str | None = None
+) -> int:
+    """Reopen the hold window on every tombstone; return how many. Keeps the row.
+
+    Two things have to be true for `retry-failed-fetches` to work, and one
+    statement is the wrong place to fake either.
+
+    **The window must be reopened, or the retry is not one.** `load_attempts`
+    does not filter tombstones, so a rewound row arriving at the next pass
+    still carries its original `first_seen_at`, expires on sight, and sync gives
+    up again without ever re-fetching -- a no-op that costs a full re-scan.
+
+    **The row must survive, or a lost rewind is a lost record.** The rewind and
+    this call commit together, but `mailboxes.uidnext` is not ours alone:
+    `sync.update_mailbox_progress` writes it unconditionally from a resume point
+    the daemon computed at the *top* of its pass, so a daemon already syncing
+    this mailbox overwrites the rewind at its next checkpoint. Deleting the row
+    here would make that silent -- no re-fetch, no record, and a command that
+    reported success. Armed instead, the same race costs one re-run.
+
+    `gave_up_at` is deliberately untouched: until the message is actually
+    fetched it is still absent, so it belongs in `list-failed-fetches`, and it
+    has been missing since the original give-up, not since this retry. A
+    successful fetch is what clears the row, via `clear_attempts`.
+
+    Live holds are left alone -- they are inside their window already, and
+    restarting it would extend the very pin the bounded hold exists to end.
+    """
+    scope, params = _gave_up_scope(account_name=account_name)
+    sql = (
+        "UPDATE transient_fetches t"
+        " SET attempt_count = 0, first_seen_at = now(), last_seen_at = now()"
+        " FROM mailboxes m, accounts a"
+        " WHERE m.id = t.mailbox_id AND a.id = m.account_id"
+        " AND t.gave_up_at IS NOT NULL"
+    ) + scope
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.rowcount
 
 
 _GAVE_UP_SELECT = """
@@ -247,14 +337,14 @@ def list_gave_up(
     conn: psycopg.Connection,
     *,
     account_name: str | None = None,
+    older_than_s: float | None = None,
     limit: int | None = None,
 ) -> list[GaveUpFetch]:
     """Every tombstoned UID, newest give-up first."""
-    sql = _GAVE_UP_SELECT
-    params: list[object] = []
-    if account_name is not None:
-        sql += " AND a.name = %s"
-        params.append(account_name)
+    scope, params = _gave_up_scope(
+        account_name=account_name, older_than_s=older_than_s
+    )
+    sql = _GAVE_UP_SELECT + scope
     sql += " ORDER BY t.gave_up_at DESC, t.mailbox_id, t.uid"
     if limit is not None:
         sql += " LIMIT %s"
@@ -279,19 +369,15 @@ def purge_gave_up(
     permanently lost mail -- exactly the gap #239 closed. `failed_messages` and
     `failed_extractions` make the same call.
     """
+    scope, params = _gave_up_scope(
+        account_name=account_name, older_than_s=older_than_s
+    )
     sql = (
         "DELETE FROM transient_fetches t"
         " USING mailboxes m, accounts a"
         " WHERE m.id = t.mailbox_id AND a.id = m.account_id"
         " AND t.gave_up_at IS NOT NULL"
-    )
-    params: list[object] = []
-    if account_name is not None:
-        sql += " AND a.name = %s"
-        params.append(account_name)
-    if older_than_s is not None:
-        sql += " AND t.gave_up_at < now() - make_interval(secs => %s)"
-        params.append(older_than_s)
+    ) + scope
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return cur.rowcount

@@ -70,7 +70,7 @@ uv run localmail backfill-internal-date [--account N]  # IMAP INTERNALDATE for l
 uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
 uv run localmail retry-failed-extractions      # re-attempt every failed extraction
 uv run localmail list-failed-fetches [--account N] [--limit K]   # UIDs whose BODY[] sync gave up on
-uv run localmail retry-failed-fetches [--account N] [--forget]   # rewind uidnext to re-fetch them
+uv run localmail retry-failed-fetches [--account N] [--forget] [--dry-run]  # rewind uidnext to re-fetch them
 uv run localmail sweep-blob-temps [--dry-run] [--max-age-seconds S]  # collect stranded blob temps
 uv run localmail estimate-upgrade [--format text|json]   # pre-flight size/duration for lock-heavy migrations
 # see docs/operations/upgrade-runbook.md
@@ -462,10 +462,19 @@ invariants follow; all are pinned by
   unlike `import_jobs.owner_pid` (#162) there is no row recording the owning
   host to disambiguate. `[attachments] temp_max_age_s` (default 86400) is what
   keeps a live writer's temp safe, so keep it generous — a real write finishes
-  in milliseconds and there is no upside to tightening it. The name match is
+  in milliseconds and there is no upside to tightening it. Because it is the
+  *only* protection it is **floored at 1s** (`Field(ge=1)`, and
+  `--max-age-seconds` is a `click.IntRange(min=1)`): `is_expired` is
+  `now - mtime > max_age_s`, so at 0 the sweep deletes a temp whose `replace()`
+  has not run yet, failing that write and poison-pilling a healthy message. The
+  name match is
   deliberately strict (`<64 hex>.<digits>.<32 hex>.tmp`), never a `*.tmp` glob:
   the sweep deletes without asking, and the blob tree is a directory operators
-  poke at.
+  poke at. A temp that vanishes *before* `stat` is **not** counted as removed —
+  the age gate never judged it, so claiming it (especially under `--dry-run`,
+  whose whole job is to say what would happen) reports an intent the sweep never
+  formed. A temp that vanishes at `unlink` **is** counted, since by then the
+  sweep had decided; its bytes are not, because it did not free them.
 
 - **Every blocking IMAP call is bounded** by `[daemon] imap_timeout_s`
   (default 60s), threaded through `WorkerContext.imap_timeout_s`. Unbounded,
@@ -588,17 +597,41 @@ thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
   live holds orphaned above the old watermark (a held UID later expunged drops
   out of SEARCH and is never re-seen).
 
+  **`mark_gave_up` runs in a nested SAVEPOINT**, like `record_attempt` beside it
+  and `record_failed_message` before both. It is bookkeeping *about* a failure
+  on the same branch of the same batch transaction, so unguarded a failure in it
+  poisons the transaction, the checkpoint right after it fails too, and the
+  whole pass dies into the worker's reconnect backoff — 49 healthy messages lost
+  to the row that was only reporting on the 50th. The realistic trigger is a
+  deploy landing the code before migration `0034` (`UndefinedColumn`).
+
   **Ops surface:** `localmail list-failed-fetches [--account N] [--limit K]` and
-  `localmail retry-failed-fetches [--account N] [--forget] [--older-than-days D]`.
-  Retry rewinds each affected mailbox's `uidnext` to its **lowest** tombstoned
-  UID via the pure `fetch_retry.plan_uidnext_rewind` (which skips a mailbox
-  whose watermark is already at or below that UID — rewinding *forward* would
-  skip mail), then purges the tombstones; the re-scan of everything above is
-  idempotent through `upsert_message`'s existing-id check + `ON CONFLICT DO
-  NOTHING`, just not free. A tombstone otherwise clears on a successful
-  re-fetch (`clear_attempts`, via the `held_attempts` preload) or a UIDVALIDITY
-  reset (`clear_mailbox` — the UID space is renumbered, so the recorded uid is
-  no longer actionable).
+  `localmail retry-failed-fetches [--account N] [--forget] [--older-than-days D]
+  [--dry-run]`. Retry rewinds each affected mailbox's `uidnext` to its **lowest**
+  tombstoned UID via the pure `fetch_retry.plan_uidnext_rewind` (which skips a
+  mailbox whose watermark is already at or below that UID — rewinding *forward*
+  would skip mail); the re-scan of everything above is idempotent through
+  `upsert_message`'s existing-id check + `ON CONFLICT DO NOTHING`, just not free.
+  A tombstone otherwise clears on a successful re-fetch (`clear_attempts`, via
+  the `held_attempts` preload) or a UIDVALIDITY reset (`clear_mailbox` — the UID
+  space is renumbered, so the recorded uid is no longer actionable).
+
+  **Retry *arms* the tombstone (`fetch_retry.arm_for_retry`); it does not purge
+  it.** Both halves of that are load-bearing. It must **reopen the hold window**
+  (`attempt_count = 0, first_seen_at = now()`) because `load_attempts` does not
+  filter tombstones — a rewound row still carrying its original `first_seen_at`
+  expires on sight, so sync gives up again without ever re-fetching and the
+  command is a no-op that costs a full re-scan. And it must **keep the row**
+  because `mailboxes.uidnext` is not ours alone: `update_mailbox_progress` writes
+  it unconditionally from a resume point the daemon computed at the *top* of its
+  pass, so a daemon already mid-pass on that mailbox overwrites the rewind at its
+  next checkpoint. Purging there would make that silent — no re-fetch, no record,
+  and a command that reported success; armed, the same race costs one re-run,
+  which the command's own output says. `gave_up_at` is untouched by the arming
+  (the message is still absent, and has been since the original give-up), so a
+  re-driven row stays in `list-failed-fetches` until it actually arrives — which
+  is why the CLI labels the reopened `first_seen_at` **`held_since`**, not
+  `first_seen`. **Do not "simplify" this back to a purge.**
 
   **Retention is manual, deliberately** (`--forget`, optionally scoped by
   `--older-than-days`). A tombstone is written once per distinct unfetchable UID

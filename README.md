@@ -82,7 +82,7 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | `localmail list-failed [--account NAME] [--limit K]` | Show messages that sync skipped due to errors. |
 | `localmail retry-failed [--account NAME]` | Re-attempt every failed message. Successful retries move from `failed_messages` to `messages`. |
 | `localmail list-failed-fetches [--account NAME] [--limit K]` | Show messages whose body the server never handed over (sync gave up on them). |
-| `localmail retry-failed-fetches [--account NAME] [--forget] [--older-than-days N]` | Rewind the affected folders so the next sync re-fetches them; `--forget` drops the records instead. |
+| `localmail retry-failed-fetches [--account NAME] [--forget] [--older-than-days N] [--dry-run]` | Rewind the affected folders so the next sync re-fetches them; `--forget` drops the records instead. Records clear when the message arrives, so the command is safely re-runnable. |
 | `localmail sweep-blob-temps [--dry-run] [--max-age-seconds S]` | Delete attachment temp files a hard kill stranded in the blob tree. |
 
 ### Daemon control (2B.4 / 2B.5)
@@ -353,16 +353,31 @@ absent from your archive, and you should be able to find it:
 
 ```bash
 uv run localmail list-failed-fetches                 # what sync gave up on
+uv run localmail retry-failed-fetches --dry-run      # what a re-fetch would rewind
 uv run localmail retry-failed-fetches                # rewind and re-fetch
 uv run localmail retry-failed-fetches --forget       # accept the loss, drop the records
 ```
 
 Retry rewinds each affected folder's resume point to the lowest given-up
 message number, so the next sync reaches it again. Everything above that point
-is re-scanned; already-archived mail is skipped, so it is safe — just one
-slower pass per affected folder. There is no automatic expiry of these records:
-they are the only trace of permanently lost mail, so removing them is your call
-(`--forget`, optionally `--older-than-days N`).
+is re-scanned; already-archived mail is skipped, so it is always safe — but it
+is not always cheap. If the message is *still* unfetchable (often the case —
+that is why sync gave up), it takes a fresh hold on the folder's resume point,
+so the re-scan repeats on every pass until that hold runs out after
+`[daemon] max_body_fetch_hold_s` (default 30 min). On INBOX, where the daemon
+re-syncs on every new-mail notification, that can be a lot of passes. Run
+`--dry-run` first: it prints how far back each folder would be rewound, which
+is the whole cost estimate.
+
+A record is **kept** through the retry and clears only when the message
+actually arrives — until then it really is still missing, so it stays listed.
+That also makes the command safely re-runnable: if the sync daemon happened to
+be mid-pass on that folder, it can carry the resume point forward again, and
+re-running is the entire remedy.
+
+There is no automatic expiry of these records: they are the only trace of
+permanently lost mail, so removing them is your call (`--forget`, optionally
+`--older-than-days N`).
 
 ### Orphaned attachment temp files
 
@@ -380,7 +395,8 @@ uv run localmail sweep-blob-temps             # reclaim it
 Only files older than `[attachments] temp_max_age_s` (default 24 h) are
 removed, which is what guarantees a temp an in-flight writer still owns is
 never touched. A real attachment write takes milliseconds, so there is no
-reason to lower it.
+reason to lower it — and since that margin is the only protection, the setting
+is floored at one second.
 
 Attachment extraction follows the same SAVEPOINT discipline but distinguishes
 two error classes (so a docling model-download blip doesn't permanently mark

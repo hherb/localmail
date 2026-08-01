@@ -15,7 +15,8 @@ root = "~/localmail"
 # atomic rename strands a `<sha>.<pid>.<uuid>.tmp` nothing else collects (#237).
 # Keep this generous: a real attachment write finishes in milliseconds, and the
 # only thing the age gate protects against is deleting a temp a *live* writer
-# still owns. There is no upside to tightening it.
+# still owns. There is no upside to tightening it, and since it is the only
+# such protection, values below 1 second are rejected.
 temp_max_age_s = 86400   # 24 hours
 
 [daemon]

@@ -43,7 +43,10 @@ class AttachmentsConfig(BaseModel):
     # between write and atomic replace; nothing else collects it. Deliberately
     # generous — a real attachment write finishes in milliseconds, so 24h buys
     # an enormous margin against ever deleting a temp a live writer still owns.
-    temp_max_age_s: int = 86_400
+    # Floored at 1s because that margin is the *only* thing protecting a live
+    # writer: at 0 the sweep deletes a temp whose `replace()` has not run yet,
+    # failing the write and poison-pilling a healthy message.
+    temp_max_age_s: int = Field(default=86_400, ge=1)
 
     @field_validator("root", mode="after")
     @classmethod

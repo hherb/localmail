@@ -1835,6 +1835,12 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   must not touch live archives.
 - The `memory_keyring` fixture (autouse) intercepts every `keyring` call so
   real Keychain entries aren't written/read during tests.
+- **If exactly the three `LISTEN`/`NOTIFY` tests fail** with
+  `could not access status of transaction …` while everything else passes, it
+  is a stale entry in Postgres' shared NOTIFY queue, **not** clog corruption
+  and not a localmail bug. Cycling the sync daemon clears it — diagnosis and
+  fix in
+  [docs/operations/postgres-maintenance-runbook.md](docs/operations/postgres-maintenance-runbook.md).
 - `tests/_fake_imap.py::FakeIMAPClient` is the only place to extend when sync
   or daemon code needs new IMAP verbs.
 

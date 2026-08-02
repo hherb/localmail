@@ -24,8 +24,10 @@ Postgres and the attachment tree without touching IMAP.
   records `[{"filename": "<original-name-from-this-email>", "sha256": "<hex>"}, …]`,
   preserving the *per-email* filename so files can be restored with the names
   they had when received.
-- Secrets (IMAP passwords, OAuth refresh tokens) live in the OS keyring —
-  macOS Keychain on darwin, Secret Service (gnome-keyring / KWallet) on Linux.
+- Secrets (IMAP passwords, OAuth refresh tokens) live in the OS keyring by
+  default — macOS Keychain on darwin, Secret Service (gnome-keyring / KWallet)
+  on Linux — or in a 0600 file for headless hosts. See
+  [Headless secret storage](#headless-secret-storage).
 - Per-account topology (host, email, auth method, folder allow/deny) lives in
   the `accounts` database table. A single TOML file seeds it on `init-db`; the
   DB is authoritative thereafter.
@@ -73,8 +75,8 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | --- | --- |
 | `localmail init-db` | Apply pending schema migrations, then seed `[[accounts]]` from `config.toml` into the database. Idempotent; the DB is authoritative, so existing rows are never overwritten (a drifted TOML value logs a warning and is ignored). |
 | `localmail list-accounts` | Show accounts in the database and whether a secret is stored. |
-| `localmail add-account NAME` | Prompt for an IMAP password and store it in the keyring. Resolves `NAME` against the DB; if absent but declared in `config.toml`, the DB row is created from that block first. |
-| `localmail oauth-login NAME` | Run the Gmail OAuth desktop consent flow. Stores the refresh token in the keyring. Resolves `NAME` against the DB (seeding from `config.toml` if absent). |
+| `localmail add-account NAME` | Prompt for an IMAP password and store it in the configured secret store. Resolves `NAME` against the DB; if absent but declared in `config.toml`, the DB row is created from that block first. |
+| `localmail oauth-login NAME` | Run the Gmail OAuth desktop consent flow. Stores the refresh token in the configured secret store. Resolves `NAME` against the DB (seeding from `config.toml` if absent). |
 | `localmail remove-account NAME [--delete-row] [--force]` | Clear stored secrets for an account. `--delete-row` also removes the DB account row (`--force` cascades when messages reference it). |
 | `localmail enable-account NAME` / `localmail disable-account NAME` | Resume or pause syncing for an account by flipping `sync_enabled` in the DB. A paused account spawns no daemon threads; a one-shot `localmail sync --account NAME` still runs it. Archive accounts are rejected; re-running on an account already in the target state is a no-op. |
 | `localmail sync [--account NAME] [--limit-per-folder K] [--no-ssl]` | One-shot incremental sync over the syncable database accounts (live + `sync_enabled`). `--account NAME` syncs one account even if it is paused (`sync_enabled = false`); archive accounts are rejected. |
@@ -83,6 +85,7 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 | `localmail retry-failed [--account NAME]` | Re-attempt every failed message. Successful retries move from `failed_messages` to `messages`. |
 | `localmail list-failed-fetches [--account NAME] [--limit K]` | Show messages whose body the server never handed over (sync gave up on them). |
 | `localmail retry-failed-fetches [--account NAME] [--forget] [--older-than-days N] [--dry-run]` | Rewind the affected folders so the next sync re-fetches them; `--forget` drops the records instead. Records clear when the message arrives, so the command is safely re-runnable. |
+| `localmail migrate-secrets` | Copy every account's secrets from the OS keyring into the file backend, for headless hosts. `--dry-run` previews. See [Headless secret storage](#headless-secret-storage). |
 | `localmail sweep-blob-temps [--dry-run] [--max-age-seconds S]` | Delete attachment temp files a hard kill stranded in the blob tree. |
 
 ### Daemon control (2B.4 / 2B.5)
@@ -426,6 +429,45 @@ a perfectly fine PDF as failed):
 uv run localmail list-failed-extractions      # show recorded poison-pills
 uv run localmail retry-failed-extractions     # clear failed + stuck-transient state so they re-queue
 ```
+
+## Headless secret storage
+
+By default IMAP passwords and Gmail refresh tokens go in the OS keyring, which
+is the right place on a desktop: your login unlocks it.
+
+**On a headless host it cannot work.** A lingering systemd *user* service starts
+at boot with no PAM session, and the gnome-keyring `login` collection is
+unlocked by PAM at interactive login and by nothing else. So the collection is
+locked, every read raises `KeyringLocked`, the daemon dies, `Restart=always`
+brings it back, and it dies again — until someone SSHes in and unlocks it by
+hand. That is not a misconfiguration to fix; it is what a login keyring is.
+
+Point localmail at a file instead:
+
+```toml
+[secrets]
+backend = "file"
+# file_path = "~/.config/localmail/secrets.json"   # this is the default
+```
+
+The file is written 0600 through an atomic rename, so a reader never sees a
+partial write and the secret is never briefly world-readable. **File permissions
+are the only protection**, deliberately — the disk is already encrypted, and
+anyone who can read a 0600 file owned by the service user is already that user
+or root. If the mode is ever found readable by group or other, reads are
+**refused** with the exact `chmod` to run rather than quietly using it.
+
+To move an existing install without re-driving the Gmail consent flow on a
+machine with no browser, unlock the keyring one final time and copy across:
+
+```bash
+uv run localmail migrate-secrets --dry-run   # show what would move
+uv run localmail migrate-secrets             # copy keyring -> file
+# then set backend = "file" and restart
+```
+
+The keyring is left intact, so the migration is re-runnable and reversible by
+just switching `backend` back.
 
 ## GUI server
 

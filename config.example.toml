@@ -19,6 +19,29 @@ root = "~/localmail"
 # such protection, values below 1 second are rejected.
 temp_max_age_s = 86400   # 24 hours
 
+[secrets]
+# Where IMAP passwords and Gmail OAuth refresh tokens are stored.
+#
+#   "keyring" (default) — the OS keychain (macOS Keychain / Secret Service).
+#                         Right for a desktop session, where login unlocks it.
+#   "file"              — a 0600 JSON file at file_path.
+#
+# Use "file" for any HEADLESS deployment. A lingering systemd *user* service
+# starts at boot with no PAM session, so the gnome-keyring `login` collection
+# is locked and nothing in the system can unlock it — the daemon then crash-
+# loops on KeyringLocked until an operator SSHes in and unlocks it by hand.
+# This is not fixable by configuring keyring; it is what a login keyring is.
+#
+# Migrate an existing install without re-driving the OAuth consent flow:
+#   1. unlock the keyring one final time
+#   2. localmail migrate-secrets        (add --dry-run to preview)
+#   3. set backend = "file" here, and restart
+#
+# File permissions are the only protection the file backend offers, by design.
+# A mode readable by group or other is refused on read, with the chmod to run.
+backend = "keyring"
+# file_path = "~/.config/localmail/secrets.json"
+
 [daemon]
 idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling
 poll_seconds       = 300    # poll non-INBOX folders every 5 minutes

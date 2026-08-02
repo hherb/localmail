@@ -17,10 +17,44 @@ attachment tree without touching IMAP.
   `migrations/`. **No ORM.** Migrations are tracked in `schema_migrations`.
 - IMAP: `imapclient` (sync, blocking). Gmail OAuth2 uses XOAUTH2 via
   `google-auth` + `google-auth-oauthlib`.
-- Secrets: `keyring` (service `"localmail"`, username = `<account.name>` for
-  passwords, `<account.name>:refresh` for OAuth refresh tokens). Cross-platform:
-  macOS Keychain on darwin, Secret Service on Linux. **That username scheme is
-  why account names may not contain `:` (#217)** — a password account named
+- Secrets: two interchangeable backends behind `secrets.py`'s seven functions,
+  keyed identically (service `"localmail"`, username = `<account.name>` for
+  passwords, `<account.name>:refresh` for OAuth refresh tokens). `[secrets]
+  backend` selects: **`keyring`** (default — macOS Keychain on darwin, Secret
+  Service on Linux) or **`file`** (a 0600 JSON file at `[secrets] file_path`).
+  The **file backend is mandatory for headless hosts**: a lingering systemd
+  *user* service starts at boot with no PAM session, so the gnome-keyring
+  `login` collection is locked and nothing can unlock it — the daemon then
+  crash-loops on `KeyringLocked` forever. That is not a keyring
+  misconfiguration; it is what a login keyring is. See
+  [docs/superpowers/specs/2026-08-02-headless-secrets-design.md](docs/superpowers/specs/2026-08-02-headless-secrets-design.md).
+  - Modules: pure [src/localmail/secrets_store.py](src/localmail/secrets_store.py)
+    (username scheme, JSON encoding, `mode_is_private`), IO
+    [src/localmail/secrets_file.py](src/localmail/secrets_file.py)
+    (`FileSecretStore`), dispatcher `secrets.py`, pure planner
+    [src/localmail/secrets_migrate.py](src/localmail/secrets_migrate.py).
+  - **`config.load_config()` calls `secrets.configure()`** — a deliberate side
+    effect. `load_config` is the only place that sees the resolved config
+    (including `--config PATH`), and every process that touches a secret loads
+    config first; the alternative was threading a store through
+    `open_connection` → `sync` → `idle`/`poller` → `Daemon` and the whole admin
+    layer. An autouse conftest fixture calls `secrets.reset_to_default()` after
+    every test so a config-loading test cannot leak its backend.
+  - **File permissions are the only protection, and are enforced on read**: any
+    group/other bit raises `InsecureSecretsFile` naming the `chmod` to run.
+    Refusing (rather than warning, or self-healing with a `chmod`) is the
+    deliberate call — the daemon stops until an operator acts, which is correct
+    for a leaked-credential file and is one command to clear.
+  - Writes go through an `O_EXCL` temp in the same directory + `os.replace`, so
+    no reader sees a partial file and the secret is never briefly at a wider
+    mode. An **existing** directory is left at whatever mode it has (the default
+    path is the operator's config dir): the 0600 file is the protection.
+  - `localmail migrate-secrets [--dry-run]` copies keyring → file for every DB
+    account. It always reads the *keyring* and writes the *file*, ignoring the
+    configured backend, because the realistic order of operations is flip the
+    config → watch it fail → migrate. It never deletes from the keyring, so it
+    is re-runnable and the switch is reversible.
+- **That username scheme is why account names may not contain `:` (#217)** — a password account named
   `gmail:refresh` would otherwise `store_password` straight over the `gmail`
   account's OAuth refresh token, and `gmail`'s next token refresh would fail.
   The rule is the pure
@@ -957,17 +991,43 @@ for the full design.
     `load_refresh` has mirrored `verify_token` on it since the M1
     hardening (#182); `load_code` never did.
 
-    **This check is load-time only, and one narrow race survives it (#241).**
-    The SDK calls `load_authorization_code` then
-    `exchange_authorization_code`, and `_exchange_code_sync` re-checks
-    nothing — it goes straight to `consume_code`. A *disabled* user is still
-    caught indirectly on that second leg (the minted refresh reads back as
-    absent through `load_refresh` → the `user_vanished` branch), but
-    `sessions_invalidated_at` is **not**: the successor refresh carries
-    `created_at = now()`, which is past the cutoff. So a revocation landing
-    between those two calls still yields a token pair. The exposure is the
-    load→exchange gap, not the full 60 s TTL, and the same race exists on the
-    refresh-rotation path.
+    **The load-time check is no longer the only one (#241, resolved).** The SDK
+    drives load and exchange as two separate calls, so the load's verdict is
+    already stale by exchange time. A *disabled* user was caught indirectly on
+    the second leg (the minted refresh reads back absent through `load_refresh`
+    → `user_vanished`), but `sessions_invalidated_at` was not: the successor
+    carries `created_at = now()`, past the cutoff, so the exchange completed and
+    handed back exactly the credentials the operator had cut off.
+
+    The fix re-decides validity **inside the burn**. `codes.consume_code` is one
+    CTE — `DELETE … RETURNING user_id, created_at` joined LEFT to `api_users` —
+    returning `ConsumeResult(burned, user_valid)` under a single snapshot, so no
+    revocation can land between the two halves. A missing user row yields
+    `user_valid=False` (the LEFT JOIN's NULL): fail closed.
+
+    **Burning is unconditional, and that is the point.** Making the DELETE itself
+    conditional on the user — the shape #241's issue text first proposed — would
+    leave a revoked user's code *unburned* and replayable for the rest of its
+    TTL, breaking the single-use invariant #219 established
+    (`test_failed_exchange_still_burns_the_code`). Single-use and user-validity
+    are separate concerns; the code always dies, validity is reported beside it.
+
+    The **rotation** path needed a narrower fix. `rotate_refresh` already re-ran
+    the full `load_refresh` predicate at the top of the exchange leg, so the
+    SDK's stale load was re-decided — but the claim UPDATE and the mint are
+    separate statements after it, each taking its own READ COMMITTED snapshot.
+    The claim now carries the revocation predicate as an `EXISTS`, making the
+    whole decision one statement. A failed claim is then **disambiguated** by
+    re-reading `_raw_state`: consumed → `reuse` (theft, delete the family),
+    otherwise → `unknown`. Conflating them would delete a token family the
+    operator never targeted, over an action they took on purpose.
+
+    The predicate itself is now the pure
+    [src/localmail/api/revocation_sql.py](src/localmail/api/revocation_sql.py)`::credential_valid_sql(user=, credential=)`,
+    shared by all five sites (`verify_token`, `load_refresh`, `load_code`,
+    `consume_code`, the rotation claim). #241 *was* a place where the wording had
+    been applied to the load but not the consume, so one authority for it is what
+    stops the next such gap from being invisible.
 
   `NULL` means "never revoked" and is the default, so nothing changes for a
   user who has never been revoked. The cutoff is a moment, not a ban:
@@ -1686,7 +1746,14 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   each refresh resets the 30-day clock (`oauth_refresh_token_ttl_s`); a browser
   re-login is required only after ~30 days of inactivity, on revocation, or if
   the api_user is disabled. The consent login reuses the `/v1/auth/login`
-  rate-limit + `DUMMY_PASSWORD_HASH` timing-parity protections. Open DCR (`POST
+  rate-limit + `DUMMY_PASSWORD_HASH` timing-parity protections — **including the
+  `X-Forwarded-For` peeling (#220, resolved)**, which was the one half of that
+  reuse never wired up: `post_consent` read `request.client.host` raw, so behind
+  a configured reverse proxy every user collapsed into one per-IP bucket, and
+  guessing spread across usernames went unthrottled while one noisy client
+  locked everyone else out. It now calls the same
+  `api.client_ip.resolve_client_ip` as `/v1/auth/login`, `/admin/login`, and the
+  DCR guard (empty `trusted_proxies` = socket peer, unchanged). Open DCR (`POST
   /register`) is bounded by a per-IP rate-limit middleware
   (`oauth_registration_max` per `oauth_registration_window_s`, default 20/hour)
   and unused-client cleanup (`oauth_client_unused_retention_s`, default 24h).

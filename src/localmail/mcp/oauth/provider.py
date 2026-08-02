@@ -178,15 +178,24 @@ class LocalmailASProvider(
             # AFTER the connection context exits — TokenError is a frozen
             # dataclass and the contextmanager's __exit__ cannot set __traceback__
             # on it.
-            consumed = codes.consume_code(conn, auth_code.code)
+            # The burn also re-decides the user's revocation state under its own
+            # snapshot (#241). The SDK's load_authorization_code ran in a
+            # separate call, so its check is already stale by the time we get
+            # here; without re-deciding, a revocation landing in that gap still
+            # minted a token pair, because the successors carry
+            # `created_at = now()` — past the cutoff, hence valid.
+            burn = codes.consume_code(conn, auth_code.code)
             # Commit the burn on its own, before anything below can fail. Sharing
             # one transaction with the mint meant a rollback took the DELETE with
             # it and resurrected the code for the rest of its TTL, so a client
             # auto-retry — or a replay by anyone holding a copy — could still
             # exchange it (#219). A post-burn failure now costs a fresh consent
             # round trip, which is the correct trade against a replayable code.
+            # Note this commits the burn even when the user is no longer valid:
+            # single-use must not become conditional on the user's state.
             conn.commit()
-            if consumed:
+            consumed = burn.burned
+            if consumed and burn.user_valid:
                 refresh_raw = refresh.mint_refresh(
                     conn, client_id=client_id, user_id=user_id,
                     scopes=auth_code.scopes,
@@ -214,7 +223,7 @@ class LocalmailASProvider(
             raise TokenError(
                 "invalid_grant", "authorization code already used or expired"
             )
-        if user_vanished:
+        if not burn.user_valid or user_vanished:
             raise TokenError("invalid_grant", "authorization code is no longer valid")
         return OAuthToken(
             access_token=access_raw,

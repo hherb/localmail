@@ -12,6 +12,7 @@ from datetime import datetime
 import psycopg
 
 from localmail.api.auth import generate_token, hash_token
+from localmail.api.revocation_sql import credential_valid_sql
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,19 @@ class CodeRow:
     scopes: list[str]
     expires_at: datetime
     resource: str | None
+
+
+@dataclass(frozen=True)
+class ConsumeResult:
+    """Outcome of burning an authorization code.
+
+    - ``burned``: a row was actually deleted (False = already used or expired).
+    - ``user_valid``: at the instant of the burn, the owning user was enabled
+      and the code did not predate a session revocation. Meaningless when
+      ``burned`` is False, and reported as False there.
+    """
+    burned: bool
+    user_valid: bool
 
 
 def mint_code(
@@ -76,9 +90,7 @@ def load_code(conn: psycopg.Connection, raw_code: str) -> CodeRow | None:
             "FROM oauth_authorization_codes c "
             "JOIN api_users u ON u.id = c.user_id "
             "WHERE c.code_sha256 = %s AND c.expires_at > now() "
-            "  AND u.disabled_at IS NULL "
-            "  AND (u.sessions_invalidated_at IS NULL "
-            "       OR c.created_at >= u.sessions_invalidated_at)",
+            "  AND " + credential_valid_sql(user="u", credential="c"),
             (hash_token(raw_code),),
         )
         row = cur.fetchone()
@@ -96,11 +108,40 @@ def load_code(conn: psycopg.Connection, raw_code: str) -> CodeRow | None:
     )
 
 
-def consume_code(conn: psycopg.Connection, raw_code: str) -> bool:
-    """Delete the code; return True if a row was removed. Caller commits."""
+def consume_code(conn: psycopg.Connection, raw_code: str) -> ConsumeResult:
+    """Burn the code unconditionally and report, in the same statement, whether
+    its user was still valid at that instant. Caller commits.
+
+    **The two halves are deliberately separate concerns (#241).** Making the
+    DELETE itself conditional on the user — the shape the issue first suggested
+    — would leave a revoked user's code *unburned*, i.e. replayable for the rest
+    of its TTL by anyone holding a copy, which is precisely the single-use
+    invariant #219 established. So the code always dies; validity is reported
+    beside it.
+
+    Reporting has to happen *here* rather than at ``load_code`` because the SDK
+    drives load and exchange as two separate calls: a revocation landing in that
+    gap left the load's check stale, and the tokens the exchange then minted
+    carried ``created_at = now()`` — past the cutoff, hence valid — handing back
+    exactly the credentials the operator had just cut off.
+
+    The CTE keeps both under one snapshot, so no revocation can slip between the
+    burn and the check. A user row that has vanished outright yields
+    ``user_valid=False`` (the LEFT JOIN's NULL), failing closed.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM oauth_authorization_codes WHERE code_sha256 = %s",
+            "WITH burned AS ("
+            "  DELETE FROM oauth_authorization_codes WHERE code_sha256 = %s"
+            "  RETURNING user_id, created_at"
+            ") "
+            "SELECT COALESCE("
+            + credential_valid_sql(user="u", credential="b")
+            + ", FALSE) "
+            "FROM burned b LEFT JOIN api_users u ON u.id = b.user_id",
             (hash_token(raw_code),),
         )
-        return cur.rowcount > 0
+        row = cur.fetchone()
+    if row is None:
+        return ConsumeResult(burned=False, user_valid=False)
+    return ConsumeResult(burned=True, user_valid=row[0])

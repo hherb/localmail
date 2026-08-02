@@ -18,6 +18,7 @@ from typing import Literal
 import psycopg
 
 from localmail.api.auth import generate_token, hash_token
+from localmail.api.revocation_sql import credential_valid_sql
 
 
 @dataclass(frozen=True)
@@ -105,9 +106,8 @@ def load_refresh(conn: psycopg.Connection, raw_token: str) -> RefreshRow | None:
             "FROM oauth_refresh_tokens r "
             "JOIN api_users u ON u.id = r.user_id "
             "WHERE r.token_sha256 = %s AND r.expires_at > now() "
-            "  AND r.consumed_at IS NULL AND u.disabled_at IS NULL "
-            "  AND (u.sessions_invalidated_at IS NULL "
-            "       OR r.created_at >= u.sessions_invalidated_at)",
+            "  AND r.consumed_at IS NULL "
+            "  AND " + credential_valid_sql(user="u", credential="r"),
             (hash_token(raw_token),),
         )
         row = cur.fetchone()
@@ -196,16 +196,34 @@ def rotate_refresh(
     # the now-committed row and matches 0 rows — so exactly one caller claims it
     # and mints a successor. The loser sees the token consumed out from under it
     # (the same token presented twice = a reuse signal) and revokes the family.
+    #
+    # The revocation half of the guard is #241: ``load_refresh`` above is a
+    # separate statement with its own snapshot, so a revocation committing
+    # between it and here was missed — and the successor minted below carries
+    # ``created_at = now()``, past the cutoff, hence live for a fresh full TTL.
+    # Folding the predicate into the claim makes the whole decision one
+    # statement, i.e. one snapshot.
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE oauth_refresh_tokens SET consumed_at = now() "
-            "WHERE token_sha256 = %s AND consumed_at IS NULL",
+            "UPDATE oauth_refresh_tokens r SET consumed_at = now() "
+            "WHERE r.token_sha256 = %s AND r.consumed_at IS NULL "
+            "  AND EXISTS (SELECT 1 FROM api_users u WHERE u.id = r.user_id "
+            "              AND " + credential_valid_sql(user="u", credential="r")
+            + ")",
             (hash_token(raw_token),),
         )
         claimed = cur.rowcount == 1
     if not claimed:
-        _delete_family(conn, row.family_id)
-        return RotateResult("reuse", family_id=row.family_id)
+        # Two very different reasons the claim can miss, and conflating them is
+        # harmful in both directions: a concurrent rotation consuming the row is
+        # theft evidence, whereas a revocation is the operator acting on purpose
+        # — treating that as reuse would delete a family they never targeted.
+        # Re-read the raw state to tell them apart.
+        after = _raw_state(conn, raw_token)
+        if after is not None and after[1]:
+            _delete_family(conn, row.family_id)
+            return RotateResult("reuse", family_id=row.family_id)
+        return RotateResult("unknown")
     new = mint_refresh(
         conn, client_id=row.client_id, user_id=row.user_id,
         scopes=row.scopes, ttl_s=ttl_s, family_id=row.family_id,

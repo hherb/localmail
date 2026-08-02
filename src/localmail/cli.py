@@ -47,6 +47,9 @@ from .fetch_retry import (
 )
 from .imap_client import open_connection
 from .oauth_gmail import run_consent_flow
+from .secrets_file import FileSecretStore
+from .secrets_migrate import plan_secret_migration
+from .secrets_store import refresh_username
 from .search import create_searcher
 from .sync import backfill_internal_date, retry_failed_messages, sync_account
 from .upgrade_estimate import ESTIMATORS, EstimateResult
@@ -219,7 +222,7 @@ def list_accounts(ctx: click.Context) -> None:
 )
 @click.pass_context
 def add_account(ctx: click.Context, name: str, password_opt: str | None) -> None:
-    """Store the IMAP password for an account in the keyring.
+    """Store the IMAP password for an account in the configured secret store.
 
     Resolves NAME against the DB; if absent but declared in config.toml, the
     DB row is created from that block first, then the password is stored.
@@ -246,7 +249,7 @@ def add_account(ctx: click.Context, name: str, password_opt: str | None) -> None
     with psycopg.connect(cfg.database.dsn) as conn:
         touch_account_updated_at(conn, account.id)
         conn.commit()
-    click.echo(f"stored password for {name} in keyring")
+    click.echo(f"stored password for {name} in {secrets.active_backend_name()}")
 
 
 @main.command("remove-account")
@@ -273,7 +276,7 @@ def remove_account(ctx: click.Context, name: str,
         if account is None:
             secrets.delete_password(name)
             secrets.delete_refresh_token(name)
-            click.echo(f"no DB row for {name}; cleared keyring only")
+            click.echo(f"no DB row for {name}; cleared stored secrets only")
             return
         try:
             delete_account(conn, account.id, force=force)
@@ -357,7 +360,9 @@ def oauth_login(ctx: click.Context, name: str) -> None:
     with psycopg.connect(cfg.database.dsn) as conn:
         touch_account_updated_at(conn, account.id)
         conn.commit()
-    click.echo(f"stored OAuth refresh token for {name} in keyring")
+    click.echo(
+        f"stored OAuth refresh token for {name} in {secrets.active_backend_name()}"
+    )
 
 
 @main.command("sync")
@@ -755,6 +760,49 @@ def run_cmd(ctx: click.Context, no_ssl: bool, log_level: str) -> None:
     cfg = load_config(ctx.obj["config_path"])
     daemon = Daemon(cfg, ssl=not no_ssl)
     daemon.run_forever()
+
+
+@main.command("migrate-secrets")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Report what would be copied without writing anything.")
+@click.pass_context
+def migrate_secrets(ctx: click.Context, dry_run: bool) -> None:
+    """Copy every account's stored secrets from the OS keyring into the file
+    backend, so a headless host can read them with nothing unlocked.
+
+    Run this once, with the keyring unlocked, then set
+    `[secrets] backend = "file"` and restart. The keyring is left intact — a
+    failed run has to be re-runnable, and nothing here is destructive.
+
+    The source is always the keyring and the target always the file, regardless
+    of which backend the config currently names: the realistic order of
+    operations is to flip the config, watch the daemon fail, then migrate.
+    """
+    cfg = load_config(ctx.obj["config_path"])
+    with psycopg.connect(cfg.database.dsn) as conn:
+        names = [a.name for a in list_accounts_full(conn)]
+
+    source_store = secrets.KeyringSecretStore()
+    candidates = [n for name in names for n in (name, refresh_username(name))]
+    plan = plan_secret_migration(
+        names, {username: source_store.get(username) for username in candidates}
+    )
+
+    target = FileSecretStore(cfg.secrets.file_path)
+    verb = "would copy" if dry_run else "copied"
+    for item in plan.to_copy:
+        if not dry_run:
+            assert item.value is not None  # to_copy is defined by value is not None
+            target.set(item.username, item.value)
+        click.echo(f"{verb} {item.account_name} ({item.kind})")
+    for item in plan.absent:
+        click.echo(f"skipped {item.account_name} ({item.kind}): not in keyring")
+    click.echo(
+        f"{verb} {len(plan.to_copy)} secret(s) for {len(names)} account(s) "
+        f"-> {cfg.secrets.file_path}"
+    )
+    if not dry_run and plan.to_copy:
+        click.echo('now set [secrets] backend = "file" and restart localmail')
 
 
 @main.command("sweep-blob-temps")

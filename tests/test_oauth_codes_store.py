@@ -44,10 +44,10 @@ def test_consume_is_single_use(db_conn):
         scopes=[], ttl_s=60,
     )
     db_conn.commit()
-    assert codes.consume_code(db_conn, raw) is True
+    assert codes.consume_code(db_conn, raw).burned is True
     db_conn.commit()
     assert codes.load_code(db_conn, raw) is None
-    assert codes.consume_code(db_conn, raw) is False
+    assert codes.consume_code(db_conn, raw).burned is False
 
 
 def test_expired_code_does_not_load(db_conn):
@@ -128,6 +128,60 @@ def test_re_enabled_user_code_loads_again(db_conn):
         cur.execute("UPDATE api_users SET disabled_at = NULL WHERE id = %s", (uid,))
     db_conn.commit()
     assert codes.load_code(db_conn, raw) is not None
+
+
+def test_consume_reports_a_live_user_as_valid(db_conn):
+    uid = _seed_client_and_user(db_conn)
+    raw = _mint(db_conn, uid)
+    result = codes.consume_code(db_conn, raw)
+    assert result.burned is True
+    assert result.user_valid is True
+
+
+def test_consume_of_an_absent_code_is_not_burned(db_conn):
+    _seed_client_and_user(db_conn)
+    result = codes.consume_code(db_conn, "never-minted")
+    assert result.burned is False
+    assert result.user_valid is False
+
+
+def test_consume_burns_a_revoked_users_code_but_reports_it_invalid(db_conn):
+    """#241: the revocation check on `load_code` is load-time only, so a
+    revocation landing between the SDK's load and its exchange used to yield a
+    full token pair. The burn itself has to decide validity, atomically.
+
+    Burning regardless is deliberate — single-use (RFC 6749 §4.1.2) must not
+    become conditional on the user's state, or a rejected exchange would leave
+    a replayable code behind for the rest of its TTL (the #219 invariant).
+    """
+    uid = _seed_client_and_user(db_conn)
+    raw = _mint(db_conn, uid)
+    _revoke_sessions(db_conn, uid)
+    result = codes.consume_code(db_conn, raw)
+    assert result.burned is True
+    assert result.user_valid is False
+    db_conn.commit()
+    assert codes.consume_code(db_conn, raw).burned is False
+
+
+def test_consume_reports_a_disabled_user_as_invalid(db_conn):
+    uid = _seed_client_and_user(db_conn)
+    raw = _mint(db_conn, uid)
+    _disable_user(db_conn, uid)
+    result = codes.consume_code(db_conn, raw)
+    assert result.burned is True
+    assert result.user_valid is False
+
+
+def test_consume_accepts_a_code_minted_after_the_revocation(db_conn):
+    """The cutoff is a moment, not a ban — re-consenting after a revocation
+    has to complete, or the operator has locked the user out permanently."""
+    uid = _seed_client_and_user(db_conn)
+    _revoke_sessions(db_conn, uid)
+    raw = _mint(db_conn, uid)
+    result = codes.consume_code(db_conn, raw)
+    assert result.burned is True
+    assert result.user_valid is True
 
 
 def test_mint_and_load_code_round_trips_resource(db_conn):

@@ -20,8 +20,15 @@ from collections.abc import Mapping
 #: offers by design (see the design doc) — so this is load-bearing, not tidiness.
 SECRETS_FILE_MODE = 0o600
 
-#: Owner-only on the containing directory too: a traversable directory leaks the
-#: file's existence and, with a rename, more than that.
+#: Applied **only when `FileSecretStore` creates the directory** — an existing
+#: one is left at whatever mode it has (the default path is the operator's own
+#: config dir; see `secrets_file._write`). So this hardens the fresh-install
+#: case and nothing else: the read-side check covers the file alone, which
+#: leaves a group- or world-*writable* pre-existing parent able to substitute
+#: the file wholesale by rename, 0600 and all. Not enforced on read because
+#: `~/.config` is routinely 0755 — and 0775 under the umask-002 + per-user-group
+#: default of several distros, where group is the user alone and refusing would
+#: wedge a safe install. Tracked in #246.
 SECRETS_DIR_MODE = 0o700
 
 #: Any group or other bit means somebody besides the owner can reach it.
@@ -50,7 +57,12 @@ def refresh_username(account_name: str) -> str:
 
 
 def mode_is_private(mode: int) -> bool:
-    """True iff `mode`'s permission bits grant nothing to group or other."""
+    """True iff `mode`'s permission bits grant nothing to group or other.
+
+    Judges a *file*, never its directory: a writable parent can substitute the
+    file by rename whatever this returns, which is #246, not something a
+    file-mode predicate can answer.
+    """
     return not mode & _GROUP_AND_OTHER_BITS
 
 

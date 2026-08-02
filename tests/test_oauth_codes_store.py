@@ -133,14 +133,14 @@ def test_consume_reports_a_live_user_as_valid(db_conn):
     raw = _mint(db_conn, uid)
     result = codes.consume_code(db_conn, raw)
     assert result.burned is True
-    assert result.user_valid is True
+    assert result.still_valid is True
 
 
 def test_consume_of_an_absent_code_is_not_burned(db_conn):
     _seed_client_and_user(db_conn)
     result = codes.consume_code(db_conn, "never-minted")
     assert result.burned is False
-    assert result.user_valid is False
+    assert result.still_valid is False
 
 
 def test_consume_burns_a_revoked_users_code_but_reports_it_invalid(db_conn):
@@ -157,7 +157,7 @@ def test_consume_burns_a_revoked_users_code_but_reports_it_invalid(db_conn):
     _revoke_sessions(db_conn, uid)
     result = codes.consume_code(db_conn, raw)
     assert result.burned is True
-    assert result.user_valid is False
+    assert result.still_valid is False
     db_conn.commit()
     assert codes.consume_code(db_conn, raw).burned is False
 
@@ -168,7 +168,7 @@ def test_consume_reports_a_disabled_user_as_invalid(db_conn):
     _disable_user(db_conn, uid)
     result = codes.consume_code(db_conn, raw)
     assert result.burned is True
-    assert result.user_valid is False
+    assert result.still_valid is False
 
 
 def test_consume_accepts_a_code_minted_after_the_revocation(db_conn):
@@ -179,7 +179,25 @@ def test_consume_accepts_a_code_minted_after_the_revocation(db_conn):
     raw = _mint(db_conn, uid)
     result = codes.consume_code(db_conn, raw)
     assert result.burned is True
-    assert result.user_valid is True
+    assert result.still_valid is True
+
+
+def test_consume_burns_an_expired_code_but_reports_it_invalid(db_conn):
+    """Expiry is decided by the burn too, for the same reason the user's state
+    is (#241): the SDK checks `expires_at` during its own separate
+    `load_authorization_code` call, so that verdict is already stale here.
+
+    The residual window is far narrower than the revocation one — a code can
+    only cross its own deadline, not be revoked by an operator mid-round-trip —
+    so this is defence in depth rather than a live leak. But it costs one
+    conjunct, and it is what makes the burn self-sufficient instead of trusting
+    a caller to have checked; that is precisely the assumption #241 punished.
+    """
+    uid = _seed_client_and_user(db_conn)
+    raw = _mint(db_conn, uid, ttl_s=-1)
+    result = codes.consume_code(db_conn, raw)
+    assert result.burned is True, "an expired code must still be burned"
+    assert result.still_valid is False
 
 
 def test_mint_and_load_code_round_trips_resource(db_conn):
@@ -207,7 +225,7 @@ def test_mint_code_defaults_resource_none(db_conn):
 
 
 def test_consume_of_an_orphaned_code_reports_it_invalid(db_conn):
-    """A burned code whose user row is gone must report ``user_valid=False``.
+    """A burned code whose user row is gone must report ``still_valid=False``.
 
     The natural reading — LEFT JOIN misses, so the predicate is NULL, so
     ``COALESCE(..., FALSE)`` fails closed — is wrong, and this test exists
@@ -232,4 +250,4 @@ def test_consume_of_an_orphaned_code_reports_it_invalid(db_conn):
     result = codes.consume_code(db_conn, raw)
     db_conn.rollback()
     assert result.burned is True
-    assert result.user_valid is False
+    assert result.still_valid is False

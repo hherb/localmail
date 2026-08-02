@@ -107,9 +107,10 @@ uv run localmail init-db         # apply pending migrations
 uv run localmail list-accounts   # show config'd accounts and whether a secret is stored
 uv run localmail add-account N   # store password for account N (must exist in config.toml)
 uv run localmail remove-account N  # drop stored secrets for account N
+uv run localmail migrate-secrets [--dry-run]   # copy keyring → file backend (headless hosts)
 uv run localmail enable-account N    # resume syncing account N (sync_enabled = TRUE)
 uv run localmail disable-account N   # pause syncing account N (sync_enabled = FALSE)
-uv run localmail oauth-login N   # Gmail desktop OAuth flow → refresh token in keyring
+uv run localmail oauth-login N   # Gmail desktop OAuth flow → refresh token in the secret store
 uv run localmail sync [--account N] [--limit-per-folder K]   # one-shot incremental sync
 uv run localmail run             # foreground daemon (IDLE on INBOX + periodic poll)
 uv run localmail list-failed [--account N] [--limit K]   # show messages sync skipped
@@ -1016,9 +1017,18 @@ for the full design.
     handed back exactly the credentials the operator had cut off.
 
     The fix re-decides validity **inside the burn**. `codes.consume_code` is one
-    CTE — `DELETE … RETURNING user_id, created_at` joined LEFT to `api_users` —
-    returning `ConsumeResult(burned, user_valid)` under a single snapshot, so no
-    revocation can land between the two halves.
+    CTE — `DELETE … RETURNING user_id, created_at, expires_at` joined LEFT to
+    `api_users` — returning `ConsumeResult(burned, still_valid)` under a single
+    snapshot, so no revocation can land between the two halves. `still_valid` is
+    **one** field covering every reason (expiry, missing/disabled user,
+    revocation) rather than one per reason: the caller's question is "may I
+    honour this?", and splitting the answer invites honouring a burn that
+    satisfied two conditions out of three — the safe-by-default shape of #234
+    and #67. **Expiry is re-decided here too**, for the same staleness reason as
+    revocation; the window is much narrower (a code can only cross its own
+    deadline, never be revoked mid-round-trip), so that conjunct is defence in
+    depth, but it is what lets the burn stand alone rather than assume its
+    caller checked.
 
     A missing user row is closed by an explicit `u.id IS NOT NULL`, and that
     line is **not** redundant. The intuitive reading — LEFT JOIN misses, so the

@@ -52,7 +52,9 @@ successor carries `created_at = now()`, past the cutoff, so the exchange
 completed and returned exactly the credentials the operator had cut off.
 
 - `codes.consume_code` now burns the code **and** re-decides validity in one CTE
-  under a single snapshot → `ConsumeResult(burned, user_valid)`. A vanished user
+  under a single snapshot → `ConsumeResult(burned, still_valid)` — one field for
+  every reason (expiry, missing/disabled user, revocation), so a caller cannot
+  honour a burn that satisfied two conditions out of three. A vanished user
   row is closed by an explicit `u.id IS NOT NULL`, **not** by the LEFT JOIN's
   NULL: against the all-NULL row every `IS NULL` test in the predicate is TRUE,
   so it returns TRUE and a `COALESCE(…, FALSE)` never fires. (This shipped as a

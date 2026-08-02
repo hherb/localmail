@@ -132,9 +132,17 @@ def test_a_missing_ocr_engine_never_burns_the_poison_pill_budget(
         def convert(self, source, **kwargs):
             _raise_missing_engine()
 
-    # An empty-but-valid PDF: pypdf reads it, finds no text, so the worker
-    # falls through to the docling branch — the scanned-document shape.
+    # `_try_import_docling` must be patched in BOTH namespaces: extract_worker
+    # imported it by name, so it holds its own reference, and that is the one
+    # gating `docling_avail`. Patching only the extractor's copy makes this test
+    # pass wherever docling happens to be installed and silently assert nothing
+    # where it is not — the worker takes the "docling missing" branch, writes a
+    # lightweight-empty sentinel, and the no-poison-pill assertion holds
+    # vacuously. Patching both makes the test mean the same thing either way.
+    import localmail.search.extract_worker as ew_mod
+
     monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _FakeConverter)
+    monkeypatch.setattr(ew_mod, "_try_import_docling", lambda: _FakeConverter)
     monkeypatch.setattr(
         ext_mod.LightweightExtractor,
         "extract",

@@ -22,9 +22,16 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol, cast, runtime_checkable
+from typing import Any, Callable, Protocol, cast, runtime_checkable
 
 from localmail.config import SearchConfig
+from localmail.ocr_policy import (
+    OCR_DISABLED,
+    OcrPlan,
+    plan_ocr,
+    unknown_engine_message,
+)
+from localmail.pgtext import strip_nuls
 from localmail.search.attachment_kind import extension_of, is_pdf
 
 _LOG = logging.getLogger(__name__)
@@ -34,9 +41,12 @@ _LOG = logging.getLogger(__name__)
 class ExtractedText:
     """The result of extracting text from a blob.
 
+    ``text`` is normalised on construction to contain no NUL bytes — see
+    ``__post_init__``.
+
     Attributes:
-        text: The extracted plain-text. May be '' (sentinel meaning "we
-            tried, got nothing, don't retry").
+        text: The extracted plain-text, NUL-free. May be '' (sentinel meaning
+            "we tried, got nothing, don't retry").
         page_count: Optional logical page count (PDFs, Office docs). None
             for plain-text formats like TXT/MD/HTML/CSV/ICS.
         extractor: Identifier of the extractor that produced the text,
@@ -48,6 +58,31 @@ class ExtractedText:
     text: str
     page_count: int | None
     extractor: str
+
+    def __post_init__(self) -> None:
+        """Strip NUL bytes from ``text`` so the value is safe to INSERT (#249).
+
+        Postgres TEXT rejects ``\\x00`` and ``attachment_text.extracted_text``
+        is this type's only consumer, so a NUL that survives to the INSERT
+        aborts it. That abort escaped ``_process_blob`` into the worker's outer
+        safety net, which recorded the blob in ``failed_extractions`` under the
+        extractor name ``'unexpected'`` — and because the same bytes always
+        re-extract to the same NUL, the retry budget was spent on a failure no
+        retry could clear.
+
+        Extracted text inherits whatever the source document contained, so this
+        is not exotic: 128 blobs on the live Mac archive (112 PDFs, 10
+        text/plain, 5 octet-stream, 1 html) had been given up on this way.
+
+        Normalising here rather than in each of the eleven ``_extract_*``
+        methods means a twelfth cannot forget — the same by-construction
+        reasoning as ``open_attachment_bytes``' unconditional ACL check (#67).
+        ``object.__setattr__`` is the standard idiom for a frozen dataclass;
+        the class stays frozen to every other caller. ``strip_nuls`` returns
+        the original object on the clean path, so the common case rebinds the
+        same string rather than copying it.
+        """
+        object.__setattr__(self, "text", strip_nuls(self.text))
 
 
 class ExtractorError(Exception):
@@ -71,6 +106,33 @@ class TransientExtractorError(ExtractorError):
     transient. Otherwise the worker falls back to walking the exception's
     cause chain for built-in transient classes (ConnectionError,
     TimeoutError, MemoryError).
+    """
+
+
+class ExtractorConfigurationError(TransientExtractorError):
+    """Raised when the extractor cannot run because of how it is *configured*,
+    not because of anything wrong with the blob (#248).
+
+    Two causes today, both about OCR: an engine name docling does not register,
+    and an engine whose package is not installed (docling raises ``ImportError``
+    out of ``convert()``).
+
+    Subclassing ``TransientExtractorError`` is the load-bearing part: the worker
+    already treats that as "not the blob's fault", so ``retry_count`` is never
+    burned and no ``failed_extractions`` row is written. Burning it *was* #248 —
+    EasyOCR-not-installed landed on the poison-pill path, so every scanned PDF in
+    the archive accumulated three failures and was then given up on, for a
+    problem no retry could fix and that had nothing to do with the document.
+    Scanned PDFs are precisely what the docling fallback exists for.
+
+    The bound is therefore the *transient* budget
+    (``extract_worker_max_transient_retries``, #153), which exists for exactly
+    this shape: a not-the-blob's-fault failure that may nonetheless be permanent.
+    A dedicated ``attachment_text`` sentinel was rejected — it would make the
+    blob ineligible for re-claim, so fixing the config would silently *not*
+    re-open the documents it was fixed for (the one-way door ``type-skipped``
+    documents). Recovery is ``localmail retry-failed-extractions``, which clears
+    both tables.
     """
 
 
@@ -548,6 +610,102 @@ def warn_docling_missing() -> None:
     )
 
 
+_OCR_ENGINE_WARNED = False
+
+
+def warn_ocr_engine_unavailable(engine: str, detail: str) -> None:
+    """Emit a one-shot WARN per process naming the unusable OCR engine (#248).
+
+    One line per *process*, not per blob: the daemon re-attempts every scanned
+    PDF in the archive, and the pre-#248 behaviour flooded the log with the same
+    EasyOCR message while quietly poison-pilling each document. Mirrors
+    ``warn_docling_missing()``.
+    """
+    global _OCR_ENGINE_WARNED
+    if _OCR_ENGINE_WARNED:
+        return
+    _OCR_ENGINE_WARNED = True
+    _LOG.warning(
+        "OCR engine %r (search.extractor_ocr_engine) is not usable: %s "
+        "Scanned PDFs will not be indexed until this is fixed; their extraction "
+        "is being held, not failed, so `localmail retry-failed-extractions` "
+        "will pick them up afterwards. Set it to %r to accept that and stop "
+        "trying, or to 'auto' to use whichever engine is installed.",
+        engine,
+        detail,
+        OCR_DISABLED,
+    )
+
+
+def _try_import_ocr_factory() -> Any:
+    """Return docling's OCR options factory, or ``None`` when unavailable.
+
+    Typed ``Any`` rather than a docling class: docling lives in the optional
+    ``[extraction]`` extra, so naming its types here (even under
+    ``TYPE_CHECKING``) would fail mypy on an install without it.
+
+    Indirected for test monkeypatching, like ``_try_import_docling``. ``None``
+    covers both "docling is not installed" and "this docling build predates the
+    factory" — the caller then leaves ``ocr_options`` unset and lets docling
+    apply its own default, which is the tolerant behaviour the pre-#248 code had
+    for missing option classes.
+    """
+    try:
+        from docling.models.factories import get_ocr_factory
+
+        return get_ocr_factory(allow_external_plugins=False)
+    except Exception:
+        return None
+
+
+def _resolve_ocr_options(plan: OcrPlan, languages: list[str]) -> Any:
+    """Resolve ``plan.engine_kind`` to a docling OCR options object.
+
+    Returns ``None`` when OCR is disabled or the factory is unavailable — in
+    both cases the caller omits ``ocr_options`` entirely rather than guessing.
+
+    Raises ``ExtractorConfigurationError`` for a kind docling does not register.
+    Validating against the *live* registry rather than a literal list in our
+    config is what keeps this correct across docling upgrades — engines get
+    added and renamed (this build knows ``tesserocr``, not ``tesseract_cli``).
+    """
+    if plan.engine_kind is None:
+        return None
+    factory = _try_import_ocr_factory()
+    if factory is None:
+        return None
+
+    known = list(factory.registered_kind)
+    if plan.engine_kind not in known:
+        raise ExtractorConfigurationError(
+            unknown_engine_message(plan.engine_kind, known)
+        )
+    return factory.create_options(kind=plan.engine_kind, lang=languages)
+
+
+def _build_pdf_pipeline_options(cfg: SearchConfig) -> Any:
+    """Build docling ``PdfPipelineOptions`` for ``cfg``, or ``None`` when the
+    option classes are unavailable (older docling — caller falls back to a bare
+    ``DocumentConverter()``).
+
+    ``do_ocr`` and the engine both come from ``search.extractor_ocr_engine`` via
+    the pure ``plan_ocr``. The pre-#248 code hardcoded ``do_ocr=True`` with
+    ``EasyOcrOptions``, which overrode docling's own ``OcrAutoOptions`` default —
+    the one that degrades to no-OCR instead of raising when no engine is
+    installed.
+    """
+    try:
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+    except Exception:
+        return None
+
+    plan = plan_ocr(cfg.extractor_ocr_engine)
+    ocr_options = _resolve_ocr_options(plan, cfg.extractor_ocr_languages)
+    if ocr_options is None:
+        return PdfPipelineOptions(do_ocr=plan.do_ocr)
+    return PdfPipelineOptions(do_ocr=plan.do_ocr, ocr_options=ocr_options)
+
+
 _TRANSIENT_THIRD_PARTY_MODULES: frozenset[str] = frozenset(
     {"requests", "httpx", "huggingface_hub", "urllib3", "aiohttp"}
 )
@@ -595,6 +753,20 @@ def _exc_chain_has_transient_module(
         type(e).__module__.split(".", 1)[0] in modules
         for e in iter_exc_chain(exc)
     )
+
+
+def _exc_chain_has_import_error(exc: BaseException) -> bool:
+    """True iff ``exc`` or anything in its cause/context chain is an
+    ``ImportError``.
+
+    An ``ImportError`` escaping ``docling.convert()`` always means an optional
+    docling dependency is absent — in practice an OCR engine, which docling
+    constructs lazily inside the pipeline and which is not one of its own
+    requirements. Matching on the *type* rather than on the message text
+    (``"EasyOCR is not installed..."``) keeps this working across docling
+    releases and across engines, each of which words its own message.
+    """
+    return any(isinstance(e, ImportError) for e in iter_exc_chain(exc))
 
 
 class DoclingExtractor:
@@ -657,26 +829,27 @@ class DoclingExtractor:
         # Build pipeline options if the docling option-classes are importable.
         # If the installed docling version doesn't expose these names, fall back
         # to default DocumentConverter() so older builds still work.
+        #
+        # ExtractorConfigurationError (an unknown engine name) propagates rather
+        # than being swallowed by the fallback: it is the operator's typo, and
+        # silently running with docling's default would hide it forever.
+        pipeline_options = _build_pdf_pipeline_options(self._cfg)
         converter = None
-        try:
-            from docling.datamodel.base_models import InputFormat
-            from docling.datamodel.pipeline_options import (
-                EasyOcrOptions,
-                PdfPipelineOptions,
-            )
-            from docling.document_converter import PdfFormatOption
+        if pipeline_options is not None:
+            try:
+                from docling.datamodel.base_models import InputFormat
+                from docling.document_converter import PdfFormatOption
 
-            pipeline_options = PdfPipelineOptions(
-                do_ocr=True,
-                ocr_options=EasyOcrOptions(lang=self._cfg.extractor_ocr_languages),
-            )
-            converter = DocumentConverter(
-                format_options={
-                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-                },
-            )
-        except Exception:
-            # Fall back to default converter if option classes are unavailable.
+                converter = DocumentConverter(
+                    format_options={
+                        InputFormat.PDF: PdfFormatOption(
+                            pipeline_options=pipeline_options
+                        ),
+                    },
+                )
+            except Exception:
+                converter = None
+        if converter is None:
             converter = DocumentConverter()
 
         try:
@@ -688,6 +861,17 @@ class DoclingExtractor:
                 max_num_pages=self._cfg.extractor_docling_max_pages,
             )
         except Exception as exc:
+            # A missing OCR engine surfaces as ImportError out of convert() —
+            # docling constructs the engine lazily inside the pipeline. It is an
+            # install problem, never the blob's fault, so it must not burn
+            # retry_count (#248).
+            if _exc_chain_has_import_error(exc):
+                warn_ocr_engine_unavailable(
+                    self._cfg.extractor_ocr_engine, str(exc)
+                )
+                raise ExtractorConfigurationError(
+                    f"docling OCR engine unavailable: {exc}"
+                ) from exc
             if _exc_chain_has_transient_module(exc):
                 raise TransientExtractorError(
                     f"docling.convert transient failure: {exc}"

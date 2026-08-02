@@ -69,6 +69,109 @@ def test_extract_worker_processes_plain_text(db_conn, tmp_path) -> None:
     assert "the quick brown fox" in text
 
 
+def test_extract_worker_indexes_a_blob_whose_text_contains_a_nul(
+    db_conn, tmp_path
+) -> None:
+    """A NUL byte in *extracted* text must not poison-pill the blob (#249).
+
+    Postgres TEXT rejects ``\\x00``, so the ``attachment_text`` INSERT raised
+    ``DataError``, escaped ``_process_blob``, and was recorded by the outer
+    safety net as a failure under the extractor name ``'unexpected'``. It is
+    deterministic — the same bytes re-extract to the same NUL — so retrying
+    could never clear it and the blob was given up on at
+    ``extract_worker_max_retries``. Observed on the live Mac archive: 128
+    blobs (112 PDFs, 10 text/plain, 5 octet-stream, 1 html) at retry_count 3.
+    """
+    sha = _seed_blob(
+        db_conn, b"before\x00after", "text/plain", tmp_path, "nul.txt"
+    )
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extractor, extracted_text FROM attachment_text "
+            "WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM failed_extractions WHERE sha256 = %s", (sha,)
+        )
+        failed = cur.fetchone()
+    assert row is not None, "the blob was not indexed at all"
+    assert row[0] == "lightweight@1.0"
+    assert row[1] == "beforeafter"
+    assert failed is not None and failed[0] == 0, (
+        "a NUL in the extracted text was recorded as a poison pill"
+    )
+
+
+def test_a_missing_ocr_engine_never_burns_the_poison_pill_budget(
+    db_conn, tmp_path, monkeypatch
+) -> None:
+    """#248 end-to-end: a scanned PDF that docling cannot OCR because no engine
+    is installed must leave ``failed_extractions`` untouched.
+
+    Before the fix, ``ImportError('EasyOCR is not installed...')`` reached
+    ``_record_failure_safely`` and bumped ``retry_count``; at 3 the blob was
+    given up on. Scanned PDFs are exactly what the docling fallback is for, so
+    the archive's whole scanned corpus was being written off — 743 rows on the
+    live Mac archive. It is bounded now by the *transient* budget instead, and
+    ``retry-failed-extractions`` clears that once an engine is installed.
+    """
+    import localmail.search.extractor as ext_mod
+
+    def _raise_missing_engine():
+        raise ImportError("EasyOCR is not installed. Please install it via ...")
+
+    class _FakeConverter:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def convert(self, source, **kwargs):
+            _raise_missing_engine()
+
+    # `_try_import_docling` must be patched in BOTH namespaces: extract_worker
+    # imported it by name, so it holds its own reference, and that is the one
+    # gating `docling_avail`. Patching only the extractor's copy makes this test
+    # pass wherever docling happens to be installed and silently assert nothing
+    # where it is not — the worker takes the "docling missing" branch, writes a
+    # lightweight-empty sentinel, and the no-poison-pill assertion holds
+    # vacuously. Patching both makes the test mean the same thing either way.
+    import localmail.search.extract_worker as ew_mod
+
+    monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _FakeConverter)
+    monkeypatch.setattr(ew_mod, "_try_import_docling", lambda: _FakeConverter)
+    monkeypatch.setattr(
+        ext_mod.LightweightExtractor,
+        "extract",
+        lambda self, p, m, filename=None: ext_mod.ExtractedText(
+            text="", page_count=0, extractor="lightweight@1.0"
+        ),
+    )
+    sha = _seed_blob(db_conn, b"%PDF-1.4 scan", "application/pdf", tmp_path, "s.pdf")
+
+    run_extract_worker_once(db_conn, SearchConfig())
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM failed_extractions WHERE sha256 = %s", (sha,)
+        )
+        failed = cur.fetchone()
+        cur.execute(
+            "SELECT transient_count FROM transient_extractions WHERE sha256 = %s",
+            (sha,),
+        )
+        transient = cur.fetchone()
+    assert failed is not None and failed[0] == 0, (
+        "a missing OCR engine was recorded as a poison pill"
+    )
+    assert transient is not None and transient[0] == 1, (
+        "the failure should be held on the bounded transient counter instead"
+    )
+
+
 def test_extract_worker_records_a_non_allowlist_blob_as_skipped(
     db_conn, tmp_path
 ) -> None:

@@ -192,6 +192,8 @@ src/localmail/
   oauth_gmail.py    # OAuth2 desktop flow + token refresh
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
+  pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
+  ocr_policy.py     # pure: plan_ocr / unknown_engine_message (#248)
   attachments.py    # write_attachments(conn, parsed, root) -> JSONB rows (content-addressable)
   blob_temps.py     # writer temp naming (new_temp_path) + its collector (sweep_blob_temps) (#237)
   fetch_retry.py    # bounded BODY[] hold (#222A) + give-up tombstones/rewind planner (#239)
@@ -912,6 +914,60 @@ so the two cannot drift. See
 - `_extract_xlsx` blob-path workaround: openpyxl detects format by file extension,
   so the worker passes `io.BytesIO(path.read_bytes())` instead of the
   extension-free blob path. No other Office extractor has this issue.
+- **The OCR engine is configurable and defaults to `auto` (#248).**
+  `DoclingExtractor` used to hardcode `ocr_options=EasyOcrOptions(...)`. EasyOCR
+  is **not** a docling dependency, so on any install without it every scanned PDF
+  raised `ImportError` out of `convert()` — on the **poison-pill** path, burning
+  `retry_count` until the blob was given up on. Scanned PDFs are precisely what
+  the docling fallback exists for; 743 such rows accumulated on the live Mac
+  archive within hours of #216 making the path reachable. The hardcoding also
+  **overrode a better default**: docling's own `PdfPipelineOptions.ocr_options`
+  is `OcrAutoOptions`, which probes ocrmac → rapidocr → easyocr and, when none
+  is installed, passes pages through **without raising** — an honest
+  `lightweight-empty` sentinel instead of a failure.
+  - The pure [src/localmail/ocr_policy.py](src/localmail/ocr_policy.py)
+    (`plan_ocr`, `unknown_engine_message`, `OCR_AUTO`, `OCR_DISABLED`) maps
+    `search.extractor_ocr_engine` to `(do_ocr, engine_kind)`. It sits at the
+    **top level, not under `search/`**, because `config.py` imports `OCR_AUTO`
+    as the field default and `localmail.search`'s `__init__` imports `config` —
+    same reason `account_names.py` and `fetch_retry.py` live there.
+  - The config value **is docling's own registry kind**, resolved through
+    `factory.create_options(kind=…)`, so there is no mapping table to drift
+    against a docling upgrade. Validation is against the **live**
+    `factory.registered_kind` rather than a `Literal` in our config — engines get
+    added and renamed (this build registers `tesserocr`, not `tesseract_cli`).
+    The one value we own is `"none"` (disable OCR; docling has no such kind).
+  - **A missing/unknown engine is an `ExtractorConfigurationError`, which
+    subclasses `TransientExtractorError`.** That subclassing is the load-bearing
+    part: `_is_transient` already recognises it, so `retry_count` is never burned
+    and the bound becomes the #153 transient budget — which exists for exactly
+    this shape (not-the-blob's-fault, possibly permanent). Detection is
+    `_exc_chain_has_import_error` — matching the **type**, never the message
+    text, since each engine words its own. A dedicated `attachment_text` sentinel
+    was rejected: it would make the blob ineligible for re-claim, so fixing the
+    config would silently *not* re-open the documents it was fixed for (the
+    one-way door `type-skipped` documents). Recovery is
+    `localmail retry-failed-extractions`.
+  - `pyproject.toml`'s `[extraction]` extra installs **`ocrmac ; sys_platform ==
+    'darwin'`** — a thin Apple Vision wrapper, no torch and no model downloads.
+    Linux gets no engine and degrades via `auto`; install `easyocr`/`rapidocr`
+    there to opt in. Measured on the live Mac archive: cold pipeline init ~100 s,
+    then **~1.7 s/page warm** — docling caches the pipeline internally, so the
+    per-blob `DocumentConverter()` construction is not worth caching ourselves.
+- **`ExtractedText` strips NUL bytes on construction, and that is a fix not a
+  nicety (#249).** Postgres `TEXT` rejects `\x00` and `attachment_text.extracted_text`
+  is the type's only consumer, so a NUL surviving to the INSERT aborted it,
+  escaped `_process_blob` into the worker's outer safety net, and was recorded as
+  a poison pill under the extractor name **`'unexpected'`** — permanently, since
+  the same bytes always re-extract to the same NUL. 128 blobs on the live Mac
+  archive (112 PDFs, 10 `text/plain`, 5 `octet-stream`, 1 html) had been given up
+  on this way. Normalising in `__post_init__` rather than in each of the eleven
+  `_extract_*` methods means a twelfth cannot forget (same by-construction
+  reasoning as #67's unconditional ACL check). The rule itself is the pure
+  [src/localmail/pgtext.py](src/localmail/pgtext.py)`::strip_nuls`, now the single
+  implementation shared by `parser.py`, `extract_worker.py`'s failure logging, and
+  this boundary — it had been copy-pasted into the first two and simply missing
+  from the third.
 - **Transient classification of third-party docling failures (#47)**:
   `extract_worker._is_transient` recognises only the narrow builtin
   `_TRANSIENT_EXC_TYPES` (`ConnectionError`/`TimeoutError`/`MemoryError`) plus

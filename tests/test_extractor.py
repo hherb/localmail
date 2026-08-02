@@ -26,6 +26,51 @@ def test_extracted_text_is_frozen_dataclass() -> None:
         et.text = "world"  # type: ignore[misc]
 
 
+class TestExtractedTextIsDbSafeByConstruction:
+    """``ExtractedText.text`` never carries a NUL byte (#249).
+
+    Postgres TEXT rejects ``\\x00``, and ``extracted_text`` is the only
+    consumer. Enforcing it here rather than in each of the eleven
+    ``_extract_*`` methods means a twelfth cannot forget: a NUL that reached
+    the INSERT aborted it, escaped to the worker's outer safety net, and was
+    recorded as a poison pill under the extractor name ``'unexpected'`` —
+    permanently, since re-extracting the same bytes reproduces the same NUL.
+    """
+
+    def test_a_nul_in_the_text_is_stripped(self) -> None:
+        assert ExtractedText(
+            text="before\x00after", page_count=None, extractor="x@1"
+        ).text == "beforeafter"
+
+    def test_every_nul_is_stripped(self) -> None:
+        assert ExtractedText(
+            text="\x00a\x00b\x00", page_count=None, extractor="x@1"
+        ).text == "ab"
+
+    def test_clean_text_is_untouched(self) -> None:
+        assert ExtractedText(
+            text="ordinary text", page_count=3, extractor="x@1"
+        ).text == "ordinary text"
+
+    def test_text_of_only_nuls_becomes_the_empty_sentinel(self) -> None:
+        """'' already means "we tried, got nothing, don't retry" — the right
+        outcome for a blob whose entire extracted text was NUL bytes."""
+        assert ExtractedText(
+            text="\x00\x00", page_count=None, extractor="x@1"
+        ).text == ""
+
+    def test_the_dataclass_stays_frozen(self) -> None:
+        """Normalising in __post_init__ must not have unfrozen the class."""
+        et = ExtractedText(text="a\x00b", page_count=None, extractor="x@1")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            et.text = "c"  # type: ignore[misc]
+
+    def test_equality_still_works_after_normalising(self) -> None:
+        assert ExtractedText(
+            text="a\x00b", page_count=1, extractor="x@1"
+        ) == ExtractedText(text="ab", page_count=1, extractor="x@1")
+
+
 def test_lightweight_supports_pdf_mime_and_ext() -> None:
     lw = LightweightExtractor()
     assert lw.supports("application/pdf", "foo.pdf")
@@ -589,3 +634,218 @@ def test_docling_extract_keeps_value_error_as_permanent(
     with pytest.raises(ExtractorError) as excinfo:
         de.extract(p, "application/pdf")
     assert not isinstance(excinfo.value, TransientExtractorError)
+
+
+# --- OCR engine selection + missing-engine classification (#248) --------------
+#
+# DoclingExtractor used to hardcode ocr_options=EasyOcrOptions(...). EasyOCR is
+# not a docling dependency, so on an install without it every scanned PDF raised
+# ImportError out of convert() on the *poison-pill* path, burning retry_count
+# until the blob was given up on. 743 such rows on the live Mac archive. The
+# hardcoding also overrode docling's own OcrAutoOptions default, which degrades
+# to no-OCR without raising.
+
+
+class _FakeOcrOptions:
+    """Stand-in for a docling OCR options object."""
+
+    def __init__(self, kind: str, lang: list[str]) -> None:
+        self.kind = kind
+        self.lang = lang
+
+
+class _FakeOcrFactory:
+    """Stand-in for docling's OCR factory, so engine-selection is testable
+    without docling installed."""
+
+    def __init__(self, kinds: list[str]) -> None:
+        self.registered_kind = kinds
+        self.created: list[tuple[str, list[str]]] = []
+
+    def create_options(self, kind: str, **kwargs: object) -> _FakeOcrOptions:
+        lang = kwargs.get("lang") or []
+        self.created.append((kind, list(lang)))  # type: ignore[arg-type]
+        return _FakeOcrOptions(kind, list(lang))  # type: ignore[arg-type]
+
+
+def test_resolve_ocr_options_asks_the_factory_for_the_configured_kind(
+    monkeypatch,
+) -> None:
+    """The config value is docling's own registry key — no mapping table."""
+    import localmail.search.extractor as ext_mod
+    from localmail.ocr_policy import plan_ocr
+
+    factory = _FakeOcrFactory(["auto", "easyocr", "ocrmac"])
+    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: factory)
+
+    opts = ext_mod._resolve_ocr_options(plan_ocr("ocrmac"), ["en", "de"])
+
+    assert factory.created == [("ocrmac", ["en", "de"])]
+    assert opts is not None and opts.kind == "ocrmac"
+
+
+def test_resolve_ocr_options_returns_none_when_ocr_is_disabled(
+    monkeypatch,
+) -> None:
+    """engine='none' must not resolve an engine at all — do_ocr=False alone."""
+    import localmail.search.extractor as ext_mod
+    from localmail.ocr_policy import plan_ocr
+
+    factory = _FakeOcrFactory(["auto"])
+    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: factory)
+
+    assert ext_mod._resolve_ocr_options(plan_ocr("none"), ["en"]) is None
+    assert factory.created == []
+
+
+def test_resolve_ocr_options_returns_none_when_the_factory_is_unavailable(
+    monkeypatch,
+) -> None:
+    """An older docling without the factory must fall back to its own default
+    rather than raise — the pre-#248 code had the same tolerance."""
+    import localmail.search.extractor as ext_mod
+    from localmail.ocr_policy import plan_ocr
+
+    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: None)
+
+    assert ext_mod._resolve_ocr_options(plan_ocr("easyocr"), ["en"]) is None
+
+
+def test_an_unknown_ocr_engine_is_a_configuration_error(monkeypatch) -> None:
+    """A typo names itself and lists the valid kinds — and must NOT be a
+    poison pill, since no blob is at fault."""
+    import localmail.search.extractor as ext_mod
+    from localmail.ocr_policy import plan_ocr
+    from localmail.search.extractor import (
+        ExtractorConfigurationError,
+        TransientExtractorError,
+    )
+
+    monkeypatch.setattr(
+        ext_mod, "_try_import_ocr_factory", lambda: _FakeOcrFactory(["auto", "easyocr"])
+    )
+
+    with pytest.raises(ExtractorConfigurationError) as excinfo:
+        ext_mod._resolve_ocr_options(plan_ocr("easyocrr"), ["en"])
+
+    assert isinstance(excinfo.value, TransientExtractorError), (
+        "a configuration error must never burn failed_extractions.retry_count"
+    )
+    msg = str(excinfo.value)
+    assert "'easyocrr'" in msg and "auto, easyocr" in msg
+
+
+def test_a_missing_ocr_engine_package_is_a_configuration_error(
+    monkeypatch, tmp_path
+) -> None:
+    """The #248 failure itself: docling raises ImportError('EasyOCR is not
+    installed...') from convert(). That is an install problem, not a bad blob,
+    so it must classify as a configuration error and leave retry_count alone."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import (
+        DoclingExtractor,
+        ExtractorConfigurationError,
+    )
+
+    def _raise_missing_easyocr():
+        raise ImportError(
+            "EasyOCR is not installed. Please install it via `pip install easyocr` "
+            "to use this OCR engine."
+        )
+
+    monkeypatch.setattr(
+        ext_mod,
+        "_try_import_docling",
+        lambda: _fake_converter_raising(_raise_missing_easyocr),
+    )
+    p = tmp_path / "scan.pdf"
+    p.write_bytes(b"%PDF-1.4 dummy")
+
+    with pytest.raises(ExtractorConfigurationError):
+        DoclingExtractor().extract(p, "application/pdf")
+
+
+def test_a_missing_ocr_engine_deep_in_the_cause_chain_still_classifies(
+    monkeypatch, tmp_path
+) -> None:
+    """docling wraps engine construction, so the ImportError arrives as a
+    __cause__ rather than at the top."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import (
+        DoclingExtractor,
+        ExtractorConfigurationError,
+    )
+
+    def _raise_wrapped():
+        try:
+            raise ImportError("RapidOCR is not installed.")
+        except ImportError as inner:
+            raise RuntimeError("pipeline build failed") from inner
+
+    monkeypatch.setattr(
+        ext_mod,
+        "_try_import_docling",
+        lambda: _fake_converter_raising(_raise_wrapped),
+    )
+    p = tmp_path / "scan.pdf"
+    p.write_bytes(b"%PDF-1.4 dummy")
+
+    with pytest.raises(ExtractorConfigurationError):
+        DoclingExtractor().extract(p, "application/pdf")
+
+
+def test_a_corrupt_pdf_is_still_a_poison_pill_not_a_configuration_error(
+    monkeypatch, tmp_path
+) -> None:
+    """The config-error branch must not swallow genuine blob failures — those
+    still need to burn retry_count and land in failed_extractions."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import (
+        DoclingExtractor,
+        TransientExtractorError,
+    )
+
+    monkeypatch.setattr(
+        ext_mod,
+        "_try_import_docling",
+        lambda: _fake_converter_raising(lambda: ValueError("corrupt PDF")),
+    )
+    p = tmp_path / "x.pdf"
+    p.write_bytes(b"%PDF-1.4 dummy")
+
+    with pytest.raises(ExtractorError) as excinfo:
+        DoclingExtractor().extract(p, "application/pdf")
+    assert not isinstance(excinfo.value, TransientExtractorError)
+
+
+def test_warn_ocr_engine_unavailable_is_one_shot_per_process(caplog) -> None:
+    """The daemon re-attempts every scanned PDF in the archive; one WARNING per
+    process, not one per blob. Mirrors warn_docling_missing()."""
+    import localmail.search.extractor as ext_mod
+
+    ext_mod._OCR_ENGINE_WARNED = False
+    with caplog.at_level(logging.WARNING, logger="localmail.search.extractor"):
+        ext_mod.warn_ocr_engine_unavailable("easyocr", "EasyOCR is not installed.")
+        ext_mod.warn_ocr_engine_unavailable("easyocr", "EasyOCR is not installed.")
+
+    hits = [r for r in caplog.records if "easyocr" in r.getMessage()]
+    assert len(hits) == 1
+    assert "extractor_ocr_engine" in hits[0].getMessage()
+
+
+def test_pdf_pipeline_options_reflect_the_configured_engine() -> None:
+    """End-to-end against real docling: the built pipeline options carry the
+    plan's do_ocr and the engine class the factory resolved. This is what
+    #248 got wrong — do_ocr=True with a hardcoded EasyOcrOptions."""
+    pytest.importorskip("docling")
+    from localmail.config import SearchConfig
+    from localmail.search.extractor import _build_pdf_pipeline_options
+
+    auto = _build_pdf_pipeline_options(SearchConfig(extractor_ocr_engine="auto"))
+    assert auto is not None
+    assert auto.do_ocr is True
+    assert type(auto.ocr_options).__name__ == "OcrAutoOptions"
+
+    off = _build_pdf_pipeline_options(SearchConfig(extractor_ocr_engine="none"))
+    assert off is not None
+    assert off.do_ocr is False

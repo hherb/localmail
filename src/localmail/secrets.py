@@ -81,15 +81,19 @@ def configure(cfg: SecretsConfig, *, named_config: bool = False) -> None:
     Such an install is **pinned**: a later load of the *default* config leaves
     it alone.
 
-    That asymmetry exists because `load_config` is called both ways in one
-    process. Several CLI commands (`extract-backfill`, `embed-backfill`,
-    `lang-backfill`, `search-status`, `estimate-upgrade`) call it with no path
-    at all, so they read the default config regardless of `--config` — a
-    pre-existing bug, tracked as #245. Without the pin, attaching the
-    backend install to *every* load meant such a read could swap a headless
-    host's `file` backend back to `keyring` mid-command, reintroducing exactly
-    the boot-time `KeyringLocked` failure this backend exists to prevent, and
-    doing it silently.
+    That asymmetry exists because `load_config` can be called both ways in one
+    process, and a default-path read that swapped a headless host's `file`
+    backend back to `keyring` mid-command would silently reintroduce the exact
+    boot-time `KeyringLocked` failure this backend exists to prevent.
+
+    #245 — nine CLI commands that read the default config whatever `--config`
+    said — was the concrete instance, and is **fixed**: every command now
+    resolves its config through `ctx.obj["config_path"]`. The pin is kept
+    anyway. `search.create_searcher(cfg=None)` still falls back to a no-path
+    `load_config()` for library callers, and the pin costs nothing while making
+    the invariant — *a default-config read cannot undo a named config's
+    backend* — hold by construction rather than by everyone remembering. Pinned
+    by `test_a_default_config_read_cannot_undo_a_named_configs_backend`.
     """
     global _store, _pinned_by_named_config
     if _pinned_by_named_config and not named_config:

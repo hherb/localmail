@@ -40,7 +40,7 @@ def test_cli_lang_backfill_populates_body_lang(
     ids = _seed_messages(db_conn, ["alpha body", "beta body", "gamma body"])
     detector = FixedDetector({"alpha body": "en", "beta body": "de", "gamma body": "es"})
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
     monkeypatch.setattr("localmail.search.lang_detect.make_detector", lambda cfg: detector)
 
     runner = CliRunner()
@@ -65,7 +65,7 @@ def test_cli_lang_backfill_no_op_when_disabled(
     """`body_lang_enabled=False` → exits cleanly without touching rows."""
     ids = _seed_messages(db_conn, ["anything"])
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
     # Force make_detector to return None (the disabled path).
     monkeypatch.setattr("localmail.search.lang_detect.make_detector", lambda cfg: None)
 
@@ -88,7 +88,7 @@ def test_cli_search_status_reports_body_lang_counts(
         cur.execute("UPDATE messages SET body_lang = 'en' WHERE id = %s", (ids[0],))
     db_conn.commit()
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
     runner = CliRunner()
     result = runner.invoke(main, ["search-status", "--format", "json"])
 

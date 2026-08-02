@@ -39,7 +39,7 @@ def _insert_failed(conn, n=3):
 
 def test_cli_list_failed_embeddings_json(monkeypatch, db_dsn, db_conn):
     _insert_failed(db_conn, n=2)
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
     runner = CliRunner()
     result = runner.invoke(main, ["list-failed-embeddings", "--format", "json"])
     assert result.exit_code == 0, result.output
@@ -50,7 +50,7 @@ def test_cli_list_failed_embeddings_json(monkeypatch, db_dsn, db_conn):
 
 def test_cli_retry_failed_embeddings_clears_rows(monkeypatch, db_dsn, db_conn):
     _insert_failed(db_conn, n=2)
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
     runner = CliRunner()
     result = runner.invoke(main, ["retry-failed-embeddings"])
     assert result.exit_code == 0, result.output

@@ -14,7 +14,11 @@ import pytest
 from psycopg_pool import ConnectionPool
 
 from localmail.config import SearchConfig
-from localmail.search.extract_worker import run_extract_worker, run_extract_worker_once
+from localmail.search.extract_worker import (
+    SKIPPED_EXTRACTOR,
+    run_extract_worker,
+    run_extract_worker_once,
+)
 from tests.conftest import TEST_DSN
 
 
@@ -65,8 +69,16 @@ def test_extract_worker_processes_plain_text(db_conn, tmp_path) -> None:
     assert "the quick brown fox" in text
 
 
-def test_extract_worker_skips_non_allowlist_blob(db_conn, tmp_path) -> None:
-    """Blobs with MIME types outside the allowlist are silently skipped."""
+def test_extract_worker_records_a_non_allowlist_blob_as_skipped(
+    db_conn, tmp_path
+) -> None:
+    """Blobs outside both allowlists get a `type-skipped` sentinel — no
+    extracted text, but a row.
+
+    This used to be a bare `continue` leaving nothing behind, which made the
+    skip invisible *and* left the blob eligible for every future claim; see
+    test_extract_worker_allowlist.py for what that cost (#216).
+    """
     sha = _seed_blob(
         db_conn, b"\x00\x01\x02", "image/png", tmp_path, "logo.png"
     )
@@ -76,11 +88,12 @@ def test_extract_worker_skips_non_allowlist_blob(db_conn, tmp_path) -> None:
 
     with db_conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM attachment_text WHERE sha256 = %s", (sha,)
+            "SELECT extractor, extracted_text FROM attachment_text "
+            "WHERE sha256 = %s",
+            (sha,),
         )
         row = cur.fetchone()
-        assert row is not None
-        assert row[0] == 0
+    assert row == (SKIPPED_EXTRACTOR, "")
 
 
 def test_extract_worker_inserts_size_skipped_sentinel(db_conn, tmp_path) -> None:
@@ -378,7 +391,7 @@ def test_extract_worker_does_not_record_transient_error(
 
     sha = _seed_blob(db_conn, b"text content", "text/plain", tmp_path, "a.txt")
 
-    def _fail_transient(self, blob_path, mime_type):
+    def _fail_transient(self, blob_path, mime_type, *, filename=None):
         raise TransientExtractorError("simulated network blip")
 
     monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)
@@ -413,7 +426,7 @@ def test_extract_worker_does_not_record_connection_error(
 
     sha = _seed_blob(db_conn, b"text content", "text/plain", tmp_path, "a.txt")
 
-    def _fail_with_connection_error(self, blob_path, mime_type):
+    def _fail_with_connection_error(self, blob_path, mime_type, *, filename=None):
         try:
             raise ConnectionError("model fetch failed")
         except ConnectionError as inner:
@@ -446,7 +459,7 @@ def test_extract_worker_records_permanent_extractor_error(
 
     sha = _seed_blob(db_conn, b"text content", "text/plain", tmp_path, "a.txt")
 
-    def _fail_permanently(self, blob_path, mime_type):
+    def _fail_permanently(self, blob_path, mime_type, *, filename=None):
         raise ExtractorError("pypdf: bad header")
 
     monkeypatch.setattr(LightweightExtractor, "extract", _fail_permanently)
@@ -485,10 +498,10 @@ def test_extract_worker_transient_does_not_poison_batch(
 
     real_extract = LightweightExtractor.extract
 
-    def _maybe_transient(self, blob_path, mime_type):
+    def _maybe_transient(self, blob_path, mime_type, *, filename=None):
         if blob_path.name == sha_a.hex():
             raise TransientExtractorError("simulated blip")
-        return real_extract(self, blob_path, mime_type)
+        return real_extract(self, blob_path, mime_type, filename=filename)
 
     monkeypatch.setattr(LightweightExtractor, "extract", _maybe_transient)
 
@@ -533,11 +546,11 @@ def test_extract_worker_transient_blob_eligible_next_sweep(
     real_extract = LightweightExtractor.extract
     calls = {"n": 0}
 
-    def _flaky(self, blob_path, mime_type):
+    def _flaky(self, blob_path, mime_type, *, filename=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise TransientExtractorError("first call blips")
-        return real_extract(self, blob_path, mime_type)
+        return real_extract(self, blob_path, mime_type, filename=filename)
 
     monkeypatch.setattr(LightweightExtractor, "extract", _flaky)
 
@@ -598,7 +611,7 @@ def test_transient_failure_increments_counter(
 
     sha = _seed_blob(db_conn, b"flaky", "text/plain", tmp_path, "a.txt")
 
-    def _fail_transient(self, blob_path, mime_type):
+    def _fail_transient(self, blob_path, mime_type, *, filename=None):
         raise TransientExtractorError("simulated network blip")
 
     monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)
@@ -637,7 +650,7 @@ def test_transient_failures_accumulate_then_blob_excluded(
 
     calls = {"n": 0}
 
-    def _always_transient(self, blob_path, mime_type):
+    def _always_transient(self, blob_path, mime_type, *, filename=None):
         calls["n"] += 1
         raise TransientExtractorError("HF 401 forever")
 
@@ -673,7 +686,7 @@ def test_transient_cap_logs_giving_up_warning(
     sha = _seed_blob(db_conn, b"flaky", "text/plain", tmp_path, "a.txt")
     cfg = SearchConfig(extract_worker_max_transient_retries=1)
 
-    def _fail_transient(self, blob_path, mime_type):
+    def _fail_transient(self, blob_path, mime_type, *, filename=None):
         raise TransientExtractorError("blip")
 
     monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)
@@ -703,11 +716,11 @@ def test_transient_counter_reset_on_success(
     real_extract = LightweightExtractor.extract
     calls = {"n": 0}
 
-    def _flaky(self, blob_path, mime_type):
+    def _flaky(self, blob_path, mime_type, *, filename=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise TransientExtractorError("first blip")
-        return real_extract(self, blob_path, mime_type)
+        return real_extract(self, blob_path, mime_type, filename=filename)
 
     monkeypatch.setattr(LightweightExtractor, "extract", _flaky)
 
@@ -739,7 +752,7 @@ def test_transient_failure_with_nul_in_message_still_increments(
 
     sha = _seed_blob(db_conn, b"nul flaky", "text/plain", tmp_path, "a.txt")
 
-    def _fail_transient(self, blob_path, mime_type):
+    def _fail_transient(self, blob_path, mime_type, *, filename=None):
         raise TransientExtractorError("bad\x00payload")
 
     monkeypatch.setattr(LightweightExtractor, "extract", _fail_transient)

@@ -15,20 +15,30 @@ mode is enforced on read rather than merely set on write.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 from localmail.secrets_store import (
     SECRETS_DIR_MODE,
     SECRETS_FILE_MODE,
+    DirectoryExposure,
     deserialise,
+    directory_exposure,
     mode_is_private,
     serialise,
 )
 
+log = logging.getLogger(__name__)
+
 
 class InsecureSecretsFile(RuntimeError):
     """The secrets file is readable by somebody other than its owner."""
+
+
+class InsecureSecretsDirectory(RuntimeError):
+    """The directory holding the secrets file is writable by anyone, so the
+    file's own mode guarantees nothing — see `DirectoryExposure`."""
 
 
 class StaleSecretsTempFile(RuntimeError):
@@ -44,6 +54,12 @@ class FileSecretStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # The group-writable case warns rather than refusing, and every `get`
+        # re-reads the file — the daemon reads a secret on each reconnect. One
+        # line per process is a finding; one per read buries the sync errors the
+        # operator shares the log with. `configure()` installs a single store
+        # per process, so instance state is process state here.
+        self._warned_about_parent = False
 
     def get(self, username: str) -> str | None:
         return self._read().get(username)
@@ -61,7 +77,39 @@ class FileSecretStore:
             return
         self._write(secrets)
 
+    def _check_parent_directory(self) -> None:
+        """Grade the directory the secrets file lives in (#246).
+
+        Runs before the file check, and runs even when there is no file yet: the
+        substitution this guards against works just as well by *planting* a file
+        where none existed, so the earliest touch is the right moment to refuse.
+        """
+        parent = self.path.parent
+        try:
+            mode = os.stat(parent).st_mode
+        except FileNotFoundError:
+            # Nothing to grade — `_write` creates it at SECRETS_DIR_MODE.
+            return
+        exposure = directory_exposure(mode)
+        if exposure is DirectoryExposure.WORLD_WRITABLE:
+            raise InsecureSecretsDirectory(
+                f"{parent} is writable by anyone, so {self.path.name} can be "
+                f"replaced wholesale whatever its own mode is; refusing to use "
+                f"it. Fix with: chmod o-w {parent}"
+            )
+        if exposure is DirectoryExposure.GROUP_WRITABLE and not self._warned_about_parent:
+            self._warned_about_parent = True
+            log.warning(
+                "%s is group-writable, so a member of its group could replace "
+                "%s whatever its own mode is. Harmless if that group is yours "
+                "alone (the umask-002 default); otherwise fix with: chmod g-w %s",
+                parent,
+                self.path.name,
+                parent,
+            )
+
     def _read(self) -> dict[str, str]:
+        self._check_parent_directory()
         try:
             mode = os.stat(self.path).st_mode
         except FileNotFoundError:

@@ -956,9 +956,18 @@ def search(ctx, query, accounts, folders, after, before, from_substr, to_substr,
         _print_text_page(page)
 
 
-def _dsn() -> str:
-    """Resolve DSN from the existing localmail config."""
-    return load_config().database.dsn
+def _dsn(ctx: click.Context) -> str:
+    """Resolve the DSN from the config the operator actually named.
+
+    Takes the context rather than reading the default path, because `--config`
+    is resolved once in `main` and left in `ctx.obj` (#245). The zero-argument
+    version this replaces called `load_config()` with no path, so nine commands
+    silently ran against `~/.config/localmail/config.toml` whatever the operator
+    asked for — a different database, a different attachment root. Making the
+    context a parameter means the next command cannot omit it without a
+    `TypeError` at the call site.
+    """
+    return load_config(ctx.obj["config_path"]).database.dsn
 
 
 def _make_backend(cfg):
@@ -969,7 +978,8 @@ def _make_backend(cfg):
 
 @main.command("extract-backfill")
 @click.option("--no-progress", is_flag=True)
-def extract_backfill(no_progress: bool) -> None:
+@click.pass_context
+def extract_backfill(ctx: click.Context, no_progress: bool) -> None:
     """Drain the attachment-extraction queue in the foreground; exit when empty.
 
     Account-agnostic — extracts text from all eligible blobs whose MIME type or
@@ -977,8 +987,8 @@ def extract_backfill(no_progress: bool) -> None:
     """
     from localmail.db import open_pool
     from localmail.search.extract_worker import run_extract_worker_once
-    cfg = load_config()
-    pool = open_pool(_dsn())
+    cfg = load_config(ctx.obj["config_path"])
+    pool = open_pool(_dsn(ctx))
     try:
         total = 0
         while True:
@@ -999,7 +1009,8 @@ def extract_backfill(no_progress: bool) -> None:
 
 @main.command("embed-backfill")
 @click.option("--no-progress", is_flag=True)
-def embed_backfill(no_progress):
+@click.pass_context
+def embed_backfill(ctx, no_progress):
     """Drain the embedding queue in the foreground; exit when empty.
 
     Account-agnostic — fills embeddings for all accounts. Each embedding
@@ -1011,10 +1022,10 @@ def embed_backfill(no_progress):
     from localmail.db import open_pool
     from localmail.search.embed_worker import run_embed_worker_once
     from localmail.search.lang_detect import make_detector, run_lang_detect_pass
-    cfg = load_config()
+    cfg = load_config(ctx.obj["config_path"])
     backend = _make_backend(cfg)
     lang_detector = make_detector(cfg.search)
-    pool = open_pool(_dsn())
+    pool = open_pool(_dsn(ctx))
     try:
         total = 0
         while True:
@@ -1049,7 +1060,8 @@ def embed_backfill(no_progress):
 
 @main.command("lang-backfill")
 @click.option("--no-progress", is_flag=True)
-def lang_backfill(no_progress: bool) -> None:
+@click.pass_context
+def lang_backfill(ctx: click.Context, no_progress: bool) -> None:
     """Populate `messages.body_lang` for every message with NULL body_lang.
 
     Account-agnostic. Runs the same per-message detector the embed worker
@@ -1059,12 +1071,12 @@ def lang_backfill(no_progress: bool) -> None:
     """
     from localmail.db import open_pool
     from localmail.search.lang_detect import make_detector, run_lang_detect_pass
-    cfg = load_config()
+    cfg = load_config(ctx.obj["config_path"])
     detector = make_detector(cfg.search)
     if detector is None:
         click.echo("body_lang detection is disabled in config; nothing to do", err=True)
         return
-    pool = open_pool(_dsn())
+    pool = open_pool(_dsn(ctx))
     try:
         total = 0
         while True:
@@ -1085,15 +1097,16 @@ def lang_backfill(no_progress: bool) -> None:
 
 @main.command("search-status")
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
-def search_status(fmt):
+@click.pass_context
+def search_status(ctx, fmt):
     """Show progress: how many chunks remain to be embedded, failures, etc.
 
     Reports message embedding status (Phase 1) and attachment extraction /
     embedding status (Phase 2), plus failure counts for both subsystems.
     """
     from localmail.db import open_pool
-    cfg = load_config()
-    pool = open_pool(_dsn())
+    cfg = load_config(ctx.obj["config_path"])
+    pool = open_pool(_dsn(ctx))
     try:
         with pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM messages")
@@ -1112,10 +1125,22 @@ def search_status(fmt):
             row = cur.fetchone()
             assert row is not None
             failed = row[0]
+            # The extension half reads the *original* filename out of
+            # `messages.attachments`, never `attachment_blobs.path` — that path
+            # is content-addressable and extensionless, so the substring match
+            # it replaces was always NULL and this count silently reported
+            # MIME-only eligibility (#216).
             cur.execute(
                 "SELECT count(*) FROM attachment_blobs b "
                 "WHERE b.mime_type = ANY(%s) "
-                "   OR lower(substring(b.path FROM '\\.[^.]+$')) = ANY(%s)",
+                "   OR EXISTS ("
+                "        SELECT 1 FROM messages m,"
+                "             jsonb_array_elements(m.attachments) AS a"
+                "         WHERE m.attachments @> jsonb_build_array("
+                "                 jsonb_build_object('sha256', encode(b.sha256,'hex')))"
+                "           AND a->>'sha256' = encode(b.sha256,'hex')"
+                "           AND lower(substring(a->>'filename' FROM '\\.[^.]+$'))"
+                "               = ANY(%s))",
                 (
                     cfg.search.extractor_mime_allowlist,
                     cfg.search.extractor_extension_allowlist,
@@ -1241,7 +1266,8 @@ def _estimate_to_json(r: EstimateResult) -> dict:
     default="text",
     help="Output format. text (default) is human-readable; json emits a list.",
 )
-def estimate_upgrade(fmt: str) -> None:
+@click.pass_context
+def estimate_upgrade(ctx: click.Context, fmt: str) -> None:
     """Pre-flight estimator for lock-heavy schema migrations.
 
     Reports projected (or actual) size + duration for migrations that
@@ -1249,11 +1275,11 @@ def estimate_upgrade(fmt: str) -> None:
     safe to run against a live archive. See
     docs/operations/upgrade-runbook.md for the full procedure.
     """
-    dsn = _dsn()
+    dsn = _dsn(ctx)
     try:
         with psycopg.connect(dsn) as conn:
             applied = _applied_revisions(conn)
-            cfg = load_config().upgrade
+            cfg = load_config(ctx.obj["config_path"]).upgrade
             results = [
                 fn(conn, cfg, rev in applied)
                 for rev, fn in ESTIMATORS.items()
@@ -1275,10 +1301,11 @@ def estimate_upgrade(fmt: str) -> None:
 @main.command("list-failed-embeddings")
 @click.option("--limit", type=int, default=50)
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
-def list_failed_embeddings(limit, fmt):
+@click.pass_context
+def list_failed_embeddings(ctx, limit, fmt):
     """Show recent failed_embeddings rows."""
     from localmail.db import open_pool
-    pool = open_pool(_dsn())
+    pool = open_pool(_dsn(ctx))
     try:
         with pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
@@ -1306,10 +1333,11 @@ def list_failed_embeddings(limit, fmt):
 @main.command("retry-failed-embeddings")
 @click.option("--chunk-table", default=None,
               help="restrict to message_chunks or attachment_chunks")
-def retry_failed_embeddings(chunk_table):
+@click.pass_context
+def retry_failed_embeddings(ctx, chunk_table):
     """Clear failed_embeddings rows so the embed worker re-attempts them."""
     from localmail.db import open_pool
-    pool = open_pool(_dsn())
+    pool = open_pool(_dsn(ctx))
     try:
         with pool.connection() as conn, conn.cursor() as cur:
             if chunk_table:
@@ -1653,14 +1681,15 @@ def serve_cmd(
     "--format", "fmt",
     type=click.Choice(["text", "json"]), default="text",
 )
-def list_failed_extractions(limit: int, fmt: str) -> None:
+@click.pass_context
+def list_failed_extractions(ctx: click.Context, limit: int, fmt: str) -> None:
     """Show recent failed_extractions rows.
 
     Each row represents a blob for which text extraction failed.  Use
     ``retry-failed-extractions`` to clear rows so the worker re-attempts them.
     """
     from localmail.db import open_pool
-    pool = open_pool(_dsn())
+    pool = open_pool(_dsn(ctx))
     try:
         with pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
@@ -1693,7 +1722,8 @@ def list_failed_extractions(limit: int, fmt: str) -> None:
     "--sha256", "sha256_hex", default=None,
     help="Restrict to one blob (full hex sha256); clears all rows when omitted.",
 )
-def retry_failed_extractions(sha256_hex: str | None) -> None:
+@click.pass_context
+def retry_failed_extractions(ctx: click.Context, sha256_hex: str | None) -> None:
     """Clear failed-extraction state so the extract worker re-attempts blobs.
 
     Removes both ``failed_extractions`` (poison-pill) rows and
@@ -1703,7 +1733,7 @@ def retry_failed_extractions(sha256_hex: str | None) -> None:
     both tables is removed; with ``--sha256 HEX`` only the single matching blob.
     """
     from localmail.db import open_pool
-    pool = open_pool(_dsn())
+    pool = open_pool(_dsn(ctx))
     try:
         with pool.connection() as conn, conn.cursor() as cur:
             if sha256_hex:

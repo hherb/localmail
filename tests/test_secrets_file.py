@@ -5,6 +5,7 @@
 its credentials at boot, with no interactive session to unlock anything."""
 from __future__ import annotations
 
+import logging
 import stat
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import pytest
 
 from localmail.secrets_file import (
     FileSecretStore,
+    InsecureSecretsDirectory,
     InsecureSecretsFile,
     StaleSecretsTempFile,
 )
@@ -127,6 +129,95 @@ def test_writing_to_an_insecure_file_is_also_refused(store: FileSecretStore) -> 
     store.path.chmod(0o644)
     with pytest.raises(InsecureSecretsFile):
         store.set("other", "x")
+
+
+def test_a_world_writable_parent_directory_is_refused(store: FileSecretStore) -> None:
+    """The file's own 0600 is no protection against a writable parent: anyone
+    with that write bit can rename the file away and drop in their own 0600
+    substitute, which passes every check the file-mode rule can make. A
+    world-writable config directory is never legitimate, so this refuses (#246).
+    """
+    store.set("gmail", "hunter2")
+    store.path.parent.chmod(0o777)
+    with pytest.raises(InsecureSecretsDirectory) as exc:
+        store.get("gmail")
+    assert str(store.path.parent) in str(exc.value)
+    assert "chmod o-w" in str(exc.value)
+
+
+def test_writing_into_a_world_writable_parent_is_refused_too(
+    store: FileSecretStore,
+) -> None:
+    """`set` reads first, so it cannot be a way around the check — and storing a
+    fresh secret into a directory anyone can substitute is the worst moment to
+    stay quiet."""
+    store.set("gmail", "hunter2")
+    store.path.parent.chmod(0o777)
+    with pytest.raises(InsecureSecretsDirectory):
+        store.set("other", "x")
+
+
+def test_a_world_writable_parent_is_refused_before_any_file_exists(
+    tmp_path: Path,
+) -> None:
+    """The substitution works just as well by *planting* a file where none was.
+    Refusing at the first touch beats letting the operator store a secret there
+    and only complaining on the next read."""
+    parent = tmp_path / "cfg"
+    parent.mkdir()
+    parent.chmod(0o777)  # not mkdir(mode=…) — that is masked by the umask
+    store = FileSecretStore(parent / "secrets.json")
+    with pytest.raises(InsecureSecretsDirectory):
+        store.get("gmail")
+
+
+def test_a_group_writable_parent_directory_warns_but_still_works(
+    store: FileSecretStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """0775 is what a stock umask-002 + private-group distro gives a directory
+    the user made, where the group is that user alone. Refusing would wedge a
+    safe install over a distro default, so this warns and carries on."""
+    store.set("gmail", "hunter2")
+    store.path.parent.chmod(0o775)
+    with caplog.at_level(logging.WARNING, logger="localmail.secrets_file"):
+        assert store.get("gmail") == "hunter2"
+    assert any(
+        str(store.path.parent) in r.message and "chmod g-w" in r.message
+        for r in caplog.records
+    ), caplog.text
+
+
+def test_the_group_writable_warning_is_logged_once_per_store(
+    store: FileSecretStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every `get` re-reads the file, and the daemon reads a secret on each
+    reconnect — an un-deduplicated warning would bury the log it shares with the
+    sync errors an operator actually needs to see."""
+    store.set("gmail", "hunter2")
+    store.path.parent.chmod(0o775)
+    with caplog.at_level(logging.WARNING, logger="localmail.secrets_file"):
+        for _ in range(3):
+            store.get("gmail")
+    assert len(caplog.records) == 1, caplog.text
+
+
+def test_a_traversable_parent_directory_is_accepted_in_silence(
+    store: FileSecretStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`~/.config` is routinely 0755. Read and execute bits let somebody learn
+    the file's *name*; they grant no rename and no read of its contents."""
+    store.set("gmail", "hunter2")
+    store.path.parent.chmod(0o755)
+    with caplog.at_level(logging.WARNING, logger="localmail.secrets_file"):
+        assert store.get("gmail") == "hunter2"
+    assert caplog.records == []
+
+
+def test_a_missing_parent_directory_is_not_an_error(store: FileSecretStore) -> None:
+    """A fresh install: `_write` will create it at SECRETS_DIR_MODE, so there is
+    nothing yet to grade."""
+    assert not store.path.parent.exists()
+    assert store.get("gmail") is None
 
 
 def test_corrupt_file_raises_rather_than_reading_as_empty(

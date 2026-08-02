@@ -12,6 +12,7 @@ for the file store as well as the keyring.
 """
 from __future__ import annotations
 
+import enum
 import json
 from collections.abc import Mapping
 
@@ -22,17 +23,18 @@ SECRETS_FILE_MODE = 0o600
 
 #: Applied **only when `FileSecretStore` creates the directory** — an existing
 #: one is left at whatever mode it has (the default path is the operator's own
-#: config dir; see `secrets_file._write`). So this hardens the fresh-install
-#: case and nothing else: the read-side check covers the file alone, which
-#: leaves a group- or world-*writable* pre-existing parent able to substitute
-#: the file wholesale by rename, 0600 and all. Not enforced on read because
-#: `~/.config` is routinely 0755 — and 0775 under the umask-002 + per-user-group
-#: default of several distros, where group is the user alone and refusing would
-#: wedge a safe install. Tracked in #246.
+#: config dir; see `secrets_file._write`). What an existing parent is held to
+#: instead is `directory_exposure`, which is weaker on purpose: see #246 and the
+#: enum's docstring.
 SECRETS_DIR_MODE = 0o700
 
 #: Any group or other bit means somebody besides the owner can reach it.
 _GROUP_AND_OTHER_BITS = 0o077
+
+#: Directory *write* bits. Read/execute bits are deliberately absent: they leak
+#: the secrets file's name, which its own 0600 mode already survives.
+_GROUP_WRITE_BIT = 0o020
+_OTHER_WRITE_BIT = 0o002
 
 #: Bumped only if the on-disk shape changes incompatibly. Readers reject an
 #: unknown version rather than guess.
@@ -64,6 +66,44 @@ def mode_is_private(mode: int) -> bool:
     file-mode predicate can answer.
     """
     return not mode & _GROUP_AND_OTHER_BITS
+
+
+class DirectoryExposure(enum.Enum):
+    """How far the directory holding the secrets file lets somebody else reach.
+
+    Write access to a directory permits `unlink` and `rename` of the entries in
+    it **regardless of their own modes**, so a writable parent can swap a 0600
+    secrets file for one the attacker wrote — the read-side `mode_is_private`
+    check passes, and the daemon authenticates with the substituted credentials.
+    That is what this grades (#246).
+
+    Two verdicts rather than one boolean because the two cases warrant different
+    answers. `WORLD_WRITABLE` is never legitimate on a config directory, so it
+    is refused. `GROUP_WRITABLE` is genuinely ambiguous: under the umask-002 +
+    per-user-private-group default of the Debian/Ubuntu and RHEL families, a
+    directory the user created lands at 0775 with the *user's own* group — safe
+    in practice, and refusing it would wedge a stock install over a distro
+    default. So it warns.
+    """
+
+    PRIVATE = "private"
+    GROUP_WRITABLE = "group-writable"
+    WORLD_WRITABLE = "world-writable"
+
+
+def directory_exposure(mode: int) -> DirectoryExposure:
+    """Grade a *directory's* mode. The sibling of `mode_is_private`, kept
+    separate so the file rule and the directory rule cannot be confused for one
+    another — they differ in both which bits they read and what they cost.
+
+    A mode that is writable by group *and* other reports `WORLD_WRITABLE`: the
+    caller must see the verdict that refuses, not the one that merely warns.
+    """
+    if mode & _OTHER_WRITE_BIT:
+        return DirectoryExposure.WORLD_WRITABLE
+    if mode & _GROUP_WRITE_BIT:
+        return DirectoryExposure.GROUP_WRITABLE
+    return DirectoryExposure.PRIVATE
 
 
 def serialise(secrets: Mapping[str, str]) -> str:

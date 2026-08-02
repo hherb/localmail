@@ -31,7 +31,7 @@ def test_cli_extract_backfill_drains_queue(
         )
     db_conn.commit()
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
 
     runner = CliRunner()
     result = runner.invoke(main, ["extract-backfill", "--no-progress"])
@@ -50,7 +50,7 @@ def test_cli_search_status_reports_attachment_counts(
     monkeypatch, db_dsn, db_conn, cli_config
 ) -> None:
     """search-status --format json must include Phase 2 attachment fields."""
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
     runner = CliRunner()
     result = runner.invoke(main, ["search-status", "--format", "json"])
     assert result.exit_code == 0, result.output
@@ -80,7 +80,7 @@ def test_cli_list_failed_extractions(monkeypatch, db_dsn, db_conn) -> None:
         )
     db_conn.commit()
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
 
     runner = CliRunner()
     result = runner.invoke(
@@ -110,7 +110,7 @@ def test_cli_retry_failed_extractions_clears_rows(monkeypatch, db_dsn, db_conn) 
         )
     db_conn.commit()
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
 
     runner = CliRunner()
     result = runner.invoke(main, ["retry-failed-extractions"])
@@ -142,7 +142,7 @@ def test_cli_retry_failed_extractions_single_sha(monkeypatch, db_dsn, db_conn) -
             )
     db_conn.commit()
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
 
     runner = CliRunner()
     result = runner.invoke(
@@ -178,7 +178,7 @@ def test_cli_retry_failed_extractions_clears_transient(
         )
     db_conn.commit()
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
 
     runner = CliRunner()
     result = runner.invoke(main, ["retry-failed-extractions"])
@@ -211,7 +211,7 @@ def test_cli_retry_failed_extractions_single_sha_clears_transient(
             )
     db_conn.commit()
 
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
 
     runner = CliRunner()
     result = runner.invoke(

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable, Protocol, cast, runtime_checkable
 
 from localmail.config import SearchConfig
+from localmail.search.attachment_kind import extension_of, is_pdf
 
 _LOG = logging.getLogger(__name__)
 
@@ -93,9 +94,15 @@ class AttachmentExtractor(Protocol):
         ...
 
     def extract(
-        self, blob_path: Path, mime_type: str | None
+        self, blob_path: Path, mime_type: str | None, *, filename: str | None = None
     ) -> ExtractedText:
         """Extract text from the blob at `blob_path`.
+
+        `filename` is the blob's *original* per-message name, used for format
+        dispatch when the MIME type is unhelpful. It is a separate argument
+        because `blob_path` is content-addressable
+        (`blobs/<aa>/<bb>/<sha256hex>`) and carries no extension — reading one
+        off it was #216.
 
         Returns an ExtractedText. May return ExtractedText(text='', ...)
         when the file is structurally valid but contains no extractable
@@ -147,21 +154,24 @@ class LightweightExtractor:
         """True iff the MIME type or filename extension is allowlisted."""
         if mime_type and mime_type.lower() in _LW_MIME_PREFIXES:
             return True
-        ext = Path(filename).suffix.lower() if filename else ""
-        return ext in _LW_EXTENSIONS
+        return extension_of(filename) in _LW_EXTENSIONS
 
     def extract(
-        self, blob_path: Path, mime_type: str | None
+        self, blob_path: Path, mime_type: str | None, *, filename: str | None = None
     ) -> ExtractedText:
-        """Extract text from `blob_path`.
+        """Extract text from `blob_path`, dispatching on `mime_type` or on
+        `filename`'s extension.
 
-        Dispatches per format. Returns ExtractedText with text='' when
-        the file is structurally valid but contains no extractable text
-        (e.g. a scanned PDF with no native text stream). Raises
-        ExtractorError on irrecoverable parse failures (corrupt bytes,
-        encryption, etc.).
+        The extension comes from `filename`, never from `blob_path`: the blob
+        path is content-addressable and extensionless, so dispatching on it left
+        every mis-typed attachment falling through to `ExtractorError` (#216).
+
+        Returns ExtractedText with text='' when the file is structurally valid
+        but contains no extractable text (e.g. a scanned PDF with no native text
+        stream). Raises ExtractorError on irrecoverable parse failures (corrupt
+        bytes, encryption, etc.).
         """
-        ext = blob_path.suffix.lower()
+        ext = extension_of(filename)
         mt = (mime_type or "").lower()
 
         if mt == "application/pdf" or ext == ".pdf":
@@ -609,12 +619,10 @@ class DoclingExtractor:
 
     def supports(self, mime_type: str | None, filename: str | None) -> bool:
         """True iff the blob is a PDF (by MIME or by filename extension)."""
-        ext = Path(filename).suffix.lower() if filename else ""
-        mt = (mime_type or "").lower()
-        return mt == "application/pdf" or ext == ".pdf"
+        return is_pdf(mime_type, filename)
 
     def extract(
-        self, blob_path: Path, mime_type: str | None
+        self, blob_path: Path, mime_type: str | None, *, filename: str | None = None
     ) -> ExtractedText:
         """Extract text from a PDF blob via docling.
 

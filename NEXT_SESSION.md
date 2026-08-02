@@ -1,14 +1,16 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-08-02 (session 13).** `origin/main` was at `c03099c`.
+> **Status as of 2026-08-03 (session 13).** `origin/main` was at `c03099c`.
 > This session closed **#248** and the newly-filed **#249** in
 > **[PR #250](https://github.com/hherb/localmail/pull/250)**, merged as
 > **`e620aa5`** (CI green). Both were deterministic failures burning
 > `failed_extractions.retry_count` on blobs no retry could ever fix — together
-> **1332 blobs** had already been given up on, and the count was still climbing
-> during the session. The Mac is deployed, recovered, and now doing **real OCR**
-> on scanned PDFs via ocrmac. The **DGX is unreachable again** (same signature as
-> last session) so it is un-deployed and still carries #249. See §0.
+> **1448 blobs** across the two hosts had already been given up on, and the count
+> was still climbing during the session. **Both hosts are now deployed and
+> recovered**; the Mac additionally does **real OCR** on scanned PDFs via ocrmac.
+> The long-standing "DGX drops off the network" mystery is **diagnosed** (a stale
+> NAT mapping — §0.1). The only thing left outstanding is the headless-secrets
+> **cold-boot proof** (§0.2). See §0.
 
 ## Project context (1-minute version)
 
@@ -128,47 +130,72 @@ per-blob `DocumentConverter()` construction is **not** worth caching ourselves
 (measured, so don't "optimise" it on a hunch). A genuinely blank scan returns 0
 chars and becomes an honest empty sentinel.
 
+### 5. Ops — the DGX
+
+Deployed to **`a7013c5`** over the LAN, 116 #249 victims recovered, and the
+recurring "DGX is unreachable" mystery diagnosed as a stale NAT mapping. Full
+detail in §0.1 — it is written up there rather than here because the LAN address
+and the `PersistentKeepalive` fix are things the next session needs *before* it
+touches that host.
+
 ## What's next
 
 ### 0. Finish what this session could not
 
-#### 0.1 The DGX is unreachable and is now two releases behind
+#### 0.1 ~~The DGX is unreachable and two releases behind~~ — **DONE**
 
-100% packet loss to `10.0.0.3` while the WireGuard tunnel is up locally
-(`utun8` = 10.0.0.2) and general internet is fine — **the same signature as last
-session**, and again nothing this session touched sshd or networking on that
-host. It is now the **second** occurrence, so it is a pattern, not a blip (risk
-5).
+Reached over the **LAN** (`ssh 192.168.68.76`) when `10.0.0.3` was still dead,
+and deployed to **`a7013c5`**. Both units `active`, clean startup (the
+onnxruntime `/sys/class/drm/card0` warning is the known-harmless one).
 
-It sits at `27de69b` and needs `e620aa5`. **#249 affects it** — the NUL path is
-in the *lightweight* extractor, which the DGX runs. (#248 cannot bite it: it
-carries only `--extra mcp`, so docling is not installed there.)
+**#249 had bitten it, as predicted** — the NUL path is in the *lightweight*
+extractor, which the DGX runs. (#248 could not: it carries only `--extra mcp`,
+so docling is not installed there.) 116 blobs were sitting at `retry_count = 3`
+with `DataError`/`unexpected`.
 
-```bash
-ssh hherb@10.0.0.3 'export PATH="$HOME/.local/bin:$PATH"; cd ~/src/localmail \
-  && git pull && unset VIRTUAL_ENV && uv sync --extra mcp \
-  && systemctl --user restart localmail-daemon localmail-serve'
-# then check whether #249 bit it, and clear if so:
-ssh hherb@10.0.0.3 'export PATH="$HOME/.local/bin:$PATH"; cd ~/src/localmail \
-  && unset VIRTUAL_ENV && uv run localmail list-failed-extractions --limit 20'
-ssh hherb@10.0.0.3 '... && uv run localmail retry-failed-extractions'
+Recovery was a **targeted** DELETE, not the blanket `retry-failed-extractions`
+used on the Mac: the other 126 rows there are *genuine* poison pills (85
+encrypted PDFs, 29 truncated/corrupt PDFs, 9 malformed ICS, 1 bad docx) and
+should keep their `retry_count` rather than re-fail three times each.
+
+```sql
+DELETE FROM failed_extractions
+ WHERE extractor = 'unexpected' AND error_class = 'DataError'
+   AND error_message LIKE '%NUL (0x00) bytes%';
 ```
-**Acceptance:** DGX at `e620aa5`, both units `active`, and no
-`DataError`/`unexpected` rows in `failed_extractions`.
+
+Result: `lightweight@1.0` 3657 → **3773** (exactly +116), `failed_extractions`
+steady at 126 with **zero** new `DataError` rows, queue otherwise drained.
+
+**The WireGuard drop is diagnosed (was risk 5): a stale NAT mapping.** Both ends
+were healthy the whole time — the Mac's `utun8` up, and on the DGX `wg0` UP with
+`10.0.0.3/24` and `wg-quick@wg0` `active`/`enabled`. One `ping 10.0.0.2` **from
+the DGX** restored it instantly, after which the Mac reached `10.0.0.3` at 0%
+loss. The DGX is behind NAT; while idle its mapping expires, inbound packets
+have nowhere to land, and nothing reopens the hole until the DGX transmits —
+which is also why it "came back on its own" last session.
+
+**Fix, not yet applied (needs root):** add `PersistentKeepalive = 25` to the
+`[Peer]` block of `/etc/wireguard/wg0.conf`, then
+`sudo systemctl restart wg-quick@wg0`. That file is root-only 0600 and the DGX
+has no passwordless sudo, so it cannot be done over a plain ssh session.
+Meanwhile `ssh 192.168.68.76` always works. (Note the RTT through the tunnel is
+~700 ms to a LAN-adjacent host, so the path hairpins out to the internet.)
 
 Note: `uv` is **not** on the non-interactive ssh PATH — export it, or `uv sync`
 silently no-ops (`uv: command not found`) while the restart still reports fine.
 
-#### 0.2 The headless-secrets cold-boot proof *(carried from sessions 11 and 12)*
+#### 0.2 The headless-secrets cold-boot proof *(carried from sessions 11, 12 and 13)*
 
-Still unproven, and blocked on §0.1 anyway. The keyring on the DGX is currently
-unlocked, so a restart demonstrates nothing; only a cold boot exercises the
-failure the `file` backend exists to remove.
+**The one thing still outstanding**, and no longer blocked — the DGX is
+reachable on the LAN and confirmed on `backend = "file"`. The keyring there is
+currently unlocked, so a restart demonstrates nothing; only a cold boot
+exercises the failure the `file` backend exists to remove.
 
 ```bash
-ssh hherb@10.0.0.3 'sudo reboot'
-# once back:
-ssh hherb@10.0.0.3 'systemctl --user is-active localmail-daemon localmail-serve;
+ssh 192.168.68.76 'sudo reboot'
+# once back (LAN address always works; 10.0.0.3 may need a packet from the DGX):
+ssh 192.168.68.76 'systemctl --user is-active localmail-daemon localmail-serve;
   journalctl --user -u localmail-daemon -b | grep -c KeyringLocked'   # expect 0
 ```
 **Acceptance:** both units `active` after a cold boot with **zero**
@@ -253,10 +280,14 @@ hang).
    `DELETE FROM attachment_text WHERE extractor = 'type-skipped'`.
    `retry-failed-extractions` deliberately does not: it is about *failures*, and
    a type-skip is a decision.
-5. **The DGX has now dropped off the network twice, mid-session both times.**
-   Tunnel up locally, general internet fine, 100% loss to the host. Nothing in
-   either session touched its networking. Worth a look at the host itself (or its
-   WireGuard peer / power state) rather than treating it as noise a third time.
+5. **"The DGX is unreachable" means a stale NAT mapping, not a dead host —
+   diagnosed, fix not yet applied.** See §0.1 for the proof. Reach it at
+   **`ssh 192.168.68.76`**, which works whenever the tunnel does not; deploys,
+   systemd, and `docker exec … psql` all work normally over it. The real fix is
+   `PersistentKeepalive = 25` in the `[Peer]` block of
+   `/etc/wireguard/wg0.conf` + `sudo systemctl restart wg-quick@wg0`, which
+   **needs root** — the file is 0600 and the DGX has no passwordless sudo, so it
+   could not be applied from this session.
 6. **`secrets.configure`'s pin is kept even though #245 is fixed** *(carried)*.
    `search.create_searcher(cfg=None)` still falls back to a no-path
    `load_config()` for library callers, and the pin makes *a default-config read
@@ -315,15 +346,13 @@ unset VIRTUAL_ENV && uv run mypy src/localmail
 # §0.3 — watch the extraction backlog drain:
 unset VIRTUAL_ENV && uv run localmail search-status
 
-# §0.1 — the DGX (unreachable at handoff; check first):
-ping -c 3 10.0.0.3
-ssh hherb@10.0.0.3 'export PATH="$HOME/.local/bin:$PATH"; cd ~/src/localmail \
-  && git pull && unset VIRTUAL_ENV && uv sync --extra mcp \
-  && systemctl --user restart localmail-daemon localmail-serve'
+# The DGX — deployed at handoff. If 10.0.0.3 is dead it is a stale NAT
+# mapping (risk 5), NOT a dead host; the LAN address always works:
+ssh 192.168.68.76 'systemctl --user is-active localmail-daemon localmail-serve'
 
-# §0.2 — the cold-boot proof:
-ssh hherb@10.0.0.3 'sudo reboot'
-ssh hherb@10.0.0.3 'journalctl --user -u localmail-daemon -b | grep -c KeyringLocked'
+# §0.2 — the cold-boot proof (the one item still outstanding):
+ssh 192.168.68.76 'sudo reboot'
+ssh 192.168.68.76 'journalctl --user -u localmail-daemon -b | grep -c KeyringLocked'
 
 # Reproduce CI's docling-less environment locally (risk 2) — a pytest plugin
 # that blocks `import docling` via sys.meta_path; see the session transcript.
@@ -335,7 +364,7 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
 ```
 
 All session-13 code is **`e620aa5`**; `origin/main` is that plus the handoff
-commit. **The Mac is deployed to it; the DGX is not** (unreachable, still at
-`27de69b`). Latest migration **`0034_transient_fetches_gave_up.sql`** (applied to
+commits. **Both hosts are deployed** (the Mac at `e620aa5`, the DGX at
+`a7013c5`). Latest migration **`0034_transient_fetches_gave_up.sql`** (applied to
 both deployments in session 11); next free slot `0035_*.sql`. **Open issues: 13**
 — all carried; #248 and #249 closed with #250. Dependabot: **0** open alerts.

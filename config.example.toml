@@ -163,6 +163,26 @@ checkpoint_seconds = 2
 # A running job idle longer than this is shown stalled (red) in the panel.
 stale_seconds = 60
 
+[search]
+# Every search/extraction tunable lives here and every one has a default, so the
+# section may be omitted entirely. Only the OCR lever is spelled out, because it
+# is the one whose right value depends on what you installed.
+#
+# Which OCR engine docling uses for scanned PDFs (PDFs with no text stream).
+# docling ships no engine itself, so one must be installed alongside it.
+#   "auto" (default) - use whichever engine is installed (ocrmac, rapidocr,
+#                      easyocr). With none installed, scanned PDFs are recorded
+#                      as `lightweight-empty` rather than failing; install an
+#                      engine later and OCR starts with no config change.
+#   "none"           - skip OCR entirely (docling still does layout/tables).
+#   "<engine>"       - pin one: easyocr, ocrmac, rapidocr, tesseract, ...
+#                      Validated against what your docling build registers.
+# On macOS the [extraction] extra installs ocrmac (Apple Vision; no torch, no
+# model downloads), so "auto" gets working OCR out of the box.
+# extractor_ocr_engine = "auto"
+# Languages passed to the OCR engine.
+# extractor_ocr_languages = ["en"]
+
 # --- accounts -----------------------------------------------------------------
 
 # [[accounts]]

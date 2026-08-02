@@ -42,6 +42,13 @@ dependencies = [
 [project.optional-dependencies]
 extraction = [
     "docling>=2.94.0",
+    # docling ships no OCR engine of its own, so a scanned PDF gets no text
+    # unless one is installed (#248). ocrmac is a thin PyObjC wrapper around
+    # Apple Vision: no torch, no model downloads, and native on the platform.
+    # The marker keeps it off Linux, where `search.extractor_ocr_engine`'s
+    # "auto" default simply finds no engine and degrades to no-OCR rather than
+    # failing — install easyocr or rapidocr there to opt in.
+    "ocrmac>=1.0 ; sys_platform == 'darwin'",
 ]
 mcp = [
     "mcp>=1.13.0",

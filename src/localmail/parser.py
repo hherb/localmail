@@ -14,6 +14,8 @@ from email.message import EmailMessage, MIMEPart
 from email.utils import getaddresses
 from typing import Any
 
+from localmail.pgtext import strip_nuls, strip_nuls_all
+
 
 @dataclass
 class Attachment:
@@ -90,19 +92,6 @@ def _headers_dict(msg: EmailMessage) -> dict[str, list[str]]:
     return out
 
 
-def _no_nul(s: str | None) -> str | None:
-    """Strip NUL bytes — PostgreSQL TEXT rejects them. Real-world mail
-    occasionally contains \\x00 in subject/body when a sender mangles encodings
-    or attaches binary garbage to a text part."""
-    if s is None or "\x00" not in s:
-        return s
-    return s.replace("\x00", "")
-
-
-def _no_nul_list(xs: list[str]) -> list[str]:
-    return [x.replace("\x00", "") if "\x00" in x else x for x in xs]
-
-
 def _decoded_payload(part: MIMEPart[Any, Any]) -> bytes:
     """Decoded payload bytes for a leaf part, or ``b""`` when absent.
 
@@ -148,7 +137,7 @@ def _content_id(part: EmailMessage) -> str | None:
     cid = str(raw).strip()
     if cid.startswith("<") and cid.endswith(">"):
         cid = cid[1:-1]
-    return _no_nul(cid) or None
+    return strip_nuls(cid) or None
 
 
 def _attachments(msg: EmailMessage) -> list[Attachment]:
@@ -207,13 +196,13 @@ def parse_message(raw: bytes) -> ParsedMessage:
     subject = msg.get("Subject")
     subject = str(subject) if subject is not None else None
 
-    headers = {k: _no_nul_list(vs) for k, vs in _headers_dict(msg).items()}
+    headers = {k: strip_nuls_all(vs) for k, vs in _headers_dict(msg).items()}
     attachments = _attachments(msg)
     # Normalize "" -> None so empty subjects/bodies land as SQL NULL rather
     # than as an empty string the schema doesn't require.
-    subject_clean = _no_nul(subject) or None
-    text_clean = _no_nul(text) or None
-    html_clean = _no_nul(html) or None
+    subject_clean = strip_nuls(subject) or None
+    text_clean = strip_nuls(text) or None
+    html_clean = strip_nuls(html) or None
 
     # Attachment-only messages (no subject, no text body) would otherwise be
     # invisible to FTS and to human browsers. Synthesize a placeholder so the
@@ -223,20 +212,20 @@ def parse_message(raw: bytes) -> ParsedMessage:
         if not subject_clean:
             subject_clean = "{attachments only}"
         if not text_clean:
-            names = [(_no_nul(a.filename) or "attachment") for a in attachments]
+            names = [(strip_nuls(a.filename) or "attachment") for a in attachments]
             text_clean = "{attachments: " + ", ".join(names) + "}"
 
     return ParsedMessage(
-        message_id=_no_nul(message_id),
+        message_id=strip_nuls(message_id),
         raw_sha256=hashlib.sha256(raw).digest(),
-        in_reply_to=_no_nul(in_reply_to),
-        refs=_no_nul_list(_refs_list(msg)),
+        in_reply_to=strip_nuls(in_reply_to),
+        refs=strip_nuls_all(_refs_list(msg)),
         subject=subject_clean,
-        from_addr=_no_nul(from_addr),
-        from_name=_no_nul(from_name),
-        to_addrs=_no_nul_list(_address_list(msg, "To")),
-        cc_addrs=_no_nul_list(_address_list(msg, "Cc")),
-        bcc_addrs=_no_nul_list(_address_list(msg, "Bcc")),
+        from_addr=strip_nuls(from_addr),
+        from_name=strip_nuls(from_name),
+        to_addrs=strip_nuls_all(_address_list(msg, "To")),
+        cc_addrs=strip_nuls_all(_address_list(msg, "Cc")),
+        bcc_addrs=strip_nuls_all(_address_list(msg, "Bcc")),
         date_sent=_date_sent(msg),
         headers=headers,
         body_text=text_clean,

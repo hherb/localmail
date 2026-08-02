@@ -430,6 +430,34 @@ nothing does it automatically:
 DELETE FROM attachment_text WHERE extractor = 'type-skipped';
 ```
 
+### Scanned PDFs and OCR
+
+A PDF whose pages are images carries no text stream, so the pure-Python
+extractor gets nothing and the docling fallback takes over. docling can OCR
+those pages, but it **ships no OCR engine of its own** — one has to be
+installed alongside it.
+
+`search.extractor_ocr_engine` (default `"auto"`) decides which:
+
+| value | behaviour |
+|---|---|
+| `"auto"` | Use whichever engine is installed (docling probes ocrmac → rapidocr → easyocr). If none is, pages pass through un-OCR'd and the PDF is recorded as `lightweight-empty` — no error. Install an engine later and OCR starts working with no config change. |
+| `"none"` | Skip OCR entirely. docling still contributes layout and table-structure analysis, so the fallback keeps some value. |
+| an engine name | Pin one: `easyocr`, `ocrmac`, `rapidocr`, `tesseract`, … Validated against what your docling build actually registers. |
+
+On macOS the `[extraction]` extra installs **ocrmac** (a thin wrapper around
+Apple Vision — no torch, no model downloads), so `uv sync --all-extras` gets you
+working OCR out of the box. On Linux, install `easyocr` or `rapidocr` to opt in;
+without one, `"auto"` simply degrades as above.
+
+An engine that is *named* but not importable, or a name docling does not
+register, is a **configuration** error: one WARNING naming the problem, and the
+blob's extraction is **held** on the transient counter rather than failed, so
+`retry_count` is never spent on a problem no retry can fix. Fix the config and
+run `localmail retry-failed-extractions` to release them.
+
+### How extraction failures are classified
+
 Attachment extraction follows the same SAVEPOINT discipline but distinguishes
 two error classes (so a docling model-download blip doesn't permanently mark
 a perfectly fine PDF as failed):
@@ -450,9 +478,18 @@ a perfectly fine PDF as failed):
   **consecutive** transient failures the blob stops being re-attempted and one
   distinct *"giving up"* WARNING is logged; a successful extraction resets the
   counter (#153, resolved).
+- **Configuration** — an OCR engine that is named but not installed, or a name
+  docling does not register (#248). Not the blob's fault and not fixable by
+  retrying, so it is held on the same transient counter and **never** burns
+  `retry_count`; one WARNING per process names the engine and the way out.
 - **Poison-pill** — corrupt PDF, encrypted, parser raise, anything else.
   Recorded in `failed_extractions` with `retry_count += 1`, permanently
   skipped once `retry_count >= search.extract_worker_max_retries` (default 3).
+
+Extracted text is stripped of NUL bytes before it is stored (#249). Postgres `TEXT`
+rejects `\x00`, and a document that contains one would otherwise fail its
+INSERT and be recorded as a poison-pill under the extractor name `unexpected` —
+permanently, since the same bytes always re-extract to the same NUL.
 
 ```bash
 uv run localmail list-failed-extractions      # show recorded poison-pills

@@ -30,6 +30,7 @@ from localmail.account_names import account_name_error
 # client_ip.py is constrained, because this is the one config→api edge.)
 from localmail.api.client_ip import TrustedProxies
 from localmail.fetch_retry import DEFAULT_MAX_BODY_FETCH_HOLD_S
+from localmail.ocr_policy import OCR_AUTO
 
 
 class DatabaseConfig(BaseModel):
@@ -549,6 +550,22 @@ class SearchConfig(BaseModel):
     extractor_max_extracted_chars: int = 1_000_000
     extractor_docling_max_pages: int = 200
     extractor_ocr_languages: list[str] = Field(default_factory=lambda: ["en"])
+    # Which OCR engine docling should use for scanned PDFs (#248).
+    #
+    # `"auto"` (default) is docling's own OcrAutoOptions: it probes ocrmac →
+    # rapidocr → easyocr and, when none is installed, passes pages through
+    # without raising — a scanned PDF then becomes an honest lightweight-empty
+    # sentinel instead of a poison-pill failure. Install an engine later and
+    # OCR starts working with no config change.
+    #
+    # `"none"` disables OCR entirely (docling still does layout/table
+    # analysis). Any other value is passed to docling as a registry kind
+    # (`easyocr`, `ocrmac`, `rapidocr`, `tesseract`, …) and validated against
+    # the live registry at extract time — deliberately not a `Literal` here,
+    # which would go stale whenever docling adds or renames an engine.
+    #
+    # See localmail.search.ocr_policy.
+    extractor_ocr_engine: str = OCR_AUTO
     # Chardet confidence threshold for text-encoding detection. Below
     # this, fall back to latin-1 rather than trust a low-confidence guess.
     extractor_chardet_confidence_min: float = 0.5

@@ -68,22 +68,46 @@ class KeyringSecretStore:
 
 _store: SecretStore = KeyringSecretStore()
 
+#: True once a config the operator *named* installed the backend. Guards the
+#: pin described in `configure`.
+_pinned_by_named_config = False
 
-def configure(cfg: SecretsConfig) -> None:
-    """Install the backend named by `cfg` for the rest of this process."""
-    global _store
+
+def configure(cfg: SecretsConfig, *, named_config: bool = False) -> None:
+    """Install the backend named by `cfg` for the rest of this process.
+
+    `named_config` says the config came from a path the operator chose — a
+    `--config PATH` or `$LOCALMAIL_CONFIG` that is not the default location.
+    Such an install is **pinned**: a later load of the *default* config leaves
+    it alone.
+
+    That asymmetry exists because `load_config` is called both ways in one
+    process. Several CLI commands (`extract-backfill`, `embed-backfill`,
+    `lang-backfill`, `search-status`, `estimate-upgrade`) call it with no path
+    at all, so they read the default config regardless of `--config` — a
+    pre-existing bug, tracked as #245. Without the pin, attaching the
+    backend install to *every* load meant such a read could swap a headless
+    host's `file` backend back to `keyring` mid-command, reintroducing exactly
+    the boot-time `KeyringLocked` failure this backend exists to prevent, and
+    doing it silently.
+    """
+    global _store, _pinned_by_named_config
+    if _pinned_by_named_config and not named_config:
+        return
     _store = (
         FileSecretStore(cfg.file_path)
         if cfg.backend == "file"
         else KeyringSecretStore()
     )
+    _pinned_by_named_config = named_config
 
 
 def reset_to_default() -> None:
-    """Restore the keyring backend. Used by the test suite so a config-loading
-    test cannot leak its backend into the next one."""
-    global _store
+    """Restore the keyring backend and clear the pin. Used by the test suite so
+    a config-loading test cannot leak its backend into the next one."""
+    global _store, _pinned_by_named_config
     _store = KeyringSecretStore()
+    _pinned_by_named_config = False
 
 
 def active_backend_name() -> str:

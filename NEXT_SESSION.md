@@ -53,7 +53,11 @@ completed and returned exactly the credentials the operator had cut off.
 
 - `codes.consume_code` now burns the code **and** re-decides validity in one CTE
   under a single snapshot → `ConsumeResult(burned, user_valid)`. A vanished user
-  row yields `user_valid=False` via the LEFT JOIN's NULL: fail closed.
+  row is closed by an explicit `u.id IS NOT NULL`, **not** by the LEFT JOIN's
+  NULL: against the all-NULL row every `IS NULL` test in the predicate is TRUE,
+  so it returns TRUE and a `COALESCE(…, FALSE)` never fires. (This shipped as a
+  COALESCE first and was corrected in review — see
+  `test_consume_of_an_orphaned_code_reports_it_invalid`.)
 - **Burning stays unconditional.** The issue text proposed a `DELETE … USING
   api_users` guarded on the user, which would leave a revoked user's code
   *unburned* and replayable for its remaining TTL — breaking the #219 single-use

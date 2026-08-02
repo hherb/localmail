@@ -31,6 +31,10 @@ class InsecureSecretsFile(RuntimeError):
     """The secrets file is readable by somebody other than its owner."""
 
 
+class StaleSecretsTempFile(RuntimeError):
+    """A temp file from an interrupted write is blocking the next one."""
+
+
 class FileSecretStore:
     """Read/write secrets in a 0600 JSON file. Not thread-safe against a
     concurrent writer in another process — writes are last-one-wins, which is
@@ -83,14 +87,42 @@ class FileSecretStore:
         # briefly present at a wider mode. O_EXCL so an existing stray temp is
         # an error rather than something we silently write a secret into.
         tmp = self.path.with_name(f".{self.path.name}.tmp")
-        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, SECRETS_FILE_MODE)
+        try:
+            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, SECRETS_FILE_MODE)
+        except FileExistsError as exc:
+            # The handler below clears the temp on every failure it can see, so
+            # reaching here means a write died where no handler runs — SIGKILL,
+            # OOM, power loss. Every later write then fails too, and a bare
+            # FileExistsError naming a dotfile the operator has never heard of
+            # is not a recoverable message. It may itself hold a secret, so say
+            # what it is rather than quietly clobbering it.
+            raise StaleSecretsTempFile(
+                f"{tmp} is left over from an interrupted write and is blocking "
+                f"this one. It may contain secrets; inspect it if {self.path} "
+                f"looks wrong, then remove it with: rm {tmp}"
+            ) from exc
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(serialise(secrets))
+                # Durability, not just atomicity: os.replace orders the rename
+                # against concurrent *readers*, but on an unclean shutdown an
+                # unflushed rename can land pointing at a zero-length file. A
+                # store whose whole purpose is surviving reboots cannot take
+                # that trade — recovering costs an interactive OAuth consent
+                # round trip, on a host with no browser.
+                fh.flush()
+                os.fsync(fh.fileno())
             # mkdir/open honour the umask, so set the mode explicitly rather
             # than trusting the process environment.
             os.chmod(tmp, SECRETS_FILE_MODE)
             os.replace(tmp, self.path)
+            # fsync the directory too, or the rename itself can be lost even
+            # though the file's own contents were durable.
+            dir_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise

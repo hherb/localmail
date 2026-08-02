@@ -92,6 +92,72 @@ def test_loading_a_config_selects_its_backend(tmp_path: Path) -> None:
     assert store.exists()
 
 
+def test_a_default_config_read_cannot_undo_a_named_configs_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The footgun in attaching backend installation to *every* config load.
+
+    Several CLI commands call `load_config()` with no path, so they read the
+    default config even under `--config`. Without the pin, that incidental read
+    would swap a headless host's `file` backend back to `keyring` mid-command
+    and the next secret read would fail with `KeyringLocked` — the exact
+    failure this backend exists to remove, reintroduced silently.
+    """
+    default_cfg = tmp_path / "default" / "config.toml"
+    default_cfg.parent.mkdir()
+    default_cfg.write_text(
+        '[database]\ndsn = "postgresql:///localmail"\n'
+        f'[attachments]\nroot = "{tmp_path / "att"}"\n'
+        '[secrets]\nbackend = "keyring"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOCALMAIL_CONFIG", str(default_cfg))
+
+    store = tmp_path / "s.json"
+    named = _write_config(
+        tmp_path, f'[secrets]\nbackend = "file"\nfile_path = "{store}"\n'
+    )
+    load_config(named)
+    assert secrets.active_backend_name() == "file"
+
+    load_config()  # what extract-backfill and friends do
+    assert secrets.active_backend_name() == "file"
+
+
+def test_a_named_config_may_still_replace_another_named_configs_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin protects against an *incidental* default read, not against the
+    operator naming a second config on purpose."""
+    monkeypatch.setenv("LOCALMAIL_CONFIG", str(tmp_path / "nonexistent.toml"))
+    first = _write_config(
+        tmp_path, f'[secrets]\nbackend = "file"\nfile_path = "{tmp_path / "s.json"}"\n'
+    )
+    load_config(first)
+    assert secrets.active_backend_name() == "file"
+
+    second = tmp_path / "second.toml"
+    second.write_text(
+        '[database]\ndsn = "postgresql:///localmail"\n'
+        f'[attachments]\nroot = "{tmp_path / "att"}"\n'
+        '[secrets]\nbackend = "keyring"\n',
+        encoding="utf-8",
+    )
+    load_config(second)
+    assert secrets.active_backend_name() == "keyring"
+
+
+def test_the_pin_does_not_survive_reset_to_default(tmp_path: Path) -> None:
+    """Otherwise the autouse conftest fixture would stop isolating tests after
+    the first one that loads a named config."""
+    named = _write_config(
+        tmp_path, f'[secrets]\nbackend = "file"\nfile_path = "{tmp_path / "s.json"}"\n'
+    )
+    load_config(named)
+    secrets.reset_to_default()
+    assert secrets.active_backend_name() == "keyring"
+
+
 def test_config_expands_a_tilde_in_the_file_path() -> None:
     cfg = SecretsConfig(backend="file", file_path="~/somewhere/secrets.json")
     assert "~" not in str(cfg.file_path)

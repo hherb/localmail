@@ -735,14 +735,21 @@ def load_config(path: Path | None = None) -> Config:
     does. See `secrets.py`'s module docstring for why the alternative — passing
     a store down through the daemon and admin layers — was rejected.
 
+    A config read from a path the operator did *not* choose is marked as such,
+    so it cannot overwrite a backend already installed from one they did. Some
+    CLI commands read the default config unconditionally, and without that
+    marking an incidental read could swap a `--config`-selected backend out
+    mid-command; `secrets.configure` documents the case.
+
     Imported inside the function because `secrets` reaches back here for the
     `SecretsConfig` type; at module scope the two would close an import cycle.
     """
     from localmail import secrets
 
-    path = path or default_config_path()
+    default_path = default_config_path()
+    path = path or default_path
     with open(path, "rb") as f:
         data = tomllib.load(f)
     cfg = Config.model_validate(data)
-    secrets.configure(cfg.secrets)
+    secrets.configure(cfg.secrets, named_config=path != default_path)
     return cfg

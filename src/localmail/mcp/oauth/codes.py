@@ -126,8 +126,19 @@ def consume_code(conn: psycopg.Connection, raw_code: str) -> ConsumeResult:
     exactly the credentials the operator had just cut off.
 
     The CTE keeps both under one snapshot, so no revocation can slip between the
-    burn and the check. A user row that has vanished outright yields
-    ``user_valid=False`` (the LEFT JOIN's NULL), failing closed.
+    burn and the check.
+
+    ``u.id IS NOT NULL`` is the fail-closed guard for a user row that has
+    vanished outright, and it has to be written explicitly: against the LEFT
+    JOIN's all-NULL row every ``IS NULL`` test inside ``credential_valid_sql``
+    is TRUE, so the predicate reads a deleted user as *valid*. It returns TRUE
+    rather than NULL, so wrapping it in ``COALESCE(..., FALSE)`` — the obvious
+    guard, and the one this first shipped with — catches nothing at all.
+    Today the branch is unreachable, because ``oauth_authorization_codes.user_id``
+    is ``ON DELETE CASCADE`` and a deleted user takes its codes with it, leaving
+    nothing to burn; the guard is what keeps that an implementation detail of the
+    schema rather than the only thing standing between a deleted user and a token
+    pair. Pinned by ``test_consume_of_an_orphaned_code_reports_it_invalid``.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -135,10 +146,9 @@ def consume_code(conn: psycopg.Connection, raw_code: str) -> ConsumeResult:
             "  DELETE FROM oauth_authorization_codes WHERE code_sha256 = %s"
             "  RETURNING user_id, created_at"
             ") "
-            "SELECT COALESCE("
+            "SELECT u.id IS NOT NULL AND "
             + credential_valid_sql(user="u", credential="b")
-            + ", FALSE) "
-            "FROM burned b LEFT JOIN api_users u ON u.id = b.user_id",
+            + " FROM burned b LEFT JOIN api_users u ON u.id = b.user_id",
             (hash_token(raw_code),),
         )
         row = cur.fetchone()

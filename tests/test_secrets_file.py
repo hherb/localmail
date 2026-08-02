@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from localmail.secrets_file import FileSecretStore, InsecureSecretsFile
+from localmail.secrets_file import (
+    FileSecretStore,
+    InsecureSecretsFile,
+    StaleSecretsTempFile,
+)
 from localmail.secrets_store import (
     SECRETS_DIR_MODE,
     SECRETS_FILE_MODE,
@@ -146,3 +150,53 @@ def test_values_survive_a_reopen(tmp_path: Path) -> None:
 def test_non_ascii_secret_round_trips(store: FileSecretStore) -> None:
     store.set("acct", "pä§§wörd✓")
     assert store.get("acct") == "pä§§wörd✓"
+
+
+def _stray_temp(store: FileSecretStore) -> Path:
+    """The temp path `_write` uses, as an interrupted write would have left it."""
+    return store.path.with_name(f".{store.path.name}.tmp")
+
+
+def test_a_stale_temp_file_raises_an_actionable_error(store: FileSecretStore) -> None:
+    """O_EXCL on a fixed temp name means one interrupted write wedges every
+    later one. A SIGKILL leaves no handler to clean up, so the message has to
+    carry the recovery — a bare FileExistsError naming a dotfile does not."""
+    store.set("gmail", "hunter2")
+    _stray_temp(store).write_text("interrupted")
+    with pytest.raises(StaleSecretsTempFile) as exc:
+        store.set("gmail", "hunter3")
+    assert str(_stray_temp(store)) in str(exc.value)
+    assert "rm " in str(exc.value)
+
+
+def test_a_stale_temp_file_is_never_clobbered(store: FileSecretStore) -> None:
+    """It may hold the secret from the interrupted write, so refusing has to
+    mean leaving it intact for the operator to inspect."""
+    store.set("gmail", "hunter2")
+    _stray_temp(store).write_text("possibly-a-secret")
+    with pytest.raises(StaleSecretsTempFile):
+        store.set("gmail", "hunter3")
+    assert _stray_temp(store).read_text() == "possibly-a-secret"
+    assert store.get("gmail") == "hunter2", "the live file must be untouched"
+
+
+def test_writes_resume_once_the_stale_temp_is_removed(store: FileSecretStore) -> None:
+    store.set("gmail", "hunter2")
+    _stray_temp(store).write_text("interrupted")
+    with pytest.raises(StaleSecretsTempFile):
+        store.set("gmail", "hunter3")
+    _stray_temp(store).unlink()
+    store.set("gmail", "hunter3")
+    assert store.get("gmail") == "hunter3"
+
+
+def test_a_failed_write_leaves_no_temp_behind(store: FileSecretStore) -> None:
+    """The cleanup handler is what keeps the stale-temp path rare — without it
+    every serialisation failure would wedge the store until an operator noticed.
+    """
+    store.set("gmail", "hunter2")
+    # json.dumps rejects it, and it does so *after* the temp has been created.
+    with pytest.raises(TypeError):
+        store.set("bad", object())  # type: ignore[arg-type]
+    assert not _stray_temp(store).exists()
+    assert store.get("gmail") == "hunter2"

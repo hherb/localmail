@@ -26,9 +26,22 @@ def credential_valid_sql(*, user: str, credential: str) -> str:
     cutoff moment, so a credential minted *at* that moment is on the surviving
     side of it. That keeps "revoke, then log in again" working — a revocation is
     not a ban.
+
+    The result is wrapped in its own parentheses. Every current call site splices
+    it into an ``AND`` chain, where the inner ``OR``'s own parens would be enough
+    — but this is the shared authority for the wording, so it has to survive
+    being spliced after an ``OR`` too, where an unwrapped ``A AND (B OR C)``
+    would regroup and silently widen what the caller honours.
+
+    **It does not defend against a missing user row.** Against a ``LEFT JOIN``
+    that found no ``api_users`` match, every ``IS NULL`` test here is TRUE of the
+    all-NULL row, so the fragment returns TRUE — not NULL, so a surrounding
+    ``COALESCE(..., FALSE)`` does not catch it either. A caller that outer-joins
+    the user must add its own ``<user>.id IS NOT NULL``; see
+    ``codes.consume_code``, the only such caller.
     """
     return (
-        f"{user}.disabled_at IS NULL "
+        f"({user}.disabled_at IS NULL "
         f"AND ({user}.sessions_invalidated_at IS NULL "
-        f"OR {credential}.created_at >= {user}.sessions_invalidated_at)"
+        f"OR {credential}.created_at >= {user}.sessions_invalidated_at))"
     )

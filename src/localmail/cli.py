@@ -13,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import click
+import keyring.errors
 import psycopg
 
 import logging
@@ -784,16 +785,30 @@ def migrate_secrets(ctx: click.Context, dry_run: bool) -> None:
 
     source_store = secrets.KeyringSecretStore()
     candidates = [n for name in names for n in (name, refresh_username(name))]
-    plan = plan_secret_migration(
-        names, {username: source_store.get(username) for username in candidates}
-    )
+    try:
+        source = {username: source_store.get(username) for username in candidates}
+    except keyring.errors.KeyringError as exc:
+        # This is the command an operator reaches for *because* the keyring has
+        # become unreadable, so a raw traceback out of the rescue tool is the
+        # worst available answer. Name the precondition instead.
+        raise click.ClickException(
+            f"could not read the OS keyring ({exc}). Run this from an "
+            "interactive desktop session with the keyring unlocked — that is "
+            "the only context it can be read from, and the reason this "
+            "migration exists."
+        ) from exc
+    plan = plan_secret_migration(names, source)
 
     target = FileSecretStore(cfg.secrets.file_path)
     verb = "would copy" if dry_run else "copied"
     for item in plan.to_copy:
+        value = item.value
+        if value is None:  # pragma: no cover - to_copy is defined by value not None
+            raise click.ClickException(
+                f"migration planner put {item.username} in to_copy with no value"
+            )
         if not dry_run:
-            assert item.value is not None  # to_copy is defined by value is not None
-            target.set(item.username, item.value)
+            target.set(item.username, value)
         click.echo(f"{verb} {item.account_name} ({item.kind})")
     for item in plan.absent:
         click.echo(f"skipped {item.account_name} ({item.kind}): not in keyring")

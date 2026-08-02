@@ -100,6 +100,17 @@ backend into the next one.
 - Writes go to an `O_CREAT|O_EXCL` temp in the **same directory**, then
   `os.replace`. A reader therefore never sees a partial file, and the secret is
   never briefly present at a wider mode.
+- The temp is `fsync`ed before the rename and the **directory** after it.
+  `os.replace` buys atomicity against a concurrent reader, not durability: on an
+  unclean shutdown an unflushed rename can land pointing at a zero-length file.
+  A store that exists to survive reboots cannot take that trade — recovering a
+  lost refresh token costs an interactive OAuth consent round trip, on a host
+  with no browser.
+- `O_EXCL` on a fixed temp name means a write killed where no cleanup handler
+  runs (SIGKILL, OOM, power loss) blocks every later write. That surfaces as
+  `StaleSecretsTempFile` naming the `rm` to run, rather than a bare
+  `FileExistsError` for a dotfile the operator has never seen. The stray temp is
+  never clobbered: it may hold the secret from the interrupted write.
 - A missing file reads as "no secrets stored" — not an error. That matches an
   empty keyring and keeps `list-accounts` working on a fresh install.
 - `delete` of an absent key is a no-op, matching the keyring backend's

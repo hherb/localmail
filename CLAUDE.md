@@ -40,6 +40,14 @@ attachment tree without touching IMAP.
     `open_connection` → `sync` → `idle`/`poller` → `Daemon` and the whole admin
     layer. An autouse conftest fixture calls `secrets.reset_to_default()` after
     every test so a config-loading test cannot leak its backend.
+  - **An install from an operator-named config is pinned**
+    (`configure(..., named_config=True)`); a later load of the *default* config
+    leaves it alone. Five CLI commands still call `load_config()` with no path
+    and so read the default config regardless of `--config` (#245) — without the
+    pin, one of those incidental reads could swap a headless host's `file`
+    backend back to `keyring` mid-command and silently reintroduce the
+    boot-time `KeyringLocked` failure the backend exists to remove. When #245
+    lands, revisit the pin.
   - **File permissions are the only protection, and are enforced on read**: any
     group/other bit raises `InsecureSecretsFile` naming the `chmod` to run.
     Refusing (rather than warning, or self-healing with a `chmod`) is the
@@ -47,8 +55,16 @@ attachment tree without touching IMAP.
     for a leaked-credential file and is one command to clear.
   - Writes go through an `O_EXCL` temp in the same directory + `os.replace`, so
     no reader sees a partial file and the secret is never briefly at a wider
-    mode. An **existing** directory is left at whatever mode it has (the default
-    path is the operator's config dir): the 0600 file is the protection.
+    mode, then `fsync` the file **and** its directory — `os.replace` orders the
+    rename against readers but is not durable, and a store that exists to
+    survive reboots cannot lose a write to an unclean shutdown. An **existing**
+    directory is left at whatever mode it has (the default path is the
+    operator's config dir): the 0600 file is the protection.
+  - `O_EXCL` on a fixed temp name means one write killed where no handler runs
+    (SIGKILL, power loss) wedges every later one. That raises
+    `StaleSecretsTempFile` naming the `rm` to run, rather than a bare
+    `FileExistsError` for a dotfile the operator has never seen. The stray temp
+    is never clobbered — it may hold the secret from the interrupted write.
   - `localmail migrate-secrets [--dry-run]` copies keyring → file for every DB
     account. It always reads the *keyring* and writes the *file*, ignoring the
     configured backend, because the realistic order of operations is flip the
@@ -1002,8 +1018,19 @@ for the full design.
     The fix re-decides validity **inside the burn**. `codes.consume_code` is one
     CTE — `DELETE … RETURNING user_id, created_at` joined LEFT to `api_users` —
     returning `ConsumeResult(burned, user_valid)` under a single snapshot, so no
-    revocation can land between the two halves. A missing user row yields
-    `user_valid=False` (the LEFT JOIN's NULL): fail closed.
+    revocation can land between the two halves.
+
+    A missing user row is closed by an explicit `u.id IS NOT NULL`, and that
+    line is **not** redundant. The intuitive reading — LEFT JOIN misses, so the
+    predicate is NULL, so `COALESCE(…, FALSE)` fails closed — is wrong, and this
+    shipped that way first: against the all-NULL row both `disabled_at IS NULL`
+    and `sessions_invalidated_at IS NULL` are TRUE, so the predicate returns
+    TRUE and no COALESCE ever fires. `ON DELETE CASCADE` on
+    `oauth_authorization_codes.user_id` makes the branch unreachable today (a
+    deleted user takes its codes with it, so nothing is burned), which is
+    exactly why the guard reads as unnecessary until someone relaxes that FK.
+    Pinned by `test_consume_of_an_orphaned_code_reports_it_invalid`, which drops
+    the FK inside the test transaction to construct the orphan.
 
     **Burning is unconditional, and that is the point.** Making the DELETE itself
     conditional on the user — the shape #241's issue text first proposed — would

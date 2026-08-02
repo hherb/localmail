@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
-import pytest
-
 from localmail.api import auth as api_auth
 from localmail.mcp.oauth import clients, codes
 
@@ -206,3 +204,32 @@ def test_mint_code_defaults_resource_none(db_conn):
     db_conn.commit()
     row = codes.load_code(db_conn, raw)
     assert row is not None and row.resource is None
+
+
+def test_consume_of_an_orphaned_code_reports_it_invalid(db_conn):
+    """A burned code whose user row is gone must report ``user_valid=False``.
+
+    The natural reading — LEFT JOIN misses, so the predicate is NULL, so
+    ``COALESCE(..., FALSE)`` fails closed — is wrong, and this test exists
+    because the fix shipped that way first. Against an all-NULL row
+    ``disabled_at IS NULL`` and ``sessions_invalidated_at IS NULL`` are both
+    TRUE, so the predicate returns TRUE and no COALESCE ever fires. Only an
+    explicit ``u.id IS NOT NULL`` closes it.
+
+    The FK is dropped inside the test transaction (never committed, so the
+    schema is intact for every other test) because ``ON DELETE CASCADE``
+    otherwise makes an orphaned code unconstructible — which is exactly why the
+    guard reads as unnecessary until the day someone relaxes that FK.
+    """
+    uid = _seed_client_and_user(db_conn)
+    raw = _mint(db_conn, uid)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE oauth_authorization_codes "
+            "DROP CONSTRAINT oauth_authorization_codes_user_id_fkey"
+        )
+        cur.execute("DELETE FROM api_users WHERE id = %s", (uid,))
+    result = codes.consume_code(db_conn, raw)
+    db_conn.rollback()
+    assert result.burned is True
+    assert result.user_valid is False

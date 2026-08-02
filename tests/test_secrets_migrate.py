@@ -173,3 +173,27 @@ def test_migrate_reads_the_keyring_even_when_the_file_backend_is_active(
     res = CliRunner().invoke(main, ["--config", str(cfg), "migrate-secrets"])
     assert res.exit_code == 0, res.output
     assert FileSecretStore(store).get("gmail") == "hunter2"
+
+
+def test_a_locked_keyring_reports_the_precondition_not_a_traceback(
+    db_conn: psycopg.Connection, db_dsn: str, tmp_path: Path, memory_keyring,
+    monkeypatch,
+) -> None:
+    """This is the command an operator runs *because* the keyring has become
+    unreadable, so it is the last place a raw `KeyringLocked` traceback helps.
+    """
+    import keyring.errors
+
+    _seed_account(db_conn, "gmail")
+
+    def locked(self, username):
+        raise keyring.errors.KeyringLocked("the collection is locked")
+
+    monkeypatch.setattr(secrets.KeyringSecretStore, "get", locked)
+    cfg = _make_cfg(tmp_path, db_dsn, tmp_path / "secrets.json")
+    res = CliRunner().invoke(main, ["--config", str(cfg), "migrate-secrets"])
+
+    assert res.exit_code != 0
+    assert "could not read the OS keyring" in res.output
+    assert "unlocked" in res.output
+    assert "Traceback" not in res.output

@@ -7,9 +7,9 @@
 > attachment extraction was starved archive-wide, not merely incomplete for
 > mis-typed attachments — the Mac had **16,542 unprocessed blobs and 19
 > extracted**. It is now draining. Two things are outstanding and neither is
-> code: the **DGX is unreachable** (dropped off the network mid-session, still
-> on `4f3285f`), and the **headless-secrets cold-boot proof still has not
-> happened**. See §0.
+> code: the **DGX cold-boot proof** for headless secrets, and deciding **#248**
+> before its retry_count burn spreads. Both hosts are deployed and draining.
+> See §0.
 
 ## Project context (1-minute version)
 
@@ -104,34 +104,45 @@ reproduces the queue starvation and the nine that reproduce the `--config` bug.
 
 ### 4. Ops
 
-- **DGX** put back on `main` (it was stranded on the deleted #244 branch),
-  `uv sync --extra mcp`, services restarted, **0 `KeyringLocked` since
-  restart**, INBOX sync live. It is now at `4f3285f` — **not** `7fb6c71`.
-- **Mac** deployed to `7fb6c71`; both launchd agents kickstarted. Extraction is
-  draining (see §0).
-- Filed **#248** (see §0.3).
+- **DGX** put back on `main` (it was stranded on the deleted #244 branch), then
+  — after an unexplained mid-session network drop — deployed to **`27de69b`**.
+  Both units `active`, **0 `KeyringLocked` since restart**, INBOX sync live, and
+  #246's group-writable warning confirmed on its real 0775 config dir (§0.1).
+- **Mac** deployed to `7fb6c71` (now `27de69b`); both launchd agents
+  kickstarted. Extraction draining (§0.3).
+- **Both hosts' extract queues were starved and are now draining** (§0.3).
+- Filed **#248** (§0.3).
 
 ## What's next
 
 ### 0. Finish what this session could not
 
-#### 0.1 The DGX is unreachable and behind
+#### 0.1 ~~The DGX is unreachable and behind~~ — **DONE**
 
-It dropped off the network mid-session — 100% packet loss to `10.0.0.3` while
-general internet was fine, so it is the host or the WireGuard peer, not a local
-outage. Nothing I ran can explain it (only `git checkout`, `uv sync`, and
-`systemctl --user restart` of the two localmail units, all of which succeeded
-and were verified healthy first). It is still on `4f3285f`.
+It dropped off the network mid-session (100% packet loss to `10.0.0.3` while
+general internet was fine — the host or the WireGuard peer, not anything I ran)
+and **came back shortly after the handoff was first written**. Now deployed:
+`27de69b`, both units `active`, **0 `KeyringLocked` since restart**, and its
+extraction queue is draining too (it was starved identically — 6,379 remaining
+at last check, from a standing start).
 
-```bash
-ping -c 3 10.0.0.3
-ssh hherb@10.0.0.3 'export PATH="$HOME/.local/bin:$PATH"; cd ~/src/localmail \
-  && git pull --ff-only && uv sync --extra mcp \
-  && systemctl --user restart localmail-daemon localmail-serve'
+That also closed the one thing only the DGX could verify — **#246's
+group-writable branch on a real 0775 config dir**:
+
 ```
-**Acceptance:** DGX at `7fb6c71`, both units `active`.
-Note `uv` is **not** on the non-interactive ssh PATH — export it, or the sync
-silently no-ops (`uv: command not found`) while the restart still reports fine.
+WARNING localmail.secrets_file /home/hherb/.config/localmail is group-writable,
+so a member of its group could replace secrets.json whatever its own mode is.
+Harmless if that group is yours alone (the umask-002 default);
+otherwise fix with: chmod g-w /home/hherb/.config/localmail
+```
+
+Exactly **one** line for the whole process (the dedupe works in production), dir
+`775`, file `600`, daemon healthy. A strict refuse-on-any-group-write rule would
+have wedged this host — the option-2 call was right.
+
+Note for future ssh work: `uv` is **not** on the non-interactive ssh PATH —
+export it, or `uv sync` silently no-ops (`uv: command not found`) while the
+restart still reports fine.
 
 #### 0.2 The headless-secrets cold-boot proof *(carried from session 11)*
 
@@ -151,15 +162,22 @@ ssh hherb@10.0.0.3 'systemctl --user is-active localmail-daemon localmail-serve;
 
 #### 0.3 Watch the Mac drain, and decide #248
 
-The queue is moving on its own at daemon cadence. Progress this session:
+Both queues are moving on their own at daemon cadence. Progress this session:
 
-| | before | at handoff |
+| Mac | before | at handoff |
 |---|---|---|
-| `lightweight@1.0` | 19 | 567 |
-| `type-skipped` | — | 339 |
-| `lightweight-empty` | — | 29 |
-| `failed_extractions` | 0 | 48 |
-| unprocessed | 16542 | 15626 |
+| `lightweight@1.0` | 19 | 1441 |
+| `type-skipped` | — | 976 |
+| `lightweight-empty` | — | 50 |
+| `docling@2.97.0` | — | 1 |
+| `failed_extractions` | 0 | 127 |
+| unprocessed | 16542 | 14093 |
+
+The DGX was starved identically and is now at 338 / 204 / 27, 16 failed, **6379
+remaining**. It carries only `--extra mcp`, so docling is not installed there
+and **#248 cannot bite it** — a PDF pypdf can't read becomes an honest
+`lightweight-empty` sentinel or a pypdf-level failure (encrypted PDFs, which is
+correct).
 
 ```bash
 unset VIRTUAL_ENV && uv run localmail search-status
@@ -212,9 +230,11 @@ recorded is `localmail retry-failed-extractions`.
 
 ## Open decisions & risks
 
-1. **The DGX is offline and one commit behind.** Both facts are §0.1. Until it
-   is reachable there is no way to confirm the #246 group-writable warning
-   behaves as intended on the one host that actually has a 0775 config dir.
+1. ~~**The DGX is offline and one commit behind.**~~ Resolved — see §0.1. It is
+   at `27de69b` and healthy, and #246's group-writable branch is confirmed on a
+   real 0775 config dir (one warning, daemon unaffected). The unexplained
+   network drop is worth remembering if it recurs; nothing in this session
+   touched sshd or networking on that host.
 2. **The headless-secrets fix stays unproven until a cold boot** *(carried)*.
    The daemon is healthy on the file backend, but the keyring is unlocked, so
    only a reboot tests the thing the backend exists for. Do not close the loop
@@ -283,7 +303,7 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git status                               # expect clean
 git branch --show-current                # main
-git log --oneline -1                     # 7fb6c71
+git log --oneline -3                     # code in 7fb6c71, then the handoff commits
 
 # Python test suite (deselect the macOS-only socket failure — see risk 12):
 unset VIRTUAL_ENV && uv run pytest -q --deselect tests/test_daemon_control_socket.py
@@ -294,12 +314,10 @@ unset VIRTUAL_ENV && uv run mypy src/localmail
 # §0.3 — watch the extraction backlog drain:
 unset VIRTUAL_ENV && uv run localmail search-status
 
-# §0.1 — DGX (check it is even up first; uv is NOT on the non-interactive PATH):
-ping -c 3 10.0.0.3
-ssh hherb@10.0.0.3 'export PATH="$HOME/.local/bin:$PATH"; cd ~/src/localmail \
-  && git pull --ff-only && uv sync --extra mcp \
-  && systemctl --user restart localmail-daemon localmail-serve'
+# DGX health (already at 27de69b; uv is NOT on the non-interactive ssh PATH):
 ssh hherb@10.0.0.3 'systemctl --user is-active localmail-daemon localmail-serve'
+ssh hherb@10.0.0.3 'export PATH="$HOME/.local/bin:$PATH"; cd ~/src/localmail \
+  && unset VIRTUAL_ENV && uv run localmail search-status'
 
 # §0.2 — the cold-boot proof:
 ssh hherb@10.0.0.3 'sudo reboot'
@@ -311,7 +329,8 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
   && cargo clippy --all-targets -- -D warnings && cd ../..
 ```
 
-`origin/main` at **`7fb6c71`**. Latest migration
+All session-12 code is **`7fb6c71`**; `origin/main` is that plus the handoff
+commits, and **both hosts are deployed to it**. Latest migration
 **`0034_transient_fetches_gave_up.sql`** (applied to both deployments in session
 11); next free slot `0035_*.sql`. **Open issues: 14** — 13 carried plus the new
 **#248**; #216, #245, #246 closed with #247. Dependabot: **0** open alerts.

@@ -5,9 +5,10 @@
 
 The account name is the canonical account key everywhere — the DB
 ``accounts.name`` unique constraint, the ``init-db`` seed's dedup key, and the
-**keyring username**. That last one is why the character rule exists: secrets
-are stored under ``<name>`` (IMAP password) and ``<name>:refresh`` (OAuth
-refresh token), so a colon in a name lets one account address another's slot.
+**secret-store username**. That last one is why the character rule exists:
+secrets are stored under ``<name>`` (IMAP password) and ``<name>:refresh``
+(OAuth refresh token), so a colon in a name lets one account address another's
+slot.
 Creating a password account literally named ``gmail:refresh`` would write a
 plaintext IMAP password over the ``gmail`` account's OAuth refresh token, and
 that account's next token refresh would fail (#217).
@@ -24,8 +25,10 @@ check lives on ``Config``, not on the ``AccountConfig`` field, because
 
 from __future__ import annotations
 
-#: Separates the account name from the secret kind in a keyring username.
-#: Must match ``secrets._refresh_user``; pinned by tests/test_account_names.py.
+#: Separates the account name from the secret kind in a secret-store username.
+#: Must match ``secrets_store.refresh_username`` — the authority for *both*
+#: backends, since the keyring and the file store key on identical usernames.
+#: Pinned by tests/test_account_names.py.
 KEYRING_SUBKEY_SEPARATOR = ":"
 
 #: Upper bound on an account name, in characters.

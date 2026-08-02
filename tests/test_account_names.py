@@ -47,8 +47,13 @@ def test_colon_anywhere_is_rejected_not_just_the_refresh_suffix():
 
 
 def test_separator_matches_the_secrets_module_scheme():
-    """Pin the constant to the scheme it protects: if secrets.py ever changes
-    how it derives the refresh-token username, this rule must move with it."""
-    from localmail import secrets
+    """Pin the constant to the scheme it protects: if the derivation of the
+    refresh-token username ever changes, this rule must move with it.
 
-    assert secrets._refresh_user("acct") == f"acct{KEYRING_SUBKEY_SEPARATOR}refresh"
+    `secrets_store` is the authority for both backends — the keyring and the
+    0600 file key on byte-identical usernames — so pinning it there covers
+    both, and covers a migration between them.
+    """
+    from localmail.secrets_store import refresh_username
+
+    assert refresh_username("acct") == f"acct{KEYRING_SUBKEY_SEPARATOR}refresh"

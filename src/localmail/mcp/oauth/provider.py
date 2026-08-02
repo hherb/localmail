@@ -171,6 +171,13 @@ class LocalmailASProvider(
         assert auth_code.subject is not None
         user_id = int(auth_code.subject)
         user_vanished = False
+        # Bound up front rather than only inside the mint branch: the return
+        # below is reachable only once three separate guards have passed, and a
+        # future edit to any of them would otherwise turn a rejected exchange
+        # into an UnboundLocalError (an HTTP 500) instead of a TokenError.
+        # Mirrors _exchange_refresh_sync.
+        access_raw: str | None = None
+        refresh_raw: str | None = None
         with self._pool.connection() as conn:
             # Atomic single-use guard (RFC 6749 §4.1.2). The SDK already loaded +
             # validated the code, but two concurrent exchanges can both pass that
@@ -178,15 +185,25 @@ class LocalmailASProvider(
             # AFTER the connection context exits — TokenError is a frozen
             # dataclass and the contextmanager's __exit__ cannot set __traceback__
             # on it.
-            consumed = codes.consume_code(conn, auth_code.code)
+            # The burn also re-decides the code's expiry and the user's
+            # revocation state under its own snapshot (#241). The SDK's
+            # load_authorization_code ran in a separate call, so its checks are
+            # already stale by the time we get here; without re-deciding, a
+            # revocation landing in that gap still minted a token pair, because
+            # the successors carry `created_at = now()` — past the cutoff, hence
+            # valid.
+            burn = codes.consume_code(conn, auth_code.code)
             # Commit the burn on its own, before anything below can fail. Sharing
             # one transaction with the mint meant a rollback took the DELETE with
             # it and resurrected the code for the rest of its TTL, so a client
             # auto-retry — or a replay by anyone holding a copy — could still
             # exchange it (#219). A post-burn failure now costs a fresh consent
             # round trip, which is the correct trade against a replayable code.
+            # Note this commits the burn even when the code is no longer valid:
+            # single-use must not become conditional on validity.
             conn.commit()
-            if consumed:
+            consumed = burn.burned
+            if consumed and burn.still_valid:
                 refresh_raw = refresh.mint_refresh(
                     conn, client_id=client_id, user_id=user_id,
                     scopes=auth_code.scopes,
@@ -211,11 +228,16 @@ class LocalmailASProvider(
                     clients.touch_last_used(conn, client_id)
                     conn.commit()
         if not consumed:
+            # Not "or expired": nothing sweeps oauth_authorization_codes, so an
+            # expired row is still there to be burned and reports itself through
+            # `still_valid` on the branch below. Reaching here means no row at
+            # all — already used, or never minted.
             raise TokenError(
-                "invalid_grant", "authorization code already used or expired"
+                "invalid_grant", "authorization code already used or unknown"
             )
-        if user_vanished:
+        if not burn.still_valid or user_vanished:
             raise TokenError("invalid_grant", "authorization code is no longer valid")
+        assert access_raw is not None and refresh_raw is not None
         return OAuthToken(
             access_token=access_raw,
             token_type="Bearer",

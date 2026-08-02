@@ -33,6 +33,7 @@ from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
 from localmail.api import auth as api_auth
+from localmail.api.client_ip import resolve_client_ip
 from localmail.api.errors import RateLimited
 from localmail.config import AuthConfig, McpConfig
 from localmail.mcp.oauth import clients, codes
@@ -173,7 +174,17 @@ def build_consent_router(
                 **({"state": payload.state} if payload.state else {}),
             )
 
-        client_ip = request.client.host if request.client else None
+        # Peel X-Forwarded-For exactly as /v1/auth/login and /admin/login do.
+        # Without it (#220) every request behind a configured reverse proxy
+        # reports the proxy's address, collapsing all users into one per-IP
+        # bucket: spread-out guessing goes unthrottled while one noisy client
+        # locks everyone else out.
+        client_ip = resolve_client_ip(
+            socket_peer=request.client.host if request.client else None,
+            xff_header=request.headers.get("X-Forwarded-For"),
+            trusted_proxies=auth_config.trusted_proxies_parsed,
+            max_hops=auth_config.trusted_proxies_max_hops,
+        )
         return await anyio.to_thread.run_sync(
             functools.partial(
                 _authorize_and_mint, request, payload, decision, client_ip

@@ -27,6 +27,7 @@ from localmail.api.errors import (
     RateLimited,
     ValidationFailed,
 )
+from localmail.api.revocation_sql import credential_valid_sql
 from localmail.config import AuthConfig
 
 logger = logging.getLogger("localmail.api.auth")
@@ -352,14 +353,12 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
             "JOIN api_users u ON u.id = t.user_id "
             "WHERE t.token_sha256 = %s "
             "  AND t.expires_at > now() "
-            "  AND u.disabled_at IS NULL "
             # Session revocation (revoke-sessions / revoke-admin-sessions) bumps
             # sessions_invalidated_at to "now"; every bearer token issued before
             # that moment must stop authenticating, matching the admin-cookie
             # path (require_admin_session). Without this, a leaked 30-day bearer
             # token survived a revocation the operator believed cut off access.
-            "  AND (u.sessions_invalidated_at IS NULL "
-            "       OR t.created_at >= u.sessions_invalidated_at)",
+            "  AND " + credential_valid_sql(user="u", credential="t"),
             (h,),
         )
         row = cur.fetchone()

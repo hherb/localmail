@@ -290,3 +290,97 @@ def test_rotate_carries_resource_to_successor(db_conn):
     assert result.outcome == "rotated" and result.new_token is not None
     succ = refresh.load_refresh(db_conn, result.new_token)
     assert succ is not None and succ.resource == "https://h/mcp"
+
+
+def _revoke_on_another_connection(dsn, uid):
+    """Commit a session revocation from outside the caller's transaction, the
+    way the operator's `revoke-sessions` does."""
+    import psycopg
+
+    other = psycopg.connect(dsn)
+    try:
+        with other.cursor() as cur:
+            cur.execute(
+                "UPDATE api_users SET sessions_invalidated_at = now() WHERE id = %s",
+                (uid,),
+            )
+        other.commit()
+    finally:
+        other.close()
+
+
+def test_revocation_between_the_load_and_the_claim_is_not_rotated(
+    db_conn, db_dsn, monkeypatch
+):
+    """#241, rotation half: `rotate_refresh` re-validates the presented token,
+    but the claim UPDATE and the mint are separate statements after it. Under
+    READ COMMITTED each takes a fresh snapshot, so a revocation committing in
+    that gap used to be missed — and the successor it minted carried
+    `created_at = now()`, past the cutoff, so it was live for a fresh 30 days.
+
+    Fault-injected because the window is two adjacent statements wide; there is
+    no way to land a real concurrent commit inside it deterministically.
+    """
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(
+        db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100
+    )
+    db_conn.commit()
+
+    real_load = refresh.load_refresh
+
+    def load_then_revoke(conn, token):
+        row = real_load(conn, token)
+        if row is not None:
+            _revoke_on_another_connection(db_dsn, uid)
+        return row
+
+    monkeypatch.setattr(refresh, "load_refresh", load_then_revoke)
+    res = refresh.rotate_refresh(db_conn, raw, ttl_s=100)
+    db_conn.commit()
+    monkeypatch.undo()
+
+    assert res.outcome == "unknown", (
+        "a revoked user's token must not rotate into a fresh 30-day successor"
+    )
+    assert res.new_token is None
+
+
+def test_revocation_mid_rotation_is_not_treated_as_reuse(
+    db_conn, db_dsn, monkeypatch
+):
+    """The failed claim must be disambiguated: a revocation is an operator
+    action, not evidence of a stolen copy, so the family must survive. Nuking
+    it would also cut off every sibling client the operator did not target.
+    """
+    uid = _seed(db_conn)
+    raw = refresh.mint_refresh(
+        db_conn, client_id="cid", user_id=uid, scopes=[], ttl_s=100
+    )
+    db_conn.commit()
+    row = refresh.load_refresh(db_conn, raw)
+    assert row is not None
+    family = row.family_id
+
+    real_load = refresh.load_refresh
+
+    def load_then_revoke(conn, token):
+        loaded = real_load(conn, token)
+        if loaded is not None:
+            _revoke_on_another_connection(db_dsn, uid)
+        return loaded
+
+    monkeypatch.setattr(refresh, "load_refresh", load_then_revoke)
+    res = refresh.rotate_refresh(db_conn, raw, ttl_s=100)
+    db_conn.commit()
+    monkeypatch.undo()
+
+    assert res.outcome == "unknown"
+    assert res.family_id is None
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM oauth_refresh_tokens WHERE family_id = %s",
+            (family,),
+        )
+        count = cur.fetchone()
+    assert count is not None and count[0] == 1, "the family must not be deleted"

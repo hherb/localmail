@@ -73,6 +73,37 @@ class ImportsConfig(BaseModel):
         return [Path(os.path.expanduser(str(p))).resolve() for p in v]
 
 
+def default_secrets_path() -> Path:
+    """Where the file backend stores secrets when the operator names no path.
+
+    Mirrors `default_config_path`'s XDG handling so the secrets file lands
+    beside config.toml, but is deliberately *not* derived from `$LOCALMAIL_CONFIG`
+    — pointing the CLI at an alternate config must not silently change which
+    secrets the daemon reads.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME") or "~/.config"
+    return Path(os.path.expanduser(base)) / "localmail" / "secrets.json"
+
+
+class SecretsConfig(BaseModel):
+    """Where IMAP passwords and OAuth refresh tokens live.
+
+    `keyring` (default) is the OS keychain and is right for a desktop session.
+    `file` is a 0600 JSON file and is the only option that works for a headless
+    service: a lingering systemd user unit starts with no PAM session, so the
+    gnome-keyring `login` collection is locked at every boot and nothing in the
+    system can unlock it. See
+    docs/superpowers/specs/2026-08-02-headless-secrets-design.md.
+    """
+    backend: Literal["keyring", "file"] = "keyring"
+    file_path: Path = Field(default_factory=default_secrets_path)
+
+    @field_validator("file_path", mode="after")
+    @classmethod
+    def _expand(cls, v: Path) -> Path:
+        return Path(os.path.expanduser(os.path.expandvars(str(v))))
+
+
 class DaemonConfig(BaseModel):
     idle_renew_seconds: int = 1740
     poll_seconds: int = 300
@@ -633,6 +664,7 @@ class McpConfig(BaseModel):
 class Config(BaseModel):
     database: DatabaseConfig
     attachments: AttachmentsConfig = AttachmentsConfig()
+    secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     daemon: DaemonConfig = DaemonConfig()
     serve: ServeConfig = Field(default_factory=ServeConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
@@ -695,7 +727,29 @@ def default_config_path() -> Path:
 
 
 def load_config(path: Path | None = None) -> Config:
-    path = path or default_config_path()
+    """Load and validate config, and install the secret backend it names.
+
+    The `secrets.configure` call is a deliberate side effect: this is the only
+    place that sees the *resolved* config, including a `--config PATH`
+    override, and every process that can touch a secret loads config before it
+    does. See `secrets.py`'s module docstring for why the alternative — passing
+    a store down through the daemon and admin layers — was rejected.
+
+    A config read from a path the operator did *not* choose is marked as such,
+    so it cannot overwrite a backend already installed from one they did. Some
+    CLI commands read the default config unconditionally, and without that
+    marking an incidental read could swap a `--config`-selected backend out
+    mid-command; `secrets.configure` documents the case.
+
+    Imported inside the function because `secrets` reaches back here for the
+    `SecretsConfig` type; at module scope the two would close an import cycle.
+    """
+    from localmail import secrets
+
+    default_path = default_config_path()
+    path = path or default_path
     with open(path, "rb") as f:
         data = tomllib.load(f)
-    return Config.model_validate(data)
+    cfg = Config.model_validate(data)
+    secrets.configure(cfg.secrets, named_config=path != default_path)
+    return cfg

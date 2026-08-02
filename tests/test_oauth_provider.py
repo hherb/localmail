@@ -109,7 +109,7 @@ def test_exchange_rejects_already_consumed_code(db_conn, db_pool):
     assert loaded is not None
     # Simulate the racing exchange having already deleted the code.
     with db_pool.connection() as conn:
-        assert codes.consume_code(conn, raw_code) is True
+        assert codes.consume_code(conn, raw_code).burned is True
         conn.commit()
     with pytest.raises(TokenError) as exc:
         anyio.run(p.exchange_authorization_code, _client(), loaded)
@@ -166,8 +166,10 @@ def test_exchange_refresh_rejects_disabled_user_without_500(db_conn, db_pool):
 
 def test_exchange_code_rejects_disabled_user_without_500(db_conn, db_pool):
     # A user disabled between consent (code mint) and code exchange must fail
-    # closed with invalid_grant — never an AssertionError (HTTP 500). load_refresh
-    # filters disabled users, so the just-minted refresh row reads back as absent.
+    # closed with invalid_grant — never an AssertionError (HTTP 500). Since #241
+    # the burn itself reports the user invalid, so the mint is never reached;
+    # before that it was caught one step later, by the just-minted refresh row
+    # reading back as absent through load_refresh's disabled-user filter.
     p = _provider(db_pool)
     anyio.run(p.register_client, _client())
     with db_pool.connection() as conn:
@@ -508,3 +510,100 @@ def test_refresh_exchange_binds_resource_onto_new_access_and_enforces(db_conn, d
     rt_unlisted = anyio.run(p.load_refresh_token, _client(), unlisted)
     rotated_unlisted = anyio.run(p.exchange_refresh_token, _client(), rt_unlisted, [])
     assert anyio.run(p.load_access_token, rotated_unlisted.access_token) is None
+
+
+def _revoke_sessions(pool, uid):
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE api_users SET sessions_invalidated_at = now() WHERE id = %s",
+                (uid,),
+            )
+        conn.commit()
+
+
+def test_revocation_between_code_load_and_exchange_is_rejected(db_conn, db_pool):
+    """#241: the SDK drives load then exchange as two calls, and the exchange
+    used to re-check nothing.
+
+    `disabled_at` was caught indirectly — the just-minted refresh reads back as
+    absent — but `sessions_invalidated_at` was not: the successor is stamped
+    `created_at = now()`, past the cutoff, so it loaded fine and the exchange
+    completed, handing the client exactly the credentials the operator had just
+    cut off.
+    """
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    uid, raw_code = _mint_code_for(db_pool, "code-revoked-mid-exchange")
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    assert loaded is not None
+    _revoke_sessions(db_pool, uid)
+    with pytest.raises(TokenError) as exc:
+        anyio.run(p.exchange_authorization_code, _client(), loaded)
+    assert exc.value.error == "invalid_grant"
+
+
+def test_revoked_mid_exchange_code_is_still_burned(db_conn, db_pool):
+    """The #219 single-use invariant has to survive the new rejection branch:
+    the code dies even though the exchange is refused, so a client auto-retry
+    cannot replay it."""
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    uid, raw_code = _mint_code_for(db_pool, "code-revoked-still-burned")
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    assert loaded is not None
+    _revoke_sessions(db_pool, uid)
+    with pytest.raises(TokenError):
+        anyio.run(p.exchange_authorization_code, _client(), loaded)
+    # The row must be gone, not merely hidden by load_code's revocation filter,
+    # so assert on a raw count rather than through load_code.
+    with db_pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM oauth_authorization_codes WHERE user_id = %s",
+            (uid,),
+        )
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_revocation_between_refresh_load_and_rotation_is_rejected(db_conn, db_pool):
+    """The rotation half of #241's acceptance.
+
+    Unlike the code path this already held before the fix: `rotate_refresh`
+    re-runs the full `load_refresh` predicate against the *presented* token at
+    the top of the exchange leg, so the SDK's stale load is re-decided. Pinned
+    so a future refactor that trusts the SDK's load cannot silently drop it.
+    """
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    uid, raw_code = _mint_code_for(db_pool, "refresh-revoked-mid-rotation")
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    token = anyio.run(p.exchange_authorization_code, _client(), loaded)
+    rt = anyio.run(p.load_refresh_token, _client(), token.refresh_token)
+    assert rt is not None
+    _revoke_sessions(db_pool, uid)
+    with pytest.raises(TokenError) as exc:
+        anyio.run(p.exchange_refresh_token, _client(), rt, [])
+    assert exc.value.error == "invalid_grant"
+
+
+def test_exchange_fails_closed_when_the_minted_refresh_reads_back_absent(
+    db_conn, db_pool, monkeypatch
+):
+    """The `user_vanished` branch must stay fail-closed rather than assert.
+
+    #241 moved the common cause (a disabled or revoked user) forward onto the
+    burn, so this branch lost its natural driver — but it is still reachable,
+    by a revocation landing between the burn's commit and this read. An
+    `assert row is not None` there would surface as an HTTP 500 instead of a
+    clean `invalid_grant`, so pin it with fault injection.
+    """
+    p = _provider(db_pool)
+    anyio.run(p.register_client, _client())
+    _uid, raw_code = _mint_code_for(db_pool, "code-refresh-vanished")
+    loaded = anyio.run(p.load_authorization_code, _client(), raw_code)
+    assert loaded is not None
+    monkeypatch.setattr(refresh, "load_refresh", lambda *_a, **_kw: None)
+    with pytest.raises(TokenError) as exc:
+        anyio.run(p.exchange_authorization_code, _client(), loaded)
+    assert exc.value.error == "invalid_grant"

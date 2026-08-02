@@ -9,6 +9,7 @@ import psycopg
 import pytest
 from keyring.backend import KeyringBackend
 
+from localmail import secrets
 from localmail.db import apply_migrations
 
 TEST_DSN = os.environ.get(
@@ -45,6 +46,18 @@ def memory_keyring():
     keyring.set_keyring(backend)
     yield backend
     keyring.set_keyring(original)
+
+
+@pytest.fixture(autouse=True)
+def default_secret_backend():
+    """Restore the keyring secret backend after every test.
+
+    `load_config` installs the backend its `[secrets]` block names, so any test
+    that loads a config with `backend = "file"` would otherwise point every
+    later test at a tmp_path that no longer exists.
+    """
+    yield
+    secrets.reset_to_default()
 
 
 def _db_available() -> bool:

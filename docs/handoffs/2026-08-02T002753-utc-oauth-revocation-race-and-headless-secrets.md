@@ -6,8 +6,10 @@
 > — on the user's request mid-session — built a **reboot-safe headless secret
 > store** so the DGX daemon survives a reboot with no operator intervention.
 > Branch `fix/oauth-revocation-race-and-headless-secrets` = `a34b6a9`, pushed as
-> **[PR #244](https://github.com/hherb/localmail/pull/244)**.
-> **Next step: merge #244, then run one command on the DGX — see §0.**
+> **[PR #244](https://github.com/hherb/localmail/pull/244)** (CI green).
+> **The DGX migration is done and the daemon is healthy on the file backend.**
+> **Next step: merge #244, reboot the DGX to prove the fix, put it back on
+> `main` — see §0.**
 
 ## Project context (1-minute version)
 
@@ -108,30 +110,44 @@ reproduces #220's shared per-IP bucket.
 
 ## What's next
 
-### 0. **Merge #244, then finish the DGX in one command**
+### 0. **Merge #244, reboot the DGX to prove the fix, restore `main`**
+
+   **The DGX migration ran and succeeded** (`~/finish-headless-secrets.sh`, with
+   the operator's password). Verified state:
+   `~/.config/localmail/secrets.json` is `-rw-------` holding
+   `horst-gmail:refresh`; `[secrets] backend = "file"` is in `config.toml` (a
+   timestamped backup sits beside it); all five workers — `idle`, `poll`,
+   `embed`, `extract`, `reconcile` — heartbeat fresh with `state=idle` and
+   `last_error_msg=NULL`, and there are **zero** `KeyringLocked` lines since the
+   restart. The healthy `idle`/`poll` workers are the real proof: they only
+   reach that state after a successful XOAUTH2 login, and with `backend = "file"`
+   the keyring is never consulted.
+
+   > **The script's own success check had a bug and reported a false failure.**
+   > It grepped `journalctl --since "1 minute ago"`, a window that spans the
+   > *pre-restart* crash-loop, so it fires every time regardless. Fixed to scope
+   > the window to `systemctl show -p ActiveEnterTimestamp`. If you re-run the
+   > staged copy it is the corrected one.
+
 ```bash
 gh pr checks 244 --watch && gh pr merge 244 --squash --delete-branch
+git checkout main && git pull --ff-only
 ```
-   **The DGX is already staged**: it is checked out on the branch, `uv sync`'d,
-   and `~/finish-headless-secrets.sh` is in place. That script needs **your login
-   password** — it unlocks the keyring one final time, migrates, flips the config,
-   restarts, and verifies. It is the only step this session could not do.
+   **Still outstanding — the reboot.** A restart is not the test: the keyring is
+   currently *unlocked* (the migration unlocked it), so only a cold boot proves
+   the daemon no longer depends on it. **Until that has happened, the fix is
+   unproven on the host it was written for.**
 ```bash
-ssh hherb@10.0.0.3
-./finish-headless-secrets.sh          # prompts for the password
-# then prove the whole point:
-sudo reboot
-systemctl --user is-active localmail-daemon localmail-serve
-journalctl --user -u localmail-daemon --since '5 minutes ago' | grep -c KeyringLocked   # expect 0
+ssh hherb@10.0.0.3 'sudo reboot'
+# once it is back:
+ssh hherb@10.0.0.3 'systemctl --user is-active localmail-daemon localmail-serve
+  journalctl --user -u localmail-daemon -b | grep -c KeyringLocked'   # expect 0
 ```
-   **After merging, put the DGX back on `main`** — it is currently on the feature
-   branch:
+   **Then put the DGX back on `main`** — it is on the feature branch:
 ```bash
-ssh hherb@10.0.0.3 'cd ~/src/localmail && git checkout main && git pull --ff-only'
+ssh hherb@10.0.0.3 'cd ~/src/localmail && git checkout main && git pull --ff-only \
+  && uv sync --extra mcp && systemctl --user restart localmail-daemon localmail-serve'
 ```
-   **Acceptance for this item is the reboot**, not the restart. Until a real
-   reboot has been survived with zero `KeyringLocked` lines, the fix is
-   unproven on the host it was written for.
 
 ### 1. **#216 — extraction extension-allowlist is dead code** *(carried)*
    MIME-mistyped attachments are silently unindexed. Worth taking next because
@@ -174,9 +190,11 @@ ssh hherb@10.0.0.3 'cd ~/src/localmail && git checkout main && git pull --ff-onl
 1. **The DGX is on a feature branch right now.** It was checked out to run the
    migration; put it back on `main` after #244 merges (§0). If #244 is *not*
    merged, that host silently drifts from `main`.
-2. **The headless-secrets fix is unproven until a reboot.** Everything is tested
-   in CI and the design is sound, but the failure it targets only manifests at
-   boot. Do not close the loop on it without the reboot check in §0.
+2. **The headless-secrets fix is unproven until a reboot.** The DGX migration
+   ran and the daemon is healthy on the file backend — but the keyring is
+   *currently unlocked*, so a restart proves nothing the reboot doesn't. The
+   failure this targets only manifests at cold boot. Do not close the loop on
+   it without the reboot check in §0.
 3. **`InsecureSecretsFile` refuses rather than warns — deliberate.** The daemon
    will crash-loop on a group/other-readable secrets file, which is the same
    *symptom* this whole feature cures. It is the right call for a genuinely

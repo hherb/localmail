@@ -8,9 +8,9 @@
 > **1448 blobs** across the two hosts had already been given up on, and the count
 > was still climbing during the session. **Both hosts are now deployed and
 > recovered**; the Mac additionally does **real OCR** on scanned PDFs via ocrmac.
-> The long-standing "DGX drops off the network" mystery is **diagnosed** (a stale
-> NAT mapping — §0.1). The only thing left outstanding is the headless-secrets
-> **cold-boot proof** (§0.2). See §0.
+> The long-standing "DGX drops off the network" mystery is **diagnosed** (its
+> upstream internet flaps; not WireGuard — §0.1). The only thing left
+> outstanding is the headless-secrets **cold-boot proof** (§0.2). See §0.
 
 ## Project context (1-minute version)
 
@@ -133,10 +133,30 @@ chars and becomes an honest empty sentinel.
 ### 5. Ops — the DGX
 
 Deployed to **`a7013c5`** over the LAN, 116 #249 victims recovered, and the
-recurring "DGX is unreachable" mystery diagnosed as a stale NAT mapping. Full
-detail in §0.1 — it is written up there rather than here because the LAN address
-and the `PersistentKeepalive` fix are things the next session needs *before* it
-touches that host.
+recurring "DGX is unreachable" mystery diagnosed (its upstream internet flaps —
+**not** WireGuard). Full detail in §0.1, written up there rather than here
+because the LAN address and the do-not-touch-wg0.conf note are things the next
+session needs *before* it touches that host.
+
+Its backlog is otherwise healthy, with two things worth knowing:
+
+```
+chunks_embedded 112911 / chunks_pending 0 / failed_embeddings 0
+attachment_chunks_embedded 29366 / 29366
+blobs_extracted 3773 / blobs_pending 566   (= 126 genuine failures + 440 lightweight-empty)
+body_lang_populated 8324 / body_lang_pending 21078
+```
+
+- **440 `lightweight-empty` blobs.** On Linux there is no OCR engine (risk 3), so
+  scanned PDFs land here as honest empty sentinels. Many would yield text if
+  `easyocr` or `rapidocr` were installed — `auto` would pick either up with no
+  config change, and clearing the sentinels
+  (`DELETE FROM attachment_text WHERE extractor = 'lightweight-empty'`) would
+  re-open them. Worth deciding deliberately; it is the DGX's remaining
+  unindexed-content gap.
+- **`body_lang_pending` 21078 vs 8324 populated.** Not a fault — the detector is
+  working through the backlog at daemon cadence — but it is the largest pending
+  queue on that host and worth a glance next session to confirm it is moving.
 
 ## What's next
 
@@ -167,20 +187,30 @@ DELETE FROM failed_extractions
 Result: `lightweight@1.0` 3657 → **3773** (exactly +116), `failed_extractions`
 steady at 126 with **zero** new `DataError` rows, queue otherwise drained.
 
-**The WireGuard drop is diagnosed (was risk 5): a stale NAT mapping.** Both ends
-were healthy the whole time — the Mac's `utun8` up, and on the DGX `wg0` UP with
-`10.0.0.3/24` and `wg-quick@wg0` `active`/`enabled`. One `ping 10.0.0.2` **from
-the DGX** restored it instantly, after which the Mac reached `10.0.0.3` at 0%
-loss. The DGX is behind NAT; while idle its mapping expires, inbound packets
-have nowhere to land, and nothing reopens the hole until the DGX transmits —
-which is also why it "came back on its own" last session.
+**The WireGuard drop is diagnosed (was risk 5): the DGX's upstream internet
+flaps.** It is **not** a dead host, a dead tunnel, or a WireGuard
+misconfiguration. `wg0` never restarted (up since Aug 2 07:27 AEST) and
+`wg-quick@wg0` stayed `active`; the DGX's journal shows NetworkManager
+repeatedly dropping to `CONNECTED_SITE` (LAN only, no internet) and back to
+`CONNECTED_GLOBAL` — four times between 03:19 and 05:34 on one night:
 
-**Fix, not yet applied (needs root):** add `PersistentKeepalive = 25` to the
-`[Peer]` block of `/etc/wireguard/wg0.conf`, then
-`sudo systemctl restart wg-quick@wg0`. That file is root-only 0600 and the DGX
-has no passwordless sudo, so it cannot be done over a plain ssh session.
-Meanwhile `ssh 192.168.68.76` always works. (Note the RTT through the tunnel is
-~700 ms to a LAN-adjacent host, so the path hairpins out to the internet.)
+```bash
+ssh 192.168.68.76 'journalctl --since "-1 day" | grep "NetworkManager state is now"'
+```
+
+The peer is a **VPS hub** (`Endpoint = vpn.consensus-ai.org:51820`,
+`AllowedIPs = 10.0.0.0/24`), so the tunnel is hub-and-spoke and every Mac↔DGX
+packet hairpins through the internet — hence ~700 ms RTT to a LAN-adjacent host.
+No internet on the DGX ⇒ no tunnel, while the LAN path is untouched.
+
+**Do not "fix" this in the WireGuard config.** `PersistentKeepalive = 25` is
+**already set** in the `[Peer]` block and cannot help — there is no path to keep
+alive. (An earlier draft of this handoff prescribed exactly that, wrongly,
+before the file had been read.) Nor does an outbound packet from the DGX restore
+the tunnel: that was inferred from one coincidental observation, and
+connectivity had in fact returned on its own hours earlier. If the flapping is
+worth chasing it is a local-network / ISP / Wi-Fi-vs-ethernet problem on the
+DGX, not a localmail one. Meanwhile `ssh 192.168.68.76` always works.
 
 Note: `uv` is **not** on the non-interactive ssh PATH — export it, or `uv sync`
 silently no-ops (`uv: command not found`) while the restart still reports fine.
@@ -280,14 +310,14 @@ hang).
    `DELETE FROM attachment_text WHERE extractor = 'type-skipped'`.
    `retry-failed-extractions` deliberately does not: it is about *failures*, and
    a type-skip is a decision.
-5. **"The DGX is unreachable" means a stale NAT mapping, not a dead host —
-   diagnosed, fix not yet applied.** See §0.1 for the proof. Reach it at
-   **`ssh 192.168.68.76`**, which works whenever the tunnel does not; deploys,
-   systemd, and `docker exec … psql` all work normally over it. The real fix is
-   `PersistentKeepalive = 25` in the `[Peer]` block of
-   `/etc/wireguard/wg0.conf` + `sudo systemctl restart wg-quick@wg0`, which
-   **needs root** — the file is 0600 and the DGX has no passwordless sudo, so it
-   could not be applied from this session.
+5. **"The DGX is unreachable" means its upstream internet is flapping, not a
+   dead host and not WireGuard.** Evidence in §0.1 (NetworkManager
+   `CONNECTED_SITE` transitions; `wg0` never restarted). Reach it at
+   **`ssh 192.168.68.76`**, which works whenever the tunnel does not — deploys,
+   systemd, and `docker exec … psql` all work normally over it. **Do not touch
+   `/etc/wireguard/wg0.conf`**: `PersistentKeepalive = 25` is already set and is
+   powerless against a missing internet path. Chase it as a local-network / ISP
+   problem on the DGX if at all.
 6. **`secrets.configure`'s pin is kept even though #245 is fixed** *(carried)*.
    `search.create_searcher(cfg=None)` still falls back to a no-path
    `load_config()` for library callers, and the pin makes *a default-config read
@@ -346,8 +376,8 @@ unset VIRTUAL_ENV && uv run mypy src/localmail
 # §0.3 — watch the extraction backlog drain:
 unset VIRTUAL_ENV && uv run localmail search-status
 
-# The DGX — deployed at handoff. If 10.0.0.3 is dead it is a stale NAT
-# mapping (risk 5), NOT a dead host; the LAN address always works:
+# The DGX — deployed at handoff. If 10.0.0.3 is dead its upstream internet is
+# flapping (risk 5), NOT a dead host; the LAN address always works:
 ssh 192.168.68.76 'systemctl --user is-active localmail-daemon localmail-serve'
 
 # §0.2 — the cold-boot proof (the one item still outstanding):

@@ -77,6 +77,7 @@ from __future__ import annotations
 import logging
 import threading
 import traceback as tb_mod
+from collections.abc import Sequence
 from pathlib import Path
 
 import psycopg
@@ -84,6 +85,7 @@ from psycopg_pool import ConnectionPool
 
 from localmail.config import SearchConfig
 from localmail.heartbeat import safe_heartbeat
+from localmail.search import attachment_kind
 from localmail.search.extractor import (
     DoclingExtractor,
     ExtractedText,
@@ -96,6 +98,21 @@ from localmail.search.extractor import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+#: Sentinel ``attachment_text.extractor`` for a blob neither allowlist admits —
+#: a sibling of the existing ``size-skipped``. Recording the decision does two
+#: jobs. It makes the skip **queryable** (``WHERE extractor = 'type-skipped'``),
+#: which #216 asked for: the previous bare ``continue`` left no row and no log,
+#: so an unindexable attachment was invisible. And it makes the blob ineligible
+#: for the next ``_claim_batch``, which is what stops the queue starving —
+#: claims are ``ORDER BY first_seen_at LIMIT extract_worker_batch_size``, so one
+#: full batch of images used to make every sweep return ``touched=0`` and every
+#: caller conclude the queue was drained, permanently.
+#:
+#: Widening an allowlist afterwards does **not** re-open these blobs; the row is
+#: what excludes them. Clear it deliberately:
+#: ``DELETE FROM attachment_text WHERE extractor = 'type-skipped'``.
+SKIPPED_EXTRACTOR = "type-skipped"
 
 
 _TRANSIENT_EXC_TYPES: tuple[type[BaseException], ...] = (
@@ -151,24 +168,49 @@ def _no_nul(s: str) -> str:
     return s.replace("\x00", "") if "\x00" in s else s
 
 
-def _is_allowlisted(mime_type: str | None, path: str, cfg: SearchConfig) -> bool:
-    """Return True iff the blob's MIME type or filename extension is allowlisted.
+def _is_allowlisted(
+    mime_type: str | None, filenames: Sequence[str], cfg: SearchConfig
+) -> bool:
+    """Return True iff the blob's MIME type or an original filename's extension
+    is allowlisted. See ``attachment_kind.is_allowlisted`` for the rule.
 
-    Checks ``cfg.extractor_mime_allowlist`` first, then
-    ``cfg.extractor_extension_allowlist``.  Both comparisons are
-    case-insensitive.  Either match is sufficient.
+    ``filenames`` comes from ``messages.attachments``, **never** from
+    ``attachment_blobs.path`` — that path is content-addressable and has no
+    extension, which is what made the extension half of this gate dead code
+    (#216).
     """
-    mt = (mime_type or "").lower()
-    if mt in (m.lower() for m in cfg.extractor_mime_allowlist):
-        return True
-    ext = Path(path).suffix.lower()
-    return ext in (e.lower() for e in cfg.extractor_extension_allowlist)
+    return attachment_kind.is_allowlisted(
+        mime_type,
+        filenames,
+        mime_allowlist=cfg.extractor_mime_allowlist,
+        extension_allowlist=cfg.extractor_extension_allowlist,
+    )
 
 
-def _is_pdf(mime_type: str | None, path: str) -> bool:
-    """Return True iff the blob is a PDF by MIME type or filename extension."""
-    mt = (mime_type or "").lower()
-    return mt == "application/pdf" or Path(path).suffix.lower() == ".pdf"
+def _blob_filenames(conn: psycopg.Connection, sha256: bytes) -> list[str]:
+    """Every distinct original filename this blob was received under.
+
+    A blob is content-addressable and global, so identical bytes attached to
+    several messages appear once here with each message's own name. Any one of
+    them carrying a recognisable extension is enough to make the bytes worth
+    extracting, so all are returned.
+
+    The containment predicate is what the ``messages_attachments_gin`` index
+    serves (same shape as ``api.attachments.get_attachment_filename``); the
+    ``jsonb_array_elements`` unnest then runs only over the matched rows.
+    """
+    sha_hex = sha256.hex()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT a->>'filename' "
+            "FROM messages m, jsonb_array_elements(m.attachments) AS a "
+            "WHERE m.attachments @> jsonb_build_array("
+            "        jsonb_build_object('sha256', %s::text)) "
+            "  AND a->>'sha256' = %s "
+            "  AND a->>'filename' IS NOT NULL",
+            (sha_hex, sha_hex),
+        )
+        return [row[0] for row in cur.fetchall()]
 
 
 def _claim_batch(conn: psycopg.Connection, cfg: SearchConfig) -> list[tuple]:
@@ -409,6 +451,7 @@ def _process_blob(
     cfg: SearchConfig,
     lw: LightweightExtractor,
     dl: DoclingExtractor,
+    filename: str | None = None,
 ) -> bool:
     """Apply the per-blob decision tree and write the result to the DB.
 
@@ -433,6 +476,10 @@ def _process_blob(
         cfg: SearchConfig providing all tunables.
         lw: Shared ``LightweightExtractor`` instance for this batch.
         dl: Shared ``DoclingExtractor`` instance for this batch.
+        filename: The blob's original per-message filename, if any. Both
+            extractors dispatch on its extension when the MIME type is
+            unhelpful; ``path`` cannot serve that role because it is
+            content-addressable and extensionless (#216).
     """
     # Step 1: size guard.
     if size_bytes > cfg.extractor_max_blob_bytes:
@@ -449,7 +496,7 @@ def _process_blob(
     lw_text: ExtractedText | None = None
     lw_raised: BaseException | None = None
     try:
-        lw_text = lw.extract(blob_path, mime_type)
+        lw_text = lw.extract(blob_path, mime_type, filename=filename)
     except Exception as exc:
         lw_raised = exc
 
@@ -459,13 +506,13 @@ def _process_blob(
         return True
 
     # Step 4: lightweight returned empty or raised.
-    is_pdf = _is_pdf(mime_type, path)
+    is_pdf = attachment_kind.is_pdf(mime_type, filename)
     docling_avail = _try_import_docling() is not None
 
     if is_pdf and docling_avail:
         # Step 4a: try docling fallback for PDFs.
         try:
-            dl_text = dl.extract(blob_path, mime_type)
+            dl_text = dl.extract(blob_path, mime_type, filename=filename)
         except Exception as exc:
             # Transient (network blip during model fetch, OOM): propagate
             # so the outer SAVEPOINT handler rolls back without recording —
@@ -556,8 +603,16 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
     touched = 0
 
     for sha256, path, mime_type, size_bytes, transient_count in batch:
-        if not _is_allowlisted(mime_type, path, cfg):
-            # Silently skip; not counted in touched.
+        filenames = _blob_filenames(conn, sha256)
+        if not _is_allowlisted(mime_type, filenames, cfg):
+            _insert_attachment_text(
+                conn,
+                sha256,
+                ExtractedText(
+                    text="", page_count=None, extractor=SKIPPED_EXTRACTOR
+                ),
+            )
+            touched += 1
             continue
 
         with conn.cursor() as cur:
@@ -565,7 +620,17 @@ def run_extract_worker_once(conn: psycopg.Connection, cfg: SearchConfig) -> int:
 
         try:
             wrote = _process_blob(
-                conn, sha256, path, mime_type, size_bytes, cfg, lw, dl
+                conn,
+                sha256,
+                path,
+                mime_type,
+                size_bytes,
+                cfg,
+                lw,
+                dl,
+                filename=attachment_kind.preferred_filename(
+                    filenames, cfg.extractor_extension_allowlist
+                ),
             )
             if wrote and transient_count is not None:
                 # A prior transient streak recovered — reset the counter so

@@ -33,7 +33,7 @@ def test_cli_embed_backfill_drains_queue(monkeypatch, db_dsn, db_conn, cli_confi
         def health_check(self): pass
 
     monkeypatch.setattr("localmail.cli._make_backend", lambda cfg: _E())
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
 
     runner = CliRunner()
     result = runner.invoke(main, ["embed-backfill", "--no-progress"])
@@ -44,7 +44,7 @@ def test_cli_embed_backfill_drains_queue(monkeypatch, db_dsn, db_conn, cli_confi
 
 
 def test_cli_search_status_reports_counts(monkeypatch, db_dsn, db_conn, cli_config):
-    monkeypatch.setattr("localmail.cli._dsn", lambda: db_dsn)
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
     runner = CliRunner()
     result = runner.invoke(main, ["search-status", "--format", "json"])
     assert result.exit_code == 0, result.output

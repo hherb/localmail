@@ -132,6 +132,35 @@ the exposure that already happened.
 `set` always writes 0600, so the only route to a bad mode is manual tampering,
 a restore, or an `rsync` that flattened it.
 
+#### The parent directory (#246)
+
+The file's mode is not the whole story. Write access to a **directory** permits
+`unlink` and `rename` of the entries in it regardless of their own modes, so
+somebody with that bit can move the 0600 file aside and drop in their own 0600
+substitute — every file-mode check still passes, and the daemon authenticates
+with whatever it now holds. `SECRETS_DIR_MODE = 0o700` covers only the
+fresh-install path where localmail creates the directory itself; an existing one
+is deliberately left at whatever mode it has.
+
+So an existing parent is graded on read by the pure `directory_exposure(mode)`,
+a **sibling** of `mode_is_private` rather than a reuse of it — the two rules read
+different bits and carry different costs, and conflating them is how one of them
+ends up applied to the wrong thing:
+
+- **World-writable → refuse** (`InsecureSecretsDirectory`, naming `chmod o-w`).
+  Never legitimate for a config directory.
+- **Group-writable → warn, once per process, and proceed.** Genuinely ambiguous:
+  under the umask-002 + per-user-private-group default of the Debian/Ubuntu and
+  RHEL families a directory the user made lands at 0775 where the group is that
+  user alone. Refusing would wedge a stock install over a distro default — the
+  DGX's own `~/.config/localmail` is 0775 today. The dedupe matters because every
+  `get` re-reads the file and the daemon reads a secret on each reconnect.
+- **Read/execute bits are ignored.** `~/.config` is routinely 0755; being able to
+  list a directory leaks the secrets file's *name*, which its 0600 survives.
+
+The check runs before the file check and runs even when no file exists yet: the
+substitution works just as well by planting a file where none was.
+
 ### Migration
 
 ```
@@ -157,6 +186,8 @@ box.
 | --- | --- |
 | `backend = "file"`, file absent | reads return `None`; first `set` creates dir + file |
 | file mode has group/other bits | `InsecureSecretsFile` on read, with the `chmod` to run |
+| parent directory is world-writable | `InsecureSecretsDirectory` on read, with `chmod o-w` (#246) |
+| parent directory is group-writable | one WARNING per process, naming `chmod g-w`; the read proceeds (#246) |
 | file is not valid JSON | raises, naming the path — a corrupt store must not read as empty, which would look like "no secret configured" and send the operator down the wrong path |
 | `backend` is an unknown string | pydantic rejects it at config load, before any process starts |
 | keyring locked, `backend = "keyring"` | unchanged — `KeyringLocked` propagates |
@@ -164,11 +195,17 @@ box.
 ## Testing
 
 - **Pure** (`secrets_store.py`): username scheme, serialise/deserialise round
-  trip, `mode_is_private` across 0600 / 0640 / 0604 / 0666 / 0700.
+  trip, `mode_is_private` across 0600 / 0640 / 0604 / 0666 / 0700;
+  `directory_exposure` across 0700 / 0755 / 0775 / 0707 / 0777, including that
+  world-writable outranks group-writable and that the two predicates disagree on
+  0755 by design.
 - **File store** (`tmp_path`): set→get round trip; overwrite; delete; delete of
   an absent key; missing file reads `None`; created file is exactly 0600 and its
   directory 0700; a 0644 file raises `InsecureSecretsFile`; corrupt JSON raises;
-  no `*.tmp` remains after a write.
+  no `*.tmp` remains after a write; a 0777 parent raises
+  `InsecureSecretsDirectory` (on read, on write, and with no file present at
+  all); a 0775 parent warns exactly once and still serves the secret; a 0755
+  parent is silent.
 - **Dispatcher**: default is keyring; `configure("file", …)` routes there;
   `reset_to_default()` restores.
 - **Migration**: copies both key kinds, skips absent ones, `--dry-run` writes

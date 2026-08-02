@@ -401,6 +401,35 @@ never touched. A real attachment write takes milliseconds, so there is no
 reason to lower it — and since that margin is the only protection, the setting
 is floored at one second.
 
+### Which attachments get extracted
+
+A blob is extracted when **either** its declared MIME type is in
+`search.extractor_mime_allowlist` **or** one of the original filenames it was
+received under has an extension in `search.extractor_extension_allowlist`.
+Either match suffices because senders get this wrong in both directions — a real
+PDF routinely arrives as `application/octet-stream` from a mobile client.
+
+The extension comes from the filename recorded in `messages.attachments`, never
+from the on-disk blob path: that path is content-addressable
+(`blobs/<aa>/<bb>/<sha256hex>`) and has no extension at all.
+
+A blob neither allowlist admits gets an `attachment_text` row with
+`extractor = 'type-skipped'` and empty text, so the decision is queryable:
+
+```sql
+SELECT b.mime_type, count(*) FROM attachment_text t
+  JOIN attachment_blobs b USING (sha256)
+ WHERE t.extractor = 'type-skipped' GROUP BY 1 ORDER BY 2 DESC;
+```
+
+That row is also what makes the blob ineligible for the next claim. If you widen
+an allowlist and want the skipped blobs reconsidered, delete the rows first —
+nothing does it automatically:
+
+```sql
+DELETE FROM attachment_text WHERE extractor = 'type-skipped';
+```
+
 Attachment extraction follows the same SAVEPOINT discipline but distinguishes
 two error classes (so a docling model-download blip doesn't permanently mark
 a perfectly fine PDF as failed):
@@ -456,6 +485,16 @@ are the only protection**, deliberately — the disk is already encrypted, and
 anyone who can read a 0600 file owned by the service user is already that user
 or root. If the mode is ever found readable by group or other, reads are
 **refused** with the exact `chmod` to run rather than quietly using it.
+
+The *directory* is graded too, because write access to a directory allows
+renaming the entries inside it whatever their own modes — so a writable parent
+lets somebody swap the 0600 file for one of their own and the mode check still
+passes. A **world-writable** parent is refused (`chmod o-w`); a
+**group-writable** one logs one warning per process and carries on, since a
+directory you created under the common umask-002 + private-group setup lands at
+0775 with your own group and is safe in practice. Read and execute bits are
+ignored — `~/.config` is routinely 0755, and listing a directory reveals only
+the file's name.
 
 To move an existing install without re-driving the Gmail consent flow on a
 machine with no browser, unlock the keyring one final time and copy across:

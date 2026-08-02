@@ -29,7 +29,7 @@ attachment tree without touching IMAP.
   misconfiguration; it is what a login keyring is. See
   [docs/superpowers/specs/2026-08-02-headless-secrets-design.md](docs/superpowers/specs/2026-08-02-headless-secrets-design.md).
   - Modules: pure [src/localmail/secrets_store.py](src/localmail/secrets_store.py)
-    (username scheme, JSON encoding, `mode_is_private`), IO
+    (username scheme, JSON encoding, `mode_is_private`, `directory_exposure`), IO
     [src/localmail/secrets_file.py](src/localmail/secrets_file.py)
     (`FileSecretStore`), dispatcher `secrets.py`, pure planner
     [src/localmail/secrets_migrate.py](src/localmail/secrets_migrate.py).
@@ -42,17 +42,38 @@ attachment tree without touching IMAP.
     every test so a config-loading test cannot leak its backend.
   - **An install from an operator-named config is pinned**
     (`configure(..., named_config=True)`); a later load of the *default* config
-    leaves it alone. Five CLI commands still call `load_config()` with no path
-    and so read the default config regardless of `--config` (#245) — without the
-    pin, one of those incidental reads could swap a headless host's `file`
-    backend back to `keyring` mid-command and silently reintroduce the
-    boot-time `KeyringLocked` failure the backend exists to remove. When #245
-    lands, revisit the pin.
+    leaves it alone. Without the pin, an incidental default-path read could swap
+    a headless host's `file` backend back to `keyring` mid-command and silently
+    reintroduce the boot-time `KeyringLocked` failure the backend exists to
+    remove. **#245 — the nine CLI commands that ignored `--config` — is fixed**
+    (see `_dsn(ctx)` under Commands), and the pin is **kept anyway**:
+    `search.create_searcher(cfg=None)` still falls back to a no-path
+    `load_config()` for library callers, so the pin is what makes the invariant
+    hold by construction rather than by everyone remembering.
   - **File permissions are the only protection, and are enforced on read**: any
     group/other bit raises `InsecureSecretsFile` naming the `chmod` to run.
     Refusing (rather than warning, or self-healing with a `chmod`) is the
     deliberate call — the daemon stops until an operator acts, which is correct
     for a leaked-credential file and is one command to clear.
+  - **The parent directory is graded separately (#246)** by the pure
+    `secrets_store.directory_exposure(mode) -> DirectoryExposure`, a **sibling**
+    of `mode_is_private`, not a reuse — the two read different bits and carry
+    different costs, and merging them is how one rule ends up applied to the
+    wrong thing. Directory *write* access permits `unlink`/`rename` of entries
+    **regardless of their own modes**, so a writable parent can swap the 0600
+    file for an attacker-written 0600 file and every file-mode check still
+    passes. `WORLD_WRITABLE` → `InsecureSecretsDirectory` (refuse, naming
+    `chmod o-w`); `GROUP_WRITABLE` → **one WARNING per process** and proceed;
+    read/execute bits ignored. Group-write only warns because the umask-002 +
+    per-user-private-group default of the Debian/Ubuntu and RHEL families puts a
+    user-created directory at 0775 with that user's own group — refusing would
+    wedge a stock install over a distro default (the DGX's own
+    `~/.config/localmail` is 0775). The warning is deduped on a
+    `FileSecretStore` instance flag because every `get` re-reads the file and
+    the daemon reads a secret per reconnect; `configure()` installs one store
+    per process, so instance state is process state. The check runs **before**
+    the file check and **even when no file exists** — the substitution works
+    just as well by planting a file where none was.
   - Writes go through an `O_EXCL` temp in the same directory + `os.replace`, so
     no reader sees a partial file and the secret is never briefly at a wider
     mode, then `fsync` the file **and** its directory — `os.replace` orders the
@@ -142,6 +163,20 @@ uv run localmail serve [--bind 127.0.0.1] [--port 8443] \
                        [--tls-cert PATH] [--tls-key PATH] [--no-tls]
 ```
 
+**`--config` reaches every command via `ctx.obj["config_path"]` (#245).** The
+shared `cli._dsn(ctx)` takes the click context; it used to be zero-argument and
+call `load_config()` with no path, so **nine** commands (`extract-backfill`,
+`embed-backfill`, `lang-backfill`, `search-status`, `estimate-upgrade`,
+`list-failed-embeddings`, `retry-failed-embeddings`, `list-failed-extractions`,
+`retry-failed-extractions` — the issue named five, the four `_dsn`-only ones
+were equally affected) silently ran against `~/.config/localmail/config.toml`:
+a different database, a different attachment root. Making the context a
+parameter means a new command cannot omit it without a `TypeError`. Pinned for
+every command by `tests/test_cli_config_path.py`, which probes the DSN that
+reaches `open_pool`/`psycopg.connect`. `search.create_searcher(cfg=None)` still
+falls back to a no-path `load_config()` — that is the library default, where no
+click context exists, and is why `secrets.configure`'s pin is kept.
+
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)
 pick the wrong interpreter. Prefix with `unset VIRTUAL_ENV && …` to be safe.
@@ -172,6 +207,7 @@ src/localmail/
     chunking.py     # chunk_message() -> ChunkSpec list; chunk_attachment_text() -> ChunkSpec list
     embed_worker.py # run_embed_worker_once, run_embed_worker (background thread)
     embeddings.py   # FastEmbedBackend + EmbeddingBackend ABC
+    attachment_kind.py # pure: extension_of / is_allowlisted / preferred_filename / is_pdf (#216)
     extractor.py    # LightweightExtractor (11 formats) + ExtractorBackend ABC; DoclingExtractor via [extraction] extra
     extract_worker.py # run_extract_worker_once, run_extract_worker (background thread)
     lang_detect.py  # LinguaDetector + FixedDetector + run_lang_detect_pass for messages.body_lang
@@ -838,6 +874,36 @@ so the two cannot drift. See
 - `LightweightExtractor` handles 11 formats (PDF, DOCX, XLSX, PPTX, ODT, RTF,
   TXT, Markdown, HTML, CSV, ICS). `DoclingExtractor` is optional, enabled via the
   `[extraction]` uv extra.
+- **The extension half of the allowlist reads the *original filename*, never
+  `attachment_blobs.path` (#216).** That path is content-addressable
+  (`blobs/<aa>/<bb>/<sha256hex>`) and has **no extension by construction**, so
+  every `Path(path).suffix` comparison was against `""` — silently reducing
+  "MIME *or* extension" to "MIME only" and leaving mis-typed attachments
+  (`application/octet-stream` from mobile clients) permanently unindexed. The
+  rule is the pure
+  [src/localmail/search/attachment_kind.py](src/localmail/search/attachment_kind.py)
+  (`extension_of`, `is_allowlisted`, `preferred_filename`, `is_pdf`), shared by
+  the worker gate, the docling-fallback decision, and both extractors'
+  `extract`/`supports`. `extract` takes a keyword-only `filename=`; filenames
+  come from `messages.attachments` via `extract_worker._blob_filenames`, whose
+  containment predicate is served by `messages_attachments_gin`. A blob is
+  content-addressable and global, so it can carry several original names —
+  **any** one with an allowlisted extension admits it.
+- **A turned-away blob gets a `type-skipped` sentinel row, and that is
+  load-bearing (#216).** The gate used to `continue` with no row and no log.
+  Two consequences, the second severe. The skip was invisible — no
+  `failed_extractions`, nothing queryable. And the blob never gained an
+  `attachment_text` row, so it stayed eligible and was re-claimed every sweep:
+  since `_claim_batch` is `ORDER BY first_seen_at LIMIT
+  extract_worker_batch_size` (default 20), **one full batch of images ahead of
+  everything else made every sweep return `touched=0`**, which the CLI backfill
+  loop and the daemon worker both read as "queue drained". Extraction then
+  stopped for the whole archive. This was live on the Mac deployment: 16,542
+  unprocessed blobs, 19 extracted, 0/20 allowlisted in the next claim. The
+  sentinel makes the blob ineligible, so the queue advances. It also means
+  widening an allowlist does **not** re-open skipped blobs — clear them with
+  `DELETE FROM attachment_text WHERE extractor = 'type-skipped'`
+  (`retry-failed-extractions` deliberately does not, it is about *failures*).
 - `extract_worker` uses `conn_factory` (not pool) so each sweep gets a fresh
   connection — prevents server-side idle timeouts on long extractions.
 - `extract_worker` spawn is gated by `cfg.search.run_extract_worker`.

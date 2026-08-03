@@ -445,10 +445,20 @@ installed alongside it.
 | `"none"` | Skip OCR entirely. docling still contributes layout and table-structure analysis, so the fallback keeps some value. |
 | an engine name | Pin one: `easyocr`, `ocrmac`, `rapidocr`, `tesseract`, … Validated against what your docling build actually registers. |
 
-On macOS the `[extraction]` extra installs **ocrmac** (a thin wrapper around
-Apple Vision — no torch, no model downloads), so `uv sync --all-extras` gets you
-working OCR out of the box. On Linux, install `easyocr` or `rapidocr` to opt in;
-without one, `"auto"` simply degrades as above.
+**With the `[extraction]` extra installed, `"auto"` finds a working engine on
+both platforms and there is nothing else to configure.** On macOS the extra adds
+**ocrmac** (a thin Apple Vision wrapper). On Linux, **rapidocr** arrives as a
+dependency of `docling[standard]` and runs on `onnxruntime`, which is already a
+core localmail dependency via fastembed. Verified on both: macOS logs
+`Auto OCR model selected ocrmac`, Linux logs
+`Auto OCR model selected rapidocr with onnxruntime`.
+
+Neither path uses easyocr, so neither pulls torch *for OCR*. (On Linux, docling
+itself may still pull torch as its own dependency — on an aarch64 host with CUDA
+that is roughly 5 GB of venv. The OCR engine does not use it.)
+
+Pin an engine only to override that choice — e.g. `"none"` to skip the OCR cost
+on a large archive, or a specific engine to force it.
 
 An engine that is *named* but not importable, or a name docling does not
 register, is a **configuration** error: one WARNING naming the problem, and the

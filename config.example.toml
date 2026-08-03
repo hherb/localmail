@@ -177,8 +177,10 @@ stale_seconds = 60
 #   "none"           - skip OCR entirely (docling still does layout/tables).
 #   "<engine>"       - pin one: easyocr, ocrmac, rapidocr, tesseract, ...
 #                      Validated against what your docling build registers.
-# On macOS the [extraction] extra installs ocrmac (Apple Vision; no torch, no
-# model downloads), so "auto" gets working OCR out of the box.
+# With the [extraction] extra installed, "auto" finds a working engine on both
+# platforms and needs no pin: ocrmac on macOS (added by the extra), rapidocr on
+# onnxruntime on Linux (a docling dependency; onnxruntime is already a core dep
+# via fastembed). Pin only to override — e.g. "none" to skip the OCR cost.
 # extractor_ocr_engine = "auto"
 # Languages passed to the OCR engine.
 # extractor_ocr_languages = ["en"]

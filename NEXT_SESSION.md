@@ -188,30 +188,48 @@ DELETE FROM failed_extractions
 Result: `lightweight@1.0` 3657 → **3773** (exactly +116), `failed_extractions`
 steady at 126 with **zero** new `DataError` rows, queue otherwise drained.
 
-**The WireGuard drop is diagnosed (was risk 5): the DGX's upstream internet
-flaps.** It is **not** a dead host, a dead tunnel, or a WireGuard
-misconfiguration. `wg0` never restarted (up since Aug 2 07:27 AEST) and
-`wg-quick@wg0` stayed `active`; the DGX's journal shows NetworkManager
-repeatedly dropping to `CONNECTED_SITE` (LAN only, no internet) and back to
-`CONNECTED_GLOBAL` — four times between 03:19 and 05:34 on one night:
+**The WireGuard drop — best current understanding, and two wrong turns to not
+repeat.** It is **not** a dead host, a dead tunnel, or a WireGuard
+misconfiguration: `wg0` never restarted (up since Aug 2 07:27 AEST),
+`wg-quick@wg0` stayed `active`, and `PersistentKeepalive = 25` is **already set**
+in the `[Peer]` block. The peer is a **VPS hub**
+(`Endpoint = vpn.consensus-ai.org:51820`, `AllowedIPs = 10.0.0.0/24`), so the
+tunnel is hub-and-spoke and every Mac↔DGX packet hairpins through the internet —
+hence ~700 ms RTT to a LAN-adjacent host.
+
+**The DGX is on Starlink, which cycles its public IP.** Its journal shows the
+fingerprint clearly — **19** brief connectivity transitions in ~36 h, every one
+lasting **1–4 seconds**, irregularly spaced ~1–2 h apart:
 
 ```bash
-ssh 192.168.68.76 'journalctl --since "-1 day" | grep "NetworkManager state is now"'
+ssh 192.168.68.76 'journalctl -b -1 -u NetworkManager --no-pager \
+  | grep -E "state is now (CONNECTED_SITE|CONNECTED_GLOBAL)"'
+#   Aug 03 05:14:31 SITE -> 05:14:33 GLOBAL   (2s)
+#   Aug 03 09:24:34 SITE -> 09:24:38 GLOBAL   (4s)   ... 19 of these
 ```
 
-The peer is a **VPS hub** (`Endpoint = vpn.consensus-ai.org:51820`,
-`AllowedIPs = 10.0.0.0/24`), so the tunnel is hub-and-spoke and every Mac↔DGX
-packet hairpins through the internet — hence ~700 ms RTT to a LAN-adjacent host.
-No internet on the DGX ⇒ no tunnel, while the LAN path is untouched.
+The **mismatch is the whole clue**: WAN interruptions are seconds long, but the
+tunnel is unreachable for far longer. So the loss of connectivity is not itself
+the outage — the tunnel is failing to re-converge on the DGX's new endpoint after
+an IP change, which is the operator's own hypothesis and fits the data.
 
-**Do not "fix" this in the WireGuard config.** `PersistentKeepalive = 25` is
-**already set** in the `[Peer]` block and cannot help — there is no path to keep
-alive. (An earlier draft of this handoff prescribed exactly that, wrongly,
-before the file had been read.) Nor does an outbound packet from the DGX restore
-the tunnel: that was inferred from one coincidental observation, and
-connectivity had in fact returned on its own hours earlier. If the flapping is
-worth chasing it is a local-network / ISP / Wi-Fi-vs-ethernet problem on the
-DGX, not a localmail one. Meanwhile `ssh 192.168.68.76` always works.
+**Not yet established** (needs root, or a longer measurement): how long the gap
+actually is, whether the DGX's keepalives resume after the address change, and
+whether the VPS updates its stored peer endpoint. `sudo wg show wg0` (latest
+handshake age) sampled over time, and/or the VPS side, would settle it. A
+root-free version: ping `10.0.0.3` from the Mac every 30 s for a few hours and
+correlate the outage windows against the NetworkManager timestamps above. If it
+is confirmed, the targeted remedy is a NetworkManager dispatcher hook that
+re-sets the peer endpoint (or bounces `wg-quick@wg0`) whenever connectivity
+returns.
+
+**Two wrong turns recorded so they are not repeated.** (1) An earlier draft
+prescribed adding `PersistentKeepalive = 25` — it was already there, and the
+claim was made before the config file had been read. (2) A later draft blamed
+"upstream internet flapping" for the outage — the transitions are 1–4 s, far too
+short to explain it, and that draft rested on a **truncated** log view. Both were
+mechanism asserted past the evidence. Meanwhile `ssh 192.168.68.76` always
+works, so no DGX work needs to wait on any of this.
 
 Note: `uv` is **not** on the non-interactive ssh PATH — export it, or `uv sync`
 silently no-ops (`uv: command not found`) while the restart still reports fine.
@@ -264,44 +282,37 @@ single digits. Unlike last session there is no known open bug holding it back.
 faster; expect ~100 s of silence on the **first** docling pipeline init (not a
 hang).
 
-### 0.4 Decide OCR on the DGX *(new, optional)*
+#### 0.4 ~~Decide OCR on the DGX~~ — **DONE, OCR is live there**
 
-The DGX has **440 `lightweight-empty` blobs** — scanned PDFs Linux cannot OCR,
-because it has no engine (risk 3) and does not even carry the `[extraction]`
-extra. Recommended engine there is **`rapidocr`**, and it must be **pinned**:
+Installed the `[extraction]` extra on the DGX (`uv sync --extra mcp --extra
+extraction`) and re-opened its 440 `lightweight-empty` sentinels
+(`DELETE FROM attachment_text WHERE extractor = 'lightweight-empty'`). Real OCR
+text is landing — e.g. *"Enquiries to: Bec Smith, Phone: (08) 9194 1601 / Dr
+Horst Herb / PO Box 161 Dorrigo 2453 / Medical Services Agreement"* off a scanned
+letter that had produced nothing before.
 
-```toml
-[search]
-extractor_ocr_engine = "rapidocr"   # NOT "auto" — see below
-```
+**No config change was needed, and the earlier "you must pin it on Linux" advice
+in this handoff was wrong.** docling's `auto` selector tries rapidocr on
+**onnxruntime** *before* it tries easyocr or the torch backend; the DGX logs
+`Auto OCR model selected rapidocr with onnxruntime`. The mistaken claim came from
+reading only the tail of `auto_ocr_model.py`'s selector chain. Benchmarked on two
+real DGX blobs, `auto` and a pinned `rapidocr` produce **byte-identical** output
+(14 and 1202 chars) because they resolve to the same engine; ~3–5 s/page warm,
+~77 s on the first call while the pipeline initialises.
 
-**The pin is load-bearing.** docling's `auto` selector tries rapidocr *with the
-torch backend* (`import torch; RapidOcrOptions(backend="torch")` in
-`auto_ocr_model.py`), so with `rapidocr` + `onnxruntime` installed but no torch,
-`auto` **skips it**, falls through to easyocr, finds nothing, and silently does
-no OCR. Pinning bypasses that path, and `RapidOcrOptions()` defaults to
-`backend='onnxruntime'` — verified — so no torch is pulled at all.
+Two things worth knowing for the next host:
 
-Why rapidocr over the alternatives on that host: easyocr drags in torch (~2–3 GB
-on aarch64) plus weights, and the GPU is not visible to onnxruntime anyway
-(fastembed already runs CPU there), so it would be *CPU* torch — huge and slow
-for no gain. tesseract (`apt install tesseract-ocr`, kind `tesseract`, **not**
-`tesserocr`, which needs build tools) is lighter still and a fine fallback, just
-weaker on photographed/noisy scans. **Do not chase GPU OCR** — 440 documents is
-well under an hour of CPU, one time.
-
-```bash
-ssh 192.168.68.76 'export PATH="$HOME/.local/bin:$PATH"; cd ~/src/localmail \
-  && unset VIRTUAL_ENV && uv add --optional extraction "rapidocr>=2.0" onnxruntime \
-  && uv sync --extra mcp --extra extraction'
-# then re-open the sentinels (nothing does this automatically — risk 4's sibling):
-#   DELETE FROM attachment_text WHERE extractor = 'lightweight-empty';
-```
-
-Note this installs the `extraction` extra (docling itself) on the DGX for the
-first time. The install is low-risk under #248: a missing or misnamed engine is
-now a *configuration* error that logs one WARNING and holds the blobs — it
-cannot burn `retry_count`.
+- **rapidocr and onnxruntime were already present** — rapidocr via
+  `docling[standard]`, onnxruntime as a *core* localmail dep via fastembed. A
+  brief attempt to add them explicitly to the `[extraction]` extra was reverted
+  as redundant. Only ocrmac (macOS) is ours.
+- **docling pulls torch and CUDA on aarch64 Linux** — `torch` 407 MB,
+  `nvidia-cudnn-cu13` 424 MB, `nvidia-cublas` 518 MB; the DGX venv went to
+  **5.5 GB** (1.5 TB free, so not a problem there). OCR does **not** use it —
+  `auto` picks the onnxruntime backend — but budget the disk on any new Linux
+  host. `torch.cuda.is_available()` is `True` there (device `NVIDIA GB10`), so a
+  GPU OCR path exists if throughput ever matters; at ~4 s/page for 440 documents
+  it does not.
 
 ### 1. **Remaining robustness issues** *(carried)*
    - **#221** — daemon supervisor lifecycle robustness (grace mismatch,
@@ -356,12 +367,12 @@ cannot burn `retry_count`.
 3. **OCR is macOS-only by default.** `[extraction]` installs ocrmac under a
    `sys_platform == 'darwin'` marker. A Linux host with the extraction extra gets
    docling but **no OCR engine**, so scanned PDFs become honest
-   `lightweight-empty` sentinels — correct and quiet, but *no text*. Deliberate:
-   easyocr pulls torch plus model weights, which is not something to inflict on
-   every Linux install by default. **To get OCR on Linux, installing the engine
-   is not enough — pin it.** `auto` tries rapidocr *with torch*, so
-   rapidocr+onnxruntime without torch is silently skipped and you get no OCR at
-   all. See §0.4 for the full reasoning and commands.
+   `lightweight-empty` sentinels — correct and quiet, but *no text*. **Installing
+   the `[extraction]` extra is the whole fix; no pin is needed** — `auto` selects
+   rapidocr on onnxruntime, verified on the DGX (§0.4). What it does cost on
+   aarch64 Linux is disk: docling drags in torch + CUDA, ~5.5 GB of venv, none of
+   which OCR actually uses. Re-open existing sentinels by hand afterwards;
+   nothing does it automatically.
 4. **`type-skipped` is a one-way door for a widened allowlist** *(carried)*. The
    sentinel is what excludes a blob from re-claim, so widening
    `extractor_mime_allowlist` / `extractor_extension_allowlist` afterwards does

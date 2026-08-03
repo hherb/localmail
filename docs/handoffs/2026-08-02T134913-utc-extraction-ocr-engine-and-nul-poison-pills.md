@@ -9,8 +9,9 @@
 > was still climbing during the session. **Both hosts are now deployed and
 > recovered**; the Mac additionally does **real OCR** on scanned PDFs via ocrmac.
 > The long-standing "DGX drops off the network" mystery is **diagnosed** (its
-> upstream internet flaps; not WireGuard — §0.1). The only thing left
-> outstanding is the headless-secrets **cold-boot proof** (§0.2). See §0.
+> upstream internet flaps; not WireGuard — §0.1), and the headless-secrets
+> **cold-boot proof finally passed** (§0.2) — carried unproven since session 11.
+> Nothing from §0 is left outstanding. See §0.
 
 ## Project context (1-minute version)
 
@@ -215,20 +216,37 @@ DGX, not a localmail one. Meanwhile `ssh 192.168.68.76` always works.
 Note: `uv` is **not** on the non-interactive ssh PATH — export it, or `uv sync`
 silently no-ops (`uv: command not found`) while the restart still reports fine.
 
-#### 0.2 The headless-secrets cold-boot proof *(carried from sessions 11, 12 and 13)*
+#### 0.2 ~~The headless-secrets cold-boot proof~~ — **DONE, it passed**
 
-**The one thing still outstanding**, and no longer blocked — the DGX is
-reachable on the LAN and confirmed on `backend = "file"`. The keyring there is
-currently unlocked, so a restart demonstrates nothing; only a cold boot
-exercises the failure the `file` backend exists to remove.
+Carried unproven since session 11; proven on 2026-08-03. A **real** cold boot
+(`system boot 2026-08-03 19:06`, `up 1 minute` at check time), both units
+`active`, and **0 `KeyringLocked` lines that boot**. The `file` backend does
+what it was built for: no PAM session, no unlocked login keyring, no crash loop.
+
+Two things came out of it for free:
+
+- **#133's startup backoff worked in production.** Postgres (the Docker
+  container) had not finished starting, so `_load_syncable_accounts` failed at
+  19:07:04 and logged *"loading syncable accounts from the DB failed; retrying
+  in 1.0s"* instead of crashing; the daemon converged at 19:07:11 and had all
+  workers up by 19:07:18. That is precisely the scenario #133 was written for,
+  now observed on real hardware rather than in a test.
+- **Small ops bug, unfixed:** `~/.config/systemd/user/localmail-daemon.service`
+  has `StartLimitIntervalSec=0` on line 11, inside `[Service]`. systemd only
+  honours that key in `[Unit]`, so it logs *"Unknown key name
+  'StartLimitIntervalSec' in section 'Service', ignoring"* and the restart-limit
+  override is silently inert. Move it under `[Unit]`. Harmless while nothing
+  crash-loops — which is the point of the fix above — but it would matter on the
+  day something does.
 
 ```bash
+# how it was verified (re-runnable if the secrets backend is ever touched):
 ssh 192.168.68.76 'sudo reboot'
-# once back (LAN address always works; 10.0.0.3 may need a packet from the DGX):
-ssh 192.168.68.76 'systemctl --user is-active localmail-daemon localmail-serve;
+ssh 192.168.68.76 'uptime -p; who -b;
+  systemctl --user is-active localmail-daemon localmail-serve;
   journalctl --user -u localmail-daemon -b | grep -c KeyringLocked'   # expect 0
 ```
-**Acceptance:** both units `active` after a cold boot with **zero**
+**Acceptance (met):** both units `active` after a cold boot with **zero**
 `KeyringLocked` lines that boot.
 
 #### 0.3 Watch the Mac finish draining
@@ -245,6 +263,45 @@ single digits. Unlike last session there is no known open bug holding it back.
 `uv run localmail extract-backfill` drains it in the foreground if you want it
 faster; expect ~100 s of silence on the **first** docling pipeline init (not a
 hang).
+
+### 0.4 Decide OCR on the DGX *(new, optional)*
+
+The DGX has **440 `lightweight-empty` blobs** — scanned PDFs Linux cannot OCR,
+because it has no engine (risk 3) and does not even carry the `[extraction]`
+extra. Recommended engine there is **`rapidocr`**, and it must be **pinned**:
+
+```toml
+[search]
+extractor_ocr_engine = "rapidocr"   # NOT "auto" — see below
+```
+
+**The pin is load-bearing.** docling's `auto` selector tries rapidocr *with the
+torch backend* (`import torch; RapidOcrOptions(backend="torch")` in
+`auto_ocr_model.py`), so with `rapidocr` + `onnxruntime` installed but no torch,
+`auto` **skips it**, falls through to easyocr, finds nothing, and silently does
+no OCR. Pinning bypasses that path, and `RapidOcrOptions()` defaults to
+`backend='onnxruntime'` — verified — so no torch is pulled at all.
+
+Why rapidocr over the alternatives on that host: easyocr drags in torch (~2–3 GB
+on aarch64) plus weights, and the GPU is not visible to onnxruntime anyway
+(fastembed already runs CPU there), so it would be *CPU* torch — huge and slow
+for no gain. tesseract (`apt install tesseract-ocr`, kind `tesseract`, **not**
+`tesserocr`, which needs build tools) is lighter still and a fine fallback, just
+weaker on photographed/noisy scans. **Do not chase GPU OCR** — 440 documents is
+well under an hour of CPU, one time.
+
+```bash
+ssh 192.168.68.76 'export PATH="$HOME/.local/bin:$PATH"; cd ~/src/localmail \
+  && unset VIRTUAL_ENV && uv add --optional extraction "rapidocr>=2.0" onnxruntime \
+  && uv sync --extra mcp --extra extraction'
+# then re-open the sentinels (nothing does this automatically — risk 4's sibling):
+#   DELETE FROM attachment_text WHERE extractor = 'lightweight-empty';
+```
+
+Note this installs the `extraction` extra (docling itself) on the DGX for the
+first time. The install is low-risk under #248: a missing or misnamed engine is
+now a *configuration* error that logs one WARNING and holds the blobs — it
+cannot burn `retry_count`.
 
 ### 1. **Remaining robustness issues** *(carried)*
    - **#221** — daemon supervisor lifecycle robustness (grace mismatch,
@@ -299,10 +356,12 @@ hang).
 3. **OCR is macOS-only by default.** `[extraction]` installs ocrmac under a
    `sys_platform == 'darwin'` marker. A Linux host with the extraction extra gets
    docling but **no OCR engine**, so scanned PDFs become honest
-   `lightweight-empty` sentinels — correct and quiet, but *no text*. To get OCR
-   there, install `easyocr` or `rapidocr` and the `auto` default picks it up with
-   no config change. Deliberate: easyocr pulls torch plus model weights, which is
-   not something to inflict on every Linux install by default.
+   `lightweight-empty` sentinels — correct and quiet, but *no text*. Deliberate:
+   easyocr pulls torch plus model weights, which is not something to inflict on
+   every Linux install by default. **To get OCR on Linux, installing the engine
+   is not enough — pin it.** `auto` tries rapidocr *with torch*, so
+   rapidocr+onnxruntime without torch is silently skipped and you get no OCR at
+   all. See §0.4 for the full reasoning and commands.
 4. **`type-skipped` is a one-way door for a widened allowlist** *(carried)*. The
    sentinel is what excludes a blob from re-claim, so widening
    `extractor_mime_allowlist` / `extractor_extension_allowlist` afterwards does
@@ -380,9 +439,10 @@ unset VIRTUAL_ENV && uv run localmail search-status
 # flapping (risk 5), NOT a dead host; the LAN address always works:
 ssh 192.168.68.76 'systemctl --user is-active localmail-daemon localmail-serve'
 
-# §0.2 — the cold-boot proof (the one item still outstanding):
-ssh 192.168.68.76 'sudo reboot'
-ssh 192.168.68.76 'journalctl --user -u localmail-daemon -b | grep -c KeyringLocked'
+# §0.2 — the cold-boot proof PASSED this session; re-run only if the secrets
+# backend is touched again:
+#   ssh 192.168.68.76 'sudo reboot'
+#   ssh 192.168.68.76 'journalctl --user -u localmail-daemon -b | grep -c KeyringLocked'
 
 # Reproduce CI's docling-less environment locally (risk 2) — a pytest plugin
 # that blocks `import docling` via sys.meta_path; see the session transcript.

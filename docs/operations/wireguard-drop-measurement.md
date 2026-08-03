@@ -47,11 +47,24 @@ needs root, and the DGX has no passwordless sudo.
 ### Mac side — the probe
 
 `scratchpad/tunnel-probe.sh` → `tunnel-probe.log`, columns:
-`iso_ts tunnel={ok,FAIL} lan={ok,FAIL}`
+`iso_ts tunnel={ok,FAIL}(n/3) lan={ok,FAIL}(n/3)`
 
 - `tunnel` pings `10.0.0.3` (Mac → hub → DGX).
 - `lan` pings `192.168.68.76` — the **control**. It proves the host is alive and
   the outage is tunnel-specific, not a crashed or rebooting DGX.
+
+**Three pings per sample, `FAIL` only if all three are lost.** The first version
+sent a single ping and produced 3 `FAIL`s in 46 samples — every one of them
+isolated, and the DGX's `rx_pkts` kept incrementing straight through all three,
+so the tunnel had not dropped at all. Starlink loses individual packets at
+satellite handover (~15 s cadence); v2 immediately recorded `tunnel=ok(2/3)`
+alongside `lan=ok(3/3)`, which is exactly that. A single-ping sampler cannot
+distinguish routine satellite loss from the multi-hour outage under
+investigation, and at ~6% loss it would bury the real signal in false positives.
+
+Parse the received count from field 4 of the `N packets transmitted, N packets
+received` line, not from the loss percentage: `int(33.3 * 3 / 100)` is 0, so
+partial loss would be scored as no loss.
 
 Probing the tunnel does **not** mask the bug: if the hub holds a stale endpoint
 the packet dies at the hub, so the DGX never receives it, never transmits, and

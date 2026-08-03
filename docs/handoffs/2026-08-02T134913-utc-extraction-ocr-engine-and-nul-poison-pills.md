@@ -188,48 +188,43 @@ DELETE FROM failed_extractions
 Result: `lightweight@1.0` 3657 → **3773** (exactly +116), `failed_extractions`
 steady at 126 with **zero** new `DataError` rows, queue otherwise drained.
 
-**The WireGuard drop — best current understanding, and two wrong turns to not
-repeat.** It is **not** a dead host, a dead tunnel, or a WireGuard
-misconfiguration: `wg0` never restarted (up since Aug 2 07:27 AEST),
-`wg-quick@wg0` stayed `active`, and `PersistentKeepalive = 25` is **already set**
-in the `[Peer]` block. The peer is a **VPS hub**
-(`Endpoint = vpn.consensus-ai.org:51820`, `AllowedIPs = 10.0.0.0/24`), so the
-tunnel is hub-and-spoke and every Mac↔DGX packet hairpins through the internet —
-hence ~700 ms RTT to a LAN-adjacent host.
+**The WireGuard drop — the DGX side is now cleared by measurement.** It is not
+a dead host, a dead tunnel, or a WireGuard misconfiguration: `wg0` never
+restarted, `wg-quick@wg0` stayed `active`, and `PersistentKeepalive = 25` is
+already set. The peer is a **VPS hub** (`vpn.consensus-ai.org:51820` =
+135.181.95.235, `AllowedIPs = 10.0.0.0/24`), so Mac↔DGX hairpins through the
+internet — hence ~700 ms RTT to a LAN-adjacent host.
 
-**The DGX is on Starlink, which cycles its public IP.** Its journal shows the
-fingerprint clearly — **19** brief connectivity transitions in ~36 h, every one
-lasting **1–4 seconds**, irregularly spaced ~1–2 h apart:
+The DGX is on **Starlink**, which cycles its public IP, and that looked like the
+answer. **It is not.** A 10.6 h measurement spanning **18 IP cycles** recorded
+**one** tunnel FAIL sample in 1188 — and that one reads `lan=FAIL` too, so both
+paths died together and it was not tunnel-specific. Any re-convergence gap is
+under 30 s. The clincher: the boot covering Aug 2 23:45 AEST, when an outage
+*was* observed, has a longest WAN interruption of **4 s** anywhere in it and **no
+transition at all** at that time — the DGX had continuous internet while its
+tunnel was dead.
+
+**Four explanations have now been refuted**, three of them mine (stale NAT +
+add-keepalive; one-outbound-packet-restores-it; upstream-flapping; and now
+IP-cycling). All are recorded in
+[docs/operations/wireguard-drop-measurement.md](docs/operations/wireguard-drop-measurement.md)
+so they are not re-proposed. **Do not edit `/etc/wireguard/wg0.conf`.**
+
+**What remains:** the **VPS hub** and **the Mac's own tunnel session** — the two
+things nothing was watching. Both probes are now **persistent** (launchd
+`KeepAlive` on the Mac, systemd `Restart=always` + `Linger=yes` on the DGX;
+verified to respawn after kill), because the fault recurs every day or two and
+12-hour bursts kept missing it. The Mac probe now also pings the hub over the
+public internet (not through the tunnel) and logs its own `utun8` counters, so
+the next occurrence separates *hub gone* from *hub up but not relaying*.
+
+**Next session: read the logs first** — the answer may already be sitting in
+them.
 
 ```bash
-ssh 192.168.68.76 'journalctl -b -1 -u NetworkManager --no-pager \
-  | grep -E "state is now (CONNECTED_SITE|CONNECTED_GLOBAL)"'
-#   Aug 03 05:14:31 SITE -> 05:14:33 GLOBAL   (2s)
-#   Aug 03 09:24:34 SITE -> 09:24:38 GLOBAL   (4s)   ... 19 of these
+grep 'tunnel=FAIL' ~/localmail-probe/tunnel-probe.log        # Mac
+ssh 192.168.68.76 'tail -50 ~/localmail-probe/wg-probe.log'  # DGX
 ```
-
-The **mismatch is the whole clue**: WAN interruptions are seconds long, but the
-tunnel is unreachable for far longer. So the loss of connectivity is not itself
-the outage — the tunnel is failing to re-converge on the DGX's new endpoint after
-an IP change, which is the operator's own hypothesis and fits the data.
-
-**Not yet established** (needs root, or a longer measurement): how long the gap
-actually is, whether the DGX's keepalives resume after the address change, and
-whether the VPS updates its stored peer endpoint. `sudo wg show wg0` (latest
-handshake age) sampled over time, and/or the VPS side, would settle it. A
-root-free version: ping `10.0.0.3` from the Mac every 30 s for a few hours and
-correlate the outage windows against the NetworkManager timestamps above. If it
-is confirmed, the targeted remedy is a NetworkManager dispatcher hook that
-re-sets the peer endpoint (or bounces `wg-quick@wg0`) whenever connectivity
-returns.
-
-**Two wrong turns recorded so they are not repeated.** (1) An earlier draft
-prescribed adding `PersistentKeepalive = 25` — it was already there, and the
-claim was made before the config file had been read. (2) A later draft blamed
-"upstream internet flapping" for the outage — the transitions are 1–4 s, far too
-short to explain it, and that draft rested on a **truncated** log view. Both were
-mechanism asserted past the evidence. Meanwhile `ssh 192.168.68.76` always
-works, so no DGX work needs to wait on any of this.
 
 Note: `uv` is **not** on the non-interactive ssh PATH — export it, or `uv sync`
 silently no-ops (`uv: command not found`) while the restart still reports fine.
@@ -380,14 +375,13 @@ Two things worth knowing for the next host:
    `DELETE FROM attachment_text WHERE extractor = 'type-skipped'`.
    `retry-failed-extractions` deliberately does not: it is about *failures*, and
    a type-skip is a decision.
-5. **"The DGX is unreachable" means its upstream internet is flapping, not a
-   dead host and not WireGuard.** Evidence in §0.1 (NetworkManager
-   `CONNECTED_SITE` transitions; `wg0` never restarted). Reach it at
-   **`ssh 192.168.68.76`**, which works whenever the tunnel does not — deploys,
-   systemd, and `docker exec … psql` all work normally over it. **Do not touch
-   `/etc/wireguard/wg0.conf`**: `PersistentKeepalive = 25` is already set and is
-   powerless against a missing internet path. Chase it as a local-network / ISP
-   problem on the DGX if at all.
+5. **"The DGX is unreachable" is NOT the DGX's fault — measured, not guessed.**
+   Four explanations refuted, three of them mine; the DGX side is cleared (§0.1).
+   Reach it at **`ssh 192.168.68.76`**, which works whenever the tunnel does not
+   — deploys, systemd, and `docker exec … psql` all work normally over it.
+   **Do not touch `/etc/wireguard/wg0.conf`**: `PersistentKeepalive = 25` is
+   already set and 18 IP cycles passed without a tunnel outage. Persistent
+   probes are now running on both hosts; read their logs before theorising.
 6. **`secrets.configure`'s pin is kept even though #245 is fixed** *(carried)*.
    `search.create_searcher(cfg=None)` still falls back to a no-path
    `load_config()` for library callers, and the pin makes *a default-config read

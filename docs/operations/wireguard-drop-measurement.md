@@ -21,14 +21,52 @@ three were wrong (see "Discarded explanations" below).
     | grep -E "state is now (CONNECTED_SITE|CONNECTED_GLOBAL)"'
   ```
 
-- **The mismatch is the whole question.** WAN interruptions are *seconds*; the
-  tunnel is unreachable for far longer. So the outage is not the connectivity
-  loss itself — something is failing to re-converge on the DGX's new endpoint
-  after an IP change.
+- **The IP-cycling hypothesis is REFUTED (2026-08-04).** A 10.6 h measurement
+  spanned **18 Starlink IP cycles** and recorded **zero tunnel-specific
+  outages**:
+
+  ```
+  1188 Mac samples / 10.6 h    tunnel FAIL samples: 1
+                               longest consecutive FAIL run: 1
+  ```
+
+  The single FAIL is disqualified by its own control — it reads
+  `lan=FAIL(0/3)` alongside `tunnel=FAIL(0/3)`, so both paths died together and
+  it was not tunnel-specific.
+
+  So any re-convergence gap after an IP change is **under 30 s**, below the
+  sampling resolution. `PersistentKeepalive = 25` is doing its job.
+
+- **The clincher.** The previous boot covers Aug 2 23:45 AEST, when the tunnel
+  *was* observed dead from the Mac. The longest WAN interruption anywhere in
+  that entire boot was **4 s**, and around 23:45 there is no transition at all
+  (nearest: 22:34 and 00:04). **The DGX had continuous internet while the tunnel
+  was unreachable.**
+
+- **Therefore the fault is not on the DGX side at all.** Not its WAN, not IP
+  cycling. The remaining suspects are the **VPS hub** and **this Mac's own
+  tunnel session** — neither of which the first two instruments watched, which
+  is what v3 adds.
 
 ## The two instruments
 
-Both sample every 30 s and stop after 12 h on their own.
+Both sample every 30 s and **run persistently** — the fault has recurred roughly
+every day or two, so 12-hour bursts kept missing it. They restart on crash and
+survive reboot, and each rotates its own log at 200k lines (~70 days).
+
+| host | mechanism | unit | log |
+|---|---|---|---|
+| Mac | launchd agent, `KeepAlive` | `com.localmail.tunnelprobe` | `~/localmail-probe/tunnel-probe.log` |
+| DGX | systemd user service, `Restart=always`, `Linger=yes` | `localmail-wgprobe` | `~/localmail-probe/wg-probe.log` |
+
+```bash
+# Mac
+launchctl list | grep tunnelprobe
+launchctl bootout gui/$(id -u)/com.localmail.tunnelprobe     # stop
+# DGX
+ssh 192.168.68.76 'systemctl --user status localmail-wgprobe'
+ssh 192.168.68.76 'systemctl --user disable --now localmail-wgprobe'   # stop
+```
 
 ### DGX side — passive, root-free
 
@@ -109,6 +147,10 @@ Recorded so they are not re-proposed:
 3. **"The upstream internet flaps, and that is the outage."** The transitions are
    1–4 s, far too short to explain it, and that reading rested on a truncated log
    view.
+4. **"Starlink cycles the IP and the tunnel is slow to re-converge."** The most
+   plausible of the four, and measurement killed it: 18 cycles, zero
+   tunnel-specific outages, and no WAN event at all at the time an outage was
+   actually observed. Any gap is under 30 s.
 
 ## Commands
 

@@ -1,25 +1,69 @@
 #!/bin/bash
-# Mac-side reachability probe for the DGX. See
-# docs/operations/wireguard-drop-measurement.md.
+# Mac-side instrument for the DGX WireGuard drops.
+# See docs/operations/wireguard-drop-measurement.md.
 #
-# THREE pings per sample, FAIL only if all three are lost. v1 used a single
-# ping and produced 3 false FAILs in 46 samples: the DGX is on Starlink, which
-# loses individual packets at satellite handover (~15s cadence). Those single
-# drops are not the multi-hour outage under investigation, and counting them as
-# outages would bury the real signal.
+# v3 adds the two things v2 could not see. v2 established that the DGX side is
+# innocent — 18 Starlink IP cycles in 10.6 h produced zero tunnel-specific
+# outages — so the fault must lie in the VPS hub or in this Mac's own tunnel
+# session, and neither was being watched.
 #
-#   tunnel : 10.0.0.3      via WireGuard, Mac -> VPS hub -> DGX
-#   lan    : 192.168.68.76 direct — the control, proves the host is alive
-LOG="$1"
-for i in $(seq 1 1440); do          # 30s x 1440 = 12h
+# Columns:
+#   iso_ts  tunnel=ok|FAIL(n/3)  lan=ok|FAIL(n/3)  hub=ok|FAIL(n/3)
+#           utun_rx=<pkts> utun_tx=<pkts>
+#
+#   tunnel : 10.0.0.3        Mac -> hub -> DGX. The thing under test.
+#   lan    : 192.168.68.76   control. Proves the DGX is alive; if this fails
+#                            too, the window says nothing about the tunnel.
+#   hub    : 135.181.95.235  the VPS itself (vpn.consensus-ai.org), reached
+#                            over the public internet, NOT through the tunnel.
+#                            Separates "the hub is gone" from "the hub is up
+#                            but not relaying".
+#   utun_* : this Mac's own wg interface counters. `wg show` would be better
+#            (handshake age) but its socket is root-only, so packet counters
+#            via `netstat -ib` are the root-free substitute.
+#
+# Reading it during a tunnel outage:
+#   hub FAIL                     -> the VPS, or the path to it, is down.
+#   hub ok, utun_tx rising,      -> we transmit into the tunnel and nothing
+#     utun_rx flat                  returns: hub up but not relaying.
+#   hub ok, utun_rx also rising  -> traffic flows; suspect the DGX leg and
+#                                   cross-check the DGX's own rx_pkts.
+#
+# THREE pings per target, FAIL only if all three are lost: the satellite path
+# loses single packets routinely (~5% of samples), and a one-ping sampler
+# reported 3 phantom outages in its first 46 samples.
+#
+# Runs forever; launchd restarts it if it dies. Rotates its own log.
+
+LOG="${1:?usage: tunnel-probe.sh <logfile>}"
+MAX_LINES=200000          # ~70 days at 30s; rotate rather than grow unbounded
+
+recv() {                  # echo how many of the 3 pings came back
+  # $4 of "N packets transmitted, N packets received" is the received count.
+  # Do NOT derive it from the loss percentage: int(33.3 * 3 / 100) == 0 would
+  # score partial loss as none.
+  ping -c 3 -i 0.3 -t 4 "$1" 2>/dev/null | awk '/packets received/{print $4}'
+}
+
+while :; do
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  # $4 of the "N packets transmitted, N packets received" line is the
-  # received count — parsed directly rather than derived from the loss
-  # percentage, which rounds wrong for partial loss (33.3% of 3 -> int(0.999) = 0).
-  trx=$(ping -c 3 -i 0.3 -t 4 10.0.0.3      2>/dev/null | awk '/packets received/{print $4}')
-  lrx=$(ping -c 3 -i 0.3 -t 4 192.168.68.76 2>/dev/null | awk '/packets received/{print $4}')
-  [ "${trx:-0}" -gt 0 ] && tun=ok || tun=FAIL
-  [ "${lrx:-0}" -gt 0 ] && lan=ok || lan=FAIL
-  printf '%s tunnel=%s(%s/3) lan=%s(%s/3)\n' "$ts" "$tun" "${trx:-0}" "$lan" "${lrx:-0}" >> "$LOG"
+  t=$(recv 10.0.0.3); l=$(recv 192.168.68.76); h=$(recv 135.181.95.235)
+  # Link-layer row only; its Address column is blank, so the fields land as
+  # Ipkts=$4 Ibytes=$6 Opkts=$7 Obytes=$9.
+  read -r urx utx <<<"$(netstat -ib -I utun8 2>/dev/null \
+      | awk '$1=="utun8" && $3 ~ /^<Link/{print $4, $7; exit}')"
+
+  [ "${t:-0}" -gt 0 ] && tst=ok || tst=FAIL
+  [ "${l:-0}" -gt 0 ] && lst=ok || lst=FAIL
+  [ "${h:-0}" -gt 0 ] && hst=ok || hst=FAIL
+
+  printf '%s tunnel=%s(%s/3) lan=%s(%s/3) hub=%s(%s/3) utun_rx=%s utun_tx=%s\n' \
+    "$ts" "$tst" "${t:-0}" "$lst" "${l:-0}" "$hst" "${h:-0}" \
+    "${urx:-NA}" "${utx:-NA}" >> "$LOG"
+
+  # Cheap rotation: only stat the file every ~100 samples.
+  if [ $((RANDOM % 100)) -eq 0 ] && [ "$(wc -l < "$LOG")" -gt "$MAX_LINES" ]; then
+    tail -n $((MAX_LINES / 2)) "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+  fi
   sleep 30
 done

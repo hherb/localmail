@@ -354,8 +354,15 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
   && cargo clippy --all-targets -- -D warnings && cd ../..
 ```
 
-Session-15 work is **`5c7f6f2`** (PR #253, squash-merged; contains the design
-spec and the fix). Both deployments are at `5c7f6f2` — **both now have #221 and
-#251**. Latest migration **`0035_messages_body_lang_attempted_at.sql`**; next
-free slot `0036_*.sql`. **Open issues: 13** — **#251 closed**, **#255 filed**. Dependabot: **0**
-open alerts.
+Session-15 code is **`5c7f6f2`** (PR #253, squash-merged; contains the design
+spec and the fix). Both deployments are at **`5c7f6f2`** — **both now have #221
+and #251**.
+
+`origin/main` sits **ahead of that**, at the session's docs commits (PR #254,
+#256). That gap is **documentation only**; the hosts are not behind on code and
+do not need redeploying. Verify with
+`git log --oneline 5c7f6f2..origin/main -- src migrations` — expect no output.
+
+Latest migration **`0035_messages_body_lang_attempted_at.sql`**; next free slot
+`0036_*.sql`. **Open issues: 13** — **#251 closed**, **#255 filed**.
+Dependabot: **0** open alerts.

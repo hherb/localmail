@@ -1,11 +1,14 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-08-05 (session 15).** `origin/main` is at **`5c7f6f2`**.
-> This session closed **#251** — `body_lang` detection had been wedged
-> **archive-wide on both deployments for weeks** — through PR **#253**, then
-> deployed it to the Mac and the DGX and drained both archives. The deploy also
-> finally landed **#221**, which session 14 shipped but never rolled out. The
-> DGX "WireGuard drops" were **not** worked on and remain unexplained.
+> **Status as of 2026-08-05 (session 15).** This session closed **#251** —
+> `body_lang` detection had been wedged **archive-wide on both deployments for
+> weeks** — through PR **#253**, then deployed it to the Mac and the DGX and
+> drained both archives. The deploy also finally landed **#221**, which session
+> 14 shipped but never rolled out. Draining the archives immediately exposed a
+> **new live defect, #255**: 7.5% of all labels are English newsletters
+> mislabelled as Yoruba, which was invisible while only 7.6% of the archive was
+> labelled at all. The DGX "WireGuard drops" were **not** worked on and remain
+> unexplained.
 
 ## Project context (1-minute version)
 
@@ -120,7 +123,8 @@ exactly the acceptance criterion the issue asked for.
 
 The residual `declined` counts are the genuinely-unlabelable remainder: **6.4%**
 of bodied messages on the Mac, **2.9%** on the DGX — separator lines, bare URLs,
-one-word replies.
+one-word replies. The rows that *were* labelled are a different story: see
+**#255** under What's next.
 
 ### 3. Ops observations worth carrying
 
@@ -168,7 +172,34 @@ ssh 192.168.1.99 'systemctl --user is-active localmail-daemon localmail-serve lo
 three DGX units `active`. `body_lang_pending` should stay at or near 0 on both —
 new mail is detected on the daemon's own sweeps.
 
-### 1. **The embed worker's backoff does not count lang progress** *(new, unfiled)*
+### 1. **#255 — `body_lang` mislabels English newsletters as Yoruba** *(new, filed; the biggest live defect now)*
+
+Surfaced the moment #251 unwedged detection and the Mac went from 7744 to
+100917 labelled rows. **Pre-existing detector quality, not a regression** — it
+was invisible while only 7.6% of the archive was labelled.
+
+`yo` is the **second most common language** in the archive at **7593 rows
+(7.5% of all labels)**. They are not boilerplate — they are *longer* than the
+English rows (median 6416 vs 2742 chars). They are English marketing/newsletter
+mail whose bodies are dominated by tracking URLs with base64-ish path segments,
+invisible preheader padding (`͏` U+034F, repeated hundreds of times), and
+HTML-to-text residue. Lingua in `low_accuracy` mode scores that soup above
+`body_lang_min_confidence = 0.65` and lands on Yoruba.
+
+**Why it matters:** the errors are *correlated*, so `lang:en` silently excludes
+~7600 English newsletters — the opposite of what the filter is for.
+
+Four directions are written up on the issue; **pre-cleaning the detector input**
+(strip URLs and zero-width characters before `detect()`, as a pure function
+beside the existing whitespace strip) looks strongest, with raising the
+confidence floor and dropping `body_lang_low_accuracy` as measurable
+comparisons. **Acceptance:** newsletter mail is labelled `en` or declined, not
+assigned an implausible language. Note `--retry-declined` does **not** re-open
+rows that carry a *wrong* label — a re-label pass needs
+`UPDATE messages SET body_lang = NULL, body_lang_attempted_at = NULL WHERE
+body_lang = 'yo'`.
+
+### 2. **The embed worker's backoff does not count lang progress** *(new, unfiled)*
 
 `run_embed_worker_once` returns embedded-chunk count only, and
 `run_embed_worker` backs off on `wrote == 0` — up to `5 s × 7 = 35 s` per sweep.
@@ -183,7 +214,7 @@ File it, decide, don't drive-by fix. **Acceptance:** either a comment explaining
 why a sweep that labelled 200 messages counts as empty, or a return shape that
 resets the backoff.
 
-### 2. **Remaining robustness issues** *(carried)*
+### 3. **Remaining robustness issues** *(carried)*
    - **#218** — GUI download commands buffer the full body before enforcing the
      size ceiling.
    - **#235** — `search --smart` reports "could not reach the rewriter service"
@@ -192,7 +223,7 @@ resets the backoff.
    - **#225 / #227** — `/v1/changes` subscription lifecycle gaps.
    - **#200 / #211 / #208** — admin panels silently swallow 4xx; surface as a toast.
 
-### 3. **Admin GUI phase 5 — Users & ACL panel** *(carried, still the design's next slice)*
+### 4. **Admin GUI phase 5 — Users & ACL panel** *(carried, still the design's next slice)*
    `/v1/admin/users` is already `require_admin()` (bearer-capable) — **no backend
    work needed.** Service layer:
    [src/localmail/api/admin/users.py](src/localmail/api/admin/users.py).
@@ -205,12 +236,12 @@ resets the backoff.
    Follow the Daemon-panel shape, and **stub the new API module in both
    `AdminView.test.ts` and `MainView.test.ts`** (see risk 15).
 
-### 4. **Close #90?** *(carried, still unanswered)*
+### 5. **Close #90?** *(carried, still unanswered)*
    Its premise (the `glib` Dependabot alert) is dismissed as `not_used` and no
    longer appears among open alerts. Either close it, or repurpose it explicitly
    as "bump the Tauri stack for its own sake" with a real acceptance criterion.
 
-### 5. **Smaller, deliberately not done this session**
+### 6. **Smaller, deliberately not done this session**
    - **`daemon.py` is 567 lines** and `cli.py` is **1864**, both over the
      500-line guideline. `cli.py` grew ~40 lines this session. Real refactors,
      out of #251's scope.
@@ -326,5 +357,5 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
 Session-15 work is **`5c7f6f2`** (PR #253, squash-merged; contains the design
 spec and the fix). Both deployments are at `5c7f6f2` — **both now have #221 and
 #251**. Latest migration **`0035_messages_body_lang_attempted_at.sql`**; next
-free slot `0036_*.sql`. **Open issues: 12** — **#251 closed**. Dependabot: **0**
+free slot `0036_*.sql`. **Open issues: 13** — **#251 closed**, **#255 filed**. Dependabot: **0**
 open alerts.

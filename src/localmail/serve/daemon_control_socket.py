@@ -116,8 +116,22 @@ class ControlSocketServer:
             self._path.unlink()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.bind(str(self._path))
-        os.chmod(self._path, 0o600)
+        # Bind under a private umask so the socket is 0600 from the instant it
+        # exists (#221 E). chmod-after-bind left a window — however brief — in
+        # which the control socket sat at whatever the process umask allowed,
+        # and anything that connects through it can stop the sync daemon. The
+        # umask is process-global, so it is restored in `finally`; the chmod is
+        # kept as the belt to this braces (a umask cannot *widen*, so it alone
+        # does not guarantee 0600 if some parent set something exotic).
+        old_umask = os.umask(0o177)
+        try:
+            sock.bind(str(self._path))
+            os.chmod(self._path, 0o600)
+        except BaseException:
+            sock.close()
+            raise
+        finally:
+            os.umask(old_umask)
         sock.listen(8)
         sock.settimeout(self._accept_timeout)
         self._sock = sock
@@ -184,19 +198,34 @@ class ControlSocketServer:
 
 def send_control_request(path: Path, request: dict, *, timeout: float) -> dict:
     """Client half: connect to `path`, send one JSON request line, return the
-    decoded JSON response. Raises ControlSocketError if the socket is absent /
-    refusing / replies garbage (the supervisor isn't running here)."""
+    decoded JSON response.
+
+    Every failure mode raises ControlSocketError, which is the only exception
+    `daemon_cli.py` catches. The *whole exchange* is wrapped, not just the
+    connect (#221 D): a peer that accepts and then stalls — a serve process
+    inside a lifecycle op, a wedged handler thread — used to surface as a bare
+    `socket.timeout`, and one that hangs up mid-write as a `BrokenPipeError`.
+    Both are `OSError`, both escaped the CLI's handler, and both showed the
+    operator a traceback where a one-line "supervisor is not reachable" was
+    the whole story.
+    """
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
         try:
             sock.connect(str(path))
-        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
+        except OSError as e:
             raise ControlSocketError(
                 f"cannot reach supervisor control socket at {path}: {e}"
             ) from e
-        sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        raw = _read_line(sock)
+        try:
+            sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
+            raw = _read_line(sock)
+        except OSError as e:
+            raise ControlSocketError(
+                f"lost contact with the supervisor at {path} "
+                f"(it accepted the connection but did not answer): {e}"
+            ) from e
     finally:
         sock.close()
     try:

@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio.to_thread
+
 if TYPE_CHECKING:
     from starlette.routing import Route
 
@@ -49,6 +51,7 @@ from localmail.serve.daemon_supervisor import (
     socket_path,
 )
 from localmail.serve.middleware import APIErrorHandlerMiddleware, RequestIdMiddleware
+from localmail.shutdown_budget import supervisor_kill_after
 from localmail.serve.oauth.registration_guard import RegistrationRateLimit
 from localmail.serve.routes import accounts as accounts_routes
 from localmail.serve.routes import auth as auth_routes
@@ -183,7 +186,11 @@ def create_app(
     if cfg.supervise_daemon:
         supervisor = DaemonSupervisor(
             argv=default_daemon_argv(config_path=daemon_config_path),
-            grace_seconds=daemon_cfg.shutdown_grace_seconds,
+            # NOT the child's raw budget: the child spends all of
+            # shutdown_grace_seconds joining its workers and then still has to
+            # close its pool and exit, so waiting the same number SIGKILLs a
+            # healthy child on every stop and restart (#221 A).
+            grace_seconds=supervisor_kill_after(daemon_cfg.shutdown_grace_seconds),
         )
     else:
         supervisor = ExternalDaemonSupervisor()
@@ -216,7 +223,13 @@ def create_app(
             if css is not None:
                 css.close()
             if isinstance(supervisor, DaemonSupervisor):
-                supervisor.close()
+                # SIGTERMs the child and blocks until it exits (up to the grace
+                # period). On the event loop that freezes the whole serve
+                # process for the duration — nothing else is scheduled, and an
+                # impatient process supervisor that SIGKILLs the parent
+                # mid-wait orphans the child (#221 B). Offloaded, teardown
+                # still waits for the child but the loop stays live.
+                await anyio.to_thread.run_sync(supervisor.close)
             pool.close()
 
     app = FastAPI(lifespan=lifespan)

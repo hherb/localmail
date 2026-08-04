@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import psycopg
 
@@ -35,6 +35,7 @@ from .heartbeat import (
 from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
 from .retry import retry_with_backoff
+from .shutdown_budget import Joinable, wind_down_threads
 from .worker import WorkerContext
 
 log = logging.getLogger(__name__)
@@ -58,10 +59,13 @@ class Daemon:
         dsn: str | None = None,
         embedding_backend_factory=None,
         stop_event: threading.Event | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cfg = cfg
         self.ssl = ssl
         self._dsn = dsn or cfg.database.dsn
+        # Injected so the shutdown budget is testable without sleeping.
+        self._clock = clock
         self._stop_event = stop_event or threading.Event()
         self._reconcile_wake = threading.Event()
         # Set while the command listener holds a LISTEN connection so stop() can
@@ -515,12 +519,49 @@ class Daemon:
                 if self._stop_event.is_set():
                     break  # drain-stop fired inside reconcile
         finally:
-            log.info("waiting for worker threads to finish")
-            for account_id in list(self._account_threads):
-                self._teardown_account(account_id)
-            for t in self._worker_threads:
-                t.join(timeout=self.cfg.daemon.shutdown_grace_seconds)
-            if listener is not None:
-                listener.join(timeout=self.cfg.daemon.shutdown_grace_seconds)
+            self._shutdown_all_threads(listener)
             self.pool.close()
             log.info("daemon stopped")
+
+    def _shutdown_all_threads(self, listener: threading.Thread | None) -> None:
+        """Wind every worker down against one shared budget (#221 A).
+
+        Distinct from `_teardown_account`, which keeps its own per-account
+        timeout: that path removes *one* account from a daemon that keeps
+        running, so it has no global deadline to share. Here the whole process
+        is leaving and `shutdown_grace_seconds` is the total the supervisor
+        waits on, so it is spent once across everything.
+        """
+        log.info("waiting for worker threads to finish")
+        # Defensive: reaching the teardown by an exception rather than the stop
+        # path would otherwise leave the embed/extract workers and the command
+        # listener unsignalled, so every one of them would burn the full budget.
+        self._stop_event.set()
+        self._interrupt_listener()
+
+        bundles = [
+            self._account_threads.pop(account_id)
+            for account_id in list(self._account_threads)
+        ]
+        threads: list[Joinable] = [
+            t for b in bundles for t in (b.idle_thread, b.poll_thread)
+        ]
+        threads += self._worker_threads
+        if listener is not None:
+            threads.append(listener)
+
+        left = wind_down_threads(
+            stop_events=[b.stop_event for b in bundles],
+            threads=threads,
+            grace_seconds=self.cfg.daemon.shutdown_grace_seconds,
+            clock=self._clock,
+        )
+        if left <= 0.0:
+            log.warning(
+                "shutdown grace of %.1fs was exhausted; some worker threads "
+                "may not have finished",
+                self.cfg.daemon.shutdown_grace_seconds,
+            )
+        # After the joins, so slow DB IO cannot eat the join budget.
+        for bundle in bundles:
+            self._clear_account_heartbeats(bundle.account_id)

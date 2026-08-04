@@ -232,16 +232,29 @@ class DaemonSupervisor:
         self._lifecycle_thread = t
         t.start()
 
+    def _admit_lifecycle_request(self) -> None:
+        """Guard every `request_*` entry. Caller must hold `_lock`.
+
+        The `_closing` half is #221 C. `request_start` used to set STARTING and
+        then hand off to `start()`, which sees the flag and returns *without*
+        touching the state — so status reported `starting` forever and the admin
+        panel showed a daemon that was never coming. Refusing before any state
+        is written is what keeps the state machine honest: nothing is promised
+        that will not happen. Ordered before the busy-guard because "we are
+        shutting down" is the more specific and more actionable reason.
+        """
+        if self._closing:
+            raise SupervisorUnavailable("supervisor is shutting down")
+        if self._lifecycle_in_flight():
+            raise SupervisorUnavailable("a lifecycle operation is already in progress")
+
     def request_start(self) -> None:
         """Start the child on a background thread; return at once.
 
-        Idempotent no-op if already running. Raises SupervisorUnavailable if a
-        lifecycle op is already in flight (the busy-guard)."""
+        Idempotent no-op if already running. Raises SupervisorUnavailable if the
+        supervisor is closing or a lifecycle op is already in flight."""
         with self._lock:
-            if self._lifecycle_in_flight():
-                raise SupervisorUnavailable(
-                    "a lifecycle operation is already in progress"
-                )
+            self._admit_lifecycle_request()
             if self._proc is not None and self._proc.poll() is None:
                 return
             self._state = SupervisorState.STARTING
@@ -251,12 +264,9 @@ class DaemonSupervisor:
         """Stop the child on a background thread; return at once.
 
         Idempotent no-op if already stopped. Sets STOPPING synchronously so a
-        clean shutdown is never misread as a crash. Busy-guarded."""
+        clean shutdown is never misread as a crash. Guarded."""
         with self._lock:
-            if self._lifecycle_in_flight():
-                raise SupervisorUnavailable(
-                    "a lifecycle operation is already in progress"
-                )
+            self._admit_lifecycle_request()
             if self._proc is None or self._proc.poll() is not None:
                 self._proc = None
                 self._started_at = None
@@ -266,14 +276,11 @@ class DaemonSupervisor:
             self._spawn_lifecycle(self.stop)
 
     def request_restart(self) -> None:
-        """Restart the child on a background thread; return at once. Busy-guarded.
+        """Restart the child on a background thread; return at once. Guarded.
 
         Settle target is RUNNING; a transient STOPPED mid-restart is expected."""
         with self._lock:
-            if self._lifecycle_in_flight():
-                raise SupervisorUnavailable(
-                    "a lifecycle operation is already in progress"
-                )
+            self._admit_lifecycle_request()
             self._state = SupervisorState.STOPPING
             self._spawn_lifecycle(self.restart)
 

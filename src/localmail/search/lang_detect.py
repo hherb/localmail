@@ -18,18 +18,26 @@ Layout:
   - `make_detector(cfg)`: returns the configured detector, or None when
     `cfg.body_lang_enabled` is False.
   - `run_lang_detect_pass(conn, cfg, detector, ...)`: one batch over
-    `messages WHERE body_lang IS NULL AND body_text IS NOT NULL`. Used by
-    the embed worker every sweep and by the `lang-backfill` CLI in a loop.
+    `CLAIMABLE_WHERE_SQL`. Used by the embed worker every sweep and by the
+    `lang-backfill` CLI in a loop.
+  - `retry_declined(conn)`: re-open rows a previous policy declined.
 
 Failure model mirrors `embed_worker.py`: per-message SAVEPOINT isolates
-detector exceptions so a single poison body doesn't abort the batch; the
-message is left NULL and skipped on subsequent sweeps until something
-fixes it (different body text, updated detector).
+detector exceptions so a single poison body doesn't abort the batch.
+
+**Every claimed row is stamped `body_lang_attempted_at`, labelled or not.**
+`body_lang` must keep meaning "detected language, else unknown" for the
+`lang:` filter, so it cannot also record "we tried". Without a separate
+record a declined row stayed in the claim predicate and — under the stable
+`ORDER BY id` — was re-selected in the same position forever, starving every
+message behind it (#251). Migration 0035 adds the column; the two module
+constants below are the one authority for its predicates.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import psycopg
@@ -38,6 +46,47 @@ from localmail.config import SearchConfig
 
 
 log = logging.getLogger("localmail.search.lang_detect")
+
+
+#: Rows the detector has not been run against yet — the lang-detect work queue.
+#: The claim query, `search-status`'s `body_lang_pending` count, and migration
+#: 0035's `messages_body_lang_claimable_idx` predicate must all agree on this.
+#: A drift makes `search-status` report work the worker will never claim (or
+#: hide work it will), which is how #251 stayed invisible for weeks.
+CLAIMABLE_WHERE_SQL = (
+    "body_lang IS NULL "
+    "AND body_text IS NOT NULL "
+    "AND body_lang_attempted_at IS NULL"
+)
+
+#: Rows the detector has run on and declined to label. A non-empty set is
+#: normal — separator blocks, bare URLs, bodies under `body_lang_min_text_chars`
+#: — and is what `search-status` reports as `body_lang_declined`. Together with
+#: `CLAIMABLE_WHERE_SQL` this partitions every NULL-body_lang row that has a
+#: body; `tests/test_lang_detect.py` pins that partition.
+DECLINED_WHERE_SQL = (
+    "body_lang IS NULL "
+    "AND body_text IS NOT NULL "
+    "AND body_lang_attempted_at IS NOT NULL"
+)
+
+
+@dataclass(frozen=True)
+class LangDetectPass:
+    """Outcome of one `run_lang_detect_pass` call.
+
+    `visited` and `labelled` answer different questions, and conflating them
+    is what wedged detection archive-wide (#251): a batch in which the
+    detector declines every row makes real progress — each row is stamped
+    attempted and will not be claimed again — while labelling nothing.
+
+    Drain loops must terminate on `visited == 0`; progress reporting wants
+    `labelled`. There is deliberately no `__bool__`: `if not result:` reads
+    ambiguously, and an implicit reading of this exact value is the bug.
+    """
+
+    visited: int
+    labelled: int
 
 
 @runtime_checkable
@@ -137,61 +186,122 @@ def run_lang_detect_pass(
     detector: LanguageDetector,
     *,
     batch: int | None = None,
-) -> int:
+) -> LangDetectPass:
     """Detect `body_lang` for one batch of pending messages.
 
-    Selects up to `batch` (default `cfg.body_lang_detect_batch_size`)
-    messages with NULL `body_lang` and non-NULL `body_text`, runs the
-    detector on each body, and writes the result.
+    Selects up to `batch` (default `cfg.body_lang_detect_batch_size`) rows
+    matching `CLAIMABLE_WHERE_SQL`, runs the detector on each body, and writes
+    the result. Every claimed row is stamped `body_lang_attempted_at`, whether
+    or not it gained a label, so it leaves the queue either way.
 
-    Returns the number of rows whose `body_lang` transitioned from NULL to
-    a non-NULL value in this call — *not* the number of rows visited. Rows
-    the detector declined to label (too short, below confidence floor, or
-    a poison exception) stay NULL and are not counted, so a `while pass:
-    ...` backfill loop terminates once no row produced a new label in the
-    current sweep. Pre-existing NULL rows can still be retried by a
-    future call (e.g. after lowering `body_lang_min_confidence` or
-    swapping the detector); termination here means "no further progress
-    on this run," not "no rows are NULL."
+    Returns a `LangDetectPass`. Drain loops terminate on `visited == 0` —
+    "nothing left to claim" — never on `labelled == 0`, which only means the
+    detector declined this batch and says nothing about what lies behind it.
+    That distinction is the whole of #251: reading termination off the label
+    count stopped the loops on a batch of unlabelable rows and left every
+    message after them permanently undetected.
 
-    Per-message SAVEPOINT isolates detector exceptions: a single poison
-    body lands a WARNING and stays NULL while the rest of the batch
-    completes normally. There is no dedicated failure table — persistent
-    failures resurface on every sweep via the WARNING log line, which
-    matches the policy already in place for attachment chunking.
+    Rows the detector declined can be re-opened later — after lowering
+    `body_lang_min_confidence` or swapping the detector — via
+    `retry_declined` / `localmail lang-backfill --retry-declined`.
+
+    Per-message SAVEPOINT isolates detector exceptions: a single poison body
+    lands a WARNING and stays NULL while the rest of the batch completes
+    normally. It is still stamped attempted (see `_mark_attempted_safely`),
+    because a body that crashes the detector once will crash it every time.
+    There is no dedicated failure table — persistent failures resurface on
+    every sweep via the WARNING log line, matching the policy already in place
+    for attachment chunking.
     """
     limit = batch if batch is not None else cfg.body_lang_detect_batch_size
-    updated = 0
+    labelled = 0
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT id, body_text FROM messages
-            WHERE body_lang IS NULL
-              AND body_text IS NOT NULL
+            WHERE {CLAIMABLE_WHERE_SQL}
             ORDER BY id
             LIMIT %s
             FOR UPDATE SKIP LOCKED
-            """,
+            """,  # noqa: S608 — module constant, no caller input
             (limit,),
         )
         rows = cur.fetchall()
         if not rows:
-            return 0
+            return LangDetectPass(visited=0, labelled=0)
         for mid, body in rows:
             cur.execute("SAVEPOINT lang")
             try:
                 code = detector.detect(body)
-                if code is not None:
-                    cur.execute(
-                        "UPDATE messages SET body_lang = %s WHERE id = %s",
-                        (code, mid),
-                    )
-                    updated += 1
+                # One write for both outcomes: `code` is NULL when the detector
+                # declined. Labelling and declining cannot diverge, so no future
+                # branch can label a row without stamping it.
+                cur.execute(
+                    "UPDATE messages"
+                    " SET body_lang = %s, body_lang_attempted_at = now()"
+                    " WHERE id = %s",
+                    (code, mid),
+                )
                 cur.execute("RELEASE SAVEPOINT lang")
+                if code is not None:
+                    labelled += 1
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT lang")
                 log.warning(
                     "lang detection failed for message %s: %s", mid, exc,
                 )
+                _mark_attempted_safely(cur, mid)
     conn.commit()
-    return updated
+    return LangDetectPass(visited=len(rows), labelled=labelled)
+
+
+def _mark_attempted_safely(cur: psycopg.Cursor, mid: int) -> None:
+    """Stamp `body_lang_attempted_at` for a row whose detection raised.
+
+    The poison branch has just rolled back to its savepoint, which discarded
+    the stamp along with everything else. Without rewriting it here, a body
+    that reliably crashes the detector re-enters the claim on every sweep and
+    starves the queue exactly as a declined body did before #251.
+
+    The SAVEPOINT statement sits *outside* the try — like
+    `sync.record_failed_message` and `fetch_retry.record_attempt` — so
+    `ROLLBACK TO` is always valid even if issuing the savepoint is itself what
+    failed. A failure to stamp leaves the row claimable, which is the safe
+    direction: re-attempting costs a sweep, whereas a lost stamp would be
+    invisible.
+    """
+    cur.execute("SAVEPOINT lang_attempt")
+    try:
+        cur.execute(
+            "UPDATE messages SET body_lang_attempted_at = now() WHERE id = %s",
+            (mid,),
+        )
+        cur.execute("RELEASE SAVEPOINT lang_attempt")
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must not kill the batch
+        cur.execute("ROLLBACK TO SAVEPOINT lang_attempt")
+        log.warning(
+            "could not record lang attempt for message %s: %s", mid, exc,
+        )
+
+
+def retry_declined(conn: psycopg.Connection) -> int:
+    """Re-open every row the detector ran on and declined; return the count.
+
+    The escape hatch that makes `body_lang_attempted_at` strictly better than
+    a sentinel language value: after lowering `body_lang_min_confidence` or
+    `body_lang_min_text_chars`, or swapping the detector, the rows the old
+    policy turned away become claimable again. #216's `type-skipped` sentinel
+    has no equivalent — widening that allowlist silently does not re-open the
+    blobs it was widened for.
+
+    Rows that already carry a `body_lang` are untouched: this re-opens
+    declines, it does not re-run detection over the archive.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE messages SET body_lang_attempted_at = NULL"
+            f" WHERE {DECLINED_WHERE_SQL}"  # noqa: S608 — module constant
+        )
+        reopened = cur.rowcount
+    conn.commit()
+    return reopened

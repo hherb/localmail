@@ -1042,13 +1042,16 @@ def embed_backfill(ctx, no_progress):
         if lang_detector is not None:
             while True:
                 with pool.connection() as conn:
-                    processed = run_lang_detect_pass(conn, cfg.search, lang_detector)
-                if processed == 0:
+                    result = run_lang_detect_pass(conn, cfg.search, lang_detector)
+                # See lang-backfill: terminating on `labelled` abandons every
+                # message behind an unlabelable batch (#251).
+                if result.visited == 0:
                     break
-                lang_total += processed
+                lang_total += result.labelled
                 if not no_progress:
                     click.echo(
-                        f"detected lang for {processed} messages (total {lang_total})",
+                        f"visited {result.visited}, labelled {result.labelled}"
+                        f" (total {lang_total})",
                         err=True,
                     )
     finally:
@@ -1060,39 +1063,62 @@ def embed_backfill(ctx, no_progress):
 
 @main.command("lang-backfill")
 @click.option("--no-progress", is_flag=True)
+@click.option(
+    "--retry-declined",
+    is_flag=True,
+    help="First re-open every row a previous detector policy declined to label.",
+)
 @click.pass_context
-def lang_backfill(ctx: click.Context, no_progress: bool) -> None:
+def lang_backfill(ctx: click.Context, no_progress: bool, retry_declined: bool) -> None:
     """Populate `messages.body_lang` for every message with NULL body_lang.
 
     Account-agnostic. Runs the same per-message detector the embed worker
-    uses, in a tight foreground loop until no rows remain. Pre-existing
+    uses, in a tight foreground loop until no rows remain to claim. Pre-existing
     body_lang values are never overwritten; messages with NULL body_text
     are skipped (no body to detect).
+
+    Rows the detector declines are stamped `body_lang_attempted_at` and leave
+    the queue, so a batch of unlabelable bodies can no longer starve everything
+    behind it (#251). Use `--retry-declined` after lowering
+    `body_lang_min_confidence` / `body_lang_min_text_chars` or swapping the
+    detector to bring those rows back.
     """
     from localmail.db import open_pool
-    from localmail.search.lang_detect import make_detector, run_lang_detect_pass
+    from localmail.search import lang_detect
     cfg = load_config(ctx.obj["config_path"])
-    detector = make_detector(cfg.search)
+    detector = lang_detect.make_detector(cfg.search)
     if detector is None:
+        # Ahead of --retry-declined deliberately: re-opening rows nothing will
+        # then process only inflates body_lang_pending.
         click.echo("body_lang detection is disabled in config; nothing to do", err=True)
         return
     pool = open_pool(_dsn(ctx))
     try:
-        total = 0
+        if retry_declined:
+            with pool.connection() as conn:
+                reopened = lang_detect.retry_declined(conn)
+            click.echo(f"re-opened {reopened} previously-declined messages")
+        seen = 0
+        labelled = 0
         while True:
             with pool.connection() as conn:
-                processed = run_lang_detect_pass(conn, cfg.search, detector)
-            if processed == 0:
+                result = lang_detect.run_lang_detect_pass(conn, cfg.search, detector)
+            # Terminate on "nothing left to claim", never on "labelled nothing"
+            # — the latter stops on a batch of unlabelable bodies and abandons
+            # every message behind it (#251).
+            if result.visited == 0:
                 break
-            total += processed
+            seen += result.visited
+            labelled += result.labelled
             if not no_progress:
                 click.echo(
-                    f"detected lang for {processed} messages (total {total})",
+                    f"visited {result.visited}, labelled {result.labelled}"
+                    f" (total {labelled}/{seen})",
                     err=True,
                 )
     finally:
         pool.close()
-    click.echo(f"done: {total} messages processed")
+    click.echo(f"done: {seen} messages processed, {labelled} labelled")
 
 
 @main.command("search-status")
@@ -1103,8 +1129,14 @@ def search_status(ctx, fmt):
 
     Reports message embedding status (Phase 1) and attachment extraction /
     embedding status (Phase 2), plus failure counts for both subsystems.
+
+    `body_lang_pending` counts rows the lang detector will actually claim;
+    rows it has already run on and declined are reported separately as
+    `body_lang_declined`. The two together account for every message that has
+    a body and no detected language.
     """
     from localmail.db import open_pool
+    from localmail.search import lang_detect
     cfg = load_config(ctx.obj["config_path"])
     pool = open_pool(_dsn(ctx))
     try:
@@ -1176,13 +1208,22 @@ def search_status(ctx, fmt):
             row = cur.fetchone()
             assert row is not None
             body_lang_populated = row[0]
+            # Both predicates come from lang_detect so this can never report
+            # work the worker will not claim — the drift that hid #251.
             cur.execute(
-                "SELECT count(*) FROM messages"
-                " WHERE body_lang IS NULL AND body_text IS NOT NULL"
+                f"SELECT count(*) FROM messages"
+                f" WHERE {lang_detect.CLAIMABLE_WHERE_SQL}"  # noqa: S608
             )
             row = cur.fetchone()
             assert row is not None
             body_lang_pending = row[0]
+            cur.execute(
+                f"SELECT count(*) FROM messages"
+                f" WHERE {lang_detect.DECLINED_WHERE_SQL}"  # noqa: S608
+            )
+            row = cur.fetchone()
+            assert row is not None
+            body_lang_declined = row[0]
     finally:
         pool.close()
     payload = {
@@ -1199,6 +1240,7 @@ def search_status(ctx, fmt):
         "failed_extractions": failed_extractions_count,
         "body_lang_populated": body_lang_populated,
         "body_lang_pending": body_lang_pending,
+        "body_lang_declined": body_lang_declined,
     }
     if fmt == "json":
         click.echo(_json.dumps(payload))

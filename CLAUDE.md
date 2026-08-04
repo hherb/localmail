@@ -137,7 +137,7 @@ uv run localmail run             # foreground daemon (IDLE on INBOX + periodic p
 uv run localmail list-failed [--account N] [--limit K]   # show messages sync skipped
 uv run localmail retry-failed [--account N]    # re-attempt every failed message
 uv run localmail extract-backfill              # one-shot extraction backfill for all blobs
-uv run localmail lang-backfill                 # one-shot body_lang detection for existing rows
+uv run localmail lang-backfill [--retry-declined]  # one-shot body_lang detection for existing rows
 uv run localmail backfill-internal-date [--account N]  # IMAP INTERNALDATE for legacy rows
 uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
 uv run localmail retry-failed-extractions      # re-attempt every failed extraction
@@ -147,7 +147,7 @@ uv run localmail sweep-blob-temps [--dry-run] [--max-age-seconds S]  # collect s
 uv run localmail estimate-upgrade [--format text|json]   # pre-flight size/duration for lock-heavy migrations
 # see docs/operations/upgrade-runbook.md
 # search-status reports Phase 2 attachment_text/attachment_chunks counts and
-# body_lang_populated / body_lang_pending
+# body_lang_populated / body_lang_pending / body_lang_declined
 ```
 
 GUI server (Phase: gui-server):
@@ -215,13 +215,14 @@ src/localmail/
     extractor.py    # LightweightExtractor (11 formats) + ExtractorBackend ABC; DoclingExtractor via [extraction] extra
     extract_worker.py # run_extract_worker_once, run_extract_worker (background thread)
     lang_detect.py  # LinguaDetector + FixedDetector + run_lang_detect_pass for messages.body_lang
+                    #   + CLAIMABLE/DECLINED_WHERE_SQL, retry_declined (#251)
     page_cache.py   # in-process LRU cache for paginated result pools
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + PEP562 back-compat re-exports
     rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0034_transient_fetches_gave_up.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0035_messages_body_lang_attempted_at.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -277,6 +278,13 @@ are `NOT NULL` on `messages`. `subject`, `body_text`, `body_html`, `from_addr`,
 `to_addrs`, etc. are all nullable — real mail occasionally lacks any of them.
 The parser normalizes empty strings to NULL so `WHERE body_text IS NULL` is
 the canonical "no body" query.
+
+**`body_lang` / `body_lang_attempted_at`**: `body_lang` is the detected ISO
+639-1 code, NULL when unknown — that is the only thing it means, and the `lang:`
+filter depends on it. "The detector has already run on this body and declined"
+is recorded separately in `body_lang_attempted_at` (migration `0035`), which is
+what keeps a declined row out of the claim. See the #251 notes under Search
+subsystem before touching either column.
 
 **Date columns** (`date_sent`, `date_received`, `internal_date`):
 - `date_sent` — email header `Date:`. Sender-supplied, may be wrong/future,
@@ -1004,6 +1012,53 @@ so the two cannot drift. See
   `transient_extractions` rows (per-blob with `--sha256`, else all). The pure
   boundary `transient_budget_exhausted(count, cap)` (`count >= cap`) matches the
   SQL `transient_count < cap` filter.
+
+**Language detection: a declined row leaves the queue (#251).** `body_lang`
+detection had stopped **archive-wide on both deployments** — the Mac frozen at
+7744 labelled against 100020 pending, for weeks. `run_lang_detect_pass` claimed
+`body_lang IS NULL AND body_text IS NOT NULL ORDER BY id LIMIT N`, and a row the
+detector *declined* stayed NULL, so it kept satisfying the predicate and, under
+a stable ordering, was re-claimed **in the same position forever**. Once the
+first `body_lang_detect_batch_size` rows were all unlabelable — separator
+blocks, bare URLs, bodies under the 20-char floor — nothing behind them was ever
+reached. Same shape as #216's un-rowed blob.
+
+- **The record lives in its own column, not in `body_lang`.** Migration `0035`
+  adds `messages.body_lang_attempted_at`; the claim gains
+  `AND body_lang_attempted_at IS NULL`. `body_lang` keeps meaning exactly
+  "detected language, else unknown", so **no reader changes**. A sentinel value
+  (`'und'`) was rejected: it would have needed four readers to learn to exclude
+  it (`arms.py`'s `lang:` filter, `searcher._maybe_warn_unpopulated_body_lang`,
+  `search-status`, migration 0015's index) and would have repeated the
+  **one-way door** CLAUDE.md already documents for `type-skipped` — lowering
+  `body_lang_min_confidence` would silently not re-open the rows it was lowered
+  for. `localmail lang-backfill --retry-declined` (→ `lang_detect.retry_declined`)
+  is the escape hatch the sentinel cannot have.
+- **`CLAIMABLE_WHERE_SQL` / `DECLINED_WHERE_SQL` are the one authority**, shared
+  by the claim, `search-status`'s two counters, and (by hand, with a test)
+  migration 0035's index predicate. The drift they prevent is what hid the bug:
+  `search-status` reported 100020 rows "pending" that the worker would never
+  claim. A test pins that the two predicates are disjoint and jointly exhaustive.
+- **`0035` replaces 0017's index under a NEW name** (`messages_body_lang_pending_idx`
+  → `messages_body_lang_claimable_idx`). `CREATE INDEX IF NOT EXISTS` matches on
+  **name only**, so recreating the old name with the new predicate would have
+  silently no-opped on every host that already had it, leaving the worker on an
+  index that no longer matches its claim.
+- **The return type carries both counts** — `LangDetectPass(visited, labelled)`.
+  This is the second half of the bug, and it is load-bearing: the function used
+  to return *labelled*, and both drain loops broke on 0, so skipping declined
+  rows alone would still have stopped them on the first unlabelable batch.
+  Loops terminate on `visited == 0`. There is deliberately **no `__bool__`** —
+  an implicit reading of this exact value is the defect.
+- **Poison rows are stamped too.** The exception branch rolls back to its
+  savepoint, discarding the stamp, so `_mark_attempted_safely` rewrites it under
+  a *second* nested savepoint — `SAVEPOINT` outside the `try`, like
+  `record_failed_message` and `record_attempt`. Without it a body that reliably
+  crashes the detector starves the queue exactly as a declined one did.
+- **`body_lang_pending` was redefined** to mean claimable work only; the
+  turned-away remainder is the new `body_lang_declined`. Rows labelled before
+  0035 keep a NULL `attempted_at` — legal, and never consulted, since the claim
+  excludes `body_lang IS NOT NULL` first.
 
 **`bm25_field_boosts` weight normalization**: `arms.py` normalises the raw
 boost values by `max(raw)` to satisfy `ts_rank_cd`'s `[0, 1]` weight
@@ -2210,7 +2265,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0034_transient_fetches_gave_up.sql`; next free slot `0035_*.sql`.
+  Latest is `0035_messages_body_lang_attempted_at.sql`; next free slot `0036_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

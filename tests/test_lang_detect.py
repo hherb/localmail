@@ -19,10 +19,13 @@ import pytest
 
 from localmail.config import SearchConfig
 from localmail.search.lang_detect import (
+    CLAIMABLE_WHERE_SQL,
+    DECLINED_WHERE_SQL,
     FixedDetector,
     LanguageDetector,
     LinguaDetector,
     make_detector,
+    retry_declined,
     run_lang_detect_pass,
 )
 
@@ -171,9 +174,9 @@ def test_run_lang_detect_pass_updates_body_lang(db_conn) -> None:
     cfg = SearchConfig()
     detector = FixedDetector({"anything": "de"})
 
-    processed = run_lang_detect_pass(db_conn, cfg, detector)
+    result = run_lang_detect_pass(db_conn, cfg, detector)
 
-    assert processed == 1
+    assert result.labelled == 1
     assert _body_lang(db_conn, mid) == "de"
 
 
@@ -184,14 +187,13 @@ def test_run_lang_detect_pass_leaves_null_when_detector_returns_none(db_conn) ->
     cfg = SearchConfig()
     detector = FixedDetector({})
 
-    processed = run_lang_detect_pass(db_conn, cfg, detector)
+    result = run_lang_detect_pass(db_conn, cfg, detector)
 
-    # The detector declined to label the row; body_lang stays NULL and the
-    # row is not counted. The return value tracks rows whose body_lang
-    # transitioned from NULL to non-NULL — this guarantees the
-    # `lang-backfill` CLI loop terminates on archives full of bodies the
-    # detector cannot label, rather than re-claiming the same rows forever.
-    assert processed == 0
+    # The detector declined to label the row: body_lang stays NULL, so the row
+    # is visited but not labelled. It is still stamped attempted, which is what
+    # keeps it out of the next claim.
+    assert result.visited == 1
+    assert result.labelled == 0
     assert _body_lang(db_conn, mid) is None
 
 
@@ -204,9 +206,9 @@ def test_run_lang_detect_pass_skips_messages_with_existing_body_lang(db_conn) ->
     cfg = SearchConfig()
     detector = FixedDetector({"anything": "de"})
 
-    processed = run_lang_detect_pass(db_conn, cfg, detector)
+    result = run_lang_detect_pass(db_conn, cfg, detector)
 
-    assert processed == 0
+    assert result.visited == 0
     # The pre-existing value must not be overwritten.
     assert _body_lang(db_conn, mid) == "en"
 
@@ -218,9 +220,9 @@ def test_run_lang_detect_pass_skips_messages_with_null_body_text(db_conn) -> Non
     cfg = SearchConfig()
     detector = FixedDetector({})
 
-    processed = run_lang_detect_pass(db_conn, cfg, detector)
+    result = run_lang_detect_pass(db_conn, cfg, detector)
 
-    assert processed == 0
+    assert result.visited == 0
     assert _body_lang(db_conn, mid) is None
 
 
@@ -238,11 +240,11 @@ def test_run_lang_detect_pass_isolates_poison_message(db_conn) -> None:
                 raise RuntimeError("boom")
             return "en"
 
-    processed = run_lang_detect_pass(db_conn, cfg, _PoisonDetector())
+    result = run_lang_detect_pass(db_conn, cfg, _PoisonDetector())
 
     # Only the labelled row is counted; the poison row stays NULL and is
     # excluded from the return count.
-    assert processed == 1
+    assert result.labelled == 1
     assert _body_lang(db_conn, poison) is None
     assert _body_lang(db_conn, good) == "en"
 
@@ -261,9 +263,9 @@ def test_run_lang_detect_pass_respects_batch_size(db_conn) -> None:
     second = run_lang_detect_pass(db_conn, cfg, detector)
     third = run_lang_detect_pass(db_conn, cfg, detector)
 
-    assert first == 3
-    assert second == 2
-    assert third == 0
+    assert first.labelled == 3
+    assert second.labelled == 2
+    assert third.visited == 0
 
 
 def test_run_lang_detect_pass_explicit_batch_overrides_cfg(db_conn) -> None:
@@ -274,16 +276,220 @@ def test_run_lang_detect_pass_explicit_batch_overrides_cfg(db_conn) -> None:
     cfg = SearchConfig(body_lang_detect_batch_size=10)
     detector = FixedDetector({"anything": "en"})
 
-    processed = run_lang_detect_pass(db_conn, cfg, detector, batch=2)
+    result = run_lang_detect_pass(db_conn, cfg, detector, batch=2)
 
-    assert processed == 2
+    assert result.labelled == 2
+
+
+def _attempted_at(conn, mid: int):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT body_lang_attempted_at FROM messages WHERE id = %s", (mid,)
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def test_advances_past_an_undetectable_head(db_conn) -> None:
+    """#251: a full batch of unlabelable rows must not block the rows behind it.
+
+    The claim is `ORDER BY id`, so before the fix a row the detector declined
+    stayed NULL, kept satisfying the predicate, and was re-claimed in the same
+    position on every sweep. With the first `batch_size` rows unlabelable the
+    head of the queue was permanently occupied and detection stopped
+    archive-wide — 7744 labelled against 100020 pending on the live Mac
+    archive, frozen for weeks.
+    """
+    acct = _seed_account(db_conn)
+    for i in range(3):
+        _seed_message(db_conn, acct, i, f"junk {i}")       # never labelable
+    labelable = [_seed_message(db_conn, acct, 10 + i, f"real {i}") for i in range(3)]
+    db_conn.commit()
+    cfg = SearchConfig(body_lang_detect_batch_size=3)
+    detector = FixedDetector({f"real {i}": "en" for i in range(3)})
+
+    first = run_lang_detect_pass(db_conn, cfg, detector)
+    second = run_lang_detect_pass(db_conn, cfg, detector)
+
+    # Pass 1 consumes the unlabelable head and labels nothing...
+    assert first.visited == 3
+    assert first.labelled == 0
+    # ...and pass 2 reaches the rows behind it. Before the fix this was 0.
+    assert second.visited == 3
+    assert second.labelled == 3
+    assert [_body_lang(db_conn, mid) for mid in labelable] == ["en", "en", "en"]
+
+
+def test_declined_rows_are_stamped_attempted(db_conn) -> None:
+    """A declined row records that the detector ran, so the claim skips it.
+
+    `body_lang` itself cannot carry this — NULL has to keep meaning "unknown"
+    for the `lang:` filter — which is why the state lives in its own column
+    rather than in a sentinel language value (#216's one-way door).
+    """
+    acct = _seed_account(db_conn)
+    mid = _seed_message(db_conn, acct, 1, "undetectable")
+    db_conn.commit()
+
+    run_lang_detect_pass(db_conn, SearchConfig(), FixedDetector({}))
+
+    assert _body_lang(db_conn, mid) is None
+    assert _attempted_at(db_conn, mid) is not None
+
+
+def test_labelled_rows_are_stamped_attempted(db_conn) -> None:
+    """Labelling and declining share one write, so neither can skip the stamp."""
+    acct = _seed_account(db_conn)
+    mid = _seed_message(db_conn, acct, 1, "anything")
+    db_conn.commit()
+
+    run_lang_detect_pass(db_conn, SearchConfig(), FixedDetector({"anything": "en"}))
+
+    assert _body_lang(db_conn, mid) == "en"
+    assert _attempted_at(db_conn, mid) is not None
+
+
+def test_poison_rows_are_stamped_attempted_and_not_reclaimed(db_conn) -> None:
+    """A body that makes the detector raise must not re-wedge the head.
+
+    The poison branch rolls back to the savepoint, which would discard the
+    stamp along with everything else — so the stamp is rewritten afterwards
+    under its own nested savepoint. Without that, a reliably-crashing body
+    starves the queue exactly as a declined one did.
+    """
+    acct = _seed_account(db_conn)
+    poison = _seed_message(db_conn, acct, 1, "bad body")
+    good = _seed_message(db_conn, acct, 2, "good body")
+    db_conn.commit()
+
+    class _PoisonDetector:
+        def detect(self, text: str) -> str | None:
+            if "bad" in text:
+                raise RuntimeError("boom")
+            return "en"
+
+    first = run_lang_detect_pass(db_conn, SearchConfig(), _PoisonDetector())
+    second = run_lang_detect_pass(db_conn, SearchConfig(), _PoisonDetector())
+
+    assert first.visited == 2
+    assert first.labelled == 1
+    assert _body_lang(db_conn, poison) is None
+    assert _attempted_at(db_conn, poison) is not None
+    assert _body_lang(db_conn, good) == "en"
+    # The poison row is not claimed a second time.
+    assert second.visited == 0
+
+
+def test_pass_reports_visited_and_labelled_separately(db_conn) -> None:
+    """`visited` and `labelled` answer different questions (#251).
+
+    A batch in which the detector declines every row makes real progress —
+    each row is stamped attempted and will not be claimed again — while
+    labelling nothing. Conflating the two is what let the drain loops read
+    "declined everything" as "queue drained" and wedged detection
+    archive-wide.
+    """
+    acct = _seed_account(db_conn)
+    _seed_message(db_conn, acct, 1, "labelable")
+    _seed_message(db_conn, acct, 2, "not labelable")
+    db_conn.commit()
+    cfg = SearchConfig()
+    detector = FixedDetector({"labelable": "en"})
+
+    result = run_lang_detect_pass(db_conn, cfg, detector)
+
+    assert result.visited == 2
+    assert result.labelled == 1
+
+
+# ---------------------------------------------------------------------------
+# retry_declined + the claim/declined predicate partition
+# ---------------------------------------------------------------------------
+
+
+def test_retry_declined_reopens_declined_rows(db_conn) -> None:
+    """Lowering a threshold must be able to re-open what the old one turned away.
+
+    This is the escape hatch #216's `type-skipped` sentinel lacks: widening
+    that allowlist silently does not re-open the blobs it was widened for.
+    """
+    acct = _seed_account(db_conn)
+    mid = _seed_message(db_conn, acct, 1, "was undetectable")
+    db_conn.commit()
+    run_lang_detect_pass(db_conn, SearchConfig(), FixedDetector({}))
+    assert _attempted_at(db_conn, mid) is not None
+
+    reopened = retry_declined(db_conn)
+
+    assert reopened == 1
+    assert _attempted_at(db_conn, mid) is None
+    # A looser detector now reaches it.
+    result = run_lang_detect_pass(
+        db_conn, SearchConfig(), FixedDetector({"was undetectable": "en"})
+    )
+    assert result.labelled == 1
+    assert _body_lang(db_conn, mid) == "en"
+
+
+def test_retry_declined_leaves_labelled_rows_alone(db_conn) -> None:
+    """Re-opening declines must not re-run detection over the whole archive."""
+    acct = _seed_account(db_conn)
+    labelled = _seed_message(db_conn, acct, 1, "anything")
+    declined = _seed_message(db_conn, acct, 2, "undetectable")
+    db_conn.commit()
+    run_lang_detect_pass(db_conn, SearchConfig(), FixedDetector({"anything": "en"}))
+
+    reopened = retry_declined(db_conn)
+
+    assert reopened == 1
+    assert _body_lang(db_conn, labelled) == "en"
+    assert _attempted_at(db_conn, labelled) is not None
+    assert _attempted_at(db_conn, declined) is None
+
+
+def test_claimable_and_declined_predicates_partition_the_pending_set(db_conn) -> None:
+    """The two predicates must be disjoint and jointly exhaustive.
+
+    `search-status` reports one count from each and calls the pair a complete
+    picture of NULL-body_lang rows. An overlap would double-count; a gap would
+    hide rows from the operator entirely — which is precisely how #251 went
+    unnoticed while 100020 rows sat unreachable.
+    """
+    acct = _seed_account(db_conn)
+    _seed_message(db_conn, acct, 1, "anything")       # will be labelled
+    _seed_message(db_conn, acct, 2, "undetectable")   # will be declined
+    _seed_message(db_conn, acct, 3, None)             # no body: in neither set
+    db_conn.commit()
+    run_lang_detect_pass(
+        db_conn, SearchConfig(body_lang_detect_batch_size=1),
+        FixedDetector({"anything": "en"}),
+    )
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) FROM messages WHERE ({CLAIMABLE_WHERE_SQL})"
+            f" AND ({DECLINED_WHERE_SQL})"
+        )
+        overlap = cur.fetchone()
+        cur.execute(
+            f"SELECT count(*) FROM messages"
+            f" WHERE body_lang IS NULL AND body_text IS NOT NULL"
+            f" AND NOT ({CLAIMABLE_WHERE_SQL}) AND NOT ({DECLINED_WHERE_SQL})"
+        )
+        gap = cur.fetchone()
+    assert overlap is not None and overlap[0] == 0
+    assert gap is not None and gap[0] == 0
 
 
 def test_run_lang_detect_pass_loop_terminates_on_persistent_null(db_conn) -> None:
-    """Regression: a while-loop draining the function must terminate even when
-    the detector cannot label any of the pending rows. Prior behaviour returned
-    the claimed-row count, which made the lang-backfill / embed-backfill CLI
-    loops re-claim the same NULL rows forever on archives full of short bodies.
+    """A drain loop must terminate when no pending row can be labelled.
+
+    Termination comes from `visited` reaching zero — the rows were claimed
+    once, stamped attempted, and are gone from the claim. Reading termination
+    off the *labelled* count instead is what traded a spinning loop for a
+    starving one (#251): it stopped after a batch that had made no progress
+    at all, leaving everything behind that batch unreachable forever.
     """
     acct = _seed_account(db_conn)
     for i in range(3):
@@ -295,5 +501,7 @@ def test_run_lang_detect_pass_loop_terminates_on_persistent_null(db_conn) -> Non
     first = run_lang_detect_pass(db_conn, cfg, detector)
     second = run_lang_detect_pass(db_conn, cfg, detector)
 
-    assert first == 0
-    assert second == 0
+    assert first.visited == 3
+    assert first.labelled == 0
+    assert second.visited == 0
+    assert second.labelled == 0

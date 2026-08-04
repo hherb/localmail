@@ -200,7 +200,7 @@ with them, and with no way to retry successfully.
 | --- | --- |
 | `localmail embed-backfill` | Drain the message-chunk embedding queue in the foreground; exit when empty. Also drains the language-detection queue after embeddings finish. |
 | `localmail extract-backfill [--no-progress]` | Drain the attachment-extraction queue (Phase 2): extract text from PDFs, DOCX, etc. |
-| `localmail lang-backfill [--no-progress]` | Populate `messages.body_lang` for every message with NULL body_lang. Required once after first install so the `lang:` search token returns rows. |
+| `localmail lang-backfill [--no-progress] [--retry-declined]` | Populate `messages.body_lang` for every message with NULL body_lang. Required once after first install so the `lang:` search token returns rows. `--retry-declined` first re-opens rows a stricter detector policy turned away. |
 | `localmail search "QUERY" [--format text\|json]` | Hybrid lexical + vector search over the local archive (see [Search](#search) below). |
 | `localmail search-status [--format text\|json]` | Report chunk/extraction backlog, language-detection progress, and failure counts. |
 | `localmail list-failed-embeddings` | Show recent `failed_embeddings` rows. |
@@ -885,16 +885,30 @@ uv run localmail embed-backfill
 
 # (Optional) Run only the body_lang pass — useful when chunks/embeddings
 # are already up to date but body_lang is not (e.g. after upgrading from a
-# pre-body_lang archive, or after raising `body_lang_min_confidence`).
+# pre-body_lang archive).
 uv run localmail lang-backfill
+
+# After LOWERING body_lang_min_confidence / body_lang_min_text_chars, or
+# swapping the detector: re-open the rows the stricter policy declined.
+# Without this they stay declined and the looser setting has no effect on
+# them.
+uv run localmail lang-backfill --retry-declined
 
 # (Optional, Phase 2) Backfill attachment text for an existing archive.
 # Requires the docling optional dep: `uv sync --extra extraction`.
 uv run localmail extract-backfill
 
-# Progress at any time (includes body_lang_populated / body_lang_pending):
+# Progress at any time (body_lang_populated / _pending / _declined):
 uv run localmail search-status
 ```
+
+`search-status` splits unlabelled messages into two counts.
+`body_lang_pending` is work the detector will actually claim;
+`body_lang_declined` is rows it has already run on and turned away — bodies
+below `body_lang_min_text_chars`, detections below `body_lang_min_confidence`,
+and bodies that made the detector raise. A steady non-zero `declined` is
+normal (separator lines, bare URLs, one-word replies). Only
+`--retry-declined` moves rows back from `declined` to `pending`.
 
 ### Search from the CLI
 
@@ -1082,7 +1096,9 @@ modern laptop. The most likely knobs to touch:
 - `chunk_size_tokens` (default 512) — smaller for short messages
 - `body_lang_enabled` (default true) — set false to skip language detection
 - `body_lang_min_confidence` (default 0.65) — lower to label more messages
-  (and accept more wrong labels); raise to be stricter
+  (and accept more wrong labels); raise to be stricter. Lowering it only
+  affects rows the detector has not seen yet; run `localmail lang-backfill
+  --retry-declined` to apply it to rows the old floor turned away
 - `body_lang_low_accuracy` (default true) — ~100 MB resident; set false for
   full lingua mode (~1 GB)
 

@@ -2180,6 +2180,22 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
 
 ## Conventions
 
+- **Branch before the first commit; land through a PR. Never push a substantive
+  change straight to `main`.** Branch names follow the change:
+  `fix/…`, `docs/…`, `gui-client-N`. Every substantive change has gone this way
+  (#250, #247, #244, #243, #242, #240, #238, #233).
+
+  CI is *not* the reason — `python-ci` triggers on `push: branches: [main]` as
+  well as `pull_request`, so a direct push still gets the full Linux test signal.
+  The PR is the **review gate**: the chance to read a multi-part behavioural
+  change as one diff before it is on `main`. That is also why it cannot be
+  recovered afterwards — a PR opened once the commits have landed has an empty
+  diff, and the only way back is reverting and re-landing.
+
+  **"Push it" is not approval of the shape.** Approval to push is approval to
+  push whatever was already set up, so get the branch right first. (Session 14
+  pushed four commits directly to `main`; CI passed and the work stood, but the
+  review gate was gone and could not be restored.)
 - **No comments unless the WHY is non-obvious.** Don't restate the SQL or the
   Python.
 - **Don't write `.eml` fixtures to disk** — `tests/_eml.py` builds messages

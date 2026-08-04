@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from localmail.search.lang_detect import CLAIMABLE_WHERE_SQL
+
 
 def test_message_chunks_table_shape(db_conn) -> None:
     with db_conn.cursor() as cur:
@@ -305,16 +307,19 @@ def test_attachment_arm4_indexes_exist(db_conn) -> None:
     assert "using gin (attachments)" in row[0].lower()
 
 
-def test_messages_body_lang_pending_index_is_eligible_for_worker_query(db_conn) -> None:
+def test_messages_body_lang_claimable_index_is_eligible_for_worker_query(db_conn) -> None:
     """The partial index must actually be eligible for the lang-detect
     worker's claim query — not just exist with a matching-looking predicate.
 
+    The WHERE clause is composed from `lang_detect.CLAIMABLE_WHERE_SQL`, the
+    same constant the production claim uses, so a change to the predicate
+    lands here automatically instead of drifting silently past a hardcoded
+    copy.
+
     Force the planner to prefer indexes (seqscan off) and verify EXPLAIN
-    reports a scan of `messages_body_lang_pending_idx` for the exact
-    `WHERE body_lang IS NULL AND body_text IS NOT NULL ORDER BY id LIMIT N
-    FOR UPDATE SKIP LOCKED` shape from `run_lang_detect_pass`. An empty
-    table would let the planner pick seq-scan even with the flag off, so
-    seed two rows first.
+    reports a scan of `messages_body_lang_claimable_idx`. An empty table
+    would let the planner pick seq-scan even with the flag off, so seed
+    two rows first.
     """
     with db_conn.cursor() as cur:
         cur.execute(
@@ -335,20 +340,19 @@ def test_messages_body_lang_pending_index_is_eligible_for_worker_query(db_conn) 
         )
         cur.execute("SET LOCAL enable_seqscan = off")
         cur.execute(
-            "EXPLAIN SELECT id, body_text FROM messages "
-            "WHERE body_lang IS NULL AND body_text IS NOT NULL "
-            "ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"
+            f"EXPLAIN SELECT id, body_text FROM messages "
+            f"WHERE {CLAIMABLE_WHERE_SQL} "
+            f"ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"
         )
         plan = "\n".join(r[0] for r in cur.fetchall())
-    assert "messages_body_lang_pending_idx" in plan, plan
+    assert "messages_body_lang_claimable_idx" in plan, plan
 
 
-def test_messages_body_lang_pending_index_exists(db_conn) -> None:
-    """Migration 0017 adds the partial index that backs the lang-detect
-    worker's claim query (`body_lang IS NULL AND body_text IS NOT NULL`).
+def test_messages_body_lang_claimable_index_exists(db_conn) -> None:
+    """Migration 0035 replaces 0017's index to include body_lang_attempted_at.
 
     The predicate must match the worker query verbatim or the planner will
-    not pick the index and fall back to a seq scan on large archives.
+    not pick the index and will fall back to a seq scan on large archives.
     Postgres normalises the predicate text in `pg_indexes.indexdef` with
     parentheses and operator spacing — match the canonical form rather
     than the source SQL.
@@ -356,13 +360,33 @@ def test_messages_body_lang_pending_index_exists(db_conn) -> None:
     with db_conn.cursor() as cur:
         cur.execute(
             "SELECT indexdef FROM pg_indexes "
-            "WHERE indexname = 'messages_body_lang_pending_idx'"
+            "WHERE indexname = 'messages_body_lang_claimable_idx'"
         )
         row = cur.fetchone()
-    assert row is not None, "messages_body_lang_pending_idx index missing"
+    assert row is not None, "messages_body_lang_claimable_idx index missing"
     indexdef = row[0]
     assert "USING btree (id)" in indexdef
-    assert "WHERE ((body_lang IS NULL) AND (body_text IS NOT NULL))" in indexdef
+    assert (
+        "WHERE ((body_lang IS NULL) AND (body_text IS NOT NULL)"
+        " AND (body_lang_attempted_at IS NULL))"
+    ) in indexdef
+
+
+def test_migration_0035_drops_the_superseded_pending_index(db_conn) -> None:
+    """0017's index carried the old claim predicate and must be gone.
+
+    Left in place it is dead weight the planner still maintains on every
+    write. It is also why 0035 uses a NEW index name: `CREATE INDEX IF NOT
+    EXISTS` matches on name only, so recreating `messages_body_lang_pending_idx`
+    with the new predicate would have silently no-opped on every host that
+    already had it, leaving the worker on an index that no longer matches.
+    """
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname = 'messages_body_lang_pending_idx'"
+        )
+        assert cur.fetchone() is None
 
 
 def test_attachment_text_and_chunks_cascade_on_blob_delete(db_conn) -> None:

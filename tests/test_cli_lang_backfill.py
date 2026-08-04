@@ -10,7 +10,8 @@ import json
 from click.testing import CliRunner
 
 from localmail.cli import main
-from localmail.search.lang_detect import FixedDetector
+from localmail.config import SearchConfig
+from localmail.search.lang_detect import FixedDetector, run_lang_detect_pass
 
 
 def _seed_messages(conn, bodies: list[str | None]) -> list[int]:
@@ -80,6 +81,90 @@ def test_cli_lang_backfill_no_op_when_disabled(
         assert cur.fetchone()[0] is None
 
 
+def test_cli_lang_backfill_drains_past_an_undetectable_head(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """#251: the drain loop must not stop on a batch that labelled nothing.
+
+    The loop used to break on the labelled count, so a leading batch of bodies
+    the detector declines ended the run with every message behind them still
+    unlabelled — and reported success. Termination now comes from the batch
+    coming back empty.
+    """
+    ids = _seed_messages(db_conn, ["junk a", "junk b", "real body"])
+    detector = FixedDetector({"real body": "en"})
+
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
+    monkeypatch.setattr("localmail.search.lang_detect.make_detector", lambda cfg: detector)
+    monkeypatch.setattr(
+        "localmail.config.SearchConfig.body_lang_detect_batch_size", 2, raising=False
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["lang-backfill", "--no-progress"])
+
+    assert result.exit_code == 0, result.output
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT body_lang FROM messages WHERE id = %s", (ids[2],))
+        assert cur.fetchone()[0] == "en"
+
+
+def test_cli_lang_backfill_retry_declined_reopens_and_relabels(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """`--retry-declined` re-opens what a stricter policy turned away."""
+    ids = _seed_messages(db_conn, ["was undetectable"])
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
+
+    monkeypatch.setattr(
+        "localmail.search.lang_detect.make_detector", lambda cfg: FixedDetector({})
+    )
+    runner = CliRunner()
+    assert runner.invoke(main, ["lang-backfill", "--no-progress"]).exit_code == 0
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT body_lang_attempted_at FROM messages WHERE id = %s", (ids[0],)
+        )
+        assert cur.fetchone()[0] is not None
+
+    # A looser detector plus --retry-declined reaches the row.
+    monkeypatch.setattr(
+        "localmail.search.lang_detect.make_detector",
+        lambda cfg: FixedDetector({"was undetectable": "en"}),
+    )
+    result = runner.invoke(main, ["lang-backfill", "--no-progress", "--retry-declined"])
+
+    assert result.exit_code == 0, result.output
+    assert "re-opened 1" in result.output
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT body_lang FROM messages WHERE id = %s", (ids[0],))
+        assert cur.fetchone()[0] == "en"
+
+
+def test_cli_lang_backfill_retry_declined_is_inert_when_disabled(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """Re-opening rows nothing will then process only inflates the queue."""
+    ids = _seed_messages(db_conn, ["undetectable"])
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
+    monkeypatch.setattr(
+        "localmail.search.lang_detect.make_detector", lambda cfg: FixedDetector({})
+    )
+    runner = CliRunner()
+    runner.invoke(main, ["lang-backfill", "--no-progress"])
+
+    monkeypatch.setattr("localmail.search.lang_detect.make_detector", lambda cfg: None)
+    result = runner.invoke(main, ["lang-backfill", "--retry-declined"])
+
+    assert result.exit_code == 0
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT body_lang_attempted_at FROM messages WHERE id = %s", (ids[0],)
+        )
+        # Still stamped: the disabled guard short-circuits before re-opening.
+        assert cur.fetchone()[0] is not None
+
+
 def test_cli_search_status_reports_body_lang_counts(
     monkeypatch, db_dsn, db_conn, cli_config
 ) -> None:
@@ -95,4 +180,32 @@ def test_cli_search_status_reports_body_lang_counts(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["body_lang_populated"] == 1
+    assert payload["body_lang_pending"] == 1
+
+
+def test_cli_search_status_separates_pending_from_declined(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """#251: `pending` must mean claimable work, not "every unlabelled row".
+
+    Before the fix it reported 100020 rows on the live archive that the worker
+    would never reach — the number that made a wedged queue look like a busy
+    one. Declined rows now have their own counter, so the operator can see the
+    genuinely-unlabelable remainder instead of it hiding inside `pending`.
+    """
+    _seed_messages(db_conn, ["labelled", "declined", "untouched"])
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
+
+    # One pass over a batch of two: labels the first, declines the second,
+    # never reaches the third.
+    run_lang_detect_pass(
+        db_conn, SearchConfig(), FixedDetector({"labelled": "en"}), batch=2
+    )
+
+    result = CliRunner().invoke(main, ["search-status", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["body_lang_populated"] == 1
+    assert payload["body_lang_declined"] == 1
     assert payload["body_lang_pending"] == 1

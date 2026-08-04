@@ -2,13 +2,14 @@
 
 > **Status as of 2026-08-04 (session 14).** `origin/main` was at `f834ad2`.
 > This session closed **#221** (five daemon-supervisor lifecycle defects) in
-> **`7c063ab`**, **solved the DGX "WireGuard drops"** — they are power losses,
-> not a network fault, and four sessions of network theorising were spent on a
-> host that was switched off (`bc26847`) — and found a **new live archive-wide
-> bug, #251**: `body_lang` detection has been permanently wedged on **both**
-> deployments. Two ops actions were taken on the Mac: the stale NOTIFY queue was
-> cleared per the runbook, and the sync daemon (which was degraded, see §0.1)
-> was restarted. **Commits are NOT pushed** — see §0.0.
+> **`7c063ab`** and found a **new live archive-wide bug, #251**: `body_lang`
+> detection has been permanently wedged on **both** deployments. The DGX
+> "WireGuard drops" remain **unsolved** — the probes captured their first
+> sustained outage, but it was a scheduled PSU installation, so it is eliminated
+> rather than diagnostic; a fifth theory ("the DGX loses power") was proposed
+> and refuted within the session (§2). Two ops actions were taken on the Mac:
+> the stale NOTIFY queue was cleared per the runbook, and the sync daemon
+> (which was degraded, see §0.1) was restarted.
 
 ## Project context (1-minute version)
 
@@ -73,37 +74,51 @@ wrapped now.
 **E** — control-socket bind/chmod TOCTOU: bind now runs under a private umask,
 restored in `finally` including on bind failure.
 
-### 2. The DGX "WireGuard drops" — SOLVED (`bc26847`)
+### 2. The DGX "WireGuard drops" — still open; a fifth theory proposed and refuted (`bc26847`, `0e8dd6c`)
 
-**There is no tunnel fault. The DGX loses power.** Five explanations across four
-sessions were all wrong because all five assumed a *network* was failing.
+The probes captured their **first sustained outage** — the Mac saw
+`tunnel=FAIL` for 30.5 minutes (2026-08-03T23:31:17Z → 00:02:21Z = 09:31 →
+10:02 AEST). Three non-network signals showed the **host was down** for that
+window: a `journalctl --list-boots` boundary inside it, a 31.5-minute gap in a
+`Restart=always` probe sampling at 30 s, and `wg0` counters back at `0 0 0 0`.
+The stop was **unclean** — zero `Reached target Shutdown` lines.
 
-The persistent probes caught a 30.5-minute outage (2026-08-03T23:31:17Z →
-00:02:21Z = 09:31 → 10:02 AEST). Three non-network signals close it:
+From that I concluded "the DGX loses power" and rewrote the doc as solved.
+**That was wrong, and the operator corrected it**: the outage was a scheduled
+**redundant PSU installation**, and the DGX is on a **UPS rated ~5 days**.
 
-| signal | reading |
-|---|---|
-| `journalctl --list-boots` | boot boundary **inside** the window — previous ends 09:30:21, next begins 10:02:07 |
-| DGX probe log | **31.5-minute gap** despite `Restart=always` at 30 s sampling |
-| `wg0` counters after | `0 0 0 0` — interface created fresh |
+Checking whether it generalised — which I should have done before concluding —
+settles it. The journal holds **exactly one** unclean stop:
 
-The shutdown was **unclean**: zero `Reached target Shutdown` lines in the
-previous boot; the journal just stops mid-session. Meanwhile **`hub=FAIL`
-appears in 0 of 1971 samples**. The two other `tunnel=FAIL` samples are isolated
-30-second blips bracketed by `ok` — Starlink losing three packets on a ~900 ms
-path, not outages.
+| boot | clean-shutdown lines | gap before next boot |
+|---|---|---|
+| -4 (Aug 1) | 8 | 48 s |
+| -3 (Aug 2) | 16 | 28 s |
+| -2 (Aug 3) | 7 | 32 s (session 13's cold-boot proof) |
+| -1 (Aug 4) | **0** | **31m46s** (the PSU install) |
+
+Every other boundary is an ordinary fast reboot. **So the measurement window
+contains zero *unexplained* tunnel outages** — the recurring fault has not been
+caught yet. Keep both probes running.
+
+What the data does support: **`hub=FAIL` in 0 of 1971 samples** (first direct
+observation of the hub, though weak while the window holds no real outage), and
+**isolated single-sample `tunnel=FAIL` readings are packet loss**, not outages —
+three lost pings on a ~900 ms hairpin.
 
 [docs/operations/wireguard-drop-measurement.md](docs/operations/wireguard-drop-measurement.md)
-is rewritten as a resolved investigation, leading with the diagnostic sequence
-("is the host up?" *before* anything about WireGuard) and keeping all five
-refuted explanations — including the framing error itself, since the thing that
-finally answered it was `journalctl --list-boots`, a command nobody had run
-because nobody had questioned the premise.
+is back to an open investigation. Its diagnostic sequence now leads with "was
+the host even up?" as **triage** — one command, and it disposed of this event —
+not as an answer. All five refuted theories are listed, the fifth being mine
+from this session, with the recurring lesson stated: each was one observation
+confidently generalised.
 
 **The LAN escape hatch moved: the DGX is `192.168.1.99` now**, not
 `192.168.68.76` — it rejoined SSID `STARLINK` on a different subnet from the
 Mac's `192.168.68.69/22`. Still the right way in (45 ms vs ~900 ms hairpinned)
-but it is a **DHCP lease that moves across boots**, so look it up.
+but it is a **DHCP lease that moves across boots**, so look it up. Note this
+also broke the Mac probe's `lan` control column, which now reads `FAIL`
+permanently until the probe's target is updated.
 
 ### 3. Verification
 
@@ -117,18 +132,12 @@ but it is a **DHCP lease that moves across boots**, so look it up.
 
 ### 0. Finish what this session could not
 
-#### 0.0 Push, and close #221
+#### 0.0 Everything is pushed; #221 is closed
 
-**Nothing is pushed.** Two commits sit on local `main` ahead of `origin/main`
-(`f834ad2`): `7c063ab` (the #221 fix) and `bc26847` (the docs), plus whatever
-handoff commit follows this file. Pushing is outward-facing and was not
-authorised, so it was left for you.
-
-```bash
-git log --oneline origin/main..main    # expect 3
-git push origin main
-gh issue close 221 --comment "Fixed in 7c063ab (A-E)."
-```
+`origin/main` is at the correction commit. Note that **`bc26847`'s commit
+message asserts the refuted "power losses" conclusion** — it was already pushed
+when the operator corrected it, so it is superseded forward rather than
+rewritten. The doc and this handoff are correct; that one message is not.
 
 #### 0.1 The Mac daemon was degraded, and is now healthy — confirm it stayed that way
 
@@ -245,8 +254,12 @@ unlabelable remainder.
      *legitimate* content-level failures, not a repeat of #248/#249 — but each
      burns `retry_count` three times for a format docling will never accept, so
      an earlier gate might be worth it. Low priority.
-   - **The DGX power losses** are an electrical problem (UPS / outlet), not a
-     code one.
+   - **The Mac probe's `lan` control column is broken** — it still targets
+     `192.168.68.76`, which the DGX no longer holds, so it reads `FAIL`
+     permanently and the probe has lost its "is the host alive" control.
+     Repointing it at the current address is a one-line edit to
+     `~/localmail-probe/tunnel-probe.sh`, but the address is a DHCP lease, so
+     consider resolving it per-sample instead of hardcoding it again.
 
 ## Open decisions & risks
 
@@ -269,13 +282,16 @@ unlabelable remainder.
    wiring is the claim) but it is brittle to renames. If you refactor
    `create_app`, expect these two to need updating — they are guarding real
    invariants, not style.
-4. **"The DGX is unreachable" means it is switched off** *(revised — this
-   replaces the old "DGX side cleared, suspect the hub" note)*. Ask
-   `journalctl --list-boots` **before** anything about WireGuard. A boot boundary
-   inside the outage window closes the question; the remedy is electrical. Reach
-   it on the LAN, but **look the address up** — it is DHCP and has been
-   `192.168.68.62`, `192.168.68.76`, and now `192.168.1.99`, on two different
-   subnets. **Do not edit `/etc/wireguard/wg0.conf`.**
+4. **The DGX drops are STILL UNEXPLAINED — five theories refuted, four of them
+   mine.** Every one was a single observation confidently generalised, including
+   this session's ("the DGX loses power"). **Do not propose a sixth without a
+   captured outage in which the host was demonstrably up throughout.** Triage
+   with `journalctl --list-boots` first — one command, and it eliminated the only
+   event captured so far. **Power is not a candidate**: the DGX is on a ~5-day
+   UPS and the journal holds exactly one unclean stop, which was a scheduled PSU
+   install. Reach it on the LAN, but **look the address up** — it is DHCP and has
+   been `192.168.68.62`, `192.168.68.76`, and now `192.168.1.99`, on two
+   different subnets. **Do not edit `/etc/wireguard/wg0.conf`.**
 5. **A single `tunnel=FAIL` probe sample is not an outage** — it is Starlink
    losing three packets on a ~900 ms path. Sustained means several consecutive
    samples. The probes are left running on both hosts.
@@ -327,7 +343,7 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git status                               # expect clean
 git branch --show-current                # main
-git log --oneline origin/main..main      # expect 3 UNPUSHED commits — see §0.0
+git log --oneline origin/main..main      # expect 0 — everything is pushed
 
 # Python test suite (deselect the macOS-only socket failure — see risk 17):
 unset VIRTUAL_ENV && uv run pytest -q --deselect tests/test_daemon_control_socket.py
@@ -351,8 +367,8 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
   && cargo clippy --all-targets -- -D warnings && cd ../..
 ```
 
-Session-14 code is **`7c063ab`**, docs **`bc26847`**, **both unpushed**.
-Deployments are at `e620aa5` (Mac) and `a7013c5` (DGX) — **neither has #221**.
-Latest migration **`0034_transient_fetches_gave_up.sql`**; next free slot
-`0035_*.sql` (likely #251). **Open issues: 13** — #221 fixed pending close,
-#251 filed. Dependabot: **0** open alerts.
+Session-14 code is **`7c063ab`**; docs `bc26847` + the correction commit. All
+pushed. Deployments are at `e620aa5` (Mac) and `a7013c5` (DGX) — **neither has
+#221**. Latest migration **`0034_transient_fetches_gave_up.sql`**; next free
+slot `0035_*.sql` (likely #251). **Open issues: 13** — **#221 closed**, **#251
+filed**. Dependabot: **0** open alerts.

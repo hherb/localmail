@@ -1,168 +1,158 @@
-# Measuring the DGX WireGuard drops
+# The DGX "WireGuard drops" — SOLVED: the DGX loses power
 
-Started 2026-08-03. The DGX (`spark-0d2d`) periodically becomes unreachable at
-its WireGuard address `10.0.0.3` while remaining perfectly healthy on the LAN at
-`192.168.68.76`. This document describes the measurement set up to settle *why*,
-because three successive explanations were asserted past the evidence and all
-three were wrong (see "Discarded explanations" below).
+**Resolved 2026-08-04.** The DGX (`spark-0d2d`) periodically became unreachable
+at its WireGuard address `10.0.0.3`. Five explanations were proposed across four
+sessions and all five were wrong, because all five assumed a *network* fault.
 
-## What is known
+**There is no tunnel fault. The host is off.** The sustained outages are
+unclean power losses; the tunnel is a bystander that comes back by itself when
+the machine does.
 
-- The DGX peers with a **VPS hub** — `Endpoint = vpn.consensus-ai.org:51820`,
-  `AllowedIPs = 10.0.0.0/24`. Mac↔DGX is hub-and-spoke and hairpins through the
-  internet, hence ~700 ms RTT to a LAN-adjacent host.
-- `PersistentKeepalive = 25` **is already set** in the DGX's `[Peer]` block.
-- The DGX is on **Starlink**, which cycles its public IP. Its journal shows the
-  fingerprint: **19 connectivity transitions in ~36 h, each lasting only 1–4 s**,
-  spaced ~1–2 h apart.
+This document keeps the measurement that settled it, because the reasoning is
+reusable and because "the DGX is unreachable" will be said again.
 
-  ```bash
-  ssh 192.168.68.76 'journalctl -b -1 -u NetworkManager --no-pager \
-    | grep -E "state is now (CONNECTED_SITE|CONNECTED_GLOBAL)"'
-  ```
+## The answer, and how it was proven
 
-- **The IP-cycling hypothesis is REFUTED (2026-08-04).** A 10.6 h measurement
-  spanned **18 Starlink IP cycles** and recorded **zero tunnel-specific
-  outages**:
+The persistent probes caught one sustained outage: the Mac saw
+`tunnel=FAIL` from **2026-08-03T23:31:17Z through 2026-08-04T00:01:42Z**,
+recovering at 00:02:21Z — 30.5 minutes. In AEST (the DGX's clock, UTC+10) that
+is **09:31:17 → 10:02:21**.
 
-  ```
-  1188 Mac samples / 10.6 h    tunnel FAIL samples: 1
-                               longest consecutive FAIL run: 1
-  ```
+Three independent signals, none of them a network measurement, agree:
 
-  The single FAIL is disqualified by its own control — it reads
-  `lan=FAIL(0/3)` alongside `tunnel=FAIL(0/3)`, so both paths died together and
-  it was not tunnel-specific.
+| signal | reading |
+|---|---|
+| `journalctl --list-boots` | boot `-1` **ends** `09:30:21 AEST`; boot `0` **begins** `10:02:07 AEST` |
+| DGX probe log | **31.5-minute gap**, `09:30:43` → `10:02:13`, in a service that samples every 30 s and is `Restart=always` |
+| `wg0` counters at the first post-gap sample | `0 0 0 0` — the interface was created fresh |
 
-  So any re-convergence gap after an IP change is **under 30 s**, below the
-  sampling resolution. `PersistentKeepalive = 25` is doing its job.
+A probe that systemd restarts on death cannot leave a 31-minute hole unless the
+whole machine is gone. The counters resetting rule out a `wg-quick` bounce
+being *inside* a live boot. And the shutdown was **not clean**:
 
-- **The clincher.** The previous boot covers Aug 2 23:45 AEST, when the tunnel
-  *was* observed dead from the Mac. The longest WAN interruption anywhere in
-  that entire boot was **4 s**, and around 23:45 there is no transition at all
-  (nearest: 22:34 and 00:04). **The DGX had continuous internet while the tunnel
-  was unreachable.**
+```bash
+ssh <dgx> 'journalctl -b -1 --no-pager | grep -icE \
+   "Reached target (Shutdown|Power-Off|Reboot)|systemd-shutdown"'   # 0
+```
 
-- **Therefore the fault is not on the DGX side at all.** Not its WAN, not IP
-  cycling. The remaining suspects are the **VPS hub** and **this Mac's own
-  tunnel session** — neither of which the first two instruments watched, which
-  is what v3 adds.
+Zero. The journal simply stops mid-session, on a `systemd-logind` session
+teardown line. That is a power cut or a hard power-off, not `reboot(8)`.
 
-## The two instruments
+The reboot cadence is consistent with it: `Aug 1 07:55`, `Aug 2 07:27`,
+`Aug 3 19:06` (that one deliberate — the cold-boot proof), `Aug 4 10:02`.
 
-Both sample every 30 s and **run persistently** — the fault has recurred roughly
-every day or two, so 12-hour bursts kept missing it. They restart on crash and
-survive reboot, and each rotates its own log at 200k lines (~70 days).
+Meanwhile the hub was never implicated. **`hub=FAIL` appears in 0 of 1971
+samples**, including every sample of the outage — the VPS was reachable over the
+public internet throughout.
+
+## The short blips are satellite loss, not drops
+
+Two other `tunnel=FAIL` samples appear in the same 18.5 h. Both are **single
+30-second samples** bracketed by `ok`, with no counter anomaly and `hub=ok`.
+On a hairpin with ~900 ms RTT and a 4 s ping deadline, losing three packets in a
+row is ordinary Starlink behaviour.
+
+Do not treat an isolated FAIL sample as an outage. The three-pings-per-sample
+design exists precisely because a one-ping sampler reported three phantom
+outages in its first 46 samples; three pings reduce that, they do not eliminate
+it. **Sustained** means several consecutive samples.
+
+## The LAN escape hatch moved — and it is not stable
+
+The DGX is now **`192.168.1.99`**, not `192.168.68.76`. It rejoined SSID
+`STARLINK` after the power loss and took a DHCP lease on a different subnet
+from the one the Mac is on (`192.168.68.69/22`, gateway `192.168.68.1`).
+
+It is still the right way in — `45 ms` versus ~900 ms through the tunnel, and it
+works whenever the host is actually up. But **look the address up, do not
+assume it**: it is a DHCP lease and the host demonstrably lands on different
+subnets across boots.
+
+```bash
+# From the DGX, once you are on it by any route:
+ip -4 -o addr show | grep -v " lo "
+# Or scan, if you have neither route:
+arp -a | grep -i <mac-oui>
+```
+
+## Diagnosing the next occurrence
+
+Ask **"is the host up?"** before asking anything about WireGuard.
+
+```bash
+# 1. Sustained, or a single-sample blip?
+grep 'tunnel=FAIL' ~/localmail-probe/tunnel-probe.log | tail -40
+
+# 2. Was the hub reachable throughout?  (If hub=FAIL, it is a different fault.)
+grep 'tunnel=FAIL' ~/localmail-probe/tunnel-probe.log | grep -c 'hub=ok'
+
+# 3. THE QUESTION.  A boot boundary inside the outage window closes it.
+ssh <dgx> 'journalctl --list-boots | tail -5; last reboot | head -5'
+
+# 4. Was it clean?  0 means power loss.
+ssh <dgx> 'journalctl -b -1 --no-pager | grep -icE \
+   "Reached target (Shutdown|Power-Off|Reboot)|systemd-shutdown"'
+```
+
+If a boot boundary lines up with the outage, stop. It is the power, and no
+amount of WireGuard configuration will change that. The remedy is electrical —
+a UPS, or a different outlet — not `wg0.conf`.
+
+## Discarded explanations
+
+Recorded so they are not re-proposed. Note that (5) subsumes the rest: every one
+of them accepted the framing that a *network* was failing.
+
+1. **"Stale NAT mapping — add `PersistentKeepalive = 25`."** Already set. The
+   claim was made before the config file had been read.
+2. **"One outbound packet from the DGX restores the tunnel."** Inferred from a
+   single coincidental observation; connectivity had returned on its own hours
+   earlier. This is also why the DGX-side instrument stays passive — if the
+   claim were true, an active prober would mask the fault.
+3. **"The upstream internet flaps, and that is the outage."** The transitions
+   are 1–4 s, far too short, and that reading rested on a truncated log view.
+4. **"Starlink cycles the IP and the tunnel is slow to re-converge."** The most
+   plausible of the five, and measurement killed it: 18 cycles, zero
+   tunnel-specific outages, and no WAN event at the time an outage was observed.
+5. **"It is a tunnel problem at all."** It never was. Three sessions of network
+   theorising were spent on a host that was switched off, and the thing that
+   finally answered it was `journalctl --list-boots` — which nobody had run,
+   because nobody had questioned the premise.
+
+**Do not edit `/etc/wireguard/wg0.conf`.** `PersistentKeepalive = 25` is set,
+18 IP cycles passed without a tunnel outage, and the tunnel has never been shown
+to fail while the host was up.
+
+## The instruments
+
+Both sample every 30 s and run persistently — they restart on crash and survive
+reboot, and each rotates its own log at 200k lines (~70 days). Left running:
+they cost nothing and the boot-gap signal above is only legible because the DGX
+probe was sampling continuously.
 
 | host | mechanism | unit | log |
 |---|---|---|---|
 | Mac | launchd agent, `KeepAlive` | `com.localmail.tunnelprobe` | `~/localmail-probe/tunnel-probe.log` |
 | DGX | systemd user service, `Restart=always`, `Linger=yes` | `localmail-wgprobe` | `~/localmail-probe/wg-probe.log` |
 
-```bash
-# Mac
-launchctl list | grep tunnelprobe
-launchctl bootout gui/$(id -u)/com.localmail.tunnelprobe     # stop
-# DGX
-ssh 192.168.68.76 'systemctl --user status localmail-wgprobe'
-ssh 192.168.68.76 'systemctl --user disable --now localmail-wgprobe'   # stop
+**Mac** (`tunnel-probe.sh`) — three pings each to the tunnel address, the LAN
+control, and the hub over the public internet, plus this Mac's own `utun8`
+packet counters:
+
+```
+iso_ts tunnel=ok|FAIL(n/3) lan=ok|FAIL(n/3) hub=ok|FAIL(n/3) utun_rx= utun_tx=
 ```
 
-### DGX side — passive, root-free
+**DGX** (`wg-probe.sh`) — **passive by design**, sends nothing. Any outbound
+packet refreshes the hub's stored endpoint for this peer and would repair the
+very failure being measured:
 
-`~/wg-probe.sh` → `~/wg-probe.log`, columns:
-`iso_ts  nm_connectivity  rx_bytes rx_pkts  tx_bytes tx_pkts`
-
-It reads `ip -s link show wg0` and `nmcli networking connectivity` and
-**deliberately sends no traffic**. That is the critical design constraint: any
-outbound packet from the DGX would reach the hub, refresh the hub's stored
-endpoint for this peer, and *repair the very failure being measured*. A ping
-logger on the DGX would have silently masked the bug.
-
-`wg show` would be the better instrument (latest-handshake age, endpoint) but
-needs root, and the DGX has no passwordless sudo.
-
-### Mac side — the probe
-
-`scratchpad/tunnel-probe.sh` → `tunnel-probe.log`, columns:
-`iso_ts tunnel={ok,FAIL}(n/3) lan={ok,FAIL}(n/3)`
-
-- `tunnel` pings `10.0.0.3` (Mac → hub → DGX).
-- `lan` pings `192.168.68.76` — the **control**. It proves the host is alive and
-  the outage is tunnel-specific, not a crashed or rebooting DGX.
-
-**Three pings per sample, `FAIL` only if all three are lost.** The first version
-sent a single ping and produced 3 `FAIL`s in 46 samples — every one of them
-isolated, and the DGX's `rx_pkts` kept incrementing straight through all three,
-so the tunnel had not dropped at all. Starlink loses individual packets at
-satellite handover (~15 s cadence); v2 immediately recorded `tunnel=ok(2/3)`
-alongside `lan=ok(3/3)`, which is exactly that. A single-ping sampler cannot
-distinguish routine satellite loss from the multi-hour outage under
-investigation, and at ~6% loss it would bury the real signal in false positives.
-
-Parse the received count from field 4 of the `N packets transmitted, N packets
-received` line, not from the loss percentage: `int(33.3 * 3 / 100)` is 0, so
-partial loss would be scored as no loss.
-
-Probing the tunnel does **not** mask the bug: if the hub holds a stale endpoint
-the packet dies at the hub, so the DGX never receives it, never transmits, and
-never refreshes anything.
-
-Note the two logs use different timezones — the DGX writes `+10:00` (AEST), the
-Mac writes UTC. Convert before correlating.
-
-## How to read the result
-
-Find a window where the Mac reports `tunnel=FAIL lan=ok` for several consecutive
-samples, then look at the DGX's `rx_pkts` across the same window:
-
-| DGX `rx_pkts` during the outage | Meaning |
-|---|---|
-| **flat** | The Mac's packets never reach the DGX → the **hub→DGX** leg is broken. Consistent with the hub holding a stale endpoint after the Starlink IP change. This is the leading hypothesis. |
-| **increments** | Requests arrive but replies do not get back → the **DGX→hub** return leg is broken instead. A different problem, and the keepalive theory would need rethinking. |
-
-`tx_pkts` rising ~1 per 25–30 s throughout is **expected and not diagnostic** —
-that is `PersistentKeepalive` doing its job. WireGuard keepalives are one-way and
-draw no reply, so TX-up/RX-flat is normal when idle.
-
-If `lan` ever reports `FAIL` too, discard that window: the host was down or
-rebooting and it says nothing about the tunnel.
-
-## If the hub→DGX leg is confirmed
-
-The targeted remedy is a NetworkManager dispatcher hook that re-sets the peer
-endpoint (or bounces `wg-quick@wg0`) when connectivity returns — **not** a
-`wg0.conf` edit. Do not add `PersistentKeepalive`; it is already there.
-
-## Discarded explanations
-
-Recorded so they are not re-proposed:
-
-1. **"Stale NAT mapping — add `PersistentKeepalive = 25`."** It was already set.
-   The claim was made before the config file had been read.
-2. **"One outbound packet from the DGX restores the tunnel."** Inferred from a
-   single coincidental observation; connectivity had returned on its own hours
-   earlier. This is also *why* the DGX-side instrument must stay passive — if the
-   claim were true, an active prober would mask the fault.
-3. **"The upstream internet flaps, and that is the outage."** The transitions are
-   1–4 s, far too short to explain it, and that reading rested on a truncated log
-   view.
-4. **"Starlink cycles the IP and the tunnel is slow to re-converge."** The most
-   plausible of the four, and measurement killed it: 18 cycles, zero
-   tunnel-specific outages, and no WAN event at all at the time an outage was
-   actually observed. Any gap is under 30 s.
-
-## Commands
-
-```bash
-# progress
-ssh 192.168.68.76 'wc -l ~/wg-probe.log; tail -3 ~/wg-probe.log'
-tail -3 "$SCRATCH/tunnel-probe.log"
-
-# outage windows seen from the Mac (tunnel down, host up)
-grep 'tunnel=FAIL lan=ok' "$SCRATCH/tunnel-probe.log"
-
-# stop early
-ssh 192.168.68.76 'pkill -f wg-probe.sh'
-pkill -f tunnel-probe.sh
 ```
+iso_ts nm_connectivity rx_bytes rx_pkts tx_bytes tx_pkts
+```
+
+`tx_pkts` rising ~1 per 25–30 s while idle is `PersistentKeepalive`, not
+traffic. Keepalives are one-way and draw no reply, so TX-up/RX-flat is normal.
+
+**The Mac logs UTC; the DGX logs +10:00.** Convert before correlating — the
+30-minute outage above looks like two unrelated events if you do not.

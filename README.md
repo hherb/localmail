@@ -102,7 +102,20 @@ a child and binds a Unix control socket at
 | `localmail daemon status` | Show daemon process state (from the supervisor socket when supervised, `external` otherwise) plus per-thread liveness from `daemon_heartbeats`. Heartbeats always print; an unreachable socket is reported, not an error. |
 | `localmail daemon reload` | **Plane A.** Enqueue `reload-now` so the running daemon re-reads its account set immediately instead of waiting out `reload_seconds`. |
 | `localmail daemon restart-account NAME` | **Plane A.** Enqueue `restart-account` to tear down and respawn one account's IDLE + poll threads (e.g. a wedged connection). |
-| `localmail daemon start` / `stop` / `restart` [`--no-wait`] | **Plane B.** Drive the supervised child over the control socket. The supervisor runs the lifecycle op on its own thread and returns at once, so the command **polls status until the daemon settles** (running / stopped) — `--no-wait` skips the poll and prints the transitional state. Exits non-zero with a clear note when the daemon is supervised externally (`supervise_daemon = false`) or when `localmail serve` is not running. |
+| `localmail daemon start` / `stop` / `restart` [`--no-wait`] | **Plane B.** Drive the supervised child over the control socket. The supervisor runs the lifecycle op on its own thread and returns at once, so the command **polls status until the daemon settles** (running / stopped) — `--no-wait` skips the poll and prints the transitional state. Exits non-zero with a clear note when the daemon is supervised externally (`supervise_daemon = false`), when `localmail serve` is not running, or when the supervisor accepts the connection but stops answering. |
+
+#### How long a stop takes
+
+`[daemon] shutdown_grace_seconds` (default 30) is the **total** wall-clock
+budget the daemon spends winding its worker threads down, not a per-thread
+timeout: every worker is signalled first and they wind down concurrently, so
+the budget bounds the slowest one rather than their sum. If it is exhausted the
+daemon logs a warning naming it, which is the signal to raise it.
+
+The supervisor deliberately waits **longer** than that before escalating
+SIGTERM to SIGKILL — the child is still closing its connection pool and exiting
+when its last join returns, so killing it at that exact instant would turn
+every ordinary stop into a SIGKILL. You do not configure the difference.
 
 The admin UI (`localmail serve`) also exposes a **daemon-control panel** at
 `/admin/daemon`: a status table (per-thread state, current folder, heartbeat

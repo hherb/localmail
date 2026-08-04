@@ -203,6 +203,8 @@ src/localmail/
   idle.py           # run_inbox_idle_loop, _one_inbox_session, _idle_step
   poller.py         # run_poll_loop, _one_poll_pass
   daemon.py         # Daemon class: signal handling, per-account thread spawn
+  shutdown_budget.py # remaining_seconds/supervisor_kill_after (pure) +
+                    #   wind_down_threads — the one shutdown budget (#221 A)
   search/           # hybrid search subsystem (Phases 1 + 2)
     __init__.py     # public API: create_searcher, Searcher, SearchPage, SearchResult
     arms.py         # retrieval arms: arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
@@ -1555,6 +1557,57 @@ for the full design.
   shutdown can no longer re-spawn an orphaned child. The flag-set and the spawn
   are serialised by `_lock`: start() either sees the flag and skips, or spawned
   first and close's stop() reaps it.
+- **Supervisor lifecycle robustness (#221 A–E, shipped):** five defects sharing
+  the supervisor/shutdown area.
+  - **A — the two shutdown budgets were the same number meaning different
+    things.** `run_forever`'s teardown joined every thread with its *own*
+    `shutdown_grace_seconds` timeout — idle then poll per account, sequentially —
+    so the real worst case was `2 × accounts × grace`, while
+    `DaemonSupervisor.stop()` waited exactly one `grace` before SIGKILL. With two
+    or more accounts an ordinary stop or restart **SIGKILLed a healthy child**.
+    The new [src/localmail/shutdown_budget.py](src/localmail/shutdown_budget.py)
+    owns both halves so they cannot drift apart again: `wind_down_threads` sets
+    **every stop event before the first join** (the load-bearing part — signalled
+    up front the workers wind down concurrently, so the budget bounds the
+    *slowest* rather than their sum) and spends the budget as one wall-clock
+    deadline via the pure `remaining_seconds`; `supervisor_kill_after` derives the
+    supervisor's kill deadline as the child's budget + `SUPERVISOR_KILL_MARGIN_S`,
+    covering the fixed work *after* the last join (pool close, final log line,
+    interpreter teardown). `remaining_seconds` clamps at 0 because
+    `Thread.join(timeout=<negative>)` returns immediately rather than raising —
+    a negative remainder would silently skip every remaining join while looking
+    like a wait. **`Daemon._teardown_account` deliberately keeps its own
+    per-account timeout**: that path removes *one* account from a daemon that
+    keeps running, so it has no global deadline to share. `wind_down_threads`
+    lives beside the arithmetic rather than in `daemon.py` because it is the sole
+    consumer of `remaining_seconds` and the counterpart to
+    `supervisor_kill_after` — splitting them is how the budgets drifted apart in
+    the first place.
+  - **B — `supervisor.close()` blocked the asyncio event loop** for up to the
+    grace period on serve shutdown; now `await anyio.to_thread.run_sync(...)`.
+    Nothing was scheduled during that wait, and a process supervisor that
+    SIGKILLed the parent mid-wait orphaned the already-SIGTERMed child. Pinned by
+    a source assertion in `test_serve_shutdown_not_blocking.py` (building a real
+    app needs a DB) plus a demonstration of the property on the same primitive.
+  - **C — `request_*` after `close()` stuck the state machine at `starting`
+    forever.** `request_start` set STARTING, then the background `start()` saw
+    `_closing` and returned *without* touching the state, so the admin panel
+    showed a daemon that was never coming. All three `request_*` now refuse via
+    the shared `_admit_lifecycle_request` guard **before any state is written**.
+    The blocking `start()` **keeps its silent no-op** — #149's guard is what an
+    in-flight async restart lands on during teardown and it must not raise there.
+  - **D — `send_control_request` wrapped only `connect()`.** A peer that accepted
+    and then stalled raised a bare `socket.timeout`; one that hung up mid-write a
+    `BrokenPipeError`. Both are `OSError`, both escaped `daemon_cli.py`'s
+    `except ControlSocketError`, and both showed the operator a traceback. The
+    **whole exchange** is wrapped now.
+  - **E — control-socket bind/chmod TOCTOU.** `bind()` ran before
+    `os.chmod(path, 0o600)`, so the socket briefly existed at whatever the process
+    umask allowed — and anything that connects through it can stop the daemon.
+    Bind now runs under a private umask, restored in `finally` (including on bind
+    failure — the umask is process-global, and leaking `0o177` would silently make
+    every later file the serve process writes owner-only). The chmod stays as belt
+    to that braces.
 - The page cache namespaces cursors by `user_id` so a search cursor minted
   by user A and replayed by user B is treated as a cache miss — preventing
   cross-user pool leakage.

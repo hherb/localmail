@@ -69,6 +69,20 @@ def test_a_zero_max_steps_disables_the_backoff_entirely():
     assert next_idle_streak(0, made_progress=False, max_steps=0) == 0
 
 
+def test_the_streak_never_goes_negative():
+    """A negative sleep is a busy-poll wearing a wait's clothing.
+
+    `Event.wait(timeout=<negative>)` returns immediately instead of raising,
+    so an unclamped streak would spin the worker while still reading as a
+    sleep. SearchConfig rejects a negative max_steps (`ge=0`); this pins the
+    module's own guarantee, which is what its docstring claims to own.
+    """
+    assert next_idle_streak(0, made_progress=False, max_steps=-1) == 0
+    assert sweep_sleep_seconds(
+        next_idle_streak(3, made_progress=False, max_steps=-5), 5.0
+    ) == 5.0
+
+
 # --- the sleep length --------------------------------------------------------
 
 

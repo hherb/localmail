@@ -23,6 +23,7 @@ happening again.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NoReturn
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,12 +40,24 @@ class SweepOutcome:
     distinction. A batch the detector declines outright still makes real
     progress, because every claimed row is stamped `body_lang_attempted_at`
     and leaves the queue for good.
+
+    The sweep's third pass — lazy chunking — is deliberately **not** here, for
+    two reasons. It feeds the embedding queue rather than draining one of its
+    own, so under a working backend the chunks it makes are claimed by
+    `_embed_table` in the same sweep and already reported as `embedded`. And
+    its counts are claim-shaped, not drain-shaped: both passes return the
+    number of rows *selected*, and a row that yields zero chunks is re-selected
+    on every sweep (`chunk_attachment_text` returns `[]` for whitespace-only
+    text, which clears the `extracted_text <> ''` filter — #266). Folding it in
+    would report progress forever and pin the loop at the base interval — the
+    inverse of the #259 defect, and the reason `lang_visited` can be trusted
+    where these cannot: every row `run_lang_detect_pass` claims is stamped.
     """
 
     embedded: int
     lang_visited: int
 
-    def __bool__(self) -> bool:
+    def __bool__(self) -> NoReturn:
         """Always raises — ask for `made_progress` (or a named count) instead.
 
         `LangDetectPass` merely declines to define this, which leaves
@@ -72,10 +85,18 @@ def next_idle_streak(streak: int, *, made_progress: bool, max_steps: int) -> int
     ceiling, and a default would quietly become a second one.
 
     `max_steps=0` pins the streak at 0, i.e. disables the backoff.
+
+    The result is clamped at 0 for the same reason `shutdown_budget`'s
+    `remaining_seconds` is: a negative streak yields a negative sleep, and
+    `Event.wait(timeout=<negative>)` returns *immediately* rather than raising
+    — so the worker would busy-poll while the code still read as a wait.
+    `SearchConfig` already rejects a negative `max_steps` (`ge=0`); the clamp
+    is what makes this module's claim to own the ceiling true on its own terms
+    rather than by the caller remembering to validate.
     """
     if made_progress:
         return 0
-    return min(streak + 1, max_steps)
+    return max(0, min(streak + 1, max_steps))
 
 
 def sweep_sleep_seconds(streak: int, poll_interval_s: float) -> float:

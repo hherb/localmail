@@ -16,6 +16,7 @@ from localmail.config import (
     SearchConfig,
     load_config,
 )
+from localmail.search.sweep_pacing import sweep_sleep_seconds
 
 
 def write(path: Path, body: str) -> Path:
@@ -231,6 +232,28 @@ def test_search_config_has_sane_defaults():
     assert cfg.run_embed_worker is True
     assert cfg.chunk_size_tokens == 512
     assert cfg.chunk_overlap_tokens == 64
+
+
+def test_embed_worker_idle_backoff_defaults_to_the_documented_ceiling():
+    """CLAUDE.md and the README both quote "35 s at the defaults" (#259).
+
+    The pure tests in test_sweep_pacing.py assert the arithmetic against their
+    own literal, so without this the two config fields could move and the
+    documented ceiling would drift silently.
+    """
+    cfg = SearchConfig()
+    assert cfg.embed_worker_idle_backoff_max_steps == 6
+    assert sweep_sleep_seconds(
+        cfg.embed_worker_idle_backoff_max_steps, cfg.embed_worker_poll_interval_s
+    ) == 35.0
+
+
+def test_a_negative_idle_backoff_ceiling_is_rejected():
+    """`ge=0` is the outer guard on the sleep arithmetic; 0 disables the backoff."""
+    with pytest.raises(ValidationError):
+        SearchConfig(embed_worker_idle_backoff_max_steps=-1)
+    disabled = SearchConfig(embed_worker_idle_backoff_max_steps=0)
+    assert sweep_sleep_seconds(0, disabled.embed_worker_poll_interval_s) == 5.0
 
 
 def test_search_config_attached_to_localmail_config():

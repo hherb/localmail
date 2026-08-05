@@ -799,6 +799,10 @@ for the Phase 2 plan.
       off; chunks get re-claimed next sweep. Permanently-broken backends
       surface via repeated WARNINGs rather than silently poisoning the
       entire queue.
+- Phase 2 (attachment search) — **shipped**, see
+  [docs/superpowers/specs/2026-05-16-hybrid-search-phase2-design.md] and
+  [docs/superpowers/plans/2026-05-16-hybrid-search-phase2.md].
+  Phase 5 (polish) — separate design + plans.
 
 **The sweep result names both queues, and the loop's backoff reads both
 (#259).** `run_embed_worker_once` returned a bare count of embedded chunks,
@@ -832,11 +836,22 @@ difference between ~5 hours and ~25 minutes.
   and reports `visited`/`labelled` separately. The three acceptance harnesses
   *do* break on `made_progress` — they want a fully-populated corpus, and the
   loop cannot spin because every visited row is stamped attempted.
-
-- Phase 2 (attachment search) — **shipped**, see
-  [docs/superpowers/specs/2026-05-16-hybrid-search-phase2-design.md] and
-  [docs/superpowers/plans/2026-05-16-hybrid-search-phase2.md].
-  Phase 5 (polish) — separate design + plans.
+- **The sweep's third pass — lazy chunking — is deliberately not counted.** It
+  feeds the embedding queue rather than draining one of its own, so under a
+  working backend its output is already reported as `embedded` in the same
+  sweep. And both chunking passes return rows *selected*, not rows drained: a
+  row that yields zero chunks is re-selected forever (`chunk_attachment_text`
+  returns `[]` for whitespace-only text, which clears the `extracted_text <>
+  ''` claim filter — #266), so counting them would report progress on every
+  sweep and pin the loop at the base interval, the inverse of #259.
+- **A broken embedding backend no longer paces the loop while a language
+  backlog drains.** `_embed_table` catches batch-level backend errors itself
+  and returns 0 rather than raising, so `run_embed_worker`'s `except` never
+  sees them; with `lang_visited > 0` the streak resets and the backend is
+  retried — and its WARNING repeats — once per base poll interval instead of
+  once per ceiling. Deliberate (the sweep really is doing work), but it is why
+  the loop's docstring no longer claims the backoff throttles a broken
+  backend. Log volume tracked by #267.
 
 **Phase 4 (`--smart` query rewriter) — shipped**, see
 [docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md](docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md)

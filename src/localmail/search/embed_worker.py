@@ -405,8 +405,13 @@ def run_embed_worker(
     queue nor the language-detection queue advanced (#259). Both the progress
     predicate and the arithmetic live in `sweep_pacing`.
 
-    A failed sweep is paced as an empty one: the backoff is also what keeps a
-    persistently broken backend from re-erroring every poll interval.
+    A sweep that *raises* is paced as an empty one — that covers pool
+    acquisition and anything outside `_embed_table`'s own handler. It does not
+    cover a broken embedding backend: `_embed_table` catches batch-level
+    backend errors itself, logs, and returns 0, so such a sweep is only "empty"
+    when nothing else advanced. While a language backlog drains, a persistently
+    broken backend is therefore retried once per base poll interval rather than
+    once per backoff ceiling, and its WARNING repeats at that rate.
     """
     streak = 0
     while not stop.is_set():

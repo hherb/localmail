@@ -555,3 +555,17 @@ def test_length_floor_applies_to_the_normalised_text() -> None:
     det = _detector_with(stub)
     assert det.detect("Hi https://example.com/a-very-long-tracking-path-here") is None
     assert stub.seen == []
+
+
+def test_full_accuracy_is_the_default() -> None:
+    """Low-accuracy mode measured worse on every axis (#255).
+
+    On the live Mac archive it left 300/300 implausibly-labelled rows wrong
+    where full accuracy left 3, while costing *more* resident memory (239 MB
+    vs 227 MB) and running 2.3x slower. The knob survives for a
+    memory-constrained host; the default must not.
+    """
+    assert SearchConfig().body_lang_low_accuracy is False
+    detector = make_detector(SearchConfig())
+    assert isinstance(detector, LinguaDetector)
+    assert detector._low_accuracy is False

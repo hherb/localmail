@@ -74,10 +74,11 @@ output (or `--tb=short` to a file) before pattern-matching failures.
 
 The Mac restart sat **~3 minutes** between `daemon pool sizing: …` (07:29:20)
 and `started workers …` (07:32:19) with no log line and **no heartbeat rows**
-(the table is emptied on clean shutdown). A process sample showed the main
-thread in `os_scandir`/`readdir` — the #237 blob-temp sweep at
-`Daemon.start_workers`, cold-cache-slow over 16,640 blobs / 14,912 dirs (a warm
-`find` walks the same tree in 0.3 s; the previous restart's gap was 35 s).
+(`start_workers` wipes the table at startup, right before the sweep). A
+process sample showed the main thread in `os_scandir`/`readdir` — the #237
+blob-temp sweep at `Daemon.start_workers`, cold-cache-slow over 16,640 blobs /
+14,912 dirs (a warm `find` walks the same tree in 0.3 s; the previous
+restart's gap was 35 s).
 Filed as **#269** with two suggestions: an INFO line around the sweep
 (zero-risk), and possibly moving the sweep off the critical path (needs a
 `wind_down_threads` interaction check). Until then: **an empty
@@ -150,9 +151,11 @@ issues (1) or the GUI panel (2), whichever the operator prefers.
    daemon_commands` succeeding on `localmail_test` (use `-h localhost` — the
    runbook's socket-path psql invocations don't resolve from every shell).
 3. **An empty `daemon_heartbeats` right after a daemon restart is normal for
-   minutes** *(new — #269)*. It is the startup blob-temp sweep; the table is
-   cleared on clean shutdown and workers spawn only after the sweep. Confirm
-   with `sample <pid>` (expect `os_scandir`), don't kill the process.
+   minutes** *(new — #269)*. It is the startup blob-temp sweep:
+   `start_workers` wipes the whole table *before* the sweep (clean shutdown
+   clears only the per-account rows), and workers spawn only after it — so an
+   empty table says nothing about how the predecessor died. Confirm with
+   `sample <pid>` (expect `os_scandir`), don't kill the process.
 4. **The DGX drops are STILL UNEXPLAINED — five theories refuted, four of them
    mine** *(carried; not investigated this session)*. **Do not propose a sixth
    without a captured outage in which the host was demonstrably up throughout.**

@@ -23,6 +23,8 @@ Layout:
     `CLAIMABLE_WHERE_SQL`. Used by the embed worker every sweep and by the
     `lang-backfill` CLI in a loop.
   - `retry_declined(conn)`: re-open rows a previous policy declined.
+  - `reopen_all(conn)`: re-open *every* bodied row, label and all, for a
+    change in detector policy rather than in thresholds (#255).
 
 Failure model mirrors `embed_worker.py`: per-message SAVEPOINT isolates
 detector exceptions so a single poison body doesn't abort the batch.
@@ -72,6 +74,13 @@ DECLINED_WHERE_SQL = (
     "AND body_text IS NOT NULL "
     "AND body_lang_attempted_at IS NOT NULL"
 )
+
+#: Every row a re-label pass may reset — i.e. every row with a body, whatever
+#: it currently holds. `CLAIMABLE_WHERE_SQL` and `DECLINED_WHERE_SQL` are
+#: disjoint subsets of this; the difference is the rows that carry a label.
+#: Those are exactly what a detector-policy change invalidates and what
+#: `retry_declined` cannot reach (#255).
+RELABELABLE_WHERE_SQL = "body_text IS NOT NULL"
 
 
 @dataclass(frozen=True)
@@ -131,7 +140,7 @@ class LinguaDetector:
         *,
         min_confidence: float,
         min_text_chars: int,
-        low_accuracy: bool = True,
+        low_accuracy: bool = False,
     ) -> None:
         self._min_confidence = min_confidence
         self._min_text_chars = min_text_chars
@@ -304,6 +313,28 @@ def retry_declined(conn: psycopg.Connection) -> int:
         cur.execute(
             f"UPDATE messages SET body_lang_attempted_at = NULL"
             f" WHERE {DECLINED_WHERE_SQL}"  # noqa: S608 — module constant
+        )
+        reopened = cur.rowcount
+    conn.commit()
+    return reopened
+
+
+def reopen_all(conn: psycopg.Connection) -> int:
+    """Clear every body_lang label and attempt stamp; return the row count.
+
+    The escape hatch for a change in *detector policy* rather than in
+    thresholds. `retry_declined` re-opens only rows the detector turned away,
+    which by construction excludes the rows a wrong policy labelled — and a
+    confidently wrong label is the whole of #255.
+
+    Destructive: it discards every existing label, so the archive is
+    unsearchable by `lang:` until a drain completes. The caller owns
+    confirming that (see `lang-backfill --relabel`).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE messages SET body_lang = NULL, body_lang_attempted_at = NULL"
+            f" WHERE {RELABELABLE_WHERE_SQL}"  # noqa: S608 — module constant
         )
         reopened = cur.rowcount
     conn.commit()

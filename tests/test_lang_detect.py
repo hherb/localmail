@@ -21,10 +21,12 @@ from localmail.config import SearchConfig
 from localmail.search.lang_detect import (
     CLAIMABLE_WHERE_SQL,
     DECLINED_WHERE_SQL,
+    RELABELABLE_WHERE_SQL,
     FixedDetector,
     LanguageDetector,
     LinguaDetector,
     make_detector,
+    reopen_all,
     retry_declined,
     run_lang_detect_pass,
 )
@@ -569,3 +571,66 @@ def test_full_accuracy_is_the_default() -> None:
     detector = make_detector(SearchConfig())
     assert isinstance(detector, LinguaDetector)
     assert detector._low_accuracy is False
+
+
+def test_reopen_all_clears_labels_and_attempt_stamps(db_conn) -> None:
+    """Re-labelling must reach rows that already carry a (wrong) label.
+
+    `retry_declined` cannot: by construction it only re-opens rows with no
+    label, and the #255 defect is rows labelled confidently and wrongly.
+    """
+    acct = _seed_account(db_conn)
+    _seed_message(db_conn, acct, 1, "anything")      # will be labelled
+    _seed_message(db_conn, acct, 2, "undetectable")  # will be declined
+    _seed_message(db_conn, acct, 3, None)            # no body
+    db_conn.commit()
+    run_lang_detect_pass(db_conn, SearchConfig(), FixedDetector({"anything": "en"}))
+
+    assert reopen_all(db_conn) == 2  # the bodied rows only
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM messages"
+            " WHERE body_lang IS NOT NULL OR body_lang_attempted_at IS NOT NULL"
+        )
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_relabelable_contains_claimable_and_declined(db_conn) -> None:
+    """One authority per predicate; claimable and declined are subsets.
+
+    `search-status` reads the first two and the relabel path reads the third.
+    A drift between them is how #251 stayed invisible for weeks.
+    """
+    acct = _seed_account(db_conn)
+    _seed_message(db_conn, acct, 1, "anything")
+    _seed_message(db_conn, acct, 2, "undetectable")
+    _seed_message(db_conn, acct, 3, None)
+    db_conn.commit()
+    run_lang_detect_pass(db_conn, SearchConfig(), FixedDetector({"anything": "en"}))
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) FROM messages"
+            f" WHERE ({CLAIMABLE_WHERE_SQL}) AND NOT ({RELABELABLE_WHERE_SQL})"
+        )
+        claimable_outside = cur.fetchone()
+        cur.execute(
+            f"SELECT count(*) FROM messages"
+            f" WHERE ({DECLINED_WHERE_SQL}) AND NOT ({RELABELABLE_WHERE_SQL})"
+        )
+        declined_outside = cur.fetchone()
+    assert claimable_outside is not None and claimable_outside[0] == 0
+    assert declined_outside is not None and declined_outside[0] == 0
+
+
+def test_constructor_default_matches_the_config_default() -> None:
+    """One meaning for "which lingua mode", not two that can drift.
+
+    `make_detector` always passes the config value, so a contradicting
+    constructor default is only reachable by a direct construction — which is
+    exactly the silent-wrong-default footgun #234 removed elsewhere.
+    """
+    direct = LinguaDetector(min_confidence=0.65, min_text_chars=20)
+    assert direct._low_accuracy is SearchConfig().body_lang_low_accuracy

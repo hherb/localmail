@@ -500,9 +500,13 @@ class SearchConfig(BaseModel):
     # Bodies shorter than this many characters are skipped — single-line bodies
     # are too short for reliable detection in any language.
     body_lang_min_text_chars: int = 20
-    # Use lingua's low-accuracy mode (~100MB resident vs ~1GB). Email bodies
-    # are usually long enough that the accuracy hit is not measurable.
-    body_lang_low_accuracy: bool = True
+    # Lingua's low-accuracy mode uses trigrams only. Measured on the live
+    # 100k-message archive it left 300/300 implausibly-labelled rows wrong
+    # where full accuracy left 3 — and it is not the cheap option the name
+    # suggests: peak RSS 239 MB vs 227 MB for full, at 2.3x the wall time,
+    # because lingua loads per-language models lazily either way (#255).
+    # Retained only as an escape hatch for a memory-constrained host.
+    body_lang_low_accuracy: bool = False
     # How many messages to claim per detection pass.
     body_lang_detect_batch_size: int = 200
 

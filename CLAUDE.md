@@ -137,7 +137,7 @@ uv run localmail run             # foreground daemon (IDLE on INBOX + periodic p
 uv run localmail list-failed [--account N] [--limit K]   # show messages sync skipped
 uv run localmail retry-failed [--account N]    # re-attempt every failed message
 uv run localmail extract-backfill              # one-shot extraction backfill for all blobs
-uv run localmail lang-backfill [--retry-declined]  # one-shot body_lang detection for existing rows
+uv run localmail lang-backfill [--retry-declined] [--relabel [--yes]]  # one-shot body_lang detection
 uv run localmail backfill-internal-date [--account N]  # IMAP INTERNALDATE for legacy rows
 uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
 uv run localmail retry-failed-extractions      # re-attempt every failed extraction
@@ -215,7 +215,9 @@ src/localmail/
     extractor.py    # LightweightExtractor (11 formats) + ExtractorBackend ABC; DoclingExtractor via [extraction] extra
     extract_worker.py # run_extract_worker_once, run_extract_worker (background thread)
     lang_detect.py  # LinguaDetector + FixedDetector + run_lang_detect_pass for messages.body_lang
-                    #   + CLAIMABLE/DECLINED_WHERE_SQL, retry_declined (#251)
+                    #   + CLAIMABLE/DECLINED/RELABELABLE_WHERE_SQL, retry_declined (#251),
+                    #   reopen_all (#255)
+    lang_text.py    # pure: normalize_for_detection — the one detector-input rule (#255)
     page_cache.py   # in-process LRU cache for paginated result pools
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
@@ -1059,6 +1061,49 @@ reached. Same shape as #216's un-rowed blob.
   turned-away remainder is the new `body_lang_declined`. Rows labelled before
   0035 keep a NULL `attempted_at` — legal, and never consulted, since the claim
   excludes `body_lang IS NOT NULL` first.
+
+**The detector sees the body with URLs stripped (#255).** Unwedging detection
+in #251 immediately exposed the next defect: **17% of all labels** on the live
+Mac archive (17129 of 100922) named a language with no plausible presence in
+it — Yoruba the second most common at 7593 rows, plus `fi`, `eo`, `et`, `cy`,
+`la`, `az`. The mail is English marketing/newsletter traffic whose bodies are
+mostly tracking URLs with high-entropy path segments; lingua scores that soup
+above `body_lang_min_confidence` and lands on a low-resource language. The
+errors are **correlated**, so `lang:en` was excluding ~7600 English newsletters
+— the inverse of the filter's purpose.
+
+- **The rule is the pure
+  [src/localmail/search/lang_text.py](src/localmail/search/lang_text.py)`::normalize_for_detection`**,
+  applied *only* inside `LinguaDetector.detect`. `messages.body_text`, the FTS
+  tsvector, chunking and embeddings all still see the original body — this
+  changes what the detector reads, never what the archive stores.
+- **The length floor measures the normalised text**, and that ordering is
+  load-bearing. A body of pure tracking URLs clears the 20-char floor when
+  measured raw and earns a confident wrong label; normalised it is empty and
+  correctly declines.
+- **Two changes were needed, not one.** URL-stripping alone resolved 69% of the
+  bad rows, full-accuracy mode alone 48%, together **99%**. The issue framed
+  them as alternatives. `body_lang_low_accuracy` now defaults **False**, and
+  `LinguaDetector.__init__`'s own default was aligned to match so the two
+  cannot drift.
+- **Three assumptions measured false, all recorded so they are not re-tried.**
+  Full accuracy is **227 MB peak RSS, not ~1 GB** (low is 239 MB — full is
+  *cheaper* and 2.3× faster; lingua loads per-language models lazily either
+  way), so the old config comment was simply wrong. Raising
+  `body_lang_min_confidence` 0.65 → 0.90 moved implausible labels 64 → 62 of
+  500 — low-accuracy lingua is *confidently* wrong, so a confidence floor
+  cannot discriminate. And the U+034F preheader padding the issue highlights
+  contributes **nothing**: an ablation shows invisible-character, email,
+  HTML-tag and separator-rule stripping each add **zero** once URLs are gone.
+  **Do not add normalisation steps here without a measurement.**
+- **`reopen_all` / `lang-backfill --relabel` is the escape hatch
+  `retry_declined` cannot be.** A row carrying a wrong label is neither
+  claimable nor declined, so `--retry-declined` cannot reach it; only a policy
+  change needs this and it discards every label, hence the confirmation prompt.
+  `RELABELABLE_WHERE_SQL` joins the other two as one authority per predicate —
+  claimable and declined are disjoint subsets of it.
+- **A "detected but implausible" sentinel was rejected**, for the reason #251
+  rejected `'und'` and #216's `type-skipped` documents: it is a one-way door.
 
 **`bm25_field_boosts` weight normalization**: `arms.py` normalises the raw
 boost values by `max(raw)` to satisfy `ts_rank_cd`'s `[0, 1]` weight

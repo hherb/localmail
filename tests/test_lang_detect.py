@@ -21,10 +21,12 @@ from localmail.config import SearchConfig
 from localmail.search.lang_detect import (
     CLAIMABLE_WHERE_SQL,
     DECLINED_WHERE_SQL,
+    RELABELABLE_WHERE_SQL,
     FixedDetector,
     LanguageDetector,
     LinguaDetector,
     make_detector,
+    reopen_all,
     retry_declined,
     run_lang_detect_pass,
 )
@@ -505,3 +507,130 @@ def test_run_lang_detect_pass_loop_terminates_on_persistent_null(db_conn) -> Non
     assert first.labelled == 0
     assert second.visited == 0
     assert second.labelled == 0
+
+
+class _StubLingua:
+    """Stands in for a built lingua detector; records what it was asked."""
+
+    def __init__(self, code: str = "YO", confidence: float = 0.99) -> None:
+        self.seen: list[str] = []
+        self._code = code
+        self._confidence = confidence
+
+    def compute_language_confidence_values(self, text: str):  # noqa: ANN202
+        self.seen.append(text)
+        iso = type("Iso", (), {"name": self._code})
+        lang = type("Lang", (), {"iso_code_639_1": iso})
+        return [type("Val", (), {"value": self._confidence, "language": lang})()]
+
+
+def _detector_with(stub: _StubLingua) -> LinguaDetector:
+    det = LinguaDetector(min_confidence=0.65, min_text_chars=20)
+    det._detector = stub
+    return det
+
+
+def test_detector_sees_the_body_with_urls_stripped() -> None:
+    """The tracking URL never reaches lingua (#255)."""
+    stub = _StubLingua()
+    det = _detector_with(stub)
+    det.detect("Last chance to save https://ct.klclick.com/f/a/IgDYzk3AXlDh~~/AASl5QA today")
+    assert stub.seen == ["Last chance to save today"]
+
+
+def test_url_only_body_is_declined_without_consulting_the_detector() -> None:
+    """A body of pure tracking URLs has no linguistic content.
+
+    Measured raw it clears the 20-char floor and earns a confident wrong label;
+    measured after normalisation it is empty. The floor must therefore apply to
+    the normalised text, and the detector must not be consulted at all.
+    """
+    stub = _StubLingua()
+    det = _detector_with(stub)
+    assert det.detect("https://a.example/aaaaaaaaaaaaaaaaaaaa http://b.example/bbbb") is None
+    assert stub.seen == []
+
+
+def test_length_floor_applies_to_the_normalised_text() -> None:
+    """Long enough raw, too short once the URL is gone."""
+    stub = _StubLingua()
+    det = _detector_with(stub)
+    assert det.detect("Hi https://example.com/a-very-long-tracking-path-here") is None
+    assert stub.seen == []
+
+
+def test_full_accuracy_is_the_default() -> None:
+    """Low-accuracy mode measured worse on every axis (#255).
+
+    On the live Mac archive it left 300/300 implausibly-labelled rows wrong
+    where full accuracy left 3, while costing *more* resident memory (239 MB
+    vs 227 MB) and running 2.3x slower. The knob survives for a
+    memory-constrained host; the default must not.
+    """
+    assert SearchConfig().body_lang_low_accuracy is False
+    detector = make_detector(SearchConfig())
+    assert isinstance(detector, LinguaDetector)
+    assert detector._low_accuracy is False
+
+
+def test_reopen_all_clears_labels_and_attempt_stamps(db_conn) -> None:
+    """Re-labelling must reach rows that already carry a (wrong) label.
+
+    `retry_declined` cannot: by construction it only re-opens rows with no
+    label, and the #255 defect is rows labelled confidently and wrongly.
+    """
+    acct = _seed_account(db_conn)
+    _seed_message(db_conn, acct, 1, "anything")      # will be labelled
+    _seed_message(db_conn, acct, 2, "undetectable")  # will be declined
+    _seed_message(db_conn, acct, 3, None)            # no body
+    db_conn.commit()
+    run_lang_detect_pass(db_conn, SearchConfig(), FixedDetector({"anything": "en"}))
+
+    assert reopen_all(db_conn) == 2  # the bodied rows only
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM messages"
+            " WHERE body_lang IS NOT NULL OR body_lang_attempted_at IS NOT NULL"
+        )
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_relabelable_contains_claimable_and_declined(db_conn) -> None:
+    """One authority per predicate; claimable and declined are subsets.
+
+    `search-status` reads the first two and the relabel path reads the third.
+    A drift between them is how #251 stayed invisible for weeks.
+    """
+    acct = _seed_account(db_conn)
+    _seed_message(db_conn, acct, 1, "anything")
+    _seed_message(db_conn, acct, 2, "undetectable")
+    _seed_message(db_conn, acct, 3, None)
+    db_conn.commit()
+    run_lang_detect_pass(db_conn, SearchConfig(), FixedDetector({"anything": "en"}))
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) FROM messages"
+            f" WHERE ({CLAIMABLE_WHERE_SQL}) AND NOT ({RELABELABLE_WHERE_SQL})"
+        )
+        claimable_outside = cur.fetchone()
+        cur.execute(
+            f"SELECT count(*) FROM messages"
+            f" WHERE ({DECLINED_WHERE_SQL}) AND NOT ({RELABELABLE_WHERE_SQL})"
+        )
+        declined_outside = cur.fetchone()
+    assert claimable_outside is not None and claimable_outside[0] == 0
+    assert declined_outside is not None and declined_outside[0] == 0
+
+
+def test_constructor_default_matches_the_config_default() -> None:
+    """One meaning for "which lingua mode", not two that can drift.
+
+    `make_detector` always passes the config value, so a contradicting
+    constructor default is only reachable by a direct construction — which is
+    exactly the silent-wrong-default footgun #234 removed elsewhere.
+    """
+    direct = LinguaDetector(min_confidence=0.65, min_text_chars=20)
+    assert direct._low_accuracy is SearchConfig().body_lang_low_accuracy

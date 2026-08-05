@@ -12,15 +12,19 @@ Layout:
 
   - `LanguageDetector` protocol: anything with `detect(text) -> str | None`.
   - `FixedDetector`: deterministic in-memory map for tests.
-  - `LinguaDetector`: wraps lingua-py, applies a confidence + length floor.
-    Returns None for empty / short / low-confidence text so the caller can
-    leave the column NULL ("unknown") rather than guess.
+  - `LinguaDetector`: wraps lingua-py. Normalises the body through
+    `lang_text.normalize_for_detection` (URLs out), then applies a confidence
+    + length floor to the *normalised* text. Returns None for empty / short /
+    low-confidence text so the caller can leave the column NULL ("unknown")
+    rather than guess.
   - `make_detector(cfg)`: returns the configured detector, or None when
     `cfg.body_lang_enabled` is False.
   - `run_lang_detect_pass(conn, cfg, detector, ...)`: one batch over
     `CLAIMABLE_WHERE_SQL`. Used by the embed worker every sweep and by the
     `lang-backfill` CLI in a loop.
   - `retry_declined(conn)`: re-open rows a previous policy declined.
+  - `reopen_all(conn)`: re-open *every* bodied row, label and all, for a
+    change in detector policy rather than in thresholds (#255).
 
 Failure model mirrors `embed_worker.py`: per-message SAVEPOINT isolates
 detector exceptions so a single poison body doesn't abort the batch.
@@ -43,6 +47,7 @@ from typing import Any, Protocol, runtime_checkable
 import psycopg
 
 from localmail.config import SearchConfig
+from localmail.search.lang_text import normalize_for_detection
 
 
 log = logging.getLogger("localmail.search.lang_detect")
@@ -69,6 +74,13 @@ DECLINED_WHERE_SQL = (
     "AND body_text IS NOT NULL "
     "AND body_lang_attempted_at IS NOT NULL"
 )
+
+#: Every row a re-label pass may reset — i.e. every row with a body, whatever
+#: it currently holds. `CLAIMABLE_WHERE_SQL` and `DECLINED_WHERE_SQL` are
+#: disjoint subsets of this; the difference is the rows that carry a label.
+#: Those are exactly what a detector-policy change invalidates and what
+#: `retry_declined` cannot reach (#255).
+RELABELABLE_WHERE_SQL = "body_text IS NOT NULL"
 
 
 @dataclass(frozen=True)
@@ -128,7 +140,7 @@ class LinguaDetector:
         *,
         min_confidence: float,
         min_text_chars: int,
-        low_accuracy: bool = True,
+        low_accuracy: bool = False,
     ) -> None:
         self._min_confidence = min_confidence
         self._min_text_chars = min_text_chars
@@ -147,15 +159,15 @@ class LinguaDetector:
         self._detector = builder.build()
 
     def detect(self, text: str) -> str | None:
-        stripped = text.strip() if text else ""
-        if len(stripped) < self._min_text_chars:
+        normalized = normalize_for_detection(text) if text else ""
+        # The floor measures the *normalised* text. A body of pure tracking
+        # URLs is long enough raw to clear it and earns a confident wrong
+        # label; normalised it is empty and correctly declines (#255).
+        if len(normalized) < self._min_text_chars:
             return None
         self._ensure_built()
         assert self._detector is not None
-        # Lingua sees the stripped form so the length floor and the detector
-        # input agree — otherwise leading/trailing whitespace would inflate
-        # the apparent length above the floor.
-        confidences = self._detector.compute_language_confidence_values(stripped)
+        confidences = self._detector.compute_language_confidence_values(normalized)
         if not confidences:
             return None
         top = confidences[0]
@@ -301,6 +313,28 @@ def retry_declined(conn: psycopg.Connection) -> int:
         cur.execute(
             f"UPDATE messages SET body_lang_attempted_at = NULL"
             f" WHERE {DECLINED_WHERE_SQL}"  # noqa: S608 — module constant
+        )
+        reopened = cur.rowcount
+    conn.commit()
+    return reopened
+
+
+def reopen_all(conn: psycopg.Connection) -> int:
+    """Clear every body_lang label and attempt stamp; return the row count.
+
+    The escape hatch for a change in *detector policy* rather than in
+    thresholds. `retry_declined` re-opens only rows the detector turned away,
+    which by construction excludes the rows a wrong policy labelled — and a
+    confidently wrong label is the whole of #255.
+
+    Destructive: it discards every existing label, so the archive is
+    unsearchable by `lang:` until a drain completes. The caller owns
+    confirming that (see `lang-backfill --relabel`).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE messages SET body_lang = NULL, body_lang_attempted_at = NULL"
+            f" WHERE {RELABELABLE_WHERE_SQL}"  # noqa: S608 — module constant
         )
         reopened = cur.rowcount
     conn.commit()

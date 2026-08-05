@@ -1068,8 +1068,24 @@ def embed_backfill(ctx, no_progress):
     is_flag=True,
     help="First re-open every row a previous detector policy declined to label.",
 )
+@click.option(
+    "--relabel",
+    is_flag=True,
+    help="Discard EVERY existing body_lang label and re-detect the archive.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the --relabel confirmation prompt (for scripted use).",
+)
 @click.pass_context
-def lang_backfill(ctx: click.Context, no_progress: bool, retry_declined: bool) -> None:
+def lang_backfill(
+    ctx: click.Context,
+    no_progress: bool,
+    retry_declined: bool,
+    relabel: bool,
+    yes: bool,
+) -> None:
     """Populate `messages.body_lang` for every message with NULL body_lang.
 
     Account-agnostic. Runs the same per-message detector the embed worker
@@ -1082,6 +1098,13 @@ def lang_backfill(ctx: click.Context, no_progress: bool, retry_declined: bool) -
     behind it (#251). Use `--retry-declined` after lowering
     `body_lang_min_confidence` / `body_lang_min_text_chars` or swapping the
     detector to bring those rows back.
+
+    `--relabel` is for a change in detector *policy* rather than in
+    thresholds: it clears every label, not just the declines, because the rows
+    a wrong policy labelled confidently are precisely the ones
+    `--retry-declined` cannot reach (#255). It is destructive — the archive is
+    unsearchable by `lang:` until the drain completes — so it prompts unless
+    `--yes` is given.
     """
     from localmail.db import open_pool
     from localmail.search import lang_detect
@@ -1094,6 +1117,18 @@ def lang_backfill(ctx: click.Context, no_progress: bool, retry_declined: bool) -
         return
     pool = open_pool(_dsn(ctx))
     try:
+        # Ahead of --retry-declined: reopen_all is a superset, so re-opening
+        # declines afterwards would report a second, meaningless count.
+        if relabel:
+            if not yes:
+                click.confirm(
+                    "Discard every existing body_lang label and re-detect"
+                    " the whole archive?",
+                    abort=True,
+                )
+            with pool.connection() as conn:
+                reopened = lang_detect.reopen_all(conn)
+            click.echo(f"re-opened {reopened} messages for re-detection")
         if retry_declined:
             with pool.connection() as conn:
                 reopened = lang_detect.retry_declined(conn)

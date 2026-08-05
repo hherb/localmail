@@ -209,3 +209,62 @@ def test_cli_search_status_separates_pending_from_declined(
     assert payload["body_lang_populated"] == 1
     assert payload["body_lang_declined"] == 1
     assert payload["body_lang_pending"] == 1
+
+
+def test_relabel_requires_confirmation(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """The only destructive verb here must not fire on a typo."""
+    _seed_messages(db_conn, ["hello world this is a body"])
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
+    monkeypatch.setattr(
+        "localmail.search.lang_detect.make_detector",
+        lambda cfg: FixedDetector({"hello world this is a body": "en"}),
+    )
+
+    result = CliRunner().invoke(main, ["lang-backfill", "--relabel"], input="n\n")
+
+    assert result.exit_code != 0
+    # Distinguishes "operator declined" from "no such option" — without this
+    # the test passes on an unparsed flag and proves nothing.
+    assert "Discard every existing body_lang label" in result.output
+    assert "Aborted" in result.output
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages WHERE body_lang IS NOT NULL")
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_relabel_reopens_labelled_rows_and_redetects(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """A row labelled by the old policy is re-detected under the new one.
+
+    `--retry-declined` cannot reach it: that row carries a label, so it is
+    neither claimable nor declined. This is the whole point of #255.
+    """
+    ids = _seed_messages(db_conn, ["hello world this is a body"])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE messages SET body_lang = 'yo', body_lang_attempted_at = now()"
+            " WHERE id = %s",
+            (ids[0],),
+        )
+    db_conn.commit()
+
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
+    monkeypatch.setattr(
+        "localmail.search.lang_detect.make_detector",
+        lambda cfg: FixedDetector({"hello world this is a body": "en"}),
+    )
+
+    result = CliRunner().invoke(
+        main, ["lang-backfill", "--relabel", "--yes", "--no-progress"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "re-opened 1" in result.output
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT body_lang FROM messages WHERE id = %s", (ids[0],))
+        row = cur.fetchone()
+    assert row is not None and row[0] == "en"

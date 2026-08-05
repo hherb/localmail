@@ -840,11 +840,15 @@ difference between ~5 hours and ~25 minutes.
 - **The sweep's third pass — lazy chunking — is deliberately not counted.** It
   feeds the embedding queue rather than draining one of its own, so under a
   working backend its output is already reported as `embedded` in the same
-  sweep. And both chunking passes return rows *selected*, not rows drained: a
-  row that yields zero chunks is re-selected forever (`chunk_attachment_text`
-  returns `[]` for whitespace-only text, which clears the `extracted_text <>
-  ''` claim filter — #266), so counting them would report progress on every
-  sweep and pin the loop at the base interval, the inverse of #259.
+  sweep — counting it would double-report. And both chunking passes return rows
+  *selected*, not rows drained, which is what made them untrustworthy as a
+  progress signal while a zero-chunk row could be re-selected on every sweep
+  (#266 — since fixed twice over: `ExtractedText` collapses whitespace-only
+  text to the `''` sentinel at the boundary, beside the #249 NUL strip, and
+  `_chunk_attachments_lazily` heals a claimed row that chunks to `[]` by
+  stamping `extracted_text = ''` in place, so legacy rows drain out on first
+  claim and any future drift in the chunker's notion of empty self-heals
+  rather than wedging the queue).
 - **A broken embedding backend no longer paces the loop while a language
   backlog drains.** `_embed_table` catches batch-level backend errors itself
   and returns 0 rather than raising, so `run_embed_worker`'s `except` never

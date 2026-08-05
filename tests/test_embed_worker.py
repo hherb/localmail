@@ -582,6 +582,130 @@ def test_worker_backoff_saturates_at_the_configured_ceiling(monkeypatch):
     assert sleeps == [10.0, 15.0, 15.0, 15.0]
 
 
+# --- #267: a persistently broken backend must not log a traceback per sweep --
+
+
+class _ScriptedBackend:
+    """Backend that follows a script of 'raise' / 'ok' per embed_documents call."""
+
+    name = "scripted"
+    model = "scripted-768"
+    dimension = 768
+
+    def __init__(self, script: list[str]) -> None:
+        self._script = script
+        self.calls = 0
+
+    def embed_documents(self, texts):
+        step = self._script[self.calls]
+        self.calls += 1
+        if step == "raise":
+            raise ConnectionError("backend down")
+        return [[1.0] * 768 for _ in texts]
+
+    def embed_query(self, text):
+        return [0.5] * 768
+
+    def health_check(self):
+        pass
+
+
+def _batch_failure_records(caplog) -> list:
+    return [r for r in caplog.records if "embed_worker batch failed" in r.getMessage()]
+
+
+def _seed_second_message(conn, body: str) -> int:
+    """Another message on the account `_seed_message` created."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts WHERE name = 'a'")
+        row = cur.fetchone()
+        assert row is not None
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " from_addr, body_text, headers, raw_bytes, size_bytes)"
+            " VALUES (%s, %s, %s, %s, %s, %s, '{}'::jsonb, %s, %s) RETURNING id",
+            (row[0], "<b@x>", b"\\x02" * 32, "Hi again", "x@y", body, b"raw", 3),
+        )
+        mid_row = cur.fetchone()
+        assert mid_row is not None
+    conn.commit()
+    return mid_row[0]
+
+
+def test_should_log_traceback_only_on_the_first_of_a_streak() -> None:
+    from localmail.search.embed_worker import should_log_traceback
+
+    assert should_log_traceback(1) is True
+    assert should_log_traceback(2) is False
+    assert should_log_traceback(50) is False
+
+
+def test_broken_backend_traceback_is_not_repeated_on_consecutive_sweeps(
+    db_conn, caplog
+) -> None:
+    """#267: while a language backlog drains, a broken backend is retried once
+    per base poll interval (~24 tracebacks/min at the defaults). The first
+    failure of a streak keeps the full traceback; later ones are a one-line
+    WARNING naming the consecutive count, so the operator signal survives
+    without the volume."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    cfg = SearchConfig()
+    backend = _ScriptedBackend(["raise", "raise"])
+    streaks: dict[str, int] = {}
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        run_embed_worker_once(db_conn, cfg, backend, failure_streaks=streaks)
+        run_embed_worker_once(db_conn, cfg, backend, failure_streaks=streaks)
+
+    records = _batch_failure_records(caplog)
+    assert len(records) == 2
+    assert records[0].exc_info  # first failure: full traceback
+    assert not records[1].exc_info  # repeat: one-liner
+    assert "2 consecutive" in records[1].getMessage()
+    assert records[1].levelname == "WARNING"  # the operator signal survives
+
+
+def test_a_successful_batch_resets_the_failure_streak(db_conn, caplog) -> None:
+    """A recovered backend that breaks again later is a *new* incident and
+    gets its traceback logged again."""
+    _seed_message(db_conn, body="First message, first incident.")
+    cfg = SearchConfig()
+    backend = _ScriptedBackend(["raise", "ok", "raise"])
+    streaks: dict[str, int] = {}
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        run_embed_worker_once(db_conn, cfg, backend, failure_streaks=streaks)  # fails
+        run_embed_worker_once(db_conn, cfg, backend, failure_streaks=streaks)  # embeds
+        _seed_second_message(db_conn, body="Second message, second incident.")
+        run_embed_worker_once(db_conn, cfg, backend, failure_streaks=streaks)  # fails
+
+    records = _batch_failure_records(caplog)
+    assert len(records) == 2
+    assert records[0].exc_info
+    assert records[1].exc_info  # streak was reset by the successful batch
+
+
+def test_loop_threads_one_streak_state_across_sweeps(monkeypatch) -> None:
+    """The daemon loop owns one mapping for the whole run — a fresh dict per
+    sweep would silently restore the per-sweep traceback #267 removes."""
+    from localmail.search import embed_worker as ew
+
+    seen: list[object] = []
+
+    def fake_sweep(conn, cfg, backend, *, lang_detector=None, failure_streaks=None):
+        seen.append(failure_streaks)
+        return SweepOutcome(embedded=0, lang_visited=0)
+
+    monkeypatch.setattr(ew, "safe_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(ew, "run_embed_worker_once", fake_sweep)
+    stop = _FakeStop(stop_after=3)
+    ew.run_embed_worker(stop, _FakePool(), SearchConfig(), _StaticEmbedder())
+
+    assert len(seen) == 3
+    assert seen[0] is not None
+    assert all(s is seen[0] for s in seen)
+
+
 def test_a_sweep_that_only_detected_language_reports_it(db_conn):
     """#259 end-to-end: the sweep result carries the lang rows it visited.
 

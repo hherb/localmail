@@ -849,10 +849,18 @@ difference between ~5 hours and ~25 minutes.
   backlog drains.** `_embed_table` catches batch-level backend errors itself
   and returns 0 rather than raising, so `run_embed_worker`'s `except` never
   sees them; with `lang_visited > 0` the streak resets and the backend is
-  retried — and its WARNING repeats — once per base poll interval instead of
-  once per ceiling. Deliberate (the sweep really is doing work), but it is why
-  the loop's docstring no longer claims the backoff throttles a broken
-  backend. Log volume tracked by #267.
+  retried once per base poll interval instead of once per ceiling. Deliberate
+  (the sweep really is doing work), but it is why the loop's docstring no
+  longer claims the backoff throttles a broken backend. The log volume that
+  retry pace implied (~24 tracebacks/min at the defaults) is bounded
+  separately (#267): `run_embed_worker` owns a run-long `failure_streaks`
+  mapping threaded into `_embed_table`, the pure `should_log_traceback`
+  (streak == 1) keeps the full traceback on the **first** failure of a
+  consecutive streak, repeats are one-line WARNINGs naming the count, and a
+  successful batch resets the streak — the next incident gets its traceback
+  again. An empty-claim sweep touches nothing (it proves nothing about the
+  backend). The operator signal stays WARNING throughout, mirroring the
+  distinct "giving up" line #153 and #239 settled on.
 
 **Phase 4 (`--smart` query rewriter) — shipped**, see
 [docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md](docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md)

@@ -350,11 +350,27 @@ def _embed_and_store(
     return written
 
 
+def should_log_traceback(consecutive_failures: int) -> bool:
+    """Pure: only the first failure of a consecutive streak carries the traceback.
+
+    #267: batch-level backend errors are caught per sweep and deliberately never
+    poison the queue, so a *persistently* broken backend surfaces as a repeated
+    WARNING — which, while a language backlog holds the loop at the base poll
+    interval (#259), meant a full traceback per table per ~5 s. The traceback
+    identifies the incident; the repeats only need to say it is still going on.
+    Mirrors the distinct "giving up" line #153 and #239 both settled on rather
+    than repeating the per-attempt one.
+    """
+    return consecutive_failures == 1
+
+
 def _embed_table(
     conn: psycopg.Connection,
     cfg: SearchConfig,
     backend: EmbeddingBackend,
     chunk_table: str,
+    *,
+    failure_streaks: dict[str, int],
 ) -> int:
     """Claim unembedded rows from chunk_table and embed them in one batch.
 
@@ -367,6 +383,12 @@ def _embed_table(
         cfg: Search configuration; supplies batch size and retry thresholds.
         backend: The embedding backend to call.
         chunk_table: Must be 'message_chunks' or 'attachment_chunks'.
+        failure_streaks: Consecutive batch-failure counts keyed by chunk table,
+            owned by the caller so they survive across sweeps (#267). The first
+            failure of a streak logs the full traceback, repeats log one line
+            naming the count, and a successful batch resets the streak. An
+            empty-claim sweep touches nothing — it proves nothing about the
+            backend either way.
     """
     with conn.cursor() as cur:
         claimed = _claim_unembedded(cur, cfg, chunk_table)
@@ -374,16 +396,29 @@ def _embed_table(
         conn.commit()
         return 0
     try:
-        return _embed_and_store(conn, cfg, backend, claimed, chunk_table)
+        embedded = _embed_and_store(conn, cfg, backend, claimed, chunk_table)
     except Exception as exc:  # noqa: BLE001 — batch-level fallback
-        log.warning(
-            "embed_worker batch failed for %s (will retry next sweep): %s",
-            chunk_table,
-            exc,
-            exc_info=True,
-        )
+        streak = failure_streaks.get(chunk_table, 0) + 1
+        failure_streaks[chunk_table] = streak
+        if should_log_traceback(streak):
+            log.warning(
+                "embed_worker batch failed for %s (will retry next sweep): %s",
+                chunk_table,
+                exc,
+                exc_info=True,
+            )
+        else:
+            log.warning(
+                "embed_worker batch failed for %s again"
+                " (%d consecutive; traceback logged on the first): %s",
+                chunk_table,
+                streak,
+                exc,
+            )
         conn.rollback()
         return 0
+    failure_streaks.pop(chunk_table, None)
+    return embedded
 
 
 def run_embed_worker_once(
@@ -392,6 +427,7 @@ def run_embed_worker_once(
     backend: EmbeddingBackend,
     *,
     lang_detector: LanguageDetector | None = None,
+    failure_streaks: dict[str, int] | None = None,
 ) -> SweepOutcome:
     """One sweep: chunk pending messages + attachments, then embed pending chunks.
 
@@ -419,16 +455,23 @@ def run_embed_worker_once(
     Batch-level backend errors are logged and the transaction is rolled back so
     the FOR UPDATE locks release — chunks get re-claimed next sweep. Operators
     see the WARNING and intervene; the worker doesn't silently poison every
-    queued chunk.
+    queued chunk. `failure_streaks` (owned by a looping caller, fresh per call
+    otherwise) is what lets a *persistent* backend failure log its traceback
+    once per streak rather than once per sweep (#267).
     """
+    streaks = failure_streaks if failure_streaks is not None else {}
     chunk_batch = max(cfg.embed_worker_batch_size, cfg.embed_worker_chunk_batch_size)
     _chunk_messages_lazily(conn, cfg, batch=chunk_batch)
     _chunk_attachments_lazily(conn, cfg, batch=chunk_batch)
     lang_visited = 0
     if lang_detector is not None and cfg.body_lang_enabled:
         lang_visited = run_lang_detect_pass(conn, cfg, lang_detector).visited
-    embedded_msg = _embed_table(conn, cfg, backend, "message_chunks")
-    embedded_att = _embed_table(conn, cfg, backend, "attachment_chunks")
+    embedded_msg = _embed_table(
+        conn, cfg, backend, "message_chunks", failure_streaks=streaks
+    )
+    embedded_att = _embed_table(
+        conn, cfg, backend, "attachment_chunks", failure_streaks=streaks
+    )
     return SweepOutcome(
         embedded=embedded_msg + embedded_att, lang_visited=lang_visited,
     )
@@ -456,15 +499,20 @@ def run_embed_worker(
     backend errors itself, logs, and returns 0, so such a sweep is only "empty"
     when nothing else advanced. While a language backlog drains, a persistently
     broken backend is therefore retried once per base poll interval rather than
-    once per backoff ceiling, and its WARNING repeats at that rate.
+    once per backoff ceiling. The retry pace is correct (the sweep genuinely is
+    doing work); the log volume is bounded separately: `failure_streaks` lives
+    for the whole run, so the traceback appears once per consecutive streak and
+    the repeats are one-line WARNINGs naming the count (#267).
     """
     streak = 0
+    failure_streaks: dict[str, int] = {}
     while not stop.is_set():
         safe_heartbeat(pool, worker_kind="embed", account_id=None, state="idle")
         try:
             with pool.connection() as conn:
                 outcome = run_embed_worker_once(
                     conn, cfg, backend, lang_detector=lang_detector,
+                    failure_streaks=failure_streaks,
                 )
         except Exception as exc:  # noqa: BLE001
             log.error("embed_worker sweep error: %s", exc, exc_info=True)

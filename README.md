@@ -200,7 +200,7 @@ with them, and with no way to retry successfully.
 | --- | --- |
 | `localmail embed-backfill` | Drain the message-chunk embedding queue in the foreground; exit when empty. Also drains the language-detection queue after embeddings finish. |
 | `localmail extract-backfill [--no-progress]` | Drain the attachment-extraction queue (Phase 2): extract text from PDFs, DOCX, etc. |
-| `localmail lang-backfill [--no-progress] [--retry-declined]` | Populate `messages.body_lang` for every message with NULL body_lang. Required once after first install so the `lang:` search token returns rows. `--retry-declined` first re-opens rows a stricter detector policy turned away. |
+| `localmail lang-backfill [--no-progress] [--retry-declined] [--relabel [--yes]]` | Populate `messages.body_lang` for every message with NULL body_lang. Required once after first install so the `lang:` search token returns rows. `--retry-declined` first re-opens rows a stricter detector policy turned away; `--relabel` discards **every** existing label and re-detects the archive (prompts unless `--yes`). |
 | `localmail search "QUERY" [--format text\|json]` | Hybrid lexical + vector search over the local archive (see [Search](#search) below). |
 | `localmail search-status [--format text\|json]` | Report chunk/extraction backlog, language-detection progress, and failure counts. |
 | `localmail list-failed-embeddings` | Show recent `failed_embeddings` rows. |
@@ -894,6 +894,12 @@ uv run localmail lang-backfill
 # them.
 uv run localmail lang-backfill --retry-declined
 
+# After changing the detector POLICY rather than a threshold (upgrading
+# localmail, flipping body_lang_low_accuracy): discard every existing label
+# and re-detect. --retry-declined cannot do this — a row carrying a wrong
+# label is neither pending nor declined. Prompts unless --yes.
+uv run localmail lang-backfill --relabel
+
 # (Optional, Phase 2) Backfill attachment text for an existing archive.
 # Requires the docling optional dep: `uv sync --extra extraction`.
 uv run localmail extract-backfill
@@ -908,7 +914,16 @@ uv run localmail search-status
 below `body_lang_min_text_chars`, detections below `body_lang_min_confidence`,
 and bodies that made the detector raise. A steady non-zero `declined` is
 normal (separator lines, bare URLs, one-word replies). Only
-`--retry-declined` moves rows back from `declined` to `pending`.
+`--retry-declined` moves rows back from `declined` to `pending`; only
+`--relabel` re-opens rows that already carry a label.
+
+Tracking URLs are stripped from the body before detection. Marketing and
+newsletter mail is largely tracking links whose path segments are long runs
+of high-entropy characters, and a language detector reads that as a
+low-resource language: before this was fixed, 17% of all labels on a live
+100k-message archive named a language with no plausible presence in it
+(#255). A body that is *only* URLs normalises to nothing and is declined
+rather than guessed at.
 
 ### Search from the CLI
 
@@ -1099,8 +1114,10 @@ modern laptop. The most likely knobs to touch:
   (and accept more wrong labels); raise to be stricter. Lowering it only
   affects rows the detector has not seen yet; run `localmail lang-backfill
   --retry-declined` to apply it to rows the old floor turned away
-- `body_lang_low_accuracy` (default true) — ~100 MB resident; set false for
-  full lingua mode (~1 GB)
+- `body_lang_low_accuracy` (default **false**) — lingua's trigram-only mode.
+  Measured on a live 100k-message archive it mislabels far more mail while
+  costing *more* memory (239 MB vs 227 MB) and running 2.3× slower, so it is
+  off by default; set true only on a memory-constrained host
 
 ### Acceptance evaluation
 

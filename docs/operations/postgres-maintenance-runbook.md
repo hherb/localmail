@@ -121,6 +121,15 @@ SELECT worker_kind, account_id, state, last_heartbeat_at
 FROM daemon_heartbeats ORDER BY last_heartbeat_at DESC LIMIT 6;
 ```
 
+A plain `launchctl kickstart -k` also clears the fault eventually, but skips
+the verify-while-down step — and the pin has been observed (2026-08-06) to
+outlast that restart by **several minutes**: a re-run ~5 minutes after the
+kickstart still failed, and the two probes only read clean ~9 minutes after.
+Whichever route you take, **gate the pytest re-run on the probes, not on a
+fixed wait**. Note also that the bare `psql -p 5532` invocations above assume
+the socket dir resolves; from shells where it doesn't, add `-h localhost` and
+`-U localmail`.
+
 **Option B — restart Postgres.** Guaranteed, and fine here: the daemon and
 `serve` both reconnect on their own 1s→60s backoff, so the cost is a few
 seconds of paused sync.

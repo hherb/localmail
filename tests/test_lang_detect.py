@@ -505,3 +505,53 @@ def test_run_lang_detect_pass_loop_terminates_on_persistent_null(db_conn) -> Non
     assert first.labelled == 0
     assert second.visited == 0
     assert second.labelled == 0
+
+
+class _StubLingua:
+    """Stands in for a built lingua detector; records what it was asked."""
+
+    def __init__(self, code: str = "YO", confidence: float = 0.99) -> None:
+        self.seen: list[str] = []
+        self._code = code
+        self._confidence = confidence
+
+    def compute_language_confidence_values(self, text: str):  # noqa: ANN202
+        self.seen.append(text)
+        iso = type("Iso", (), {"name": self._code})
+        lang = type("Lang", (), {"iso_code_639_1": iso})
+        return [type("Val", (), {"value": self._confidence, "language": lang})()]
+
+
+def _detector_with(stub: _StubLingua) -> LinguaDetector:
+    det = LinguaDetector(min_confidence=0.65, min_text_chars=20)
+    det._detector = stub
+    return det
+
+
+def test_detector_sees_the_body_with_urls_stripped() -> None:
+    """The tracking URL never reaches lingua (#255)."""
+    stub = _StubLingua()
+    det = _detector_with(stub)
+    det.detect("Last chance to save https://ct.klclick.com/f/a/IgDYzk3AXlDh~~/AASl5QA today")
+    assert stub.seen == ["Last chance to save today"]
+
+
+def test_url_only_body_is_declined_without_consulting_the_detector() -> None:
+    """A body of pure tracking URLs has no linguistic content.
+
+    Measured raw it clears the 20-char floor and earns a confident wrong label;
+    measured after normalisation it is empty. The floor must therefore apply to
+    the normalised text, and the detector must not be consulted at all.
+    """
+    stub = _StubLingua()
+    det = _detector_with(stub)
+    assert det.detect("https://a.example/aaaaaaaaaaaaaaaaaaaa http://b.example/bbbb") is None
+    assert stub.seen == []
+
+
+def test_length_floor_applies_to_the_normalised_text() -> None:
+    """Long enough raw, too short once the URL is gone."""
+    stub = _StubLingua()
+    det = _detector_with(stub)
+    assert det.detect("Hi https://example.com/a-very-long-tracking-path-here") is None
+    assert stub.seen == []

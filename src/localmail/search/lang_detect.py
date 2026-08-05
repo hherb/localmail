@@ -12,9 +12,11 @@ Layout:
 
   - `LanguageDetector` protocol: anything with `detect(text) -> str | None`.
   - `FixedDetector`: deterministic in-memory map for tests.
-  - `LinguaDetector`: wraps lingua-py, applies a confidence + length floor.
-    Returns None for empty / short / low-confidence text so the caller can
-    leave the column NULL ("unknown") rather than guess.
+  - `LinguaDetector`: wraps lingua-py. Normalises the body through
+    `lang_text.normalize_for_detection` (URLs out), then applies a confidence
+    + length floor to the *normalised* text. Returns None for empty / short /
+    low-confidence text so the caller can leave the column NULL ("unknown")
+    rather than guess.
   - `make_detector(cfg)`: returns the configured detector, or None when
     `cfg.body_lang_enabled` is False.
   - `run_lang_detect_pass(conn, cfg, detector, ...)`: one batch over
@@ -43,6 +45,7 @@ from typing import Any, Protocol, runtime_checkable
 import psycopg
 
 from localmail.config import SearchConfig
+from localmail.search.lang_text import normalize_for_detection
 
 
 log = logging.getLogger("localmail.search.lang_detect")
@@ -147,15 +150,15 @@ class LinguaDetector:
         self._detector = builder.build()
 
     def detect(self, text: str) -> str | None:
-        stripped = text.strip() if text else ""
-        if len(stripped) < self._min_text_chars:
+        normalized = normalize_for_detection(text) if text else ""
+        # The floor measures the *normalised* text. A body of pure tracking
+        # URLs is long enough raw to clear it and earns a confident wrong
+        # label; normalised it is empty and correctly declines (#255).
+        if len(normalized) < self._min_text_chars:
             return None
         self._ensure_built()
         assert self._detector is not None
-        # Lingua sees the stripped form so the length floor and the detector
-        # input agree — otherwise leading/trailing whitespace would inflate
-        # the apparent length above the floor.
-        confidences = self._detector.compute_language_confidence_values(stripped)
+        confidences = self._detector.compute_language_confidence_values(normalized)
         if not confidences:
             return None
         top = confidences[0]

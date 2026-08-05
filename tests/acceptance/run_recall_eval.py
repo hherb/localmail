@@ -110,11 +110,11 @@ def main() -> int:
         print("Running embed worker …", file=sys.stderr)
         passes = 0
         while True:
-            wrote = run_embed_worker_once(
+            sweep = run_embed_worker_once(
                 conn, cfg, backend, lang_detector=lang_detector,
             )
             passes += 1
-            if wrote == 0:
+            if not sweep.made_progress:
                 break
         print(f"  embed worker: {passes} pass(es)", file=sys.stderr)
 

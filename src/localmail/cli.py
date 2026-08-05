@@ -1030,9 +1030,12 @@ def embed_backfill(ctx, no_progress):
         total = 0
         while True:
             with pool.connection() as conn:
-                wrote = run_embed_worker_once(
+                sweep = run_embed_worker_once(
                     conn, cfg.search, backend, lang_detector=lang_detector,
                 )
+            # Drains the *embedding* queue only; the language queue gets its
+            # own tight loop below, which reports visited/labelled separately.
+            wrote = sweep.embedded
             if wrote == 0:
                 break
             total += wrote

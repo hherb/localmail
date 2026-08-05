@@ -267,6 +267,7 @@ import time
 import localmail.search.embed_worker as embed_mod
 import localmail.search.extract_worker as extract_mod
 from localmail.config import SearchConfig
+from localmail.search.sweep_pacing import SweepOutcome
 
 
 class _ProcHBSpy:
@@ -284,7 +285,11 @@ def test_embed_worker_records_embed_heartbeat(db_dsn: str, monkeypatch) -> None:
     try:
         spy = _ProcHBSpy()
         monkeypatch.setattr(embed_mod, "safe_heartbeat", spy)
-        monkeypatch.setattr(embed_mod, "run_embed_worker_once", lambda *a, **k: 0)
+        monkeypatch.setattr(
+            embed_mod,
+            "run_embed_worker_once",
+            lambda *a, **k: SweepOutcome(embedded=0, lang_visited=0),
+        )
         stop = threading.Event()
 
         class _Backend:

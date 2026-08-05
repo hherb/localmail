@@ -917,6 +917,13 @@ normal (separator lines, bare URLs, one-word replies). Only
 `--retry-declined` moves rows back from `declined` to `pending`; only
 `--relabel` re-opens rows that already carry a label.
 
+The running daemon also detects language on its own, one
+`body_lang_detect_batch_size` slice per embed-worker sweep, so a backlog
+drains without any of the commands above — it just takes longer, since each
+sweep pays a poll interval. Reach for `lang-backfill` when you want a large
+backlog cleared now (a fresh archive, or after `--relabel`); leave it to the
+daemon otherwise.
+
 Tracking URLs are stripped from the body before detection. Marketing and
 newsletter mail is largely tracking links whose path segments are long runs
 of high-entropy characters, and a language detector reads that as a
@@ -1118,6 +1125,12 @@ modern laptop. The most likely knobs to touch:
   Measured on a live 100k-message archive it mislabels far more mail while
   costing *more* memory (239 MB vs 227 MB) and running 2.3× slower, so it is
   off by default; set true only on a memory-constrained host
+- `embed_worker_idle_backoff_max_steps` (default 6) — how far the background
+  worker stretches its poll interval when it finds nothing to do, capping the
+  sleep at `embed_worker_poll_interval_s × (1 + steps)` (35 s at the
+  defaults). A sweep counts as idle only when *neither* the embedding queue
+  nor the language-detection queue advanced. Set `0` to poll at a fixed
+  interval
 
 ### Acceptance evaluation
 

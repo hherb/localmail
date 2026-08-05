@@ -1,14 +1,18 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-08-05 (session 17).** This session closed **#259** (the
-> embed worker's backoff ignored language-detection progress) and **#235** (a
-> malformed rewriter base URL reported "could not reach the rewriter service"
-> forever), through PRs **#262** and **#263**, and cleared a **High** Dependabot
-> alert that landed mid-session (PR **#265**). **All three are open, CI-green,
-> and awaiting your merge** — nothing from this session is on `main` yet, and
-> neither host has been redeployed. Session 16's deployments were re-verified
-> intact first: Mac `claimable = 0 / implausible = 350`, all three DGX units
-> `active`, probe control reading `lan=ok@192.168.1.99`.
+> **Status as of 2026-08-05 (session 17; refreshed post-merge).** This session
+> closed **#259** (the embed worker's backoff ignored language-detection
+> progress) and **#235** (a malformed rewriter base URL reported "could not
+> reach the rewriter service" forever) through PRs **#262** and **#263** —
+> **both merged since this was first written** (`508cde2`, `49d7b2f`). The
+> **High** cryptography Dependabot alert that landed mid-session was cleared by
+> **PR #268** (a `pyproject.toml` floor bump, merged as `68e0bd8`), which
+> **supersedes this session's lockfile-only PR #265 — close #265 unmerged**
+> (risk 1). Dependabot is back to **0 open alerts**. **Neither daemon runs the
+> new code yet** — deploying both hosts is the first action (What's next §0).
+> Session 16's deployments were re-verified intact first: Mac `claimable = 0 /
+> implausible = 350`, all three DGX units `active`, probe control reading
+> `lan=ok@192.168.1.99`.
 
 ## Project context (1-minute version)
 
@@ -26,7 +30,7 @@ See [CLAUDE.md](CLAUDE.md), [README.md](README.md).
 
 ## What we shipped this session
 
-### 1. #259 — the embed worker's backoff sees language progress (PR #262 → `55aa287`)
+### 1. #259 — the embed worker's backoff sees language progress (PR #262 → `508cde2`)
 
 `run_embed_worker_once` returned a bare count of embedded chunks, which
 `run_embed_worker` read as "did this sweep do work". But the sweep also runs one
@@ -71,7 +75,7 @@ against the pre-fix code (a dataclass is never `== 0`, so the old `wrote == 0`
 check fell through); without deliberately breaking the new code it would have
 looked like a valid RED.
 
-### 2. #235 — a malformed rewriter base URL fails loud at construction (PR #263 → `7319f9c`)
+### 2. #235 — a malformed rewriter base URL fails loud at construction (PR #263 → `49d7b2f`)
 
 A bad `ollama_host` / `rewriter_openai_base_url` / `rewriter_anthropic_base_url`
 surfaced per request as `rewrite_note_code: unreachable`, "could not reach the
@@ -115,7 +119,7 @@ rewriter init failed (backend='ollama' model='...'): [search] ollama_host =
 https:// — continuing without --smart
 ```
 
-### 3. Dependabot #57 — cryptography 49.0.0 → 50.0.0 (PR #265 → `3995941`)
+### 3. Dependabot #57 — cryptography 49.0.0 → 50.0.0 (PR #265, superseded by #268 → `68e0bd8`)
 
 Raised **during this session** (2026-08-05 04:50 UTC), so session 16's "0 open
 alerts" was accurate when written. **High**: PKCS#7 EnvelopedData decryption
@@ -127,6 +131,11 @@ empty. `cryptography` is a transitive runtime dep backing the self-signed TLS
 cert path and `google-auth`; neither touches the affected API. Bumped anyway
 because resolution updated **one package** with no cascade. Lockfile only.
 
+**Superseded after this handoff was first written**: PR **#268** bumped the
+`pyproject.toml` floor to `>= 50.0.0` for the same CVE (CVE-2026-69247) and
+merged as `68e0bd8`, closing the alert. #265's lockfile-only change is subsumed
+— **close it, do not merge it** (risk 1).
+
 ### 4. Verification
 
 - `uv run pytest -q --deselect tests/test_daemon_control_socket.py` →
@@ -136,33 +145,38 @@ because resolution updated **one package** with no cascade. Lockfile only.
 - `uv run mypy src/localmail` → clean, **137** source files (was 135)
 - `uv run ruff check src/localmail` → the pre-existing **10**, none in touched
   files (verified against `HEAD` by stashing)
-- CI green on **both** PRs (Linux, PG pg18, Python 3.12)
+- CI green on all three PRs (Linux, PG pg18, Python 3.12)
 
 ### 5. Not deployed
 
-Neither host was touched. Both still run `19be6a2` from session 16, which is
-correct — the two fixes are on unmerged branches. **Deploy after merging**, per
-the resume commands below.
+Neither daemon runs the session-17 code. The Mac checkout has since pulled
+`68e0bd8`, but its daemon started before the merges and is still running
+`19be6a2` code; the DGX checkout is still at `19be6a2` (all three units
+`active`). With the PRs merged, **deploy is now due on both hosts**, per the
+resume commands below.
 
 ## What's next
 
-### 0. Merge the two open PRs, then deploy
+### 0. Close superseded #265, then deploy both hosts
+
+#262 and #263 are already merged, and #268 already cleared the Dependabot
+alert. Only the cleanup and the deploy remain:
 
 ```bash
-gh pr checks 262 && gh pr merge 262 --squash   # #259
-gh pr checks 263 && gh pr merge 263 --squash   # #235
-gh pr checks 265 && gh pr merge 265 --squash   # Dependabot #57 (lockfile only)
+gh pr close 265 --comment "superseded by #268 (pyproject floor bump, 68e0bd8)" --delete-branch
 ```
 
-**Acceptance:** all three merged, `main` green, `gh api
-repos/hherb/localmail/dependabot/alerts --jq '[.[]|select(.state=="open")]|length'`
-back to **0**. Then redeploy both hosts (risk 15 —
-`--all-extras` on the Mac, `--extra mcp --extra extraction` on the DGX) and
-confirm heartbeats. Neither fix needs a migration or a backfill; #259's effect
+**Acceptance:** #265 closed, both hosts on `68e0bd8` (risk 14 —
+`--all-extras` on the Mac, `--extra mcp --extra extraction` on the DGX) with
+fresh heartbeats. Neither fix needs a migration or a backfill; #259's effect
 is only visible when a lang backlog exists, which on both hosts is currently
 zero, so **expect no observable change** — that is correct, not a failed deploy.
 
-### 1. **Remaining robustness issues** *(carried)*
+### 1. **Remaining robustness issues** *(two new, rest carried)*
+   - **#266** — attachment chunking re-claims whitespace-only `extracted_text`
+     rows forever *(filed after this handoff was first written)*.
+   - **#267** — a persistently broken embedding backend logs a traceback per
+     sweep at the base poll interval *(likewise new)*.
    - **#218** — GUI download commands buffer the full body before enforcing the
      size ceiling.
    - **#226** — self-signed cert misses the reachable IP when `--bind 0.0.0.0`.
@@ -200,10 +214,11 @@ zero, so **expect no observable change** — that is correct, not a failed deplo
 
 ## Open decisions & risks
 
-1. **All three PRs are unmerged; `main` is unchanged** *(new)*. `git log
-   origin/main..` on any of them shows a single commit. If you resume before
-   merging, **branch from the relevant PR branch, not `main`**, or you will
-   rebuild what is already there.
+1. **PR #265 is open but superseded — close it, do not merge it** *(new)*.
+   #268 already bumped the cryptography floor on `main` (`68e0bd8`); merging
+   #265's stale lockfile-only branch (`chore/bump-cryptography-50`) on top
+   would at best no-op and at worst regress the resolution. Everything else
+   from this session is on `main` — branch from `main` as usual.
 2. **`SweepOutcome.__bool__` raises, unlike `LangDetectPass`** *(new)*. That
    asymmetry is deliberate — see the #259 notes in CLAUDE.md. If you ever
    "harmonise" the two, harmonise *upward* (make `LangDetectPass` raise too);
@@ -280,7 +295,7 @@ zero, so **expect no observable change** — that is correct, not a failed deplo
     tombstone retention is deliberate; admin bearer tokens have no per-token
     scope (#204).
 20. **Run vitest from `gui/`, not the repo root** *(carried)*.
-    **`cargo clippy --all-targets` is clean but ungated** *(carried)*.
+21. **`cargo clippy --all-targets` is clean but ungated** *(carried)*.
 
 ## Exact commands to resume
 
@@ -288,15 +303,13 @@ zero, so **expect no observable change** — that is correct, not a failed deplo
 cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git status                               # expect clean
-git branch --show-current                # main (after merging both PRs)
+git branch --show-current                # main
 git log --oneline origin/main..main      # expect 0
 
-# If the PRs are still open, MERGE FIRST (risk 1) — do not rebuild them:
-gh pr checks 262 && gh pr merge 262 --squash   # #259 embed-worker backoff
-gh pr checks 263 && gh pr merge 263 --squash   # #235 rewriter base URL
-gh pr checks 265 && gh pr merge 265 --squash   # cryptography 50.0.0 (lockfile)
+# #262, #263 and #268 are merged. If #265 is still open, CLOSE it (risk 1):
+gh pr close 265 --comment "superseded by #268" --delete-branch
 gh api repos/hherb/localmail/dependabot/alerts \
-  --jq '[.[]|select(.state=="open")]|length'   # expect 0 after merging 265
+  --jq '[.[]|select(.state=="open")]|length'   # expect 0
 
 # Python test suite (deselect the macOS-only socket failure — see risk 16).
 # Do NOT run this while a backfill is draining — see risk 15.
@@ -305,7 +318,7 @@ unset VIRTUAL_ENV && uv run pytest -q --deselect tests/test_daemon_control_socke
 unset VIRTUAL_ENV && uv run mypy src/localmail
 #   expect: Success, 137 source files
 
-# Deploy after merging (risk 14 — extras are NOT optional):
+# Deploy — both daemons still run session-16 code (risk 14 — extras are NOT optional):
 git pull && uv sync --all-extras && launchctl kickstart -k gui/$UID/com.localmail.daemon
 launchctl print gui/$UID/com.localmail.daemon | grep -E '^\s*(state|pid) '
 psql -h localhost -p 5532 -U localmail -d localmail -c \
@@ -339,12 +352,12 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
   && cargo clippy --all-targets -- -D warnings && cd ../..
 ```
 
-Session-17 code is **`55aa287`** (PR #262, #259), **`7319f9c`** (PR #263, #235)
-and **`3995941`** (PR #265, cryptography) — **all three unmerged**. Both
-deployments still run **`19be6a2`** from session 16, which is correct until the
-PRs land.
+Session-17 code is on `main`: **`508cde2`** (PR #262, #259) and **`49d7b2f`**
+(PR #263, #235); the cryptography fix landed as **`68e0bd8`** (PR #268,
+superseding the still-open #265). Both daemons still run **`19be6a2`** from
+session 16 — deploying them is the first action.
 
 Latest migration **`0035_messages_body_lang_attempted_at.sql`**; next free slot
-`0036_*.sql`. **Open issues: 12** — #259 and #235 close on merge, taking it to
-**10**. Dependabot: **1** open (#57, High, cryptography) — closes when PR #265
-merges.
+`0036_*.sql`. **Open issues: 12** — #259 and #235 closed on merge; **#266** and
+**#267** were filed after this handoff was first written. Dependabot: **0**
+open alerts.

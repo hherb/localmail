@@ -21,6 +21,7 @@ from localmail.search.query import ParsedQuery, QueryParseError, SearchFilters
 from localmail.search.rewriter import QueryRewriter, RewriteParseError, RewriteResult
 from localmail.search.rewriter_backends import (
     AnthropicRewriter,
+    InvalidRewriterUrl,
     MissingApiKey,
     OllamaLLMRewriter,
     OpenAICompatRewriter,
@@ -43,6 +44,7 @@ __all__ = [
     "AnthropicRewriter",
     "build_rewriter",
     "MissingApiKey",
+    "InvalidRewriterUrl",
     "RewriteParseError",
 ]
 

@@ -224,6 +224,7 @@ src/localmail/
     reranker.py     # FastEmbedReranker + Reranker ABC
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + PEP562 back-compat re-exports
     rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
+    rewriter_url.py # pure: base_url_error — the one base-URL rule (#235)
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
 migrations/         # 0001_init.sql … 0035_messages_body_lang_attempted_at.sql (0023_daemon_heartbeats.sql also applied)
 tests/
@@ -871,7 +872,40 @@ use `temperature=0`. The cloud backends read their API key at construction from
 the env var named by `rewriter_openai_api_key_env` / `rewriter_anthropic_api_key_env`
 (never config/DB); a missing key raises `MissingApiKey`, which `create_searcher`'s
 guard turns into graceful "no `--smart`". `rewriter.py` keeps the old deep import
-path working via a PEP 562 `__getattr__`. No new uv extra (`httpx` is already a dep). The rewriter produces `rewritten_text` (vector arm +
+path working via a PEP 562 `__getattr__`.
+
+**The base URL is validated at construction, beside the API key (#235).** A
+malformed `ollama_host` / `rewriter_openai_base_url` / `rewriter_anthropic_base_url`
+used to surface *per request* as `rewrite_note_code: unreachable`, "could not
+reach the rewriter service" — a permanent `config.toml` typo reported in
+transient wording, on every search forever, sending the operator to the network.
+`InvalidRewriterUrl` is a sibling of `MissingApiKey` (same `RewriteParseError`
+base, same guard, same degradation), so the wire says `not_configured` and
+`smart_available` is correctly `False`. **No wire contract changed** — the
+alternative, a new `invalid_config` note code, would have added a value to an
+enum documented across CLAUDE.md, the MCP tool docstrings, and the HTTP schema.
+
+- The rule is the pure
+  [src/localmail/search/rewriter_url.py](src/localmail/search/rewriter_url.py)`::base_url_error`,
+  shaped like `account_names.py::account_name_error` — a message, or `None`.
+- **`httpx.URL` alone is not a validator.** It is permissive: only an
+  unparseable port raises `InvalidURL`. The far more common mistake —
+  omitting the scheme — parses happily as `scheme='localhost'`, and the request
+  then fails as an `HTTPError`, i.e. the same misleading "unreachable". The
+  check is therefore scheme-in-`{http,https}` **and** non-empty host, *plus*
+  the httpx parse so nothing that passes here can still raise at request time.
+- Each backend declares `base_url_setting`, the `SearchConfig` attribute name.
+  Stringly-typed on purpose: the name is what lets the error tell the operator
+  which key to edit, and a subclass that omits it makes
+  `_HttpJsonRewriter.__init__` raise a named `TypeError` rather than silently
+  skipping the check (a `raise`, not an `assert` — asserts vanish under
+  `python -O`, the same reasoning as `upsert_message`'s named `RuntimeError`).
+- **Keep the `httpx.InvalidURL` catch in `Searcher.search`** (added by #229).
+  It is the backstop for a rewriter constructed some other way, and costs
+  nothing.
+
+No new uv extra (`httpx` is already a dep). The rewriter produces
+`rewritten_text` (vector arm +
 reranker), `expansion_terms` (OR-ed into the lexical arms — see below), and
 `extracted_filters` (NL → structured). **`apply_rewrite` merge precedence:
 explicit operators win** — the LLM fills only the scalar filter slots

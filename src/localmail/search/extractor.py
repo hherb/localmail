@@ -81,8 +81,23 @@ class ExtractedText:
         the class stays frozen to every other caller. ``strip_nuls`` returns
         the original object on the clean path, so the common case rebinds the
         same string rather than copying it.
+
+        Whitespace-only text likewise becomes the ``''`` sentinel (#266): the
+        attachment-chunking claim skips sentinels via ``extracted_text <> ''``,
+        but ``chunk_attachment_text`` yields no chunks for text whose
+        whitespace-normalisation is empty — a stored whitespace-only row would
+        pass the claim, produce nothing, and be re-claimed on every sweep
+        forever (the #216 queue-wedging shape, reached once enough such rows
+        sort low in the sha256 order to fill a batch). ``str.strip()`` is
+        exactly the chunker's emptiness rule: ``normalize_whitespace`` strips
+        every line and then the whole text, so its result is empty iff every
+        character is Python whitespace. The worker's own []-chunks self-heal
+        backstops any future drift between the two.
         """
-        object.__setattr__(self, "text", strip_nuls(self.text))
+        text = strip_nuls(self.text)
+        if not text.strip():
+            text = ""
+        object.__setattr__(self, "text", text)
 
 
 class ExtractorError(Exception):

@@ -171,6 +171,15 @@ def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch
     Unlike message chunking, blob-level failures are not recorded in a dedicated
     failure table; the next sweep will retry the blob until its chunks appear.
     Persistent failures surface via repeated WARNING log lines.
+
+    A claimed row that chunks to nothing is healed to the '' sentinel in place
+    (#266): its text passed the `<> ''` filter yet normalises to empty, so
+    without the heal it would be re-claimed on every sweep forever — and
+    enough such rows sorting low in the sha256 order fill the batch and stop
+    attachment ingestion archive-wide, the #216 shape. `ExtractedText` now
+    normalises whitespace-only text at the boundary, so this is the backstop
+    for legacy rows (and for any future drift in what the chunker calls
+    empty — the trigger is the chunker's own [] verdict, which cannot drift).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -197,6 +206,19 @@ def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch
             cur.execute("SAVEPOINT chunk_blob")
             try:
                 specs = chunk_attachment_text(sha256_bytes, text, cfg)
+                if not specs:
+                    cur.execute(
+                        "UPDATE attachment_text SET extracted_text = ''"
+                        " WHERE sha256 = %s",
+                        (sha256_bytes,),
+                    )
+                    log.info(
+                        "attachment_text for %s chunked to nothing;"
+                        " healed to the '' sentinel (#266)",
+                        sha256_bytes.hex()
+                        if isinstance(sha256_bytes, (bytes, bytearray))
+                        else sha256_bytes,
+                    )
                 for spec in specs:
                     cur.execute(
                         "INSERT INTO attachment_chunks"

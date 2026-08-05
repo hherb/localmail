@@ -71,6 +71,43 @@ class TestExtractedTextIsDbSafeByConstruction:
         ) == ExtractedText(text="ab", page_count=1, extractor="x@1")
 
 
+class TestWhitespaceOnlyTextBecomesTheSentinel:
+    """Whitespace-only text normalises to '' on construction (#266).
+
+    The attachment-chunking claim skips sentinel rows via
+    ``extracted_text <> ''``, but ``chunk_attachment_text`` yields no chunks
+    for any text whose whitespace-normalisation is empty — so a stored
+    whitespace-only row passes the claim, produces nothing, and is re-claimed
+    on every sweep forever. Enough of them sorting low in the sha256 order
+    fills the batch and attachment ingestion silently stops (the #216 shape).
+    Same by-construction placement as the NUL rule above.
+    """
+
+    def test_spaces_tabs_and_newlines_become_empty(self) -> None:
+        assert ExtractedText(
+            text=" \t\n \n\t ", page_count=None, extractor="x@1"
+        ).text == ""
+
+    def test_unicode_whitespace_becomes_empty(self) -> None:
+        """A page of non-breaking spaces is the observed real-world case."""
+        assert ExtractedText(
+            text="\u00a0\u00a0\n\u00a0\u2003", page_count=None, extractor="x@1"
+        ).text == ""
+
+    def test_text_with_any_substance_keeps_its_whitespace(self) -> None:
+        """Only fully-blank text is collapsed; real text is stored verbatim
+        (chunking does its own normalisation later)."""
+        assert ExtractedText(
+            text="  x  \n", page_count=None, extractor="x@1"
+        ).text == "  x  \n"
+
+    def test_nuls_amid_whitespace_still_become_empty(self) -> None:
+        """The NUL strip runs first; what remains is whitespace-only."""
+        assert ExtractedText(
+            text=" \x00 \n\x00", page_count=None, extractor="x@1"
+        ).text == ""
+
+
 def test_lightweight_supports_pdf_mime_and_ext() -> None:
     lw = LightweightExtractor()
     assert lw.supports("application/pdf", "foo.pdf")

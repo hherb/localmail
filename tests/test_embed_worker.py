@@ -334,6 +334,37 @@ def test_embed_worker_skips_sentinel_attachment_text(db_conn) -> None:
         assert row[0] == 0
 
 
+def test_whitespace_only_attachment_text_is_healed_and_leaves_the_claim(db_conn) -> None:
+    """#266: a legacy whitespace-only row passes the `<> ''` claim filter but
+    chunks to nothing, so it used to be re-claimed on every sweep forever —
+    enough of them sorting low in the sha256 order fills the batch and stops
+    attachment ingestion archive-wide (the #216 shape). The worker now stamps
+    such a row to the '' sentinel in place, using the chunker itself as the
+    emptiness authority, so it leaves the claim for good."""
+    from localmail.search.embed_worker import _chunk_attachments_lazily
+
+    sha = _seed_blob(db_conn, b"legacy whitespace blob", " \n\t\n  ")
+    cfg = SearchConfig()
+
+    first = _chunk_attachments_lazily(db_conn, cfg, batch=50)
+    assert first == 1  # claimed once — and healed
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == ""  # now the sentinel the claim filter skips
+        cur.execute(
+            "SELECT count(*) FROM attachment_chunks WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0
+
+    second = _chunk_attachments_lazily(db_conn, cfg, batch=50)
+    assert second == 0  # never re-claimed
+
+
 def test_embed_worker_embeds_attachment_chunks(db_conn) -> None:
     """After chunking, the next pass embeds attachment_chunks where
     embedding_v1 IS NULL."""

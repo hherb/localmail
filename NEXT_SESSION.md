@@ -3,8 +3,9 @@
 > **Status as of 2026-08-05 (session 17).** This session closed **#259** (the
 > embed worker's backoff ignored language-detection progress) and **#235** (a
 > malformed rewriter base URL reported "could not reach the rewriter service"
-> forever), through PRs **#262** and **#263**. **Both are open, CI-green, and
-> awaiting your merge** — nothing from this session is on `main` yet, and
+> forever), through PRs **#262** and **#263**, and cleared a **High** Dependabot
+> alert that landed mid-session (PR **#265**). **All three are open, CI-green,
+> and awaiting your merge** — nothing from this session is on `main` yet, and
 > neither host has been redeployed. Session 16's deployments were re-verified
 > intact first: Mac `claimable = 0 / implausible = 350`, all three DGX units
 > `active`, probe control reading `lan=ok@192.168.1.99`.
@@ -114,7 +115,19 @@ rewriter init failed (backend='ollama' model='...'): [search] ollama_host =
 https:// — continuing without --smart
 ```
 
-### 3. Verification
+### 3. Dependabot #57 — cryptography 49.0.0 → 50.0.0 (PR #265 → `3995941`)
+
+Raised **during this session** (2026-08-05 04:50 UTC), so session 16's "0 open
+alerts" was accurate when written. **High**: PKCS#7 EnvelopedData decryption
+exposes a Bleichenbacher oracle through distinguishable errors and timing;
+vulnerable range `>= 44.0.0, < 50.0.0`.
+
+**Not exploitable here** — `grep -rn 'pkcs7|PKCS7|EnvelopedData' src/ tests/` is
+empty. `cryptography` is a transitive runtime dep backing the self-signed TLS
+cert path and `google-auth`; neither touches the affected API. Bumped anyway
+because resolution updated **one package** with no cascade. Lockfile only.
+
+### 4. Verification
 
 - `uv run pytest -q --deselect tests/test_daemon_control_socket.py` →
   **2244 passed, 0 failed** (was 2205; **+39** — `test_sweep_pacing.py` (12),
@@ -125,7 +138,7 @@ https:// — continuing without --smart
   files (verified against `HEAD` by stashing)
 - CI green on **both** PRs (Linux, PG pg18, Python 3.12)
 
-### 4. Not deployed
+### 5. Not deployed
 
 Neither host was touched. Both still run `19be6a2` from session 16, which is
 correct — the two fixes are on unmerged branches. **Deploy after merging**, per
@@ -138,9 +151,12 @@ the resume commands below.
 ```bash
 gh pr checks 262 && gh pr merge 262 --squash   # #259
 gh pr checks 263 && gh pr merge 263 --squash   # #235
+gh pr checks 265 && gh pr merge 265 --squash   # Dependabot #57 (lockfile only)
 ```
 
-**Acceptance:** both merged, `main` green. Then redeploy both hosts (risk 15 —
+**Acceptance:** all three merged, `main` green, `gh api
+repos/hherb/localmail/dependabot/alerts --jq '[.[]|select(.state=="open")]|length'`
+back to **0**. Then redeploy both hosts (risk 15 —
 `--all-extras` on the Mac, `--extra mcp --extra extraction` on the DGX) and
 confirm heartbeats. Neither fix needs a migration or a backfill; #259's effect
 is only visible when a lang backlog exists, which on both hosts is currently
@@ -184,8 +200,8 @@ zero, so **expect no observable change** — that is correct, not a failed deplo
 
 ## Open decisions & risks
 
-1. **Both PRs are unmerged; `main` is unchanged** *(new)*. `git log
-   origin/main..` on either branch shows the single commit. If you resume before
+1. **All three PRs are unmerged; `main` is unchanged** *(new)*. `git log
+   origin/main..` on any of them shows a single commit. If you resume before
    merging, **branch from the relevant PR branch, not `main`**, or you will
    rebuild what is already there.
 2. **`SweepOutcome.__bool__` raises, unlike `LangDetectPass`** *(new)*. That
@@ -278,6 +294,9 @@ git log --oneline origin/main..main      # expect 0
 # If the PRs are still open, MERGE FIRST (risk 1) — do not rebuild them:
 gh pr checks 262 && gh pr merge 262 --squash   # #259 embed-worker backoff
 gh pr checks 263 && gh pr merge 263 --squash   # #235 rewriter base URL
+gh pr checks 265 && gh pr merge 265 --squash   # cryptography 50.0.0 (lockfile)
+gh api repos/hherb/localmail/dependabot/alerts \
+  --jq '[.[]|select(.state=="open")]|length'   # expect 0 after merging 265
 
 # Python test suite (deselect the macOS-only socket failure — see risk 16).
 # Do NOT run this while a backfill is draining — see risk 15.
@@ -320,10 +339,12 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
   && cargo clippy --all-targets -- -D warnings && cd ../..
 ```
 
-Session-17 code is **`55aa287`** (PR #262, #259) and **`7319f9c`** (PR #263,
-#235) — **both unmerged**. Both deployments still run **`19be6a2`** from session
-16, which is correct until the PRs land.
+Session-17 code is **`55aa287`** (PR #262, #259), **`7319f9c`** (PR #263, #235)
+and **`3995941`** (PR #265, cryptography) — **all three unmerged**. Both
+deployments still run **`19be6a2`** from session 16, which is correct until the
+PRs land.
 
 Latest migration **`0035_messages_body_lang_attempted_at.sql`**; next free slot
 `0036_*.sql`. **Open issues: 12** — #259 and #235 close on merge, taking it to
-**10**. Dependabot: **0** open alerts.
+**10**. Dependabot: **1** open (#57, High, cryptography) — closes when PR #265
+merges.

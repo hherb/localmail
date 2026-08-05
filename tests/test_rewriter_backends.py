@@ -262,7 +262,45 @@ def test_invalid_rewriter_url_is_caught_by_the_rewriter_guard():
 
 
 def test_a_well_formed_base_url_still_constructs():
-    assert OllamaLLMRewriter(SearchConfig(ollama_host="http://localhost:11434"))
+    rewriter = OllamaLLMRewriter(SearchConfig(ollama_host="http://localhost:11434"))
+    rewriter.close()
+
+
+def test_a_backend_without_base_url_setting_raises_at_construction():
+    """A raise, not an assert — the guard must survive `python -O`."""
+    from localmail.search.rewriter_backends import _HttpJsonRewriter
+
+    class Incomplete(_HttpJsonRewriter):
+        name = "incomplete"
+
+    with pytest.raises(TypeError, match="base_url_setting"):
+        Incomplete(SearchConfig())
+
+
+def test_missing_api_key_does_not_create_an_owned_client(monkeypatch):
+    """The key check runs before super().__init__, or the client would leak.
+
+    A construction-time raise after `httpx.Client(...)` orphans the client —
+    the caller has no reference to close(). Both failure paths (URL, key)
+    must therefore fire before the client exists.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    created = []
+    real_client = httpx.Client
+
+    def counting_client(*args, **kwargs):
+        created.append(1)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", counting_client)
+    for cls, backend in (
+        (OpenAICompatRewriter, "openai"),
+        (AnthropicRewriter, "anthropic"),
+    ):
+        with pytest.raises(MissingApiKey):
+            cls(SearchConfig(rewriter_backend=backend))
+    assert created == []
 
 
 def test_every_backend_declares_which_setting_holds_its_base_url():

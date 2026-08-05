@@ -845,11 +845,16 @@ enum documented across CLAUDE.md, the MCP tool docstrings, and the HTTP schema.
   the httpx parse so nothing that passes here can still raise at request time.
 - Each backend declares `base_url_setting`, the `SearchConfig` attribute name.
   Stringly-typed on purpose: the name is what lets the error tell the operator
-  which key to edit, and a subclass that omits it trips an assert in
-  `_HttpJsonRewriter.__init__` rather than silently skipping the check.
+  which key to edit, and a subclass that omits it makes
+  `_HttpJsonRewriter.__init__` raise a named `TypeError` rather than silently
+  skipping the check (a `raise`, not an `assert` — asserts vanish under
+  `python -O`, the same reasoning as `upsert_message`'s named `RuntimeError`).
 - **Keep the `httpx.InvalidURL` catch in `Searcher.search`** (added by #229).
   It is the backstop for a rewriter constructed some other way, and costs
-  nothing. No new uv extra (`httpx` is already a dep). The rewriter produces `rewritten_text` (vector arm +
+  nothing.
+
+No new uv extra (`httpx` is already a dep). The rewriter produces
+`rewritten_text` (vector arm +
 reranker), `expansion_terms` (OR-ed into the lexical arms — see below), and
 `extracted_filters` (NL → structured). **`apply_rewrite` merge precedence:
 explicit operators win** — the LLM fills only the scalar filter slots

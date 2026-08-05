@@ -95,9 +95,11 @@ class _HttpJsonRewriter:
         client: httpx.Client | None = None,
         today_provider: Callable[[], date] = date.today,
     ) -> None:
-        assert self.base_url_setting, (
-            f"{type(self).__name__} must declare base_url_setting"
-        )
+        if not self.base_url_setting:
+            # A raise, not an assert: asserts vanish under `python -O`.
+            raise TypeError(
+                f"{type(self).__name__} must declare base_url_setting"
+            )
         _require_valid_base_url(cfg, self.base_url_setting)
         self._cfg = cfg
         self.model = cfg.rewriter_model
@@ -186,8 +188,10 @@ class OpenAICompatRewriter(_HttpJsonRewriter):
         client: httpx.Client | None = None,
         today_provider: Callable[[], date] = date.today,
     ) -> None:
-        super().__init__(cfg, client=client, today_provider=today_provider)
+        # Before super().__init__: a missing key must raise before the owned
+        # httpx.Client exists, or the client leaks with no handle to close it.
         self._api_key = _require_env(cfg.rewriter_openai_api_key_env)
+        super().__init__(cfg, client=client, today_provider=today_provider)
 
     def _request(self, prompt: str) -> str:
         resp = self._client.post(
@@ -228,8 +232,10 @@ class AnthropicRewriter(_HttpJsonRewriter):
         client: httpx.Client | None = None,
         today_provider: Callable[[], date] = date.today,
     ) -> None:
-        super().__init__(cfg, client=client, today_provider=today_provider)
+        # Before super().__init__ — same client-leak reasoning as the OpenAI
+        # backend above.
         self._api_key = _require_env(cfg.rewriter_anthropic_api_key_env)
+        super().__init__(cfg, client=client, today_provider=today_provider)
 
     def _request(self, prompt: str) -> str:
         resp = self._client.post(

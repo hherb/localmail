@@ -219,6 +219,7 @@ src/localmail/
                     #   reopen_all (#255)
     lang_text.py    # pure: normalize_for_detection — the one detector-input rule (#255)
     page_cache.py   # in-process LRU cache for paginated result pools
+    sweep_pacing.py # pure: SweepOutcome + idle-streak/sleep arithmetic (#259)
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + PEP562 back-compat re-exports
@@ -771,7 +772,8 @@ for the Phase 2 plan.
 
 - Code lives under `src/localmail/search/` — `chunking.py`, `embeddings.py`,
   `reranker.py`, `query.py`, `rewriter.py`, `searcher.py`, `arms.py`,
-  `page_cache.py`, `embed_worker.py`, `extractor.py`, `extract_worker.py`.
+  `page_cache.py`, `embed_worker.py`, `sweep_pacing.py`, `extractor.py`,
+  `extract_worker.py`.
   Public API: `localmail.search.create_searcher`.
 - All numeric tunables in `LocalmailConfig.search` (`SearchConfig`).
   **No magic numbers elsewhere in search code.**
@@ -801,6 +803,55 @@ for the Phase 2 plan.
   [docs/superpowers/specs/2026-05-16-hybrid-search-phase2-design.md] and
   [docs/superpowers/plans/2026-05-16-hybrid-search-phase2.md].
   Phase 5 (polish) — separate design + plans.
+
+**The sweep result names both queues, and the loop's backoff reads both
+(#259).** `run_embed_worker_once` returned a bare count of embedded chunks,
+which `run_embed_worker` read as "did this sweep do work". But the sweep also
+runs one `body_lang_detect_batch_size` slice of language detection, so a sweep
+that laboured through 200 rows reported `0`, the loop concluded the queue was
+empty, and it slept the full backoff — **~340 rows/min**, against the far
+higher rate `localmail lang-backfill` achieves on the same queue. Harmless in
+steady state (new mail arrives far below one lang batch per sweep, so the
+backoff is correct), but on the 100k-row backlog #251 unwedged it was the
+difference between ~5 hours and ~25 minutes.
+
+- The rule is the pure
+  [src/localmail/search/sweep_pacing.py](src/localmail/search/sweep_pacing.py),
+  which owns **both** halves — `SweepOutcome.made_progress` (what counts as
+  work) and `next_idle_streak` / `sweep_sleep_seconds` (how long to sleep on
+  it). Co-located for the same reason as `blob_temps.py`'s minting-beside-
+  matching and `shutdown_budget.py`'s two budgets: writing them apart is what
+  produced the defect.
+- **`SweepOutcome.__bool__` raises `TypeError`.** `LangDetectPass` merely
+  declines to define one, which leaves `if not result:` silently always-False;
+  raising makes the implicit read that caused #251 *and* #259 impossible rather
+  than just discouraged. `lang_visited` counts rows **visited**, not labelled —
+  a declined batch still leaves the queue for good.
+- The backoff ceiling is `search.embed_worker_idle_backoff_max_steps`
+  (default 6 → 35 s at a 5 s interval), not the hardcoded `6` it used to be;
+  `next_idle_streak` takes `max_steps` keyword-only **with no default** so the
+  config stays the one authority. `0` disables the backoff.
+- **`embed-backfill` still breaks its first loop on `sweep.embedded`**, not on
+  `made_progress`: it has a second tight loop that drains the language queue
+  and reports `visited`/`labelled` separately. The three acceptance harnesses
+  *do* break on `made_progress` — they want a fully-populated corpus, and the
+  loop cannot spin because every visited row is stamped attempted.
+- **The sweep's third pass — lazy chunking — is deliberately not counted.** It
+  feeds the embedding queue rather than draining one of its own, so under a
+  working backend its output is already reported as `embedded` in the same
+  sweep. And both chunking passes return rows *selected*, not rows drained: a
+  row that yields zero chunks is re-selected forever (`chunk_attachment_text`
+  returns `[]` for whitespace-only text, which clears the `extracted_text <>
+  ''` claim filter — #266), so counting them would report progress on every
+  sweep and pin the loop at the base interval, the inverse of #259.
+- **A broken embedding backend no longer paces the loop while a language
+  backlog drains.** `_embed_table` catches batch-level backend errors itself
+  and returns 0 rather than raising, so `run_embed_worker`'s `except` never
+  sees them; with `lang_visited > 0` the streak resets and the backend is
+  retried — and its WARNING repeats — once per base poll interval instead of
+  once per ceiling. Deliberate (the sweep really is doing work), but it is why
+  the loop's docstring no longer claims the backoff throttles a broken
+  backend. Log volume tracked by #267.
 
 **Phase 4 (`--smart` query rewriter) — shipped**, see
 [docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md](docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md)

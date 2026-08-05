@@ -485,6 +485,12 @@ class SearchConfig(BaseModel):
     # embedding batch) can be tuned smaller without accidentally starving the
     # chunking pass — chunking is cheap relative to embedding.
     embed_worker_chunk_batch_size: int = 50
+    # Cap on the consecutive-empty-sweep counter that stretches the poll
+    # interval, so an idle queue doesn't busy-poll. The sleep is
+    # `poll_interval_s * (1 + streak)`, so the default caps it at 35 s.
+    # A sweep counts as empty only when *neither* the embedding queue nor the
+    # language-detection queue advanced (#259). 0 disables the backoff.
+    embed_worker_idle_backoff_max_steps: int = Field(default=6, ge=0)
 
     # --- Phase 1+: per-message body language detection ---
     # Populates `messages.body_lang` (ISO 639-1 lowercase). Required for the

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 from localmail.config import SearchConfig
@@ -12,6 +14,7 @@ from localmail.search.embed_worker import (
     record_failed_embedding,
     run_embed_worker_once,
 )
+from localmail.search.sweep_pacing import SweepOutcome
 
 
 def _seed_message(conn, body="Hello world."):
@@ -52,8 +55,8 @@ class _StaticEmbedder:
 def test_run_embed_worker_chunks_and_embeds_a_message(db_conn):
     mid = _seed_message(db_conn, body="The Berlin conference is next week.")
     cfg = SearchConfig(embed_worker_batch_size=10)
-    embedded = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
-    assert embedded >= 1
+    sweep = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+    assert sweep.embedded >= 1
     with db_conn.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM message_chunks WHERE message_id = %s"
@@ -66,7 +69,7 @@ def test_run_embed_worker_idempotent(db_conn):
     cfg = SearchConfig()
     first = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
     second = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
-    assert first >= 1 and second == 0
+    assert first.embedded >= 1 and second.embedded == 0
 
 
 def test_record_failed_embedding_inserts_row(db_conn):
@@ -128,8 +131,8 @@ def test_claim_filter_skips_chunks_past_max_retries(db_conn):
     db_conn.commit()
 
     cfg = SearchConfig(embed_worker_max_chunk_retries=3)
-    embedded = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
-    assert embedded == 0
+    sweep = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+    assert sweep.embedded == 0
 
 
 def test_batch_failure_does_not_poison_queue(db_conn):
@@ -144,16 +147,16 @@ def test_batch_failure_does_not_poison_queue(db_conn):
 
     cfg = SearchConfig(embed_worker_max_chunk_retries=3)
     # First sweep chunks the message but the batch embedding raises.
-    embedded = run_embed_worker_once(db_conn, cfg, _Boom())
-    assert embedded == 0
+    sweep = run_embed_worker_once(db_conn, cfg, _Boom())
+    assert sweep.embedded == 0
 
     with db_conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM failed_embeddings")
         assert cur.fetchone()[0] == 0
 
     # A subsequent sweep with a working backend embeds the same chunks.
-    embedded = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
-    assert embedded >= 1
+    sweep = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+    assert sweep.embedded >= 1
 
 
 def test_chunking_failure_records_failed_chunking_and_skips_message(db_conn, monkeypatch):
@@ -420,3 +423,96 @@ def test_run_embed_worker_skips_lang_detect_when_disabled_in_cfg(db_conn):
         row = cur.fetchone()
     assert row is not None
     assert row[0] is None
+
+
+# --- #259: the loop's backoff must see language-detection progress -----------
+
+
+class _FakeStop:
+    """Stop event that records each wait() timeout and halts after N waits."""
+
+    def __init__(self, stop_after: int) -> None:
+        self.timeouts: list[float] = []
+        self._stop_after = stop_after
+        self._set = False
+
+    def is_set(self) -> bool:
+        return self._set
+
+    def wait(self, timeout=None) -> bool:
+        self.timeouts.append(timeout)
+        if len(self.timeouts) >= self._stop_after:
+            self._set = True
+        return self._set
+
+
+class _FakePool:
+    """Minimal stand-in: `with pool.connection() as conn` yields a dummy."""
+
+    @contextlib.contextmanager
+    def connection(self):
+        yield object()
+
+
+def _loop_sleeps(monkeypatch, outcome, *, sweeps, cfg) -> list[float]:
+    """Run `run_embed_worker` for `sweeps` iterations; return the sleeps taken."""
+    from localmail.search import embed_worker as ew
+
+    monkeypatch.setattr(ew, "safe_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(ew, "run_embed_worker_once", lambda *a, **k: outcome)
+    stop = _FakeStop(stop_after=sweeps)
+    ew.run_embed_worker(stop, _FakePool(), cfg, _StaticEmbedder())
+    return stop.timeouts
+
+
+def test_worker_does_not_back_off_while_language_detection_progresses(monkeypatch):
+    """#259: a sweep that labelled 200 rows embedded nothing but did work."""
+    cfg = SearchConfig(embed_worker_poll_interval_s=5.0)
+    sleeps = _loop_sleeps(
+        monkeypatch, SweepOutcome(embedded=0, lang_visited=200), sweeps=3, cfg=cfg,
+    )
+    assert sleeps == [5.0, 5.0, 5.0]
+
+
+def test_worker_backs_off_when_a_sweep_did_nothing_at_all(monkeypatch):
+    cfg = SearchConfig(embed_worker_poll_interval_s=5.0)
+    sleeps = _loop_sleeps(
+        monkeypatch, SweepOutcome(embedded=0, lang_visited=0), sweeps=3, cfg=cfg,
+    )
+    assert sleeps == [10.0, 15.0, 20.0]
+
+
+def test_worker_backoff_saturates_at_the_configured_ceiling(monkeypatch):
+    cfg = SearchConfig(
+        embed_worker_poll_interval_s=5.0, embed_worker_idle_backoff_max_steps=2,
+    )
+    sleeps = _loop_sleeps(
+        monkeypatch, SweepOutcome(embedded=0, lang_visited=0), sweeps=4, cfg=cfg,
+    )
+    assert sleeps == [10.0, 15.0, 15.0, 15.0]
+
+
+def test_a_sweep_that_only_detected_language_reports_it(db_conn):
+    """#259 end-to-end: the sweep result carries the lang rows it visited.
+
+    Sweep 1 runs without a detector, so it drains the embedding queue and
+    leaves body_lang NULL. Sweep 2 therefore embeds nothing while the
+    language queue still has work — the exact shape that used to read as an
+    empty sweep and trigger the backoff.
+    """
+    from localmail.search.lang_detect import FixedDetector
+
+    body = "The Berlin conference is next week."
+    _seed_message(db_conn, body=body)
+    cfg = SearchConfig()
+
+    first = run_embed_worker_once(db_conn, cfg, _StaticEmbedder())
+    assert first.embedded >= 1
+    assert first.lang_visited == 0
+
+    second = run_embed_worker_once(
+        db_conn, cfg, _StaticEmbedder(), lang_detector=FixedDetector({body: "de"}),
+    )
+    assert second.embedded == 0
+    assert second.lang_visited == 1
+    assert second.made_progress is True

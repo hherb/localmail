@@ -40,6 +40,11 @@ from localmail.heartbeat import safe_heartbeat
 from localmail.search.chunking import MessageRow, chunk_attachment_text, chunk_message
 from localmail.search.embeddings import EmbeddingBackend
 from localmail.search.lang_detect import LanguageDetector, run_lang_detect_pass
+from localmail.search.sweep_pacing import (
+    SweepOutcome,
+    next_idle_streak,
+    sweep_sleep_seconds,
+)
 
 _CHUNK_TABLES = frozenset({"message_chunks", "attachment_chunks"})
 
@@ -342,7 +347,7 @@ def run_embed_worker_once(
     backend: EmbeddingBackend,
     *,
     lang_detector: LanguageDetector | None = None,
-) -> int:
+) -> SweepOutcome:
     """One sweep: chunk pending messages + attachments, then embed pending chunks.
 
     Processing order:
@@ -355,10 +360,16 @@ def run_embed_worker_once(
       4. Embed pending message_chunks rows.
       5. Embed pending attachment_chunks rows.
 
-    Returns total number of chunks newly embedded across both tables. Used both
-    by the background daemon thread and the `localmail embed-backfill` CLI.
-    Language detection happens silently as a side effect; its row count is not
-    folded into the return value because it's orthogonal to the embedding queue.
+    Returns a `SweepOutcome` carrying the chunks embedded across both tables
+    *and* the language rows visited. Used both by the background daemon thread
+    and the `localmail embed-backfill` CLI.
+
+    The language count is part of the result rather than a silent side effect
+    because `run_embed_worker`'s backoff reads it: this function used to return
+    a bare embedded-chunk count, so a sweep that laboured through a full
+    `body_lang_detect_batch_size` slice reported 0, the loop concluded the
+    queue was empty, and it slept the full backoff (#259). Which queue advanced
+    is the caller's business; *whether* one did is not.
 
     Batch-level backend errors are logged and the transaction is rolled back so
     the FOR UPDATE locks release — chunks get re-claimed next sweep. Operators
@@ -368,11 +379,14 @@ def run_embed_worker_once(
     chunk_batch = max(cfg.embed_worker_batch_size, cfg.embed_worker_chunk_batch_size)
     _chunk_messages_lazily(conn, cfg, batch=chunk_batch)
     _chunk_attachments_lazily(conn, cfg, batch=chunk_batch)
+    lang_visited = 0
     if lang_detector is not None and cfg.body_lang_enabled:
-        run_lang_detect_pass(conn, cfg, lang_detector)
+        lang_visited = run_lang_detect_pass(conn, cfg, lang_detector).visited
     embedded_msg = _embed_table(conn, cfg, backend, "message_chunks")
     embedded_att = _embed_table(conn, cfg, backend, "attachment_chunks")
-    return embedded_msg + embedded_att
+    return SweepOutcome(
+        embedded=embedded_msg + embedded_att, lang_visited=lang_visited,
+    )
 
 
 def run_embed_worker(
@@ -386,25 +400,35 @@ def run_embed_worker(
     """Background loop: sleep, sweep, sleep. Exits when `stop` is set.
 
     Re-acquires a fresh connection from the pool each sweep to keep the
-    pool's idle-rotation healthy. Backoff on consecutive empty sweeps so
-    an empty queue doesn't busy-poll.
+    pool's idle-rotation healthy. Backs off on consecutive empty sweeps so an
+    empty queue doesn't busy-poll — where "empty" means neither the embedding
+    queue nor the language-detection queue advanced (#259). Both the progress
+    predicate and the arithmetic live in `sweep_pacing`.
+
+    A sweep that *raises* is paced as an empty one — that covers pool
+    acquisition and anything outside `_embed_table`'s own handler. It does not
+    cover a broken embedding backend: `_embed_table` catches batch-level
+    backend errors itself, logs, and returns 0, so such a sweep is only "empty"
+    when nothing else advanced. While a language backlog drains, a persistently
+    broken backend is therefore retried once per base poll interval rather than
+    once per backoff ceiling, and its WARNING repeats at that rate.
     """
-    consecutive_empty = 0
+    streak = 0
     while not stop.is_set():
         safe_heartbeat(pool, worker_kind="embed", account_id=None, state="idle")
         try:
             with pool.connection() as conn:
-                wrote = run_embed_worker_once(
+                outcome = run_embed_worker_once(
                     conn, cfg, backend, lang_detector=lang_detector,
                 )
         except Exception as exc:  # noqa: BLE001
             log.error("embed_worker sweep error: %s", exc, exc_info=True)
             safe_heartbeat(pool, worker_kind="embed", account_id=None,
                            state="error", last_error_msg=str(exc))
-            wrote = 0
-        if wrote == 0:
-            consecutive_empty = min(consecutive_empty + 1, 6)
-        else:
-            consecutive_empty = 0
-        sleep_s = cfg.embed_worker_poll_interval_s * (1 + consecutive_empty)
-        stop.wait(timeout=sleep_s)
+            outcome = SweepOutcome(embedded=0, lang_visited=0)
+        streak = next_idle_streak(
+            streak,
+            made_progress=outcome.made_progress,
+            max_steps=cfg.embed_worker_idle_backoff_max_steps,
+        )
+        stop.wait(timeout=sweep_sleep_seconds(streak, cfg.embed_worker_poll_interval_s))

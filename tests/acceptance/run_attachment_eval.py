@@ -274,9 +274,9 @@ def main() -> int:
             print("Running embed_worker …", file=sys.stderr)
             passes = 0
             while True:
-                wrote = run_embed_worker_once(conn, cfg, backend)
+                sweep = run_embed_worker_once(conn, cfg, backend)
                 passes += 1
-                if wrote == 0:
+                if not sweep.made_progress:
                     break
             print(f"  embed_worker: {passes} pass(es)", file=sys.stderr)
 

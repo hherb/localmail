@@ -14,6 +14,7 @@ from localmail.config import SearchConfig
 from localmail.search.rewriter import RewriteParseError
 from localmail.search.rewriter_backends import (
     AnthropicRewriter,
+    InvalidRewriterUrl,
     MissingApiKey,
     OllamaLLMRewriter,
     OpenAICompatRewriter,
@@ -208,3 +209,72 @@ def test_all_backends_reexported_via_rewriter_module():
     import localmail.search.rewriter_backends as b
     for name in ("OllamaLLMRewriter", "OpenAICompatRewriter", "AnthropicRewriter", "build_rewriter", "MissingApiKey"):
         assert getattr(r, name) is getattr(b, name)
+
+
+# --- #235: a malformed base URL fails at construction, naming the setting ----
+
+
+def test_ollama_malformed_base_url_raises_at_construction():
+    """A config typo must not surface per-request as "could not reach"."""
+    with pytest.raises(InvalidRewriterUrl):
+        OllamaLLMRewriter(SearchConfig(ollama_host="localhost:11434"))
+
+
+def test_openai_malformed_base_url_raises_at_construction(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with pytest.raises(InvalidRewriterUrl):
+        OpenAICompatRewriter(
+            SearchConfig(rewriter_backend="openai", rewriter_openai_base_url="http://")
+        )
+
+
+def test_anthropic_malformed_base_url_raises_at_construction(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    with pytest.raises(InvalidRewriterUrl):
+        AnthropicRewriter(
+            SearchConfig(
+                rewriter_backend="anthropic",
+                rewriter_anthropic_base_url="http://x:notaport",
+            )
+        )
+
+
+def test_the_error_names_the_offending_setting_and_value():
+    """The operator needs to know which config key to edit."""
+    with pytest.raises(InvalidRewriterUrl) as excinfo:
+        OllamaLLMRewriter(SearchConfig(ollama_host="localhost:11434"))
+    message = str(excinfo.value)
+    assert "ollama_host" in message
+    assert "localhost:11434" in message
+
+
+def test_build_rewriter_propagates_an_invalid_base_url():
+    """Reaches create_searcher's guard, which degrades to "no --smart"."""
+    with pytest.raises(InvalidRewriterUrl):
+        build_rewriter(
+            SearchConfig(rewriter_backend="ollama", ollama_host="not a url")
+        )
+
+
+def test_invalid_rewriter_url_is_caught_by_the_rewriter_guard():
+    """It subclasses RewriteParseError for the same reason MissingApiKey does."""
+    assert issubclass(InvalidRewriterUrl, RewriteParseError)
+
+
+def test_a_well_formed_base_url_still_constructs():
+    assert OllamaLLMRewriter(SearchConfig(ollama_host="http://localhost:11434"))
+
+
+def test_every_backend_declares_which_setting_holds_its_base_url():
+    """A new backend cannot silently skip the check."""
+    for cls in (OllamaLLMRewriter, OpenAICompatRewriter, AnthropicRewriter):
+        assert cls.base_url_setting
+        assert hasattr(SearchConfig(), cls.base_url_setting)
+
+
+def test_invalid_rewriter_url_is_exported_beside_missing_api_key():
+    """Siblings at the package boundary, so a caller can catch either."""
+    from localmail import search as pkg
+
+    assert pkg.InvalidRewriterUrl is InvalidRewriterUrl
+    assert "InvalidRewriterUrl" in pkg.__all__

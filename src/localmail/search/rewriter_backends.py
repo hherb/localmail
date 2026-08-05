@@ -26,6 +26,7 @@ from localmail.search.rewriter import (
     build_rewrite_prompt,
     parse_rewrite_response,
 )
+from localmail.search.rewriter_url import base_url_error
 
 
 class MissingApiKey(RewriteParseError):
@@ -37,12 +38,39 @@ class MissingApiKey(RewriteParseError):
     """
 
 
+class InvalidRewriterUrl(RewriteParseError):
+    """A backend's ``[search]`` base-URL setting is not a usable HTTP URL.
+
+    Sibling of :class:`MissingApiKey`, and subclasses
+    :class:`RewriteParseError` for the same reason: raised at construction, it
+    is caught by ``create_searcher``'s rewriter guard and degrades to "no
+    ``--smart``" rather than crashing startup.
+
+    Checking at construction rather than at request time is the whole point
+    (#235). A config typo is permanent, but per-request it surfaced as
+    "could not reach the rewriter service" on every search forever — sending
+    the operator to the network instead of to ``config.toml``.
+    """
+
+
 def _require_env(name: str) -> str:
     """Return a non-empty environment variable or raise :class:`MissingApiKey`."""
     value = os.environ.get(name, "")
     if not value:
         raise MissingApiKey(f"environment variable {name!r} is unset or empty")
     return value
+
+
+def _require_valid_base_url(cfg: SearchConfig, setting: str) -> None:
+    """Raise :class:`InvalidRewriterUrl` if ``cfg.<setting>`` is unusable.
+
+    The setting *name* is threaded through rather than just its value so the
+    message can tell the operator which key to edit.
+    """
+    value = getattr(cfg, setting)
+    error = base_url_error(value)
+    if error is not None:
+        raise InvalidRewriterUrl(f"[search] {setting} = {value!r} {error}")
 
 
 class _HttpJsonRewriter:
@@ -55,6 +83,10 @@ class _HttpJsonRewriter:
     """
 
     name: str = ""
+    #: The ``SearchConfig`` attribute holding this backend's base URL.
+    #: Declared per subclass so a new backend cannot silently skip the #235
+    #: validation, and so the error can name the setting the operator must fix.
+    base_url_setting: str = ""
 
     def __init__(
         self,
@@ -63,6 +95,10 @@ class _HttpJsonRewriter:
         client: httpx.Client | None = None,
         today_provider: Callable[[], date] = date.today,
     ) -> None:
+        assert self.base_url_setting, (
+            f"{type(self).__name__} must declare base_url_setting"
+        )
+        _require_valid_base_url(cfg, self.base_url_setting)
         self._cfg = cfg
         self.model = cfg.rewriter_model
         self._owns_client = client is None
@@ -108,6 +144,7 @@ class OllamaLLMRewriter(_HttpJsonRewriter):
     """Rewriter backed by a local Ollama ``/api/generate`` call."""
 
     name = "ollama"
+    base_url_setting = "ollama_host"
 
     def _request(self, prompt: str) -> str:
         resp = self._client.post(
@@ -140,6 +177,7 @@ class OpenAICompatRewriter(_HttpJsonRewriter):
     """
 
     name = "openai"
+    base_url_setting = "rewriter_openai_base_url"
 
     def __init__(
         self,
@@ -181,6 +219,7 @@ class AnthropicRewriter(_HttpJsonRewriter):
     """
 
     name = "anthropic"
+    base_url_setting = "rewriter_anthropic_base_url"
 
     def __init__(
         self,

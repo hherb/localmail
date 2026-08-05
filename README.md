@@ -984,10 +984,17 @@ rewriter_backend = "ollama"              # "ollama" (default) | "openai" | "anth
 rewriter_model = "granite4.1:3b-q8_0"    # set to match the chosen backend
 rewriter_timeout_s = 10.0                # fall through if the LLM is slower
 rewriter_max_expansion_terms = 8         # cap on synonyms OR-ed into the lexical arms
-ollama_host = "http://localhost:11434"
+ollama_host = "http://localhost:11434"   # must include the scheme
 rewriter_cache_size = 128                # cache repeated --smart rewrites; 0 disables
 rewriter_cache_ttl_s = 1200              # cache entry lifetime in seconds
 ```
+
+The base URL of whichever backend you pick (`ollama_host`,
+`rewriter_openai_base_url`, `rewriter_anthropic_base_url`) is validated at
+startup and must carry an `http://` or `https://` scheme and a host —
+`localhost:11434` is **not** enough. A bad value degrades to "no `--smart`"
+and logs one line naming the setting, rather than reporting "could not reach
+the rewriter service" on every search.
 
 To use a cloud model instead, set `rewriter_backend` and point `rewriter_model`
 at that provider's model. The API key is read from an environment variable

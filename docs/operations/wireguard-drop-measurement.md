@@ -146,12 +146,27 @@ control, and the hub over the public internet, plus this Mac's own `utun8`
 packet counters:
 
 ```
-iso_ts tunnel=ok|FAIL(n/3) lan=ok|FAIL(n/3) hub=ok|FAIL(n/3) utun_rx= utun_tx=
+iso_ts tunnel=ok|FAIL(n/3) lan=ok|FAIL(n/3)@<addr> hub=ok|FAIL(n/3) utun_rx= utun_tx=
 ```
 
-Note the `lan` column is only a valid control while the two hosts are on the
-same subnet — after the Aug 4 reboot they were not, so it reads `FAIL`
-permanently until the probe's target is updated.
+The `lan` column tries each address in `LAN_CANDIDATES` in turn and reports
+which one answered, because the DGX's address is a DHCP lease that has moved
+three times across two subnets (`192.168.68.62` → `.76` → `192.168.1.99`). A
+single hardcoded target silently rots into a permanent `FAIL`, and a control
+that always fails cannot distinguish "the tunnel broke" from "the DGX is off"
+— which is the entire question the probe exists to answer. It read `FAIL`
+that way from the Aug 4 reboot until this was fixed, so **treat `lan` in log
+lines without an `@addr` suffix as unreliable**. When the lease moves again,
+prepend the new address:
+
+```bash
+LAN_CANDIDATES="192.168.1.42 192.168.1.99" ~/localmail-probe/tunnel-probe.sh <log>
+```
+
+Note the two hosts are currently on *different* subnets and the "LAN" path
+measures ~35-120 ms, so it is a routed path rather than a local one. It is
+still a valid liveness control — it does not traverse the tunnel — but do not
+read its latency as a LAN figure.
 
 **DGX** (`wg-probe.sh`) — **passive by design**, sends nothing. Any outbound
 packet refreshes the hub's stored endpoint for this peer and would repair the

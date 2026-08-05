@@ -12,8 +12,9 @@
 #           utun_rx=<pkts> utun_tx=<pkts>
 #
 #   tunnel : 10.0.0.3        Mac -> hub -> DGX. The thing under test.
-#   lan    : 192.168.68.76   control. Proves the DGX is alive; if this fails
+#   lan    : off-tunnel      control. Proves the DGX is alive; if this fails
 #                            too, the window says nothing about the tunnel.
+#                            The column also reports WHICH address answered.
 #   hub    : 135.181.95.235  the VPS itself (vpn.consensus-ai.org), reached
 #                            over the public internet, NOT through the tunnel.
 #                            Separates "the hub is gone" from "the hub is up
@@ -38,6 +39,16 @@
 LOG="${1:?usage: tunnel-probe.sh <logfile>}"
 MAX_LINES=200000          # ~70 days at 30s; rotate rather than grow unbounded
 
+# The DGX's off-tunnel address is a DHCP lease and has moved three times, across
+# two subnets (192.168.68.62 -> .76 -> 192.168.1.99). A single hardcoded value
+# silently rots into a permanent FAIL, and then the control column no longer
+# distinguishes "the tunnel broke" from "the DGX is off" -- which is exactly the
+# question the probe exists to answer. So try each candidate per sample and
+# report the first that answers. Override with
+# LAN_CANDIDATES="a.b.c.d e.f.g.h" when the lease lands somewhere new; adding
+# the address here rather than editing the probe keeps old log lines readable.
+LAN_CANDIDATES="${LAN_CANDIDATES:-192.168.1.99 192.168.68.76 192.168.68.62}"
+
 recv() {                  # echo how many of the 3 pings came back
   # $4 of "N packets transmitted, N packets received" is the received count.
   # Do NOT derive it from the loss percentage: int(33.3 * 3 / 100) == 0 would
@@ -45,9 +56,22 @@ recv() {                  # echo how many of the 3 pings came back
   ping -c 3 -i 0.3 -t 4 "$1" 2>/dev/null | awk '/packets received/{print $4}'
 }
 
+recv_any() {              # first candidate that answers: echo "<count> <addr>"
+  # Stops at the first responder, so the common case costs one ping burst.
+  # A dead DGX pays the full list -- correct, since that is the case where we
+  # must be sure it is dead rather than merely moved.
+  local addr got
+  for addr in $LAN_CANDIDATES; do
+    got=$(recv "$addr")
+    if [ "${got:-0}" -gt 0 ]; then echo "$got $addr"; return; fi
+  done
+  echo "0 none"
+}
+
 while :; do
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  t=$(recv 10.0.0.3); l=$(recv 192.168.68.76); h=$(recv 135.181.95.235)
+  t=$(recv 10.0.0.3); h=$(recv 135.181.95.235)
+  read -r l lan_addr <<<"$(recv_any)"
   # Link-layer row only; its Address column is blank, so the fields land as
   # Ipkts=$4 Ibytes=$6 Opkts=$7 Obytes=$9.
   read -r urx utx <<<"$(netstat -ib -I utun8 2>/dev/null \
@@ -57,8 +81,8 @@ while :; do
   [ "${l:-0}" -gt 0 ] && lst=ok || lst=FAIL
   [ "${h:-0}" -gt 0 ] && hst=ok || hst=FAIL
 
-  printf '%s tunnel=%s(%s/3) lan=%s(%s/3) hub=%s(%s/3) utun_rx=%s utun_tx=%s\n' \
-    "$ts" "$tst" "${t:-0}" "$lst" "${l:-0}" "$hst" "${h:-0}" \
+  printf '%s tunnel=%s(%s/3) lan=%s(%s/3)@%s hub=%s(%s/3) utun_rx=%s utun_tx=%s\n' \
+    "$ts" "$tst" "${t:-0}" "$lst" "${l:-0}" "$lan_addr" "$hst" "${h:-0}" \
     "${urx:-NA}" "${utx:-NA}" >> "$LOG"
 
   # Cheap rotation: only stat the file every ~100 samples.

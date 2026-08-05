@@ -346,6 +346,48 @@ def test_daemon_startup_sweeps_stale_temps(tmp_path: Path, db_dsn, monkeypatch) 
         daemon.pool.close()
 
 
+def test_daemon_startup_sweep_logs_before_and_after(
+    tmp_path: Path, db_dsn, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#269: the sweep can take minutes on a cold cache, with the previous log
+    line being `pool sizing` — an operator (or monitoring) reading an empty
+    `daemon_heartbeats` then sees a daemon that looks dead. One INFO line
+    *before* the walk names what is happening; one *after* reports the counts
+    unconditionally (the old line was skipped when nothing was removed, i.e.
+    on exactly the silent-but-slow startups the issue is about)."""
+    import localmail.daemon as daemon_mod
+    from localmail.config import LocalmailConfig
+    from localmail.daemon import Daemon
+
+    cfg = LocalmailConfig.model_validate({
+        "database": {"dsn": db_dsn},
+        "attachments": {"root": str(tmp_path)},
+    })
+    cfg.search.run_embed_worker = False
+    cfg.search.run_extract_worker = False
+    monkeypatch.setattr(daemon_mod, "list_syncable_accounts", lambda conn: [])
+
+    daemon = Daemon(cfg=cfg, dsn=db_dsn)
+    try:
+        with caplog.at_level("INFO", logger="localmail.daemon"):
+            daemon.start_workers()
+    finally:
+        daemon.stop()
+        daemon.join(timeout=2)
+        daemon.pool.close()
+
+    messages = [r.getMessage() for r in caplog.records]
+    before = [i for i, m in enumerate(messages) if "sweeping blob temps" in m]
+    after = [i for i, m in enumerate(messages) if "blob-temp sweep done" in m]
+    assert len(before) == 1, messages
+    assert len(after) == 1, messages
+    assert before[0] < after[0]
+    assert str(tmp_path) in messages[before[0]]
+    # Unconditional counts, even on a no-op sweep over an empty tree.
+    assert "scanned=0" in messages[after[0]]
+    assert "removed=0" in messages[after[0]]
+
+
 def test_cli_exposes_sweep_blob_temps_with_dry_run() -> None:
     from click.testing import CliRunner
 

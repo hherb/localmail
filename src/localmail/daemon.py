@@ -404,16 +404,21 @@ class Daemon:
         disk, a raise here costs the whole daemon.
         """
         try:
+            # #269: on a cold cache this walk has taken minutes, during which
+            # the heartbeat table is empty (just wiped above) and the last log
+            # line was "pool sizing" — announce it, and report unconditionally.
+            log.info("sweeping blob temps under %s ...", self.cfg.attachments.root)
+            started = time.monotonic()
             result = sweep_blob_temps(
                 self.cfg.attachments.root,
                 max_age_s=self.cfg.attachments.temp_max_age_s,
                 now=time.time(),
             )
-            if result.removed or result.errors:
-                log.info(
-                    "swept orphaned blob temps: removed=%d bytes=%d errors=%d",
-                    result.removed, result.bytes_reclaimed, result.errors,
-                )
+            log.info(
+                "blob-temp sweep done: scanned=%d removed=%d bytes=%d errors=%d took=%.1fs",
+                result.scanned, result.removed, result.bytes_reclaimed,
+                result.errors, time.monotonic() - started,
+            )
         except Exception:
             log.warning("startup blob-temp sweep failed", exc_info=True)
 

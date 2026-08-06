@@ -72,8 +72,12 @@ def is_expired(*, mtime: float, now: float, max_age_s: float) -> bool:
 
 @dataclass(frozen=True)
 class SweepResult:
-    """Outcome of one sweep. `scanned` counts recognised temps, not all files."""
+    """Outcome of one sweep. `walked` counts every file the walk visited —
+    canonical blobs included — and is the tree-size denominator the startup
+    log needs (#269): the walk's cost scales with the whole tree, while
+    `scanned` counts only the recognised temps among them."""
 
+    walked: int = 0
     scanned: int = 0
     removed: int = 0
     bytes_reclaimed: int = 0
@@ -98,40 +102,49 @@ def sweep_blob_temps(
     if not blobs.is_dir():
         return SweepResult()
 
-    scanned = removed = reclaimed = errors = 0
-    for path in blobs.rglob(f"*{TEMP_SUFFIX}"):
-        if not is_writer_temp(path.name):
-            continue
-        scanned += 1
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            # Vanished before the age gate could judge it, so the sweep never
-            # decided anything about it — reporting it as removed (or, under
-            # `--dry-run`, as one we *would* remove) claims an intent we never
-            # formed about a file that may well have been young.
-            continue
-        except OSError:
-            errors += 1
-            continue
-
-        if not is_expired(mtime=stat.st_mtime, now=now, max_age_s=max_age_s):
-            continue
-        if not dry_run:
+    walked = scanned = removed = reclaimed = errors = 0
+    # os.walk, not rglob(f"*{TEMP_SUFFIX}"): both visit the whole tree, but
+    # rglob discards the non-temp entries before they can be counted, and
+    # `walked` is what the startup log line reports the walk's cost against.
+    for dirpath, _dirnames, filenames in os.walk(blobs):
+        walked += len(filenames)
+        for name in filenames:
+            if not is_writer_temp(name):
+                continue
+            scanned += 1
+            path = Path(dirpath) / name
             try:
-                path.unlink()
+                stat = path.stat()
             except FileNotFoundError:
-                # Another sweep (or a writer's own cleanup) won the race. The
-                # file is gone, which is the outcome we wanted — but we did not
-                # free those bytes, so they are not counted below.
-                removed += 1
+                # Vanished before the age gate could judge it, so the sweep
+                # never decided anything about it — reporting it as removed
+                # (or, under `--dry-run`, as one we *would* remove) claims an
+                # intent we never formed about a file that may well have been
+                # young.
                 continue
             except OSError:
                 errors += 1
                 continue
-        removed += 1
-        reclaimed += stat.st_size
+
+            if not is_expired(mtime=stat.st_mtime, now=now, max_age_s=max_age_s):
+                continue
+            if not dry_run:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    # Another sweep (or a writer's own cleanup) won the race.
+                    # The file is gone, which is the outcome we wanted — but
+                    # we did not free those bytes, so they are not counted
+                    # below.
+                    removed += 1
+                    continue
+                except OSError:
+                    errors += 1
+                    continue
+            removed += 1
+            reclaimed += stat.st_size
 
     return SweepResult(
-        scanned=scanned, removed=removed, bytes_reclaimed=reclaimed, errors=errors
+        walked=walked, scanned=scanned, removed=removed,
+        bytes_reclaimed=reclaimed, errors=errors,
     )

@@ -845,8 +845,9 @@ def sweep_blob_temps_cmd(ctx: click.Context, max_age_s: int | None,
     )
     verb = "would remove" if dry_run else "removed"
     click.echo(
-        f"blob temps: scanned={result.scanned} {verb}={result.removed} "
-        f"bytes={result.bytes_reclaimed} errors={result.errors}"
+        f"blob temps: walked={result.walked} scanned={result.scanned} "
+        f"{verb}={result.removed} bytes={result.bytes_reclaimed} "
+        f"errors={result.errors}"
     )
 
 

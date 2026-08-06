@@ -103,7 +103,9 @@ def test_sweep_removes_expired_temps_and_reports_bytes(tmp_path: Path) -> None:
     result = sweep_blob_temps(tmp_path, max_age_s=86_400, now=now)
 
     assert not old.exists()
-    assert result == SweepResult(scanned=1, removed=1, bytes_reclaimed=7, errors=0)
+    assert result == SweepResult(
+        walked=1, scanned=1, removed=1, bytes_reclaimed=7, errors=0
+    )
 
 
 def test_sweep_leaves_a_temp_younger_than_the_gate(tmp_path: Path) -> None:
@@ -117,7 +119,9 @@ def test_sweep_leaves_a_temp_younger_than_the_gate(tmp_path: Path) -> None:
     result = sweep_blob_temps(tmp_path, max_age_s=86_400, now=now)
 
     assert fresh.exists()
-    assert result == SweepResult(scanned=1, removed=0, bytes_reclaimed=0, errors=0)
+    assert result == SweepResult(
+        walked=1, scanned=1, removed=0, bytes_reclaimed=0, errors=0
+    )
 
 
 def test_sweep_never_touches_a_canonical_blob(tmp_path: Path) -> None:
@@ -131,6 +135,7 @@ def test_sweep_never_touches_a_canonical_blob(tmp_path: Path) -> None:
 
     assert blob.read_bytes() == b"payload"
     assert result.scanned == 0
+    assert result.walked == 1  # visited, recognised as not-a-temp, left alone
 
 
 def test_dry_run_reports_what_it_would_reclaim_without_deleting(tmp_path: Path) -> None:
@@ -143,7 +148,9 @@ def test_dry_run_reports_what_it_would_reclaim_without_deleting(tmp_path: Path) 
     result = sweep_blob_temps(tmp_path, max_age_s=86_400, now=now, dry_run=True)
 
     assert old.exists()
-    assert result == SweepResult(scanned=1, removed=1, bytes_reclaimed=11, errors=0)
+    assert result == SweepResult(
+        walked=1, scanned=1, removed=1, bytes_reclaimed=11, errors=0
+    )
 
 
 def test_sweep_walks_the_whole_fan_out(tmp_path: Path) -> None:
@@ -159,10 +166,34 @@ def test_sweep_walks_the_whole_fan_out(tmp_path: Path) -> None:
     assert result.bytes_reclaimed == 10
 
 
+def test_sweep_counts_every_file_it_walked_not_just_temps(tmp_path: Path) -> None:
+    """#269: the walk's cost scales with the whole blob tree, but `scanned`
+    counts only recognised temps — so the startup line read `scanned=0
+    took=182.3s` on exactly the slow cold-cache case, with nothing naming what
+    took the time. `walked` is the denominator: every file the walk visited,
+    canonical blobs included, independent of cache state."""
+    now = 1_000_000.0
+    for sha in (SHA, OTHER_SHA):
+        blob = _blob_dir(tmp_path, sha) / sha
+        blob.write_bytes(b"payload")
+    old = _blob_dir(tmp_path, SHA) / temp_name(SHA, pid=1, token=uuid.uuid4().hex)
+    old.write_bytes(b"x" * 3)
+    _age(old, 90_000, now=now)
+
+    result = sweep_blob_temps(tmp_path, max_age_s=86_400, now=now)
+
+    assert result.walked == 3
+    assert result == SweepResult(
+        walked=3, scanned=1, removed=1, bytes_reclaimed=3, errors=0
+    )
+
+
 def test_missing_blob_tree_is_a_clean_no_op(tmp_path: Path) -> None:
     """A fresh install has no blobs/ dir; daemon startup must not raise."""
     result = sweep_blob_temps(tmp_path / "never-created", max_age_s=1, now=1.0)
-    assert result == SweepResult(scanned=0, removed=0, bytes_reclaimed=0, errors=0)
+    assert result == SweepResult(
+        walked=0, scanned=0, removed=0, bytes_reclaimed=0, errors=0
+    )
 
 
 def test_a_vanished_temp_is_not_an_error(tmp_path: Path) -> None:
@@ -346,6 +377,49 @@ def test_daemon_startup_sweeps_stale_temps(tmp_path: Path, db_dsn, monkeypatch) 
         daemon.pool.close()
 
 
+def test_daemon_startup_sweep_logs_before_and_after(
+    tmp_path: Path, db_dsn, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#269: the sweep can take minutes on a cold cache, with the previous log
+    line being `pool sizing` — an operator (or monitoring) reading an empty
+    `daemon_heartbeats` then sees a daemon that looks dead. One INFO line
+    *before* the walk names what is happening; one *after* reports the counts
+    unconditionally (the old line was skipped when nothing was removed, i.e.
+    on exactly the silent-but-slow startups the issue is about)."""
+    import localmail.daemon as daemon_mod
+    from localmail.config import LocalmailConfig
+    from localmail.daemon import Daemon
+
+    cfg = LocalmailConfig.model_validate({
+        "database": {"dsn": db_dsn},
+        "attachments": {"root": str(tmp_path)},
+    })
+    cfg.search.run_embed_worker = False
+    cfg.search.run_extract_worker = False
+    monkeypatch.setattr(daemon_mod, "list_syncable_accounts", lambda conn: [])
+
+    daemon = Daemon(cfg=cfg, dsn=db_dsn)
+    try:
+        with caplog.at_level("INFO", logger="localmail.daemon"):
+            daemon.start_workers()
+    finally:
+        daemon.stop()
+        daemon.join(timeout=2)
+        daemon.pool.close()
+
+    messages = [r.getMessage() for r in caplog.records]
+    before = [i for i, m in enumerate(messages) if "sweeping blob temps" in m]
+    after = [i for i, m in enumerate(messages) if "blob-temp sweep done" in m]
+    assert len(before) == 1, messages
+    assert len(after) == 1, messages
+    assert before[0] < after[0]
+    assert str(tmp_path) in messages[before[0]]
+    # Unconditional counts, even on a no-op sweep over an empty tree.
+    assert "walked=0" in messages[after[0]]
+    assert "scanned=0" in messages[after[0]]
+    assert "removed=0" in messages[after[0]]
+
+
 def test_cli_exposes_sweep_blob_temps_with_dry_run() -> None:
     from click.testing import CliRunner
 
@@ -376,6 +450,7 @@ def test_cli_sweep_reports_and_honours_dry_run(tmp_path: Path, cli_config) -> No
     dry = runner.invoke(main, [*args, "--dry-run"])
     assert dry.exit_code == 0, dry.output
     assert "1" in dry.output and old.exists()
+    assert "walked=1" in dry.output
 
     real = runner.invoke(main, args)
     assert real.exit_code == 0, real.output

@@ -1,6 +1,6 @@
 [package]
 name = "localmail-gui"
-version = "0.2.0"
+version = "0.3.0"
 description = "Read-only desktop client for the localmail archive"
 authors = ["Horst Herb"]
 edition = "2021"

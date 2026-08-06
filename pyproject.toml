@@ -1,6 +1,6 @@
 [project]
 name = "localmail"
-version = "0.1.0"
+version = "0.3.0"
 description = "Local PostgreSQL archive of one or more IMAP accounts."
 authors = [
     { name = "Horst Herb" }

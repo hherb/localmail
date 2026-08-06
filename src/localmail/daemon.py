@@ -415,9 +415,10 @@ class Daemon:
                 now=time.time(),
             )
             log.info(
-                "blob-temp sweep done: scanned=%d removed=%d bytes=%d errors=%d took=%.1fs",
-                result.scanned, result.removed, result.bytes_reclaimed,
-                result.errors, time.monotonic() - started,
+                "blob-temp sweep done: walked=%d scanned=%d removed=%d bytes=%d "
+                "errors=%d took=%.1fs",
+                result.walked, result.scanned, result.removed,
+                result.bytes_reclaimed, result.errors, time.monotonic() - started,
             )
         except Exception:
             log.warning("startup blob-temp sweep failed", exc_info=True)

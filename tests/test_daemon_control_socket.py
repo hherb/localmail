@@ -15,7 +15,9 @@ import os
 import socket
 import stat
 import sys
+import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -126,9 +128,28 @@ def test_dispatch_stop_returns_before_grace_elapses() -> None:
 
 # --- end-to-end socket round trip -----------------------------------------
 
+# macOS caps an AF_UNIX `sun_path` at 104 bytes (Linux allows 108), and
+# pytest's `tmp_path` — nested under `pytest-of-<user>/pytest-<n>/<test-name><n>`
+# — overruns it, so `bind()` fails with a bare `OSError: AF_UNIX path too long`
+# naming neither the limit nor the culprit. Production never sees this:
+# `resolve_runtime_dir` returns `$XDG_RUNTIME_DIR` or the platform temp dir
+# itself, with none of the per-test nesting.
+_SUN_PATH_MAX = 104
+
+
 @pytest.fixture
-def server(tmp_path: Path):
-    sock = tmp_path / "ctl.sock"
+def socket_dir() -> Iterator[Path]:
+    """A temp dir short enough to hold an AF_UNIX socket path."""
+    with tempfile.TemporaryDirectory(prefix="lm-ctl-") as raw:
+        path = Path(raw)
+        if len(str(path / "ctl.sock")) >= _SUN_PATH_MAX:
+            pytest.skip(f"temp dir too long for an AF_UNIX path: {path}")
+        yield path
+
+
+@pytest.fixture
+def server(socket_dir: Path):
+    sock = socket_dir / "ctl.sock"
     srv = ControlSocketServer(path=sock, supervisor=ExternalDaemonSupervisor())
     srv.start()
     yield srv, sock
@@ -154,8 +175,8 @@ def test_socket_file_is_mode_0600(server) -> None:
     assert mode == 0o600
 
 
-def test_socket_file_removed_on_close(tmp_path: Path) -> None:
-    sock = tmp_path / "ctl.sock"
+def test_socket_file_removed_on_close(socket_dir: Path) -> None:
+    sock = socket_dir / "ctl.sock"
     srv = ControlSocketServer(path=sock, supervisor=ExternalDaemonSupervisor())
     srv.start()
     assert sock.exists()
@@ -163,16 +184,19 @@ def test_socket_file_removed_on_close(tmp_path: Path) -> None:
     assert not sock.exists()
 
 
-def test_send_to_missing_socket_raises(tmp_path: Path) -> None:
+def test_send_to_missing_socket_raises(socket_dir: Path) -> None:
+    # Uses the short dir so the raise is provably "no such socket" rather than
+    # the path-length OSError, which would pass this assertion for the wrong
+    # reason.
     with pytest.raises(ControlSocketError):
-        send_control_request(tmp_path / "nope.sock", {"cmd": "status"}, timeout=1.0)
+        send_control_request(socket_dir / "nope.sock", {"cmd": "status"}, timeout=1.0)
 
 
-def test_silent_client_does_not_wedge_the_server(tmp_path: Path) -> None:
+def test_silent_client_does_not_wedge_the_server(socket_dir: Path) -> None:
     """A client that connects but never sends must not freeze the accept loop:
     a concurrent well-formed request still succeeds promptly (per-connection
     threads + bounded recv timeout)."""
-    sock = tmp_path / "ctl.sock"
+    sock = socket_dir / "ctl.sock"
     srv = ControlSocketServer(
         path=sock, supervisor=ExternalDaemonSupervisor(), conn_timeout=0.5
     )
@@ -189,8 +213,8 @@ def test_silent_client_does_not_wedge_the_server(tmp_path: Path) -> None:
         srv.close()
 
 
-def test_stale_socket_file_is_replaced(tmp_path: Path) -> None:
-    sock = tmp_path / "ctl.sock"
+def test_stale_socket_file_is_replaced(socket_dir: Path) -> None:
+    sock = socket_dir / "ctl.sock"
     sock.write_text("stale")  # a leftover file from a crashed prior run
     srv = ControlSocketServer(path=sock, supervisor=ExternalDaemonSupervisor())
     srv.start()

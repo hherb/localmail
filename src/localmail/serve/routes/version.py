@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 import logging
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from fastapi import APIRouter, Depends, Request
 
+from localmail import __version__ as SERVER_VERSION
 from localmail.api.errors import FeatureUnavailable
 from localmail.serve.middleware import get_authenticated_user
 
@@ -16,16 +16,6 @@ API_MAJOR = 1
 API_MINOR = 0
 
 logger = logging.getLogger("localmail.serve")
-
-
-def _server_version() -> str:
-    try:
-        return _pkg_version("localmail")
-    except PackageNotFoundError:
-        return "0.0.0+unknown"
-
-
-SERVER_VERSION = _server_version()
 
 router = APIRouter()
 

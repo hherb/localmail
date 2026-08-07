@@ -44,14 +44,15 @@ class SweepOutcome:
     The sweep's third pass — lazy chunking — is deliberately **not** here, for
     two reasons. It feeds the embedding queue rather than draining one of its
     own, so under a working backend the chunks it makes are claimed by
-    `_embed_table` in the same sweep and already reported as `embedded`. And
-    its counts are claim-shaped, not drain-shaped: both passes return the
-    number of rows *selected*, and a row that yields zero chunks is re-selected
-    on every sweep (`chunk_attachment_text` returns `[]` for whitespace-only
-    text, which clears the `extracted_text <> ''` filter — #266). Folding it in
-    would report progress forever and pin the loop at the base interval — the
-    inverse of the #259 defect, and the reason `lang_visited` can be trusted
-    where these cannot: every row `run_lang_detect_pass` claims is stamped.
+    `_embed_table` in the same sweep and already reported as `embedded` —
+    folding it in would double-report the same work. And its counts are
+    claim-shaped, not drain-shaped: both passes return the number of rows
+    *selected*, which is what made them untrustworthy as a progress signal
+    while a zero-chunk row could be re-selected on every sweep (the #266
+    defect — since fixed by healing such rows to the '' sentinel on first
+    claim, but the counts still measure claims, which is the reason
+    `lang_visited` can be trusted where these cannot: every row
+    `run_lang_detect_pass` claims is stamped).
     """
 
     embedded: int

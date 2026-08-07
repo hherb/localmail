@@ -45,6 +45,7 @@ from localmail.search.sweep_pacing import (
     next_idle_streak,
     sweep_sleep_seconds,
 )
+from localmail.search.text_empty import is_blank
 
 _CHUNK_TABLES = frozenset({"message_chunks", "attachment_chunks"})
 
@@ -171,6 +172,27 @@ def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch
     Unlike message chunking, blob-level failures are not recorded in a dedicated
     failure table; the next sweep will retry the blob until its chunks appear.
     Persistent failures surface via repeated WARNING log lines.
+
+    A claimed row whose text is blank is healed to the '' sentinel in place
+    (#266): it passed the `<> ''` filter yet chunks to nothing, so without the
+    heal it would be re-claimed on every sweep forever — and enough such rows
+    sorting low in the sha256 order fill the batch and stop attachment
+    ingestion archive-wide, the #216 shape. `ExtractedText` now collapses such
+    text at the boundary, so this is the backstop for rows stored before that.
+    Healed rows are `extracted_text = '' AND extractor NOT IN ('size-skipped',
+    'type-skipped', 'lightweight-empty')` — no real extractor writes an empty
+    row, so that predicate finds them.
+
+    The heal is gated on `is_blank` — the boundary's own rule — and **not** on
+    the chunker's bare `[]` verdict, even though today the two coincide
+    exactly. The UPDATE is destructive and one-way (`_claim_batch` skips any
+    blob that already has an `attachment_text` row, so nothing re-extracts it),
+    so if some future chunker rule started returning `[]` for text with
+    substance, a `[]`-triggered heal would silently delete real extracted text
+    archive-wide. Gated this way that case instead logs a WARNING and stays in
+    the queue: a loud wedge, which is recoverable, rather than a quiet
+    one-way door — the trade CLAUDE.md makes everywhere else (`type-skipped`,
+    the rejected `'und'` sentinel).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -193,10 +215,35 @@ def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch
         return 0
 
     for sha256_bytes, text in rows:
+        sha_hex = (
+            sha256_bytes.hex()
+            if isinstance(sha256_bytes, (bytes, bytearray))
+            else sha256_bytes
+        )
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT chunk_blob")
             try:
                 specs = chunk_attachment_text(sha256_bytes, text, cfg)
+                if not specs and is_blank(text):
+                    cur.execute(
+                        "UPDATE attachment_text SET extracted_text = ''"
+                        " WHERE sha256 = %s",
+                        (sha256_bytes,),
+                    )
+                    log.info(
+                        "attachment_text for %s was whitespace-only;"
+                        " healed to the '' sentinel (#266)",
+                        sha_hex,
+                    )
+                elif not specs:
+                    log.warning(
+                        "attachment_text for %s has %d characters of substance"
+                        " yet chunked to nothing; leaving it claimable rather"
+                        " than deleting it — chunk_attachment_text and"
+                        " text_empty.is_blank disagree (#266)",
+                        sha_hex,
+                        len(text),
+                    )
                 for spec in specs:
                     cur.execute(
                         "INSERT INTO attachment_chunks"
@@ -209,9 +256,7 @@ def _chunk_attachments_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT chunk_blob")
                 log.warning(
-                    "chunking failed for attachment blob %s: %s",
-                    sha256_bytes.hex() if isinstance(sha256_bytes, (bytes, bytearray)) else sha256_bytes,
-                    exc,
+                    "chunking failed for attachment blob %s: %s", sha_hex, exc,
                 )
     conn.commit()
     return len(rows)

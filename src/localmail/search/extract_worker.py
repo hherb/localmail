@@ -15,7 +15,11 @@ Per-blob decision tree
    → INSERT sentinel ``extractor='size-skipped'``, ``extracted_text=''``.
 2. Try ``LightweightExtractor.extract()``.
 3. text non-empty → INSERT ``attachment_text`` row with lightweight extractor
-   name + page_count.  Done.
+   name + page_count.  Done.  "Non-empty" is the ``ExtractedText`` boundary's
+   notion: whitespace-only output arrives here already collapsed to ``''``
+   (#266), so it takes branch 4 — which for a PDF means the docling/OCR
+   fallback, usually the right answer for a blob whose lightweight extraction
+   was nothing but space (a scanned page), at the cost of an OCR pass on it.
 4. lightweight returned empty OR raised:
    a. PDF AND docling importable → try DoclingExtractor.
       - docling text non-empty → INSERT ``attachment_text``.  Done.

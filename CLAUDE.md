@@ -218,6 +218,7 @@ src/localmail/
                     #   + CLAIMABLE/DECLINED/RELABELABLE_WHERE_SQL, retry_declined (#251),
                     #   reopen_all (#255)
     lang_text.py    # pure: normalize_for_detection — the one detector-input rule (#255)
+    text_empty.py   # pure: is_blank — the one "nothing to index" rule (#266)
     page_cache.py   # in-process LRU cache for paginated result pools
     sweep_pacing.py # pure: SweepOutcome + idle-streak/sleep arithmetic (#259)
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
@@ -843,12 +844,7 @@ difference between ~5 hours and ~25 minutes.
   sweep — counting it would double-report. And both chunking passes return rows
   *selected*, not rows drained, which is what made them untrustworthy as a
   progress signal while a zero-chunk row could be re-selected on every sweep
-  (#266 — since fixed twice over: `ExtractedText` collapses whitespace-only
-  text to the `''` sentinel at the boundary, beside the #249 NUL strip, and
-  `_chunk_attachments_lazily` heals a claimed row that chunks to `[]` by
-  stamping `extracted_text = ''` in place, so legacy rows drain out on first
-  claim and any future drift in the chunker's notion of empty self-heals
-  rather than wedging the queue).
+  (#266 — see the blank-text bullet below).
 - **A broken embedding backend no longer paces the loop while a language
   backlog drains.** `_embed_table` catches batch-level backend errors itself
   and returns 0 rather than raising, so `run_embed_worker`'s `except` never
@@ -1069,6 +1065,47 @@ so the two cannot drift. See
   implementation shared by `parser.py`, `extract_worker.py`'s failure logging, and
   this boundary — it had been copy-pasted into the first two and simply missing
   from the third.
+- **`ExtractedText` also collapses whitespace-only text to the `''` sentinel
+  (#266).** `_chunk_attachments_lazily` claims `extracted_text <> ''`, but
+  `chunk_attachment_text` returns `[]` for text whose `normalize_whitespace` is
+  empty — so a stored whitespace-only row (a scanned page of nothing, layout
+  that extracted to spaces) passed the claim, produced no chunk, and was
+  **re-claimed on every sweep forever**. Enough of them sorting low in the
+  `ORDER BY sha256` claim fill the batch and attachment ingestion stops
+  archive-wide: the #216 shape, with the same invisibility (blob chunking has
+  no failure table, by design). Placed in `__post_init__` beside the #249 NUL
+  strip, and for the same by-construction reason.
+  - The rule is the pure
+    [src/localmail/search/text_empty.py](src/localmail/search/text_empty.py)`::is_blank`,
+    shared with the worker's backstop below. It is `not text or text.isspace()`
+    — allocation-free and short-circuiting, where `not text.strip()` copies a
+    possibly-megabyte string whenever there is leading/trailing whitespace.
+    `tests/test_text_empty.py` pins `is_blank(t) == (normalize_whitespace(t) ==
+    '')` over every character Python calls whitespace, including the
+    `str.splitlines()` boundaries (`\x0b`, `\x1c`–`\x1e`, `\x85`, U+2028).
+  - **The backstop is gated on `is_blank`, NOT on the chunker's bare `[]`.**
+    `_chunk_attachments_lazily` heals a claimed row that is blank by stamping
+    `extracted_text = ''` in place (one INFO line), which is how rows stored
+    before the boundary drain out — on first claim, with no migration. Healing
+    on `[]` alone would be shorter and today means the same thing, but the
+    UPDATE is destructive and **one-way** (`_claim_batch` skips any blob that
+    already has an `attachment_text` row, so nothing re-extracts it): a future
+    chunker rule that returned `[]` for text with substance would silently
+    delete real extracted text archive-wide. Gated this way that case logs a
+    WARNING and stays claimable — a loud wedge, which is recoverable, over a
+    quiet one-way door, the same call as `type-skipped` and the rejected `'und'`
+    sentinel. Healed rows are `extracted_text = '' AND extractor NOT IN
+    ('size-skipped', 'type-skipped', 'lightweight-empty')`.
+  - **It changes what `_process_blob` sees**, deliberately: step 3's gate is
+    `if lw_text.text`, so a whitespace-only lightweight result now falls to step
+    4 — the docling/OCR fallback for PDFs (usually right: a lightweight
+    extraction of pure space is a scanned page, exactly what the fallback exists
+    for, at the cost of an OCR pass on those blobs — see #248 for the timings),
+    and the `lightweight-empty` sentinel for everything else.
+  - Known consequence, filed as #277: `search-status`'s `blobs_extracted`
+    counts `extracted_text <> ''`, so a healed row moves into `blobs_pending`,
+    which never drains. Pre-existing for every other sentinel; healing adds to
+    that bucket rather than creating it.
 - **Transient classification of third-party docling failures (#47)**:
   `extract_worker._is_transient` recognises only the narrow builtin
   `_TRANSIENT_EXC_TYPES` (`ConnectionError`/`TimeoutError`/`MemoryError`) plus

@@ -33,6 +33,7 @@ from localmail.ocr_policy import (
 )
 from localmail.pgtext import strip_nuls
 from localmail.search.attachment_kind import extension_of, is_pdf
+from localmail.search.text_empty import is_blank
 
 _LOG = logging.getLogger(__name__)
 
@@ -41,12 +42,12 @@ _LOG = logging.getLogger(__name__)
 class ExtractedText:
     """The result of extracting text from a blob.
 
-    ``text`` is normalised on construction to contain no NUL bytes — see
-    ``__post_init__``.
+    ``text`` is normalised on construction to contain no NUL bytes, and to be
+    ``''`` when it carries nothing but whitespace — see ``__post_init__``.
 
     Attributes:
-        text: The extracted plain-text, NUL-free. May be '' (sentinel meaning
-            "we tried, got nothing, don't retry").
+        text: The extracted plain-text, NUL-free, and never whitespace-only.
+            May be '' (sentinel meaning "we tried, got nothing, don't retry").
         page_count: Optional logical page count (PDFs, Office docs). None
             for plain-text formats like TXT/MD/HTML/CSV/ICS.
         extractor: Identifier of the extractor that produced the text,
@@ -88,14 +89,22 @@ class ExtractedText:
         whitespace-normalisation is empty — a stored whitespace-only row would
         pass the claim, produce nothing, and be re-claimed on every sweep
         forever (the #216 queue-wedging shape, reached once enough such rows
-        sort low in the sha256 order to fill a batch). ``str.strip()`` is
-        exactly the chunker's emptiness rule: ``normalize_whitespace`` strips
-        every line and then the whole text, so its result is empty iff every
-        character is Python whitespace. The worker's own []-chunks self-heal
-        backstops any future drift between the two.
+        sort low in the sha256 order to fill a batch). ``is_blank`` is exactly
+        the chunker's emptiness rule, and is shared with the worker's backstop
+        so the two cannot drift apart.
+
+        The NUL strip runs **first**: text that is whitespace around a NUL is
+        blank only once the NUL is gone.
+
+        This also changes what ``_process_blob`` sees. Its "lightweight produced
+        text" test is ``if lw_text.text``, so a whitespace-only extraction now
+        falls through to step 4 — the docling/OCR fallback for PDFs (which is
+        what such a blob usually needs: a scanned page the lightweight path
+        could only read as blank space), and the ``lightweight-empty`` sentinel
+        for everything else.
         """
         text = strip_nuls(self.text)
-        if not text.strip():
+        if is_blank(text):
             text = ""
         object.__setattr__(self, "text", text)
 

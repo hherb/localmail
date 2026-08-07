@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 
 import pytest
 
@@ -339,8 +340,7 @@ def test_whitespace_only_attachment_text_is_healed_and_leaves_the_claim(db_conn)
     chunks to nothing, so it used to be re-claimed on every sweep forever —
     enough of them sorting low in the sha256 order fills the batch and stops
     attachment ingestion archive-wide (the #216 shape). The worker now stamps
-    such a row to the '' sentinel in place, using the chunker itself as the
-    emptiness authority, so it leaves the claim for good."""
+    such a row to the '' sentinel in place, so it leaves the claim for good."""
     from localmail.search.embed_worker import _chunk_attachments_lazily
 
     sha = _seed_blob(db_conn, b"legacy whitespace blob", " \n\t\n  ")
@@ -363,6 +363,65 @@ def test_whitespace_only_attachment_text_is_healed_and_leaves_the_claim(db_conn)
 
     second = _chunk_attachments_lazily(db_conn, cfg, batch=50)
     assert second == 0  # never re-claimed
+
+
+def test_attachment_text_that_chunks_is_never_overwritten(db_conn) -> None:
+    """The heal is an in-place UPDATE on a column nothing can rebuild — the
+    blob is not re-extractable once an attachment_text row exists — so pin
+    that a row which does produce chunks keeps its text verbatim."""
+    from localmail.search.embed_worker import _chunk_attachments_lazily
+
+    text = "  Real extracted text, with leading and trailing space.  \n"
+    sha = _seed_blob(db_conn, b"substantive blob", text)
+    cfg = SearchConfig()
+
+    assert _chunk_attachments_lazily(db_conn, cfg, batch=50) == 1
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == text
+        cur.execute(
+            "SELECT count(*) FROM attachment_chunks WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] >= 1
+
+
+def test_zero_chunks_from_substantive_text_warns_instead_of_deleting(
+    db_conn, monkeypatch, caplog
+) -> None:
+    """If the chunker ever returned [] for text with substance, healing on that
+    verdict alone would silently delete real extracted text archive-wide, with
+    no way back (the blob never re-extracts). The heal is gated on `is_blank`
+    instead, so this case logs and stays claimable — a loud wedge beats a quiet
+    one-way door."""
+    import localmail.search.embed_worker as ew_mod
+    from localmail.search.embed_worker import _chunk_attachments_lazily
+
+    text = "text the chunker unexpectedly declines to chunk"
+    sha = _seed_blob(db_conn, b"drifted chunker blob", text)
+    cfg = SearchConfig()
+    monkeypatch.setattr(ew_mod, "chunk_attachment_text", lambda *a, **k: [])
+
+    with caplog.at_level(logging.WARNING, logger="localmail.search.embed_worker"):
+        assert _chunk_attachments_lazily(db_conn, cfg, batch=50) == 1
+
+    assert any(
+        "chunked to nothing" in r.getMessage() for r in caplog.records
+    ), caplog.text
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s", (sha,))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == text  # untouched
+
+    # Still claimable: the operator can fix the chunker and re-run.
+    assert _chunk_attachments_lazily(db_conn, cfg, batch=50) == 1
 
 
 def test_embed_worker_embeds_attachment_chunks(db_conn) -> None:

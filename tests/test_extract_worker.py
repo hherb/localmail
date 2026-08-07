@@ -236,6 +236,35 @@ def test_extract_worker_sentinel_for_lightweight_empty_non_pdf(
         assert row[0] == "lightweight-empty"
 
 
+def test_extract_worker_sentinel_for_whitespace_only_non_pdf(
+    db_conn, tmp_path
+) -> None:
+    """A blob whose text is nothing but whitespace — ASCII here plus a
+    non-breaking space, the shape a real PDF page of padding takes — follows
+    the same branch as an empty one (#266). Before the boundary collapsed it,
+    step 3's `if lw_text.text` saw a truthy string and stored the whitespace —
+    a row that then chunked to nothing and was re-claimed on every sweep.
+
+    For a PDF this same fall-through is what routes a scanned page to the
+    docling/OCR fallback; here (text/plain, no fallback) it is the sentinel."""
+    sha = _seed_blob(
+        db_conn, "  \n\t\u00a0\n  ".encode(), "text/plain", tmp_path, "blank.txt"
+    )
+    cfg = SearchConfig()
+
+    run_extract_worker_once(db_conn, cfg)
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT extractor, extracted_text FROM attachment_text "
+            "WHERE sha256 = %s",
+            (sha,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row == ("lightweight-empty", "")
+
+
 def test_extract_worker_records_failure_on_corrupt_pdf(
     db_conn, tmp_path
 ) -> None:

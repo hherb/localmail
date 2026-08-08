@@ -443,6 +443,30 @@ nothing does it automatically:
 DELETE FROM attachment_text WHERE extractor = 'type-skipped';
 ```
 
+### Reading the attachment counters
+
+`search-status` divides the eligible blobs into four counts that add up to
+`blobs_eligible`, so the four together account for every blob:
+
+| Count | Meaning |
+|---|---|
+| `blobs_extracted` | Text was extracted and stored. |
+| `blobs_no_text` | Processed, but produced no text: skipped by size or type, extracted to nothing, or whitespace-only. |
+| `blobs_gave_up` | Not processed — a retry budget ran out. |
+| `blobs_pending` | Outstanding work the extract worker will still pick up. |
+
+Only `blobs_pending` is a backlog, and it does reach zero. A steady non-zero
+`blobs_no_text` is **normal** — those blobs are finished, just with nothing to
+index — so treat it like `body_lang_declined`. Break it down by cause with:
+
+```sql
+SELECT extractor, count(*) FROM attachment_text
+ WHERE extracted_text = '' GROUP BY extractor ORDER BY 2 DESC;
+```
+
+`blobs_gave_up` is the one to act on: `localmail list-failed-extractions` shows
+why, and `localmail retry-failed-extractions` puts them back in the queue.
+
 ### Scanned PDFs and OCR
 
 A PDF whose pages are images carries no text stream, so the pure-Python

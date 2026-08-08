@@ -1173,9 +1173,18 @@ def search_status(ctx, fmt):
     rows it has already run on and declined are reported separately as
     `body_lang_declined`. The two together account for every message that has
     a body and no detected language.
+
+    The four `blobs_*` dispositions partition `blobs_eligible` the same way:
+    `blobs_extracted` produced text, `blobs_no_text` was disposed of with an
+    empty-text sentinel (skipped by size or type, extracted to nothing, or
+    healed), `blobs_gave_up` exhausted a retry budget (clear it with
+    `retry-failed-extractions`), and only `blobs_pending` is work the extract
+    worker will still claim. Break the sentinel bucket down with
+    `SELECT extractor, count(*) FROM attachment_text WHERE extracted_text = ''
+    GROUP BY extractor`.
     """
     from localmail.db import open_pool
-    from localmail.search import lang_detect
+    from localmail.search import extract_queue, lang_detect
     cfg = load_config(ctx.obj["config_path"])
     pool = open_pool(_dsn(ctx))
     try:
@@ -1196,38 +1205,10 @@ def search_status(ctx, fmt):
             row = cur.fetchone()
             assert row is not None
             failed = row[0]
-            # The extension half reads the *original* filename out of
-            # `messages.attachments`, never `attachment_blobs.path` — that path
-            # is content-addressable and extensionless, so the substring match
-            # it replaces was always NULL and this count silently reported
-            # MIME-only eligibility (#216).
-            cur.execute(
-                "SELECT count(*) FROM attachment_blobs b "
-                "WHERE b.mime_type = ANY(%s) "
-                "   OR EXISTS ("
-                "        SELECT 1 FROM messages m,"
-                "             jsonb_array_elements(m.attachments) AS a"
-                "         WHERE m.attachments @> jsonb_build_array("
-                "                 jsonb_build_object('sha256', encode(b.sha256,'hex')))"
-                "           AND a->>'sha256' = encode(b.sha256,'hex')"
-                "           AND lower(substring(a->>'filename' FROM '\\.[^.]+$'))"
-                "               = ANY(%s))",
-                (
-                    cfg.search.extractor_mime_allowlist,
-                    cfg.search.extractor_extension_allowlist,
-                ),
-            )
-            row = cur.fetchone()
-            assert row is not None
-            blobs_eligible = row[0]
-            cur.execute(
-                "SELECT count(*) FROM attachment_text "
-                "WHERE extracted_text <> ''"
-            )
-            row = cur.fetchone()
-            assert row is not None
-            blobs_extracted = row[0]
-            blobs_pending = max(0, blobs_eligible - blobs_extracted)
+            # Both the claim predicate and the allowlist come from
+            # extract_queue, so this can never report work the worker will not
+            # claim — the drift that hid #251 and, on this half, #277.
+            blobs = extract_queue.fetch_queue_counts(conn, cfg.search)
             cur.execute("SELECT count(*) FROM attachment_chunks")
             row = cur.fetchone()
             assert row is not None
@@ -1271,9 +1252,11 @@ def search_status(ctx, fmt):
         "chunks_embedded": chunks_embedded,
         "chunks_pending": chunks_total - chunks_embedded,
         "failed_embeddings": failed,
-        "blobs_eligible": blobs_eligible,
-        "blobs_extracted": blobs_extracted,
-        "blobs_pending": blobs_pending,
+        "blobs_eligible": blobs.eligible,
+        "blobs_extracted": blobs.extracted,
+        "blobs_no_text": blobs.no_text,
+        "blobs_gave_up": blobs.gave_up,
+        "blobs_pending": blobs.pending,
         "attachment_chunks_total": attachment_chunks_total,
         "attachment_chunks_embedded": attachment_chunks_embedded,
         "failed_extractions": failed_extractions_count,

@@ -147,7 +147,8 @@ uv run localmail sweep-blob-temps [--dry-run] [--max-age-seconds S]  # collect s
 uv run localmail estimate-upgrade [--format text|json]   # pre-flight size/duration for lock-heavy migrations
 # see docs/operations/upgrade-runbook.md
 # search-status reports Phase 2 attachment_text/attachment_chunks counts and
-# body_lang_populated / body_lang_pending / body_lang_declined
+# body_lang_populated / body_lang_pending / body_lang_declined; its four
+# blobs_{extracted,no_text,gave_up,pending} partition blobs_eligible (#277)
 ```
 
 GUI server (Phase: gui-server):
@@ -214,6 +215,7 @@ src/localmail/
     attachment_kind.py # pure: extension_of / is_allowlisted / preferred_filename / is_pdf (#216)
     extractor.py    # LightweightExtractor (11 formats) + ExtractorBackend ABC; DoclingExtractor via [extraction] extra
     extract_worker.py # run_extract_worker_once, run_extract_worker (background thread)
+    extract_queue.py  # the one claim/eligibility predicate + fetch_queue_counts (#277)
     lang_detect.py  # LinguaDetector + FixedDetector + run_lang_detect_pass for messages.body_lang
                     #   + CLAIMABLE/DECLINED/RELABELABLE_WHERE_SQL, retry_declined (#251),
                     #   reopen_all (#255)
@@ -1147,10 +1149,57 @@ so the two cannot drift. See
     extraction of pure space is a scanned page, exactly what the fallback exists
     for, at the cost of an OCR pass on those blobs — see #248 for the timings),
     and the `lightweight-empty` sentinel for everything else.
-  - Known consequence, filed as #277: `search-status`'s `blobs_extracted`
-    counts `extracted_text <> ''`, so a healed row moves into `blobs_pending`,
-    which never drains. Pre-existing for every other sentinel; healing adds to
-    that bucket rather than creating it.
+  - Consequence for `search-status`, **fixed by #277** (see the extraction
+    queue bullet below): a healed row used to move into `blobs_pending`, which
+    never drained. Pre-existing for every other sentinel; healing added to that
+    bucket rather than creating it.
+- **The extraction queue has one authority, and `search-status` composes it
+  (#277).** `search-status` derived `blobs_pending = blobs_eligible -
+  blobs_extracted`, where *extracted* meant `attachment_text.extracted_text <>
+  ''`. But `_claim_batch` skips a blob the moment **any** `attachment_text` row
+  exists, so every empty-text sentinel — `type-skipped` (#216),
+  `lightweight-empty`, `size-skipped`, a #266-healed row — counted as
+  outstanding work **forever**, as did every blob parked at a retry cap (#153,
+  which writes no `attachment_text` row at all). On the live Mac archive that
+  was `blobs_pending 288` against a genuinely empty queue: 106 sentinels + 182
+  capped-out failures, none of which any worker would ever claim. Exactly the
+  drift #251 found on the language half of the same command.
+  - The rule is [src/localmail/search/extract_queue.py](src/localmail/search/extract_queue.py),
+    which owns the claim predicate (`CLAIMABLE_WHERE_SQL`), the join shape it
+    reads (`QUEUE_FROM_SQL`), the SQL mirror of the allowlist
+    (`ALLOWLISTED_WHERE_SQL`), and the one thin read `fetch_queue_counts` —
+    co-located for the same reason as `blob_temps.py`'s minting-beside-matching.
+    **`_claim_batch` composes the same constants**, so the report cannot again
+    describe a queue the worker disagrees with.
+  - **Four buckets partition `blobs_eligible`**: `blobs_extracted` (a row with
+    text), `blobs_no_text` (a row with `''` — every sentinel flavour),
+    `blobs_gave_up` (no row, a retry budget exhausted), `blobs_pending` (no row,
+    still claimable). `QueueCounts.__post_init__` **raises** when they fail to
+    sum, since a gap can only come from a predicate bug and the number an
+    operator reads is the command's whole product. `attachment_text.extracted_text`
+    is `NOT NULL`, which is what makes the rowed pair exhaustive.
+  - **`blobs_extracted` is now scoped to allowlisted blobs**, where it used to
+    be a global `attachment_text` count. That is what lets the four sum; the two
+    agreed on the live archive (9202) because only an allowlist *narrowed* after
+    extraction can separate them.
+  - **`blobs_gave_up` is recoverable and `blobs_no_text` is not.** The former
+    clears with `localmail retry-failed-extractions`; the latter is the one-way
+    door documented under `SKIPPED_EXTRACTOR`, so a steady non-zero reading is
+    **normal** — the same shape as `body_lang_declined`. Break it down with
+    `SELECT extractor, count(*) FROM attachment_text WHERE extracted_text = ''
+    GROUP BY extractor`; a flat int payload was kept over a nested per-extractor
+    map so `--format text` stays one number per line.
+  - **The counters are one aggregate pass, not five queries**, because the
+    allowlist half is a correlated `EXISTS` over `messages.attachments` and is
+    essentially the whole cost of the command. It is **slow, and that is
+    pre-existing and untouched here**: on the 127k-message Mac archive the old
+    eligibility query alone measured **13:04** and the whole new command
+    **14:07**, matching the planner's 452,749 → 459,756 (the added LEFT JOINs
+    are index scans over ≤16k rows; the same `SubPlan` dominates both). The
+    cause is that `messages_attachments_gin` serves the containment predicate at
+    cost ~42 with a **constant** operand but is abandoned for a per-blob
+    `Seq Scan on messages` at cost ~36,203 once the operand correlates on
+    `b.sha256`. Filed as #280 — do not read it as a cost of this fix.
 - **Transient classification of third-party docling failures (#47)**:
   `extract_worker._is_transient` recognises only the narrow builtin
   `_TRANSIENT_EXC_TYPES` (`ConnectionError`/`TimeoutError`/`MemoryError`) plus

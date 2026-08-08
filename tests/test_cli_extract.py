@@ -11,6 +11,7 @@ import json
 from click.testing import CliRunner
 
 from localmail.cli import main
+from localmail.config import SearchConfig
 
 
 def test_cli_extract_backfill_drains_queue(
@@ -61,6 +62,116 @@ def test_cli_search_status_reports_attachment_counts(
     assert "attachment_chunks_total" in payload
     assert "attachment_chunks_embedded" in payload
     assert "failed_extractions" in payload
+
+
+def _seed_blob(conn, label: str, mime: str = "text/plain") -> bytes:
+    """Insert one attachment_blobs row; return its sha256 digest."""
+    sha = hashlib.sha256(label.encode()).digest()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes) "
+            "VALUES (%s, %s, %s, %s)",
+            (sha, f"/blobs/{label}", mime, 10),
+        )
+    return sha
+
+
+def _seed_text(conn, sha: bytes, extractor: str, text: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_text (sha256, extractor, extracted_text) "
+            "VALUES (%s, %s, %s)",
+            (sha, extractor, text),
+        )
+
+
+def _search_status(monkeypatch, db_dsn) -> dict:
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
+    result = CliRunner().invoke(main, ["search-status", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output)
+
+
+def test_search_status_does_not_report_sentinel_blobs_as_pending(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """#277: a blob the worker disposed of with an empty-text sentinel row is
+    finished work, not outstanding work.
+
+    `_claim_batch` skips any blob that already has an `attachment_text` row, so
+    counting these as pending reports a queue that can never drain.
+    """
+    for label, extractor in [
+        ("type_skipped", "type-skipped"),
+        ("lightweight_empty", "lightweight-empty"),
+        ("size_skipped", "size-skipped"),
+        ("healed", "lightweight@1.0"),  # #266 whitespace heal
+    ]:
+        _seed_text(db_conn, _seed_blob(db_conn, label), extractor, "")
+    db_conn.commit()
+
+    payload = _search_status(monkeypatch, db_dsn)
+    assert payload["blobs_pending"] == 0
+    assert payload["blobs_no_text"] == 4
+
+
+def test_search_status_does_not_report_capped_out_blobs_as_pending(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """A blob parked at a retry cap (#153) is excluded by the claim too, so it
+    would never drain either — reported separately as `blobs_gave_up`."""
+    poisoned = _seed_blob(db_conn, "poisoned")
+    stalled = _seed_blob(db_conn, "stalled")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO failed_extractions "
+            "(sha256, extractor, error_class, error_message, retry_count) "
+            "VALUES (%s, 'lightweight', 'Boom', 'broken', %s)",
+            (poisoned, SearchConfig().extract_worker_max_retries),
+        )
+        cur.execute(
+            "INSERT INTO transient_extractions (sha256, transient_count) "
+            "VALUES (%s, %s)",
+            (stalled, SearchConfig().extract_worker_max_transient_retries),
+        )
+    db_conn.commit()
+
+    payload = _search_status(monkeypatch, db_dsn)
+    assert payload["blobs_pending"] == 0
+    assert payload["blobs_gave_up"] == 2
+
+
+def test_search_status_still_reports_genuinely_outstanding_blobs(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """The counter must stay useful: an untouched eligible blob is pending."""
+    _seed_blob(db_conn, "fresh")
+    _seed_text(db_conn, _seed_blob(db_conn, "done"), "lightweight@1.0", "text")
+    db_conn.commit()
+
+    payload = _search_status(monkeypatch, db_dsn)
+    assert payload["blobs_pending"] == 1
+    assert payload["blobs_extracted"] == 1
+
+
+def test_search_status_blob_buckets_sum_to_eligible(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """Every eligible blob lands in exactly one bucket, so an operator can read
+    the four numbers as an account of the whole population."""
+    _seed_blob(db_conn, "fresh")
+    _seed_text(db_conn, _seed_blob(db_conn, "done"), "lightweight@1.0", "text")
+    _seed_text(db_conn, _seed_blob(db_conn, "skipped"), "type-skipped", "")
+    db_conn.commit()
+
+    payload = _search_status(monkeypatch, db_dsn)
+    assert (
+        payload["blobs_extracted"]
+        + payload["blobs_no_text"]
+        + payload["blobs_gave_up"]
+        + payload["blobs_pending"]
+        == payload["blobs_eligible"]
+    )
 
 
 def test_cli_list_failed_extractions(monkeypatch, db_dsn, db_conn) -> None:

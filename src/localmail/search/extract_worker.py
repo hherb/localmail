@@ -90,7 +90,7 @@ from psycopg_pool import ConnectionPool
 from localmail.config import SearchConfig
 from localmail.heartbeat import safe_heartbeat
 from localmail.pgtext import strip_nuls
-from localmail.search import attachment_kind
+from localmail.search import attachment_kind, extract_queue
 from localmail.search.extractor import (
     DoclingExtractor,
     ExtractedText,
@@ -225,27 +225,28 @@ def _claim_batch(conn: psycopg.Connection, cfg: SearchConfig) -> list[tuple]:
 
     Rows are ordered by ``attachment_blobs.first_seen_at`` so oldest blobs
     are processed first (FIFO, consistent with email archive sync order).
+
+    The predicate is `extract_queue.CLAIMABLE_WHERE_SQL` rather than a local
+    restatement, so `localmail search-status` cannot report a queue depth this
+    function disagrees with (#277).
     """
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT b.sha256, b.path, b.mime_type, b.size_bytes, tr.transient_count
-            FROM attachment_blobs b
-            LEFT JOIN attachment_text     t  USING (sha256)
-            LEFT JOIN failed_extractions  f  USING (sha256)
-            LEFT JOIN transient_extractions tr USING (sha256)
-            WHERE t.sha256 IS NULL
-              AND (f.sha256 IS NULL OR f.retry_count < %s)
-              AND (tr.sha256 IS NULL OR tr.transient_count < %s)
+            {extract_queue.QUEUE_FROM_SQL}
+            WHERE {extract_queue.CLAIMABLE_WHERE_SQL}
             ORDER BY b.first_seen_at
-            LIMIT %s
+            LIMIT %(batch_size)s
             FOR UPDATE OF b SKIP LOCKED
-            """,
-            (
-                cfg.extract_worker_max_retries,
-                cfg.extract_worker_max_transient_retries,
-                cfg.extract_worker_batch_size,
-            ),
+            """,  # noqa: S608
+            {
+                **extract_queue.cap_params(
+                    max_retries=cfg.extract_worker_max_retries,
+                    max_transient_retries=cfg.extract_worker_max_transient_retries,
+                ),
+                "batch_size": cfg.extract_worker_batch_size,
+            },
         )
         return list(cur.fetchall())
 

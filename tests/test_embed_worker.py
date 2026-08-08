@@ -606,3 +606,254 @@ def test_a_sweep_that_only_detected_language_reports_it(db_conn):
     assert second.embedded == 0
     assert second.lang_visited == 1
     assert second.made_progress is True
+
+
+# --- #267: a persistently broken backend must not log a traceback per sweep --
+
+
+class _Clock:
+    """Monotonic stand-in the test advances explicitly."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _ScriptedBackend:
+    """Backend following a script: each step is an exception to raise, or None
+    to succeed.
+
+    Running past the end raises rather than repeating the last step, because
+    `_embed_table`'s broad `except Exception` would swallow either into a
+    "batch failed" record — a script overrun would otherwise manufacture the
+    very log lines these tests count. Every test asserts `calls` for the same
+    reason: the raise alone is invisible from inside that handler.
+    """
+
+    name = "scripted"
+    model = "scripted-768"
+    dimension = 768
+
+    def __init__(self, script: list[BaseException | None]) -> None:
+        self._script = list(script)
+        self.calls = 0
+
+    def embed_documents(self, texts):
+        if self.calls >= len(self._script):
+            raise AssertionError(
+                f"_ScriptedBackend ran past its script: call {self.calls + 1}"
+                f" of {len(self._script)} steps"
+            )
+        step = self._script[self.calls]
+        self.calls += 1
+        if step is not None:
+            raise step
+        return [[1.0] * 768 for _ in texts]
+
+    def embed_query(self, text):
+        return [0.5] * 768
+
+    def health_check(self):
+        pass
+
+
+def _batch_failure_records(caplog) -> list:
+    return [r for r in caplog.records if "embed_worker batch failed" in r.getMessage()]
+
+
+def _seed_second_message(conn, body: str) -> int:
+    """Another message on the account `_seed_message` created."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts WHERE name = 'a'")
+        row = cur.fetchone()
+        assert row is not None
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " from_addr, body_text, headers, raw_bytes, size_bytes)"
+            " VALUES (%s, %s, %s, %s, %s, %s, '{}'::jsonb, %s, %s) RETURNING id",
+            (row[0], "<b@x>", b"\x02" * 32, "Hi again", "x@y", body, b"raw", 3),
+        )
+        mid_row = cur.fetchone()
+        assert mid_row is not None
+    conn.commit()
+    return mid_row[0]
+
+
+def test_a_broken_backend_reports_once_and_then_stays_quiet(db_conn, caplog) -> None:
+    """The defect: while a language backlog drains, a broken backend is retried
+    once per base poll interval, so an unthrottled report is ~24 tracebacks a
+    minute for as long as the backlog lasts."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    cfg = SearchConfig()
+    backend = _ScriptedBackend([ConnectionError("backend down")] * 4)
+    failure_log: dict = {}
+    clock = _Clock()
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        for _ in range(4):
+            clock.now += 5.0
+            run_embed_worker_once(
+                db_conn, cfg, backend, failure_log=failure_log, clock=clock,
+            )
+
+    assert backend.calls == 4
+    records = _batch_failure_records(caplog)
+    assert len(records) == 1
+    assert records[0].exc_info  # and it is the diagnosable one
+    assert records[0].levelname == "WARNING"
+
+
+def test_the_report_resumes_once_the_interval_elapses(db_conn, caplog) -> None:
+    """The traceback re-arms, so a week-old incident is still diagnosable from
+    a rotated log without restarting the daemon — and the resumed line accounts
+    for what was swallowed in between."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    cfg = SearchConfig(embed_worker_failure_report_interval_s=60.0)
+    backend = _ScriptedBackend([ConnectionError("backend down")] * 3)
+    failure_log: dict = {}
+    clock = _Clock()
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        for tick in (0.0, 5.0, 60.0):
+            clock.now = tick
+            run_embed_worker_once(
+                db_conn, cfg, backend, failure_log=failure_log, clock=clock,
+            )
+
+    assert backend.calls == 3
+    records = _batch_failure_records(caplog)
+    assert len(records) == 2
+    assert records[1].exc_info
+    assert "1 further failures" in records[1].getMessage()
+
+
+def test_a_different_failure_mode_reports_immediately(db_conn, caplog) -> None:
+    """A second failure mode arriving mid-incident must not be swallowed as a
+    continuation of the first — the one traceback on record would then name a
+    problem that is no longer the one happening."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    cfg = SearchConfig()
+    backend = _ScriptedBackend(
+        [ConnectionError("db blip"), ConnectionError("db blip"), ImportError("no easyocr")]
+    )
+    failure_log: dict = {}
+    clock = _Clock()
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        for _ in range(3):
+            clock.now += 5.0
+            run_embed_worker_once(
+                db_conn, cfg, backend, failure_log=failure_log, clock=clock,
+            )
+
+    assert backend.calls == 3
+    records = _batch_failure_records(caplog)
+    assert len(records) == 2
+    assert "ConnectionError" in records[0].getMessage()
+    assert "ImportError" in records[1].getMessage()
+
+
+def test_a_flapping_backend_is_reported_only_once(db_conn, caplog) -> None:
+    """A backend alternating success and failure — the "network blip" the
+    batch-level handler exists for — would defeat a reset-on-success rule
+    entirely: every failure would be the first of a fresh streak."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    cfg = SearchConfig()
+    down = ConnectionError("backend down")
+    backend = _ScriptedBackend([down, None, down])
+    failure_log: dict = {}
+    clock = _Clock()
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        run_embed_worker_once(db_conn, cfg, backend, failure_log=failure_log, clock=clock)
+        clock.now += 5.0
+        run_embed_worker_once(db_conn, cfg, backend, failure_log=failure_log, clock=clock)
+        _seed_second_message(db_conn, body="More text for the recovered backend.")
+        clock.now += 5.0
+        run_embed_worker_once(db_conn, cfg, backend, failure_log=failure_log, clock=clock)
+
+    assert backend.calls == 3
+    assert len(_batch_failure_records(caplog)) == 1
+
+
+def test_the_report_names_the_exception_class_even_with_no_message(
+    db_conn, caplog
+) -> None:
+    """`str(exc)` is empty for ConnectionError(), MemoryError() and much of
+    what a backend raises, and this line is what a log grep shows."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    cfg = SearchConfig()
+    backend = _ScriptedBackend([ConnectionError()])
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        run_embed_worker_once(db_conn, cfg, backend, failure_log={}, clock=_Clock())
+
+    assert backend.calls == 1
+    assert "ConnectionError" in _batch_failure_records(caplog)[0].getMessage()
+
+
+def test_the_two_chunk_tables_are_throttled_independently(db_conn, caplog) -> None:
+    """Keyed on one shared bucket, a failure on either table would suppress the
+    other's *first* report, and each table's incident would mask the other's."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    _seed_blob(db_conn, b"attachment payload", "extracted attachment body text")
+    cfg = SearchConfig()
+    backend = _ScriptedBackend([ConnectionError("backend down")] * 2)
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        run_embed_worker_once(db_conn, cfg, backend, failure_log={}, clock=_Clock())
+
+    assert backend.calls == 2
+    tables = [
+        table
+        for table in ("message_chunks", "attachment_chunks")
+        if any(table in r.getMessage() for r in _batch_failure_records(caplog))
+    ]
+    assert tables == ["message_chunks", "attachment_chunks"]
+
+
+def test_a_successful_or_empty_sweep_leaves_the_failure_log_alone(db_conn) -> None:
+    """The log records what has been *said*, not what the backend is doing, so
+    only the failure branch touches it. Clearing it on success is the flapping
+    hole above; clearing it on an empty claim would restore the per-sweep
+    report on any alternating claim/empty pattern."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    cfg = SearchConfig()
+    backend = _ScriptedBackend([ConnectionError("backend down"), None])
+    failure_log: dict = {}
+    clock = _Clock()
+
+    run_embed_worker_once(db_conn, cfg, backend, failure_log=failure_log, clock=clock)
+    after_failure = dict(failure_log)
+    assert set(after_failure) == {"message_chunks"}
+
+    clock.now += 5.0  # sweep 2 embeds the same chunks with the recovered backend
+    assert run_embed_worker_once(
+        db_conn, cfg, backend, failure_log=failure_log, clock=clock,
+    ).embedded >= 1
+    assert failure_log == after_failure
+
+    clock.now += 5.0  # sweep 3 has nothing left to claim
+    assert run_embed_worker_once(
+        db_conn, cfg, backend, failure_log=failure_log, clock=clock,
+    ).embedded == 0
+    assert backend.calls == 2
+    assert failure_log == after_failure
+
+
+def test_sweeps_share_the_process_failure_log_by_default(db_conn, caplog) -> None:
+    """No caller has to know the parameter exists: the four looping callers in
+    the repo (the daemon loop, `embed-backfill`, three acceptance harnesses)
+    pass nothing and are throttled anyway."""
+    _seed_message(db_conn, body="Text that will be chunked but never embedded.")
+    cfg = SearchConfig()
+    backend = _ScriptedBackend([ConnectionError("backend down")] * 2)
+
+    with caplog.at_level("WARNING", logger="localmail.search.embed_worker"):
+        run_embed_worker_once(db_conn, cfg, backend)
+        run_embed_worker_once(db_conn, cfg, backend)
+
+    assert backend.calls == 2
+    assert len(_batch_failure_records(caplog)) == 1

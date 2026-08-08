@@ -214,6 +214,14 @@ stale_seconds = 60
 # results on sort=rank queries.
 # reranker_enabled = true
 
+# A batch-level embedding-backend failure never poisons the queue — it rolls
+# back and the chunks are re-claimed next sweep — so its WARNING is the only
+# record it leaves. Repeats of the same failure on the same chunk table are
+# swallowed for this many seconds and accounted for in the next report; a
+# different exception type always reports at once. Set 0 while debugging a
+# backend to see every failure.
+# embed_worker_failure_report_interval_s = 300
+
 # `--smart` query rewrites are memoised in a bounded per-process LRU+TTL cache
 # keyed on (today, free_text), so repeated identical smart queries skip a fresh
 # Ollama call. On by default; set rewriter_cache_size = 0 to disable.

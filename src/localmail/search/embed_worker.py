@@ -24,14 +24,18 @@ Failure model (mirrors sync.py poison-pill handling):
   - Batch-level errors (e.g. backend model load failure, network blip) do
     NOT mark individual chunks as failed — they roll back, log, and back off.
     The same chunks get re-claimed next sweep. Permanently-broken backends
-    surface via repeated WARNINGs rather than silently poisoning the queue.
+    surface via WARNINGs rather than silently poisoning the queue — paced by
+    `failure_pacing` so a persistent one reports periodically instead of once
+    per sweep (#267).
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 import traceback
+from collections.abc import Callable
 
 import psycopg
 
@@ -39,6 +43,7 @@ from localmail.config import SearchConfig
 from localmail.heartbeat import safe_heartbeat
 from localmail.search.chunking import MessageRow, chunk_attachment_text, chunk_message
 from localmail.search.embeddings import EmbeddingBackend
+from localmail.search.failure_pacing import ReportedFailure, note_failure
 from localmail.search.lang_detect import LanguageDetector, run_lang_detect_pass
 from localmail.search.sweep_pacing import (
     SweepOutcome,
@@ -50,6 +55,23 @@ from localmail.search.text_empty import is_blank
 _CHUNK_TABLES = frozenset({"message_chunks", "attachment_chunks"})
 
 log = logging.getLogger("localmail.search.embed_worker")
+
+_FAILURE_LOG: dict[str, ReportedFailure] = {}
+"""What has already been reported about batch-level backend failures (#267).
+
+Process state, because throttling log output is a process concern — and
+because it makes the *default* value of `run_embed_worker_once`'s
+`failure_log` the correct one, so a looping caller that never heard of the
+parameter is throttled anyway. CLAUDE.md pins one embed worker per process; a
+second would share the throttle, which is what a shared log wants.
+"""
+
+
+def reset_failure_log() -> None:
+    """Forget every reported failure. For tests — an autouse conftest fixture
+    calls it so one test's broken backend cannot silence the next test's
+    WARNING, the same shape as `secrets.reset_to_default()`."""
+    _FAILURE_LOG.clear()
 
 
 def _record_with_savepoint(conn, sql: str, params: tuple) -> None:
@@ -350,11 +372,56 @@ def _embed_and_store(
     return written
 
 
+def _report_batch_failure(
+    cfg: SearchConfig,
+    chunk_table: str,
+    exc: Exception,
+    *,
+    failure_log: dict[str, ReportedFailure],
+    now: float,
+) -> None:
+    """Log a batch-level backend failure, or swallow it and count (#267).
+
+    The decision and the record are `failure_pacing`'s; this only renders it.
+    Both branches leave the retry pace alone — the caller rolls back and the
+    chunks are re-claimed next sweep either way.
+    """
+    report = note_failure(
+        failure_log.get(chunk_table),
+        exc_name=type(exc).__name__,
+        now=now,
+        interval_s=cfg.embed_worker_failure_report_interval_s,
+    )
+    failure_log[chunk_table] = report.record
+    if not report.log_it:
+        return
+    backlog = (
+        f"; {report.suppressed} further failures since the last report"
+        " were not logged"
+        if report.suppressed
+        else ""
+    )
+    # The class is named in the message and not left to the traceback alone:
+    # str(exc) is empty for ConnectionError(), MemoryError() and much of what
+    # a backend raises, and this line is what a log grep shows.
+    log.warning(
+        "embed_worker batch failed for %s (will retry next sweep%s): %s: %s",
+        chunk_table,
+        backlog,
+        type(exc).__name__,
+        exc,
+        exc_info=True,
+    )
+
+
 def _embed_table(
     conn: psycopg.Connection,
     cfg: SearchConfig,
     backend: EmbeddingBackend,
     chunk_table: str,
+    *,
+    failure_log: dict[str, ReportedFailure],
+    now: float,
 ) -> int:
     """Claim unembedded rows from chunk_table and embed them in one batch.
 
@@ -367,6 +434,13 @@ def _embed_table(
         cfg: Search configuration; supplies batch size and retry thresholds.
         backend: The embedding backend to call.
         chunk_table: Must be 'message_chunks' or 'attachment_chunks'.
+        failure_log: What has already been reported about batch failures,
+            keyed by chunk table (#267) — per table, so a failure on one
+            cannot suppress the first report of the other. Only the failure
+            branch touches it: a successful or empty-claim sweep leaves it
+            alone, since the throttle paces log output rather than tracking
+            the backend's state.
+        now: A monotonic reading for this sweep, compared against the record.
     """
     with conn.cursor() as cur:
         claimed = _claim_unembedded(cur, cfg, chunk_table)
@@ -376,12 +450,7 @@ def _embed_table(
     try:
         return _embed_and_store(conn, cfg, backend, claimed, chunk_table)
     except Exception as exc:  # noqa: BLE001 — batch-level fallback
-        log.warning(
-            "embed_worker batch failed for %s (will retry next sweep): %s",
-            chunk_table,
-            exc,
-            exc_info=True,
-        )
+        _report_batch_failure(cfg, chunk_table, exc, failure_log=failure_log, now=now)
         conn.rollback()
         return 0
 
@@ -392,6 +461,8 @@ def run_embed_worker_once(
     backend: EmbeddingBackend,
     *,
     lang_detector: LanguageDetector | None = None,
+    failure_log: dict[str, ReportedFailure] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> SweepOutcome:
     """One sweep: chunk pending messages + attachments, then embed pending chunks.
 
@@ -419,16 +490,35 @@ def run_embed_worker_once(
     Batch-level backend errors are logged and the transaction is rolled back so
     the FOR UPDATE locks release — chunks get re-claimed next sweep. Operators
     see the WARNING and intervene; the worker doesn't silently poison every
-    queued chunk.
+    queued chunk. How often a *repeating* one is logged is `failure_pacing`'s
+    rule, read against `failure_log` (#267).
+
+    Args:
+        failure_log: Defaults to the process-wide log, which is what makes a
+            looping caller correct without having to know this parameter
+            exists — the four in the repo (the daemon loop, `embed-backfill`,
+            three acceptance harnesses) pass nothing. #234's shape (keyword-only,
+            no default) is for a parameter whose safe value *cannot* be the
+            default; here it can, so the footgun is removed rather than merely
+            made loud. Pass an explicit mapping to isolate a caller's throttle
+            state — which is what the tests do.
+        clock: Monotonic source, read once per sweep. Injectable so the
+            interval branch is testable without sleeping, like `run_import`'s.
     """
+    log_state = _FAILURE_LOG if failure_log is None else failure_log
+    now = clock()
     chunk_batch = max(cfg.embed_worker_batch_size, cfg.embed_worker_chunk_batch_size)
     _chunk_messages_lazily(conn, cfg, batch=chunk_batch)
     _chunk_attachments_lazily(conn, cfg, batch=chunk_batch)
     lang_visited = 0
     if lang_detector is not None and cfg.body_lang_enabled:
         lang_visited = run_lang_detect_pass(conn, cfg, lang_detector).visited
-    embedded_msg = _embed_table(conn, cfg, backend, "message_chunks")
-    embedded_att = _embed_table(conn, cfg, backend, "attachment_chunks")
+    embedded_msg = _embed_table(
+        conn, cfg, backend, "message_chunks", failure_log=log_state, now=now
+    )
+    embedded_att = _embed_table(
+        conn, cfg, backend, "attachment_chunks", failure_log=log_state, now=now
+    )
     return SweepOutcome(
         embedded=embedded_msg + embedded_att, lang_visited=lang_visited,
     )
@@ -456,7 +546,11 @@ def run_embed_worker(
     backend errors itself, logs, and returns 0, so such a sweep is only "empty"
     when nothing else advanced. While a language backlog drains, a persistently
     broken backend is therefore retried once per base poll interval rather than
-    once per backoff ceiling, and its WARNING repeats at that rate.
+    once per backoff ceiling. The retry pace is correct (the sweep genuinely is
+    doing work); the log volume is bounded separately, by `failure_pacing`'s
+    rule over the process-wide failure log (#267). `streak` below is the *idle*
+    counter and has nothing to do with that one — it resets on progress, where
+    the failure log is paced by elapsed time.
     """
     streak = 0
     while not stop.is_set():

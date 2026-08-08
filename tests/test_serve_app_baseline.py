@@ -4,6 +4,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+import localmail
 from localmail.serve.app import create_app
 
 
@@ -24,7 +25,9 @@ def test_version_unauth(db_dsn: str) -> None:
     body = r.json()
     assert body["api_major"] == 1
     assert body["api_minor"] >= 0
-    assert isinstance(body["server_version"], str)
+    # The wire field, not just the module constant: this is the only assertion
+    # that fails if the route stops reporting `localmail.__version__`.
+    assert body["server_version"] == localmail.__version__
 
 
 def test_authenticated_endpoint_rejects_no_token(db_dsn: str, api_user) -> None:

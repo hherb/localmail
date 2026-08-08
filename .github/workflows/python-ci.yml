@@ -66,7 +66,14 @@ jobs:
         # --extra mcp installs the (lightweight) MCP SDK so the MCP server
         # tests actually run in CI. The docling `extraction` extra is left
         # out deliberately (heavy ML deps); its tests importorskip docling.
-        run: uv sync --frozen --extra mcp
+        #
+        # --locked, not --frozen: --frozen only skips the up-to-date check, so
+        # a `uv.lock` disagreeing with `pyproject.toml` (including on the
+        # version) installed happily and CI never noticed — and the later
+        # `uv run pytest` silently re-locked it on the runner, so no test could
+        # catch it either. --locked asserts the lockfile is current and fails
+        # if it is not. See tests/test_version_single_source.py.
+        run: uv sync --locked --extra mcp
       - name: Cache embedding model
         # The real-model tests download google/embeddinggemma-300m (~1.2 GB) from
         # HuggingFace. The model is immutable, so a static key persists it across

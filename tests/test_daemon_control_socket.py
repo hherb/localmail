@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from localmail.serve.daemon_control_socket import (
+    SUN_PATH_MAX_BYTES,
     ControlSocketError,
     ControlSocketServer,
     handle_control_request,
@@ -128,21 +129,32 @@ def test_dispatch_stop_returns_before_grace_elapses() -> None:
 
 # --- end-to-end socket round trip -----------------------------------------
 
-# macOS caps an AF_UNIX `sun_path` at 104 bytes (Linux allows 108), and
-# pytest's `tmp_path` — nested under `pytest-of-<user>/pytest-<n>/<test-name><n>`
-# — overruns it, so `bind()` fails with a bare `OSError: AF_UNIX path too long`
-# naming neither the limit nor the culprit. Production never sees this:
-# `resolve_runtime_dir` returns `$XDG_RUNTIME_DIR` or the platform temp dir
-# itself, with none of the per-test nesting.
-_SUN_PATH_MAX = 104
+# macOS caps an AF_UNIX `sun_path` at 104 bytes (Linux's `sizeof` is 108, so
+# 107 is its last usable length), and pytest's `tmp_path` — nested under
+# `pytest-of-<user>/pytest-<n>/<test-name><n>` — overruns it, so `bind()` fails
+# with a bare `OSError: AF_UNIX path too long` naming neither the limit nor the
+# culprit. Production reaches the same cap only through an over-long
+# `[serve] runtime_dir`, which `ControlSocketServer.start` now rejects by name.
 
 
 @pytest.fixture
 def socket_dir() -> Iterator[Path]:
-    """A temp dir short enough to hold an AF_UNIX socket path."""
-    with tempfile.TemporaryDirectory(prefix="lm-ctl-") as raw:
+    """A temp dir short enough to hold an AF_UNIX socket path.
+
+    Rooted at `/tmp` rather than `$TMPDIR`: `tempfile` honours TMPDIR, which CI
+    images and agent harnesses routinely set to a deep per-session path, and the
+    skip below would then silently delete every test in this section — including
+    the only guard on the 0600 bind (#221 E). `pytest -q` prints skip counts,
+    not reasons, so nobody would notice.
+    """
+    root = "/tmp" if os.path.isdir("/tmp") else None
+    with tempfile.TemporaryDirectory(prefix="lm-ctl-", dir=root) as raw:
         path = Path(raw)
-        if len(str(path / "ctl.sock")) >= _SUN_PATH_MAX:
+        # Measured in bytes, as the kernel does: a non-ASCII TMPDIR (an accented
+        # username, a CJK home) overruns the cap at a *character* count the
+        # guard would still call safe, delivering the exact bare OSError this
+        # fixture exists to prevent.
+        if len(os.fsencode(path / "ctl.sock")) >= SUN_PATH_MAX_BYTES:
             pytest.skip(f"temp dir too long for an AF_UNIX path: {path}")
         yield path
 
@@ -223,3 +235,36 @@ def test_stale_socket_file_is_replaced(socket_dir: Path) -> None:
         assert resp["ok"] is True
     finally:
         srv.close()
+
+
+def test_over_long_path_names_the_limit_and_the_setting(socket_dir: Path) -> None:
+    """An over-long `[serve] runtime_dir` must not surface as the bare
+    `OSError: AF_UNIX path too long`, which names neither the cap nor the key
+    that caused it — serve aborts on this at lifespan startup."""
+    deep = socket_dir / ("d" * (SUN_PATH_MAX_BYTES + 32))
+    srv = ControlSocketServer(
+        path=deep / "ctl.sock", supervisor=ExternalDaemonSupervisor()
+    )
+    with pytest.raises(ControlSocketError) as excinfo:
+        srv.start()
+    msg = str(excinfo.value)
+    assert str(SUN_PATH_MAX_BYTES) in msg
+    assert "runtime_dir" in msg
+
+
+def test_non_ascii_path_is_measured_in_bytes(socket_dir: Path) -> None:
+    """The cap is a byte count. A path whose *character* count clears it but
+    whose UTF-8 encoding does not must still be rejected by name — this is the
+    accented-username / CJK-home case."""
+    # 'é' is one character but two UTF-8 bytes. Size the component so the whole
+    # path lands just under the cap by len() yet well over it once encoded.
+    overhead = len(str(socket_dir / "x" / "ctl.sock")) - 1
+    n = SUN_PATH_MAX_BYTES - overhead - 1
+    if n < 1:
+        pytest.skip(f"no room under the cap to build the case: {socket_dir}")
+    sock = socket_dir / ("é" * n) / "ctl.sock"
+    assert len(str(sock)) < SUN_PATH_MAX_BYTES <= len(os.fsencode(sock))
+
+    srv = ControlSocketServer(path=sock, supervisor=ExternalDaemonSupervisor())
+    with pytest.raises(ControlSocketError):
+        srv.start()

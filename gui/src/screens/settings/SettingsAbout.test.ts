@@ -32,8 +32,9 @@ describe("SettingsAbout", () => {
     const { getByText, container } = render(SettingsAbout);
     expect(getByText("9.9.9")).toBeTruthy();
     expect(getByText("abc123")).toBeTruthy();
-    // Client version rendered from the in-component constant.
-    expect(container.textContent ?? "").toContain("0.5.0");
+    // Client version comes from vite's `define`, sourced from package.json —
+    // asserting a literal here is what let the old constant drift unnoticed.
+    expect(container.textContent ?? "").toContain(__APP_VERSION__);
   });
 
   it("invokes open_logs_cmd when the log-directory button is clicked", async () => {

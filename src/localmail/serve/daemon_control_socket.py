@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import threading
 from pathlib import Path
 from typing import Protocol
@@ -41,6 +42,13 @@ DEFAULT_CONN_TIMEOUT_S = 10.0
 # Cap on a single request/response line (defensive against an unbounded read
 # from a misbehaving peer). Control messages are tiny.
 _MAX_LINE_BYTES = 1 << 20
+# AF_UNIX bounds `sun_path` in *bytes* — 104 on darwin, 108 on Linux — with one
+# reserved for the NUL terminator, so the last usable length is one below this.
+# Past it `bind()` raises a bare `OSError: AF_UNIX path too long` naming neither
+# the limit nor the setting responsible; `[serve] runtime_dir` is returned
+# verbatim by `resolve_runtime_dir` and carries no length validation, so an
+# operator can reach this with a config edit alone.
+SUN_PATH_MAX_BYTES = 104 if sys.platform == "darwin" else 108
 
 
 class ControlSocketError(RuntimeError):
@@ -111,6 +119,13 @@ class ControlSocketServer:
         self._stop = threading.Event()
 
     def start(self) -> None:
+        encoded_len = len(os.fsencode(self._path))
+        if encoded_len >= SUN_PATH_MAX_BYTES:
+            raise ControlSocketError(
+                f"control socket path is {encoded_len} bytes, over this "
+                f"platform's {SUN_PATH_MAX_BYTES}-byte AF_UNIX limit: "
+                f"{self._path} — set a shorter [serve] runtime_dir"
+            )
         # Replace a stale socket file left by a crashed prior run.
         if self._path.exists():
             self._path.unlink()

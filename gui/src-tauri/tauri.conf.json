@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "localmail",
-  "version": "0.3.0",
   "identifier": "com.horstherb.localmail",
   "build": {
     "beforeDevCommand": "npm run dev",

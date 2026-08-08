@@ -2,14 +2,14 @@
   /**
    * About tab: client build version, server-advertised API/build versions,
    * and a button that opens the platform-specific log directory via the
-   * `open_logs_cmd` Tauri command. `CLIENT_VERSION` is hand-kept in sync
-   * with `gui/package.json` and `gui/src-tauri/Cargo.toml`; build-time
-   * injection is out of scope for v1.
+   * `open_logs_cmd` Tauri command. `__APP_VERSION__` is injected by
+   * vite.config.ts from `gui/package.json`; it used to be a hand-kept literal
+   * here and had drifted three minors ahead of it.
    */
   import { version } from "../../lib/stores/version.svelte";
   import { invoke } from "@tauri-apps/api/core";
 
-  const CLIENT_VERSION = "0.5.0";
+  const CLIENT_VERSION = __APP_VERSION__;
 
   async function openLogs(): Promise<void> {
     try {

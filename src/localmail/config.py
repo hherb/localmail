@@ -491,6 +491,14 @@ class SearchConfig(BaseModel):
     # A sweep counts as empty only when *neither* the embedding queue nor the
     # language-detection queue advanced (#259). 0 disables the backoff.
     embed_worker_idle_backoff_max_steps: int = Field(default=6, ge=0)
+    # Minimum seconds between WARNINGs about the *same* batch-level backend
+    # failure on the same chunk table (#267). A broken backend is retried every
+    # sweep and never poisons the queue, so the log is the only signal it
+    # leaves; unthrottled that is a traceback per table per poll interval.
+    # Each report carries its traceback and names how many it swallowed.
+    # A different exception type always reports immediately. 0 disables the
+    # throttle (every failure logs, the pre-#267 behaviour).
+    embed_worker_failure_report_interval_s: float = Field(default=300.0, ge=0)
 
     # --- Phase 1+: per-message body language detection ---
     # Populates `messages.body_lang` (ISO 639-1 lowercase). Required for the

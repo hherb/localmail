@@ -221,6 +221,7 @@ src/localmail/
     text_empty.py   # pure: is_blank — the one "nothing to index" rule (#266)
     page_cache.py   # in-process LRU cache for paginated result pools
     sweep_pacing.py # pure: SweepOutcome + idle-streak/sleep arithmetic (#259)
+    failure_pacing.py # pure: how often a repeating batch failure reports (#267)
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
     reranker.py     # FastEmbedReranker + Reranker ABC
     rewriter.py     # Phase 4 --smart: build_rewrite_prompt/parse_rewrite_response/apply_rewrite (pure) + PEP562 back-compat re-exports
@@ -774,8 +775,8 @@ for the Phase 2 plan.
 
 - Code lives under `src/localmail/search/` — `chunking.py`, `embeddings.py`,
   `reranker.py`, `query.py`, `rewriter.py`, `searcher.py`, `arms.py`,
-  `page_cache.py`, `embed_worker.py`, `sweep_pacing.py`, `extractor.py`,
-  `extract_worker.py`.
+  `page_cache.py`, `embed_worker.py`, `sweep_pacing.py`, `failure_pacing.py`,
+  `extractor.py`, `extract_worker.py`.
   Public API: `localmail.search.create_searcher`.
 - All numeric tunables in `LocalmailConfig.search` (`SearchConfig`).
   **No magic numbers elsewhere in search code.**
@@ -851,16 +852,52 @@ difference between ~5 hours and ~25 minutes.
   sees them; with `lang_visited > 0` the streak resets and the backend is
   retried once per base poll interval instead of once per ceiling. Deliberate
   (the sweep really is doing work), but it is why the loop's docstring no
-  longer claims the backoff throttles a broken backend. The log volume that
-  retry pace implied (~24 tracebacks/min at the defaults) is bounded
-  separately (#267): `run_embed_worker` owns a run-long `failure_streaks`
-  mapping threaded into `_embed_table`, the pure `should_log_traceback`
-  (streak == 1) keeps the full traceback on the **first** failure of a
-  consecutive streak, repeats are one-line WARNINGs naming the count, and a
-  successful batch resets the streak — the next incident gets its traceback
-  again. An empty-claim sweep touches nothing (it proves nothing about the
-  backend). The operator signal stays WARNING throughout, mirroring the
-  distinct "giving up" line #153 and #239 settled on.
+  longer claims the backoff throttles a broken backend.
+
+**The log volume that retry pace implies is bounded separately (#267).** A
+traceback for each of the two chunk tables every ~5 s — ~24/min, for as long as
+the backlog lasts — is what that pace costs unthrottled. The rule is the pure
+[src/localmail/search/failure_pacing.py](src/localmail/search/failure_pacing.py):
+**report a failure, with its traceback, when it is the first on record for that
+table, when the exception type changes, or when
+`search.embed_worker_failure_report_interval_s` (default 300, `0` disables) has
+elapsed since the last report; otherwise stay silent and count.** The next
+report names how many it swallowed, so nothing is lost, only deferred.
+
+- **This is not the shape #153 and #239 settled on, and should not be aligned
+  with it.** Those log one *terminal* "giving up" line, bounded by a cap and
+  backed by a queryable row (`transient_extractions` / `transient_fetches`) with
+  a `retry-…` command to clear it. Nothing here is terminal — the backend is
+  retried forever and nothing is written to the database on that path, so the
+  log is the whole record and it has to keep re-arming.
+- **The record holds the exception type, not just a count.** A count alone
+  cannot tell a continuing failure from a *different* one arriving mid-incident;
+  the second would be suppressed and, worse, reported as a continuation of the
+  first, leaving the one traceback on record naming the wrong problem.
+- **Success does not clear the record**, which is why the rule is a duration
+  rather than a consecutive-failure streak. A backend alternating 200/503 — the
+  "network blip" the batch-level handler exists for — makes every failure the
+  first of a fresh streak under reset-on-success, so every one carries a
+  traceback and the throttle buys nothing. Recovery is expressed by the interval
+  instead. An empty-claim sweep likewise touches nothing: only the failure
+  branch writes, since the log records what has been *said*, not what the
+  backend is doing.
+- **Every report carries the traceback**, including the periodic ones. Logging
+  it only once per process leaves a long incident undiagnosable from a rotated
+  log or the supervisor's `deque(maxlen)` ring buffer, with no way back short of
+  restarting the daemon — which also destroys the failing state.
+- **The mapping is process state (`embed_worker._FAILURE_LOG`), and
+  `run_embed_worker_once`'s `failure_log=` defaults to it.** Throttling log
+  output is a process concern, and making the *default* correct is what removes
+  the footgun rather than merely making it loud: the four looping callers (the
+  daemon loop, `embed-backfill`, three acceptance harnesses) pass nothing and
+  are throttled anyway. #234's keyword-only-no-default shape is for a parameter
+  whose safe value cannot be the default; here it can. `reset_failure_log()` +
+  an autouse conftest fixture keep one test's broken backend from silencing the
+  next test's WARNING, the same shape as `secrets.reset_to_default()`.
+- **The line names `type(exc).__name__`** and does not leave it to the
+  traceback: `str(exc)` is empty for `ConnectionError()`, `MemoryError()` and
+  much of what a backend raises, and the message line is what a log grep shows.
 
 **Phase 4 (`--smart` query rewriter) — shipped**, see
 [docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md](docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md)

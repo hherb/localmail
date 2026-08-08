@@ -49,6 +49,24 @@ def memory_keyring():
 
 
 @pytest.fixture(autouse=True)
+def fresh_embed_failure_log():
+    """Clear the embed worker's process-wide failure log between tests (#267).
+
+    It throttles repeated backend-failure WARNINGs, so a test that breaks the
+    backend would otherwise silence the *next* test's first failure — the
+    logging analogue of the leaked secret backend below.
+
+    Imported inside the fixture so collecting a suite that never touches search
+    doesn't pull the embedding stack in.
+    """
+    from localmail.search.embed_worker import reset_failure_log
+
+    reset_failure_log()
+    yield
+    reset_failure_log()
+
+
+@pytest.fixture(autouse=True)
 def default_secret_backend():
     """Restore the keyring secret backend after every test.
 

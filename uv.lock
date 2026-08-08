@@ -1204,7 +1204,7 @@ wheels = [
 
 [[package]]
 name = "localmail"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "argon2-cffi" },

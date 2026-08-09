@@ -67,8 +67,12 @@ is exactly what makes the planner abandon `messages_attachments_gin`:
 | constant | `Bitmap Index Scan on messages_attachments_gin` | ~42 |
 | `encode(b.sha256,'hex')` | `Seq Scan on messages`, once per blob | ~36,203 |
 
-`EXTENSION_MATCH_JOIN_SQL` resolves it once for the whole archive. Measured on
-the live Mac archive (127,494 messages, 16,644 blobs), the **same command**
+`EXTENSION_MATCH_JOIN_SQL` resolves it once for the whole archive. Note it does
+**not** restore the ~42 index plan — it carries no containment predicate, so it
+is one `Seq Scan on messages` + `HashAggregate` for the whole archive, i.e. the
+scan paid once instead of once per blob. (`messages_attachments_gin`'s remaining
+user is `extract_worker._blob_filenames`, which does pass a constant.) Measured
+on the live Mac archive (127,494 messages, 16,644 blobs), the **same command**
 before and after:
 
 ```
@@ -87,24 +91,47 @@ Every counter byte-identical, including the eleven non-blob ones.
   it on the worker's hot path. Pinned by
   `test_the_claim_join_shape_never_touches_messages`.
 - **A `LEFT JOIN`, not an uncorrelated `IN (SELECT …)`.** The subquery form
-  reads better and plans identically *until* the hashed subplan outgrows
-  `work_mem`, at which point Postgres silently reverts to re-executing it per
-  row — undoing the fix on precisely the large archives it was written for. A
-  hash join spills to disk instead. This one is invisible at fixture scale and
-  will look like gratuitous complexity to the next reader.
-- **`DISTINCT` is load-bearing.** A blob is content-addressable and global, so
-  every message carrying those bytes names it independently. Without it a blob
-  several messages named admissibly fans out into one row per message,
-  inflating `eligible` past the blob count and breaking the partition. Pinned
-  by `test_a_blob_two_messages_both_named_admissibly_is_counted_once`.
+  reads better and plans identically until the planner *estimates* the hashed
+  subplan will not fit `work_mem`, at which point it plans the per-row form —
+  undoing the fix on precisely the large archives it was written for. The
+  estimate is made at plan time from statistics; Postgres does not detect
+  overflow at runtime and switch, so bad statistics can choose that form on an
+  archive that would have fit. A hash join spills to disk instead. This one is
+  invisible at fixture scale and will look like gratuitous complexity to the
+  next reader.
+- **`jsonb_typeof(m.attachments) = 'array'` guards the expansion.** The
+  correlated form's `@>` was a single-relation qual the planner pushed below
+  the lateral, so `jsonb_array_elements` only ever saw arrays. Decorrelated
+  there is no restriction on `messages`, and `jsonb_array_elements` raises
+  `22023` on an object or scalar — while the column is `JSONB NOT NULL DEFAULT
+  '[]'` with no `CHECK`. One malformed row would abort the statement and escape
+  `search_status`'s narrow catch, taking the eleven healthy counters with it.
+  Pinned by `test_a_malformed_attachments_row_does_not_abort_the_report`.
+- **`DISTINCT` is load-bearing, and no runtime guard covers it.** A blob is
+  content-addressable and global, so every message carrying those bytes names
+  it independently. Without it a blob several messages named admissibly fans
+  out into one row per message, inflating every counter. The partition check
+  does **not** catch this: the fan-out multiplies `eligible` and the buckets
+  equally, each duplicate still matches exactly one bucket, so the sum holds
+  and `misfiled` stays `0`. The only symptom an operator sees is `pending`
+  diverging from `claimable` — #277's failure mode returning. Pinned solely by
+  `test_a_blob_two_messages_both_named_admissibly_is_counted_once`, which is
+  therefore load-bearing rather than redundant.
 
 **The regression pin is a plan assertion, because nothing about the answers
-changes.** `tests/test_extract_queue_sql.py` walks `EXPLAIN (FORMAT JSON)` and
-requires that no scan of `messages` sit under a `SubPlan` — a property of the
-plan tree, so it holds at fixture scale where a wall-clock assertion would mean
-nothing. It keeps the pre-#280 predicate **verbatim** to prove that assertion
-can fail, the role `--predicate-form pre75` plays in `run_browse_explain.py`.
-Do not "tidy up" `_PRE280_CORRELATED_ALLOWLIST_SQL`; it is a museum piece.
+changes — and it takes two, because either alone has a hole.**
+`tests/test_extract_queue_sql.py` walks `EXPLAIN (FORMAT JSON)` and requires
+that no scan of `messages` sit under a `SubPlan` — a property of the plan tree,
+so it holds at fixture scale where a wall-clock assertion would mean nothing.
+But it recognises re-execution only in the shape the pre-fix predicate had: a
+`LEFT JOIN LATERAL` re-correlation keeps the join, merely makes it per-blob,
+and slips straight past (measured: 30 loops on 30 blobs, zero `SubPlan` hits).
+So it also walks `EXPLAIN (ANALYZE)` and requires `Actual Loops == 1`, over a
+**seeded** fixture — on the empty tables `db_conn` yields, every form reports
+`0` loops and that assertion is vacuous. Both keep the pre-#280 predicate
+**verbatim** as a negative control, the role `--predicate-form pre75` plays in
+`run_browse_explain.py`. Do not "tidy up"
+`_PRE280_CORRELATED_ALLOWLIST_SQL`; it is a museum piece.
 
 #### #284 — check the partition, not just its sum
 
@@ -123,6 +150,10 @@ one: a blob counted twice plus a blob counted not at all adds up correctly.
   incapable of overlapping, so the detector cannot be exercised through them —
   which is why nothing tested this guard. Contrived predicates over a `VALUES`
   row do it with no fixtures at all.
+- **Its scope is one blob against the four buckets.** It does not — cannot —
+  see a blob duplicated by a join fan-out, because each duplicate still lands
+  in exactly one bucket. That failure mode belongs to `DISTINCT` above, and the
+  only thing guarding it is a test.
 - **`misfiled` is the one field `status_field_names()` excludes.** Its only
   non-zero value raises, so reporting it would put a permanently-`0` line in
   front of an operator and invite the wrong question.
@@ -130,9 +161,10 @@ one: a blob counted twice plus a blob counted not at all adds up correctly.
 #### Test layout
 
 `tests/test_extract_queue.py` was already at 506 lines. It is now DB behaviour
-only (451); the SQL fragments, the plan pins, and the pure `QueueCounts`
-invariants moved to the new `tests/test_extract_queue_sql.py` (349).
-`extract_queue.py` is 411. All three under the 500-line guideline.
+only (494); the SQL fragments, the plan pins, and the pure `QueueCounts`
+invariants moved to the new `tests/test_extract_queue_sql.py` (468).
+`extract_queue.py` is 443. All three under the 500-line guideline, though the
+two test files have little headroom left after the review follow-ups.
 
 A fourth near-copy of the blob-seeding helper was **deliberately not created** —
 #283 named exactly that smell and was closed — so the two new DB-backed tests
@@ -156,6 +188,58 @@ live beside the existing seeder rather than in the new file.
   (see the table above), not reasoned about.
 - Both NOTIFY gates pass: `pg_notification_queue_usage()` → `0` **and**
   `LISTEN daemon_commands` on `localmail_test` succeeds.
+
+### 2b. Review follow-ups, folded into PR #286
+
+A five-agent review of the stack found two real defects and four inaccurate
+claims. All are fixed on the branch; the counters are unchanged.
+
+- **`jsonb_array_elements` aborted on a non-array `attachments`.** The
+  correlated form never met one — its `@>` was pushed below the lateral — so
+  decorrelating removed a guard nobody had written down. `messages.attachments`
+  is `JSONB NOT NULL DEFAULT '[]'` with no `CHECK`, and the raw `psycopg.Error`
+  escapes `search_status`'s narrow catch, discarding the eleven healthy
+  counters that the "read blobs last" ordering exists to preserve. No writer
+  produces one today, so this was defence-in-depth. Fixed with
+  `jsonb_typeof(m.attachments) = 'array'`; pinned by
+  `test_a_malformed_attachments_row_does_not_abort_the_report`, which fails on
+  all four malformed shapes without it.
+- **The `SubPlan` walk missed a `LEFT JOIN LATERAL` re-correlation** — the
+  likeliest accidental regression, since it keeps the join and only makes it
+  per-blob. Measured: 30 loops over 30 blobs, and zero `SubPlan` hits, so the
+  pin for the headline fix passed it. Added an `Actual Loops == 1` assertion
+  over a seeded fixture, plus its pre-#280 negative control.
+- **The `DISTINCT` rationale was wrong in five places.** It claimed a missing
+  `DISTINCT` would break the partition. It does not: the fan-out multiplies
+  `eligible` and the buckets equally, so the sum holds and `misfiled` stays
+  `0`. Reworded everywhere, and the test is now labelled load-bearing — the
+  old wording invited deleting it as redundant.
+- **CLAUDE.md still justified `CLAIMABLE_TOTAL_SQL` by "that correlated
+  `EXISTS`"**, which #280 deleted — so CLAUDE.md and the module gave mutually
+  exclusive reasons for the same decision.
+- **`~70 ms` was unsourced and self-contradicting**; it appeared nowhere else
+  in the tree and sat 150 lines from a claim that the same work was "still the
+  dominant cost" of a 0.97 s command. Removed. `13:04` is kept but now
+  attributed to session 21's measurement of the eligibility counter *alone*,
+  against the `13:28.45` whole-command figure.
+- **Two mechanisms were misstated**: `work_mem` reversion is a plan-time
+  estimate, not a runtime switch; and the fix does not restore the GIN index
+  plan — it is one `Seq Scan on messages` paid once rather than per blob.
+- Smaller: `_UNREPORTED_FIELDS` gained a field-name pin, and
+  `QueueCountsInconsistent`'s docstring now covers both raise conditions.
+- **The `AS misfiled` pin took two attempts, and the first was the same bug
+  the review was about.** `assert "AS misfiled" in QUEUE_COUNTS_SQL` is
+  satisfied by `0 AS misfiled`, i.e. the disabled form. Replacing it with
+  `assert misfiled_count_sql(BUCKET_WHERE_SQL) in QUEUE_COUNTS_SQL` looked
+  stronger and is a **tautology** — both sides derive from the same function,
+  so they mutate together, and it passed the `0 AS misfiled` mutation cleanly.
+  The shipped pin never calls the function: each bucket predicate must appear
+  exactly twice in the statement, once as its own `FILTER` and once in the
+  misfiled sum. Caught only by running the mutation; keep doing that.
+
+One review claim did **not** survive checking: that dropping a bucket from the
+report would leave the suite green. `test_cli_extract.py` asserts exact values
+for all six `blobs_*` keys, so any drop raises `KeyError`. Left alone.
 
 ### 3. PR #288 → commit `d025f2e` — pypdf 6.14.2 → 6.15.0
 

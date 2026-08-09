@@ -362,8 +362,15 @@ def test_any_one_allowlisted_name_admits_a_blob_that_arrived_under_several(
 def test_a_blob_two_messages_both_named_admissibly_is_counted_once(db_conn) -> None:
     """The eligibility lookup joins against the *distinct* filenames across the
     whole archive (#280). Without that, a blob every message names admissibly
-    would fan out into one counted row per message — inflating `eligible` past
-    the number of blobs and breaking the partition on the busiest archives.
+    fans out into one counted row per message, inflating every counter on the
+    busiest archives.
+
+    This test is the only thing standing there. Neither runtime guard catches
+    it: the fan-out multiplies `eligible` and the buckets equally, so each
+    duplicated row still matches exactly one bucket, the sum holds, and
+    `misfiled` stays 0. The symptom reaches the operator only as `pending`
+    diverging from `claimable` — #277's failure mode returning. Do not delete
+    this as redundant.
     """
     sha = _blob(db_conn, "shared", "application/octet-stream", filename="a.txt")
     _also_named(db_conn, sha, "b.txt")
@@ -377,6 +384,41 @@ def test_a_blob_neither_allowlist_admits_is_not_eligible(db_conn) -> None:
     _blob(db_conn, "photo", NOT_ALLOWLISTED_MIME, filename="photo.png")
     db_conn.commit()
     assert _counts(db_conn, _cfg()).eligible == 0
+
+
+@pytest.mark.parametrize("malformed", ['{"not": "an array"}', "null", "42", '"txt"'])
+def test_a_malformed_attachments_row_does_not_abort_the_report(
+    db_conn, malformed
+) -> None:
+    """``messages.attachments`` is ``JSONB NOT NULL DEFAULT '[]'`` with no
+    ``CHECK``, and ``jsonb_array_elements`` raises ``22023`` on anything that
+    is not an array.
+
+    The pre-#280 correlated form never met one: its ``@>`` containment was a
+    single-relation qual the planner pushed below the lateral, so only arrays
+    were ever expanded. Decorrelated there is no restriction on `messages` at
+    all, so without the ``jsonb_typeof`` guard one bad row — a restore, a hand
+    ``UPDATE`` — aborts the statement with a raw `psycopg.Error`. That escapes
+    `cli.search_status`'s deliberately narrow catch and takes the eleven
+    healthy embedding and `body_lang` counters with it, which is precisely what
+    reading the blob counts last is meant to prevent.
+    """
+    _blob(db_conn, "good", filename="notes.txt")
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts LIMIT 1")
+        row = cur.fetchone()
+        assert row is not None
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " headers, raw_bytes, size_bytes, attachments)"
+            " VALUES (%s, '<bad>', %s, 's', '{}'::jsonb, %s, %s, %s::jsonb)",
+            (row[0], hashlib.sha256(b"bad").digest(), b"raw", 1, malformed),
+        )
+    db_conn.commit()
+
+    counts = _counts(db_conn, _cfg())
+    assert counts.eligible == 1
+    assert counts.pending == 1
 
 
 # Cases chosen to cover both halves of the allowlist, the case-folding of each

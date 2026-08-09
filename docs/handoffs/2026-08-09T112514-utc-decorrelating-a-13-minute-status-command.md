@@ -14,6 +14,10 @@
 > **The DGX was deployed this session** and is no longer three commits behind.
 > Both hosts now run `57ce228`; neither runs `0f0b1aa` yet.
 >
+> **A follow-up, PR #288, clears the two `pypdf` Dependabot alerts** that were
+> filed after the last handoff was frozen. Lock-only, branched off `main`, CI
+> green — mergeable in any order relative to the other two.
+>
 > **One prediction the last handoff made was wrong, and it matters for how you
 > read the counters:** it expected `blobs_claimable` to come in "well above 0"
 > on the Mac. It is **0**. See risk 5.
@@ -136,8 +140,9 @@ live beside the existing seeder rather than in the new file.
 
 ### 2. Verification (this Mac, all extras)
 
-- `unset VIRTUAL_ENV && uv run pytest -q` → **2357 passed, 1 skipped, 0
-  failed**, no `--deselect` (2342 before; 15 new).
+- `unset VIRTUAL_ENV && uv run pytest -q` → **2358 passed, 0 skipped, 0
+  failed**, no `--deselect` (2343 before; 15 new). Read section 4 before
+  comparing that to any earlier handoff — the *environment* changed too.
 - `unset VIRTUAL_ENV && uv run mypy src/localmail` → **Success, 140 source
   files**.
 - `uv run ruff check` on every changed file → clean.
@@ -152,11 +157,66 @@ live beside the existing seeder rather than in the new file.
 - Both NOTIFY gates pass: `pg_notification_queue_usage()` → `0` **and**
   `LISTEN daemon_commands` on `localmail_test` succeeds.
 
+### 3. PR #288 → commit `d025f2e` — pypdf 6.14.2 → 6.15.0
+
+Branch `chore/pypdf-6.15`, off **`main`** rather than the #286 stack, so merge
+order does not matter. **Open, CI green, unmerged.** Two medium Dependabot
+alerts, both resource-exhaustion in `pypdf < 6.15.0`:
+
+| severity | advisory | patched |
+|---|---|---|
+| medium | large memory usage for large `/ToUnicode` streams | 6.15.0 |
+| medium | long runtimes / large memory for large CID font width ranges | 6.15.0 |
+
+Both filed **2026-08-08T22:04Z**, after session 21's handoff was frozen — which
+is why every earlier handoff says "0 open alerts".
+
+**Not purely theoretical here.** `LightweightExtractor` runs pypdf over PDF
+attachments that arrive from strangers, so a crafted PDF is a plausible way to
+make the extract worker chew memory or time. Bounded by
+`extractor_max_blob_bytes` (50 MB) and the transient-retry cap (#153), so it
+degrades to a stuck blob rather than a dead daemon — medium, not urgent.
+
+`pyproject.toml` already declared `pypdf>=6.12.0`, so **no constraint changed**;
+only the lock pinned the vulnerable version. `uv lock --upgrade-package pypdf`
+resolved 193 packages and updated exactly one — three lines of `uv.lock`, no
+transitive churn. `gui/`'s lockfiles are untouched (pypdf is Python-side).
+
+Verified on **real** pypdf parsing, not stubs: `tests/test_extractor.py` builds
+its PDF fixtures with reportlab and parses them back. 87 passed across the three
+extractor suites; full suite 2343; mypy Success on 140 files.
+
+### 4. Two environment findings that move the test count
+
+Neither is a code change, and both explain numbers a future session would
+otherwise mistrust.
+
+- **The `[extraction]` extra was not actually installed on this Mac.**
+  `tests/test_extractor.py::test_pdf_pipeline_options_reflect_the_configured_engine`
+  — the #248 regression test that runs against **real docling** — was the
+  session's one `skipped`, silently, for as long as that state lasted. `uv sync
+  --all-extras` installed it; the test now runs and passes. Every count in this
+  document is post-fix: **`main` is 2343/0, `fix/280…` is 2358/0**, where the
+  last handoff recorded 2342/1. Nothing was wrong with the suite; the
+  environment was under-provisioned, exactly as risk 17 warns and nobody had
+  checked.
+- **The stale-NOTIFY fault recurred mid-session**, having read clean at the
+  start. Same three `LISTEN`/`NOTIFY` tests, same
+  `could not access status of transaction … Could not open file "pg_xact/…"`.
+  Cleared with the runbook's Option A — `launchctl bootout` the daemon, wait for
+  it to actually be gone, verify **both** gates (`pg_notification_queue_usage()`
+  → `0` *and* `LISTEN daemon_commands` → `LISTEN`), `bootstrap` back. Note the
+  queue reading alone was **not** the tell: it read `9.5e-07`, not an obvious
+  failure, while `LISTEN` errored outright.
+
 ## What's next
 
-### 0. **Merge PR #286, then deploy both hosts**
-   The PR is green and unmerged; **the operator merges** (project convention).
-   - **Mac**: `git pull`, `uv sync --all-extras`, `launchctl kickstart -k
+### 0. **Merge PRs #286, #287 and #288, then deploy both hosts**
+   All three are green and unmerged; **the operator merges** (project
+   convention). **#287 is stacked on #286** and retargets to `main` once #286
+   lands; **#288 is independent** (off `main`, lock-only).
+   - **Mac**: `git pull`, `uv sync --all-extras` — **`--all-extras`, not a bare
+     `uv sync`**, see What we shipped 4 — then `launchctl kickstart -k
      gui/$UID/com.localmail.daemon` (and the serve agent).
    - **DGX**: `git pull`, `~/.local/bin/uv sync --extra mcp --extra
      extraction`, `systemctl --user restart localmail-daemon localmail-serve`.
@@ -169,36 +229,7 @@ live beside the existing seeder rather than in the new file.
      command was never timed there. Record what it says; that is the second
      data point #280 never had.
 
-### 1. **Two Dependabot alerts on `pypdf` — one command, not yet done** *(new)*
-   Both filed **2026-08-08T22:04Z**, i.e. after session 21's handoff was
-   frozen, which is why every prior handoff says "0 open alerts":
-
-   | severity | package | summary | patched |
-   |---|---|---|---|
-   | medium | pypdf < 6.15.0 | large memory usage for large `/ToUnicode` streams | 6.15.0 |
-   | medium | pypdf < 6.15.0 | long runtimes / large memory for large CID font width ranges | 6.15.0 |
-
-   **This is not purely theoretical here.** `LightweightExtractor` runs pypdf
-   over PDF attachments that arrive from strangers, so a crafted PDF is a
-   plausible way to make the extract worker chew memory or time. It is bounded
-   by `extractor_max_blob_bytes` (50 MB) and by the transient-retry cap, so it
-   degrades to a stuck blob rather than a dead daemon — hence medium, not
-   urgent.
-
-   `pyproject.toml` already declares `pypdf>=6.12.0`, so **only the lock pins
-   the vulnerable version**; no constraint has to change:
-
-   ```bash
-   unset VIRTUAL_ENV && uv lock --upgrade-package pypdf && uv sync --all-extras
-   unset VIRTUAL_ENV && uv run pytest -q tests/test_extractor.py && uv run pytest -q
-   ```
-
-   **Deliberately left for its own PR** rather than folded into #286 — a
-   lockfile bump and a query rewrite have nothing to say to each other, and the
-   PR *is* the review gate. Remember `gui/` has its own lockfiles; this touches
-   only `uv.lock`.
-
-### 2. **#279 and #278 — the version surface** *(carried from session 20's review)*
+### 1. **#279 and #278 — the version surface** *(carried from session 20's review)*
    - **#279** is close to a one-liner: `@click.version_option(__version__,
      package_name="localmail")`. The manual's *install-verification* step tells
      users to run `localmail --version`, which currently prints a usage error —
@@ -209,7 +240,7 @@ live beside the existing seeder rather than in the new file.
      build" row always shows `?` — while five test files mock the field and make
      it look covered. Either emit a build hash or delete the field end-to-end.
 
-### 3. **#285 — ruff, repo-wide** *(carried)*
+### 2. **#285 — ruff, repo-wide** *(carried)*
    Every `# noqa: S608` in the tree is a dead directive: `ruff check --select
    S608 --ignore-noqa` reports nothing on those files, so the rule never fired.
    There is no `[tool.ruff]` config and no CI step; repo-wide `ruff check`
@@ -218,7 +249,7 @@ live beside the existing seeder rather than in the new file.
    worth deciding once. **This PR added two more `# noqa: S608` comments** for
    consistency with their neighbours; they are equally dead.
 
-### 4. **Admin GUI phase 5 — Users & ACL panel** *(carried, still the design's next slice)*
+### 3. **Admin GUI phase 5 — Users & ACL panel** *(carried, still the design's next slice)*
    `/v1/admin/users` is already `require_admin()` (bearer-capable) — **no backend
    work needed.** Service layer:
    [src/localmail/api/admin/users.py](src/localmail/api/admin/users.py).
@@ -231,7 +262,7 @@ live beside the existing seeder rather than in the new file.
    Follow the Daemon-panel shape, and **stub the new API module in both
    `AdminView.test.ts` and `MainView.test.ts`** (see risk 11).
 
-### 5. **Remaining robustness backlog** *(carried)*
+### 4. **Remaining robustness backlog** *(carried)*
    **#218** (GUI download commands buffer the full body before enforcing the
    size ceiling) · **#226** (self-signed cert misses the reachable IP when
    `--bind 0.0.0.0`) · **#225 / #227** (`/v1/changes` subscription lifecycle
@@ -239,7 +270,7 @@ live beside the existing seeder rather than in the new file.
    **#206** (GUI AccountForm: folder filters not editable) · **#204** (admin
    bearer-token scope) · **#25** (websockets DeprecationWarning).
 
-### 6. **Smaller, deliberately not done** *(carried)*
+### 5. **Smaller, deliberately not done** *(carried)*
    - **`cli.py` is 1906 lines**, `daemon.py` 573 — both over the 500-line
      guideline. This session did **not** touch `cli.py` (the whole change fits
      inside `extract_queue.py`), so the refactor session 21 deferred is still
@@ -256,11 +287,13 @@ live beside the existing seeder rather than in the new file.
 
 ## Open decisions & risks
 
-1. **PR #286 is open, green, and yours to merge.** `main` is `57ce228`; the
-   branch is `fix/280-decorrelate-blob-eligibility` at **`0f0b1aa`**.
-   **15 open issues**; #280 and #284 both close on merge, taking it to 13.
-   **2 open Dependabot alerts** (both `pypdf`, both new since the last handoff
-   — see What's next, 1; every earlier handoff's "0 alerts" is stale).
+1. **Three PRs are open, all green, all yours to merge.** `main` is `57ce228`.
+   **#286** (`fix/280-decorrelate-blob-eligibility` @ `0f0b1aa`) is the fix;
+   **#287** (`docs/session-22-handoff`) is stacked on it and carries this
+   document; **#288** (`chore/pypdf-6.15` @ `d025f2e`) is independent, off
+   `main`. **15 open issues**; #280 and #284 both close with #286, taking it to
+   13. **2 open Dependabot alerts, both cleared by #288** — every earlier
+   handoff's "0 alerts" was written before they were filed.
 2. **`search-status` is fast now — stop budgeting fourteen minutes for it**
    *(changed; this was risk 2 of the last two handoffs)*. `13:28.45 → 0.97 s`
    on the 127k-message Mac archive. If it ever runs long again, that is a
@@ -321,19 +354,32 @@ live beside the existing seeder rather than in the new file.
     `search-status` no longer qualifies (risk 2).
 14. **The macOS socket deselect is GONE — stop using it** *(carried)*. #276
     fixed it; `uv run pytest -q` with **no arguments** is the right command.
-15. **The stale NOTIFY queue is CLEAR** *(carried)*. If the three
-    `LISTEN`/`NOTIFY` tests fail, cycle the daemon and **verify both gates
-    before re-running**: `pg_notification_queue_usage()` → `0` **and** `LISTEN
-    daemon_commands` succeeding on `localmail_test`. Session 19 saw usage `0`
-    with `LISTEN` still erroring — **the queue reading alone is not the gate.**
+15. **The stale NOTIFY queue RECURRED mid-session and was cleared**
+    *(changed)*. It read clean at the start and had taken the usual three
+    `LISTEN`/`NOTIFY` tests down by the afternoon — so treat "clear at the last
+    handoff" as worth nothing. Fixed with the runbook's Option A: `launchctl
+    bootout gui/$UID/com.localmail.daemon`, **wait until `launchctl print` says
+    the service is gone**, verify both gates, then `bootstrap` back.
+    **Verify both gates, not one:** this time
+    `pg_notification_queue_usage()` read `9.5e-07` — small enough to look
+    healthy at a glance — while `LISTEN daemon_commands` errored outright.
+    Session 19 saw the inverse (usage `0`, `LISTEN` still erroring). Neither
+    reading alone is the gate.
 16. **An empty `daemon_heartbeats` right after a daemon restart is normal for
     minutes** *(carried — #269/#271)*. It is the startup blob-temp sweep. Grep
     for **`blob-temp sweep done: walked=`**.
-17. **`uv sync` without extras silently downgrades a host** *(carried)*. Use
-    `--all-extras` on the Mac and `--extra mcp --extra extraction` on the DGX.
-    **`uv` is not on the DGX's default non-interactive PATH** — use
-    `~/.local/bin/uv` over SSH. The pytest count depends on the extras:
-    **2357** with all extras on the Mac. CI installs only `--extra mcp`.
+17. **`uv sync` without extras silently downgrades a host — and this Mac WAS
+    downgraded** *(changed; this stopped being hypothetical)*. The
+    `[extraction]` extra was missing here, so
+    `test_pdf_pipeline_options_reflect_the_configured_engine` — the #248
+    regression test that exercises **real docling** — had been skipping. That
+    is what the "1 skipped" in every recent handoff was, and nobody looked.
+    Use `--all-extras` on the Mac and `--extra mcp --extra extraction` on the
+    DGX. **`uv` is not on the DGX's default non-interactive PATH** — use
+    `~/.local/bin/uv` over SSH. Counts, all post-fix and all with **0 skipped**:
+    `main` **2343**, `fix/280…` **2358**. A non-zero `skipped` on this machine
+    now means an extra has gone missing again — check it rather than ignoring
+    it. CI installs only `--extra mcp`, so its count differs by design.
 18. **`ExtractorConfigurationError` subclasses `TransientExtractorError`, and
     that subclassing *is* the #248 fix — do not "clean it up"** *(carried)*.
 19. **`run_embed_worker_once`'s `failure_log` defaults to the process-wide
@@ -361,13 +407,15 @@ git status                               # expect clean
 git branch --show-current
 git log --oneline origin/main..main      # expect 0
 
-# PR #286 is OPEN and GREEN, awaiting your merge (What's next, 0).
-# 15 open issues; #280 + #284 close on merge.
-gh pr list; gh pr checks 286; gh issue list --limit 20
+# THREE PRs are OPEN and GREEN, awaiting your merge (What's next, 0).
+# #287 is stacked on #286; #288 is independent. 15 open issues.
+gh pr list
+for n in 286 287 288; do gh pr checks $n; done
+gh issue list --limit 20
 
-# TWO open Dependabot alerts, both new since the last handoff (What's next, 1):
+# Dependabot: 2 open alerts, both cleared by #288. Expect 0 once it merges:
 gh api repos/hherb/localmail/dependabot/alerts \
-  --jq '.[] | select(.state=="open") | "\(.security_advisory.severity) \(.dependency.package.name) -> \(.security_vulnerability.first_patched_version.identifier)"'
+  --jq '[.[] | select(.state=="open")] | length'
 
 # AFTER MERGING #286, deploy both hosts:
 #   Mac:  git pull && uv sync --all-extras && launchctl kickstart -k gui/$UID/com.localmail.daemon
@@ -375,8 +423,10 @@ gh api repos/hherb/localmail/dependabot/alerts \
 
 # Python test suite. No --deselect (risk 14).
 # Do NOT run while a backfill is draining (risk 13).
+unset VIRTUAL_ENV && uv sync --all-extras   # NOT a bare `uv sync` — risk 17
 unset VIRTUAL_ENV && uv run pytest -q
-#   expect: 2357 passed, 1 skipped, 0 failed (all extras installed — risk 17)
+#   expect: 2358 passed, 0 SKIPPED on fix/280…; 2343 on main.
+#   A non-zero skip count means an extra went missing again (risk 17).
 
 unset VIRTUAL_ENV && uv run mypy src/localmail
 #   expect: Success, 140 source files
@@ -417,6 +467,6 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
 `fix/280-decorrelate-blob-eligibility`, **open as PR #286, CI green, not
 merged**. Latest migration **`0035_messages_body_lang_attempted_at.sql`**; next
 free slot `0036_*.sql` (this session adds none). **Open issues: 15** (13 after
-#286 merges closes #280 and #284). Dependabot: **2** open alerts, both
-medium, both `pypdf < 6.15.0` — fixable with `uv lock --upgrade-package pypdf`
-in its own PR (What's next, 1).
+#286 merges closes #280 and #284). Dependabot: **2** open alerts, both medium,
+both `pypdf < 6.15.0`, **both cleared by PR #288** (`d025f2e`, off `main`, CI
+green).

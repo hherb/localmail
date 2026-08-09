@@ -37,18 +37,24 @@ claim).
 
 Every fragment below assumes ``attachment_blobs`` is aliased ``b`` and that
 `QUEUE_FROM_SQL` supplied the joins, so the aliases the predicates read are
-defined by the same string that introduces them.
+defined by the same string that introduces them. `ALLOWLISTED_WHERE_SQL` reads
+one more, ``ext``, which only `QUEUE_COUNTS_FROM_SQL` introduces — the join
+behind it reads every message, and the worker's claim must not.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, replace
+from types import MappingProxyType
 
 import psycopg
 from psycopg.rows import class_row
 
 from localmail.config import SearchConfig
+
+_UNREPORTED_FIELDS = frozenset({"misfiled"})
+"""`QueueCounts` fields that are self-checks rather than operator counters."""
 
 
 class QueueCountsInconsistent(ValueError):
@@ -71,7 +77,47 @@ QUEUE_FROM_SQL = """
 
 All three joined tables key on ``sha256 PRIMARY KEY``, so no join can multiply
 a blob into two rows and inflate the counters.
+
+Shared with `extract_worker._claim_batch`, which runs it every sweep under
+``FOR UPDATE … SKIP LOCKED`` — so it stays three primary-key lookups per blob.
+The eligibility lookup, which reads every message, hangs off
+`QUEUE_COUNTS_FROM_SQL` instead.
 """
+
+EXTENSION_MATCH_JOIN_SQL = """
+    LEFT JOIN (
+        SELECT DISTINCT a->>'sha256' AS sha256_hex
+          FROM messages m, jsonb_array_elements(m.attachments) AS a
+         WHERE lower(substring(a->>'filename' FROM '.(\\.[^.]+)$'))
+               = ANY(%(extension_allowlist)s)
+    ) ext ON ext.sha256_hex = encode(b.sha256, 'hex')
+"""
+"""Which blobs some message named with an allowlisted extension — resolved
+once for the whole archive, not once per blob (#280).
+
+Written as a correlated ``EXISTS`` this was a ``SubPlan``, and correlating the
+operand on ``b.sha256`` is exactly what makes Postgres abandon
+``messages_attachments_gin``: the containment predicate costs ~42 with a
+constant operand and ~36,203 as a per-blob ``Seq Scan on messages``, which on
+the 127k-message Mac archive measured **13:04** for one counter. As a
+decorrelated join the same answer takes ~70 ms.
+
+**A ``LEFT JOIN`` rather than an uncorrelated ``IN (SELECT …)``**, which reads
+more simply and plans the same way *until* the hashed subplan outgrows
+``work_mem`` — at which point Postgres silently reverts to re-executing it per
+row and the fix is undone on precisely the large archives it was written for. A
+hash join spills to disk instead.
+
+``DISTINCT`` is load-bearing: a blob is content-addressable and global, so
+every message carrying those bytes names it independently (#216), and without
+it a blob several messages named admissibly would fan out into one row per
+message — inflating ``eligible`` past the blob count and breaking the
+partition. It also matches `attachment_kind.is_allowlisted`'s "**any** one of
+its filenames" rule, which asks whether a match exists, not how many.
+"""
+
+QUEUE_COUNTS_FROM_SQL = QUEUE_FROM_SQL + EXTENSION_MATCH_JOIN_SQL
+"""`QUEUE_FROM_SQL` plus the alias `ALLOWLISTED_WHERE_SQL` reads."""
 
 _UNDER_RETRY_CAPS_SQL = (
     "(f.sha256 IS NULL OR f.retry_count < %(max_retries)s)"
@@ -114,16 +160,26 @@ NO_TEXT_WHERE_SQL = "t.sha256 IS NOT NULL AND t.extracted_text = ''"
 or healed by #266. ``attachment_text.extracted_text`` is ``NOT NULL``, so this
 and `EXTRACTED_WHERE_SQL` between them cover every rowed blob."""
 
+BUCKET_WHERE_SQL: Mapping[str, str] = MappingProxyType(
+    {
+        "extracted": EXTRACTED_WHERE_SQL,
+        "no_text": NO_TEXT_WHERE_SQL,
+        "gave_up": GAVE_UP_WHERE_SQL,
+        "pending": CLAIMABLE_WHERE_SQL,
+    }
+)
+"""The partition, keyed by the `QueueCounts` field each bucket fills.
+
+The one authority for *what the buckets are*: `QUEUE_COUNTS_SQL`'s aggregates,
+the misfiled check that guards their disjointness, and
+`QueueCounts.__post_init__`'s sum are all derived from it, so a fifth
+disposition cannot reach one and miss another. Adding a key without adding the
+matching field fails loudly at `class_row` construction.
+"""
+
 ALLOWLISTED_WHERE_SQL = """
     lower(b.mime_type) = ANY(%(mime_allowlist)s)
-    OR EXISTS (
-        SELECT 1
-          FROM messages m, jsonb_array_elements(m.attachments) AS a
-         WHERE m.attachments @> jsonb_build_array(
-                 jsonb_build_object('sha256', encode(b.sha256,'hex')))
-           AND a->>'sha256' = encode(b.sha256,'hex')
-           AND lower(substring(a->>'filename' FROM '.(\\.[^.]+)$'))
-               = ANY(%(extension_allowlist)s))
+    OR ext.sha256_hex IS NOT NULL
 """
 """SQL mirror of `attachment_kind.is_allowlisted`, pinned by a differential
 test over the same inputs (`test_the_sql_allowlist_agrees_with_the_python_one`).
@@ -131,17 +187,20 @@ test over the same inputs (`test_the_sql_allowlist_agrees_with_the_python_one`).
 The extension half reads the **original filename** out of
 ``messages.attachments``, never ``attachment_blobs.path`` — that path is
 content-addressable and extensionless, so a ``suffix`` comparison against it is
-always ``''`` (#216). Unparenthesised; combine it as ``WHERE (…)``.
+always ``''`` (#216). It arrives here as the `EXTENSION_MATCH_JOIN_SQL` alias
+rather than as a subquery, so this predicate requires `QUEUE_COUNTS_FROM_SQL`,
+not `QUEUE_FROM_SQL`. Unparenthesised; combine it as ``WHERE (…)``.
 
 Two details exist only to keep the mirror exact, and both were divergences
-before #277's review found them:
+before #277's review found them. Both now live on the join that resolves the
+extension half, `EXTENSION_MATCH_JOIN_SQL`:
 
 * **Both sides of each comparison are lowercased.** `is_allowlisted` lowers the
   stored value *and* the configured one, so a ``config.toml`` carrying
   ``"Application/PDF"`` or ``".PDF"`` matched in Python and never in SQL —
   dropping a whole class of blob out of every bucket while the partition still
   summed, i.e. #277's failure mode wearing a different hat. The config half is
-  lowered in `allowlist_params`, so this fragment can assume it.
+  lowered in `allowlist_params`, so these fragments can assume it.
 * **The leading character before the extension is required.** ``Path(".txt")``
   has no suffix — a dotfile names no format (`attachment_kind.extension_of`) —
   but ``'\\.[^.]+$'`` matched the whole of ``.txt``. The ``.`` prefix demands
@@ -149,21 +208,48 @@ before #277's review found them:
   the differential test covers, including ``..txt`` and ``archive.tar.gz``.
 """
 
+
+def bucket_count_sql(buckets: Mapping[str, str]) -> str:
+    """One ``count(*) FILTER (…) AS <bucket>`` aggregate per bucket."""
+    return ",\n           ".join(
+        f"count(*) FILTER (WHERE {predicate}) AS {name}"
+        for name, predicate in buckets.items()
+    )
+
+
+def misfiled_count_sql(buckets: Mapping[str, str]) -> str:
+    """One aggregate counting rows that land in other than exactly one bucket.
+
+    The sum check in `QueueCounts.__post_init__` is implied by a partition but
+    does not imply one: a row counted twice plus a row counted not at all adds
+    up correctly (#284). Casting each predicate to ``int`` and demanding the
+    total be exactly ``1`` catches overlap and gap in the same expression.
+
+    ``IS DISTINCT FROM`` rather than ``<>`` because the total is SQL ``NULL``
+    as soon as any predicate is — which is what a migration relaxing one of the
+    ``NOT NULL`` columns the predicates pivot on would produce, and a ``NULL``
+    filter condition counts nothing and reports the archive as healthy.
+
+    Takes the buckets as a parameter so the detector can be exercised against
+    contrived predicates: the production ones are structurally incapable of
+    overlapping, which is exactly why nothing tested this guard.
+    """
+    total = "\n         + ".join(f"({predicate})::int" for predicate in buckets.values())
+    return f"count(*) FILTER (WHERE ({total}) IS DISTINCT FROM 1) AS misfiled"
+
+
 QUEUE_COUNTS_SQL = f"""
-    SELECT count(*)                                          AS eligible,
-           count(*) FILTER (WHERE {EXTRACTED_WHERE_SQL})     AS extracted,
-           count(*) FILTER (WHERE {NO_TEXT_WHERE_SQL})       AS no_text,
-           count(*) FILTER (WHERE {GAVE_UP_WHERE_SQL})       AS gave_up,
-           count(*) FILTER (WHERE {CLAIMABLE_WHERE_SQL})     AS pending
-    {QUEUE_FROM_SQL}
+    SELECT count(*) AS eligible,
+           {bucket_count_sql(BUCKET_WHERE_SQL)},
+           {misfiled_count_sql(BUCKET_WHERE_SQL)}
+    {QUEUE_COUNTS_FROM_SQL}
     WHERE ({ALLOWLISTED_WHERE_SQL})
 """  # noqa: S608 — every fragment is a module constant; runtime values bind as %(name)s
 """The partition, in one pass.
 
-Aggregated rather than run as five statements because the allowlist half is an
-``EXISTS`` over ``messages.attachments`` — the expensive part of
-`search-status` on a real archive (#280), and there is no reason to pay for it
-more than once.
+Aggregated rather than run as one statement per bucket because the allowlist
+half reads every message — still the dominant cost of `search-status` even
+decorrelated (#280), and there is no reason to pay for it more than once.
 
 **Do not split this into separate statements.** One statement is one snapshot
 under READ COMMITTED, which is what lets `QueueCounts.__post_init__` treat a
@@ -179,10 +265,9 @@ CLAIMABLE_TOTAL_SQL = f"""
 """  # noqa: S608 — every fragment is a module constant; runtime values bind as %(name)s
 """Everything `_claim_batch` will hand the worker, allowlist and all.
 
-Its own statement because it must *not* carry `ALLOWLISTED_WHERE_SQL`, and
-folding the allowlist into per-aggregate ``FILTER``s instead of the ``WHERE``
-would evaluate that correlated ``EXISTS`` once per aggregate rather than once
-per row. Cheap on its own — three primary-key lookups per blob, no subquery.
+Its own statement because it must *not* carry `ALLOWLISTED_WHERE_SQL`, and it
+composes `QUEUE_FROM_SQL` rather than `QUEUE_COUNTS_FROM_SQL` so it never
+touches `messages` at all: three primary-key lookups per blob, no subquery.
 """
 
 
@@ -216,8 +301,9 @@ def allowlist_params(
 class QueueCounts:
     """How the eligible blob population divides, at one moment.
 
-    The first five fields are built by name (psycopg ``class_row``), so the
-    SELECT's column aliases — not their order — are what bind to them.
+    Every field but `claimable` is built by name from `QUEUE_COUNTS_SQL`'s
+    column aliases (psycopg ``class_row``), so the aliases — not their order —
+    are what bind to them.
     """
 
     eligible: int
@@ -237,8 +323,20 @@ class QueueCounts:
     that resolves itself.
     """
 
+    misfiled: int = 0
+    """Eligible blobs that `misfiled_count_sql` found in other than exactly one
+    bucket — always ``0`` on an instance that exists, since `__post_init__`
+    refuses any other value. Not reported: see `status_field_names`."""
+
     def __post_init__(self) -> None:
-        total = self.extracted + self.no_text + self.gave_up + self.pending
+        if self.misfiled:
+            raise QueueCountsInconsistent(
+                f"{self.misfiled} of {self.eligible} eligible blobs are misfiled "
+                f"— each must match exactly one of "
+                f"{', '.join(BUCKET_WHERE_SQL)}; a predicate now overlaps, has a "
+                f"gap, or reads a column that has become nullable"
+            )
+        total = sum(getattr(self, name) for name in BUCKET_WHERE_SQL)
         if total != self.eligible:
             raise QueueCountsInconsistent(
                 f"extraction queue buckets do not sum to the eligible "
@@ -263,13 +361,25 @@ class QueueCounts:
 
         Derived from the fields rather than typed out, so a bucket added here
         cannot go missing from the command that exists to report it — the
-        hand-copied projection is the last place this PR's drift could hide.
+        hand-copied projection is the last place #277's drift could hide.
+
+        `misfiled` is the one exclusion: it is a self-check whose only
+        non-zero value raises, so reporting it would put a permanently-``0``
+        line in front of an operator and invite the wrong question.
         """
-        return tuple(f"blobs_{f.name}" for f in fields(QueueCounts))
+        return tuple(
+            f"blobs_{f.name}"
+            for f in fields(QueueCounts)
+            if f.name not in _UNREPORTED_FIELDS
+        )
 
     def status_fields(self) -> dict[str, int]:
         """This instance as that payload slice."""
-        return {f"blobs_{f.name}": getattr(self, f.name) for f in fields(self)}
+        return {
+            f"blobs_{f.name}": getattr(self, f.name)
+            for f in fields(self)
+            if f.name not in _UNREPORTED_FIELDS
+        }
 
 
 def fetch_queue_counts(conn: psycopg.Connection, cfg: SearchConfig) -> QueueCounts:

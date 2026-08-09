@@ -149,7 +149,9 @@ uv run localmail estimate-upgrade [--format text|json]   # pre-flight size/durat
 # search-status reports Phase 2 attachment_text/attachment_chunks counts and
 # body_lang_populated / body_lang_pending / body_lang_declined; its four
 # blobs_{extracted,no_text,gave_up,pending} partition blobs_eligible, and
-# blobs_claimable is the worker's real queue depth (allowlist-blind) (#277)
+# blobs_claimable is the worker's real queue depth (allowlist-blind) (#277).
+# Sub-second on a 127k-message archive since #280 decorrelated the eligibility
+# lookup — it used to take 13½ minutes.
 ```
 
 GUI server (Phase: gui-server):
@@ -218,6 +220,7 @@ src/localmail/
     extract_worker.py # run_extract_worker_once, run_extract_worker (background thread)
     extract_queue.py  # the one claim/eligibility predicate + fetch_queue_counts (#277)
                     #   + QueueCounts (4-bucket partition + allowlist-blind claimable)
+                    #   + decorrelated extension join (#280) + misfiled guard (#284)
     lang_detect.py  # LinguaDetector + FixedDetector + run_lang_detect_pass for messages.body_lang
                     #   + CLAIMABLE/DECLINED/RELABELABLE_WHERE_SQL, retry_declined (#251),
                     #   reopen_all (#255)
@@ -1236,26 +1239,59 @@ so the two cannot drift. See
     psycopg traceback. `QueueCounts.status_field_names()` / `.status_fields()`
     derive the payload keys from the dataclass fields, so a bucket added to the
     type cannot go missing from the command that exists to report it — the
-    hand-copied projection was the last place this drift could hide. `__bool__`
+    hand-copied projection was the last place this drift could hide, apart from
+    `misfiled` — see #284 below, which is excluded on purpose. `__bool__`
     raises, like `SweepOutcome`'s (#259).
-  - **The partition is one aggregate pass, not five queries**, because the
-    allowlist half is a correlated `EXISTS` over `messages.attachments` and is
-    essentially the whole cost of the command. **Do not split it**: one
-    statement is one snapshot under READ COMMITTED, which is the only reason
-    `__post_init__` can treat a gap as a predicate bug rather than as a worker
-    committing mid-read — split, it becomes an intermittent crash on a live
-    archive. It is **slow, and that is pre-existing and untouched here**: on the
-    127k-message Mac archive the old eligibility query alone measured **13:04**
-    and the four-bucket pass **14:07**, matching the planner's 452,749 →
-    459,756 (the added LEFT JOINs are index scans over ≤16k rows; the same
-    `SubPlan` dominates both). The cause is that `messages_attachments_gin`
-    serves the containment predicate at cost ~42 with a **constant** operand but
-    is abandoned for a per-blob `Seq Scan on messages` at cost ~36,203 once the
-    operand correlates on `b.sha256`. Filed as #280 — do not read it as a cost
-    of this fix. `CLAIMABLE_TOTAL_SQL` was added after that measurement and is
-    **not** in the 14:07: it carries no `EXISTS`, only three primary-key lookups
-    per blob, so it should be negligible — but it is unmeasured on the live
-    archive, so confirm that when #280 is next profiled.
+  - **The partition is one aggregate pass, not five queries.** **Do not split
+    it**: one statement is one snapshot under READ COMMITTED, which is the only
+    reason `__post_init__` can treat a gap as a predicate bug rather than as a
+    worker committing mid-read — split, it becomes an intermittent crash on a
+    live archive.
+  - **The eligibility lookup is decorrelated, and that is #280's whole fix.**
+    `search-status` measured **13:28** on the 127k-message Mac archive and now
+    measures **0.97 s**, with every counter byte-identical (9491 / 9203 / 106 /
+    182 / 0). The extension half reads original filenames out of
+    `messages.attachments` (#216); written as a correlated `EXISTS` it was a
+    `SubPlan` re-executed once per blob, and correlating the operand on
+    `b.sha256` is exactly what makes the planner abandon
+    `messages_attachments_gin` — cost ~42 with a **constant** operand, ~36,203
+    as a per-blob `Seq Scan on messages`.
+    - `EXTENSION_MATCH_JOIN_SQL` resolves it once for the whole archive as a
+      `LEFT JOIN` over `SELECT DISTINCT`, and hangs off `QUEUE_COUNTS_FROM_SQL`
+      rather than `QUEUE_FROM_SQL` — the latter is shared with `_claim_batch`,
+      which must stay three primary-key lookups per blob.
+    - **A `LEFT JOIN`, not an uncorrelated `IN (SELECT …)`.** The subquery form
+      reads better and plans the same way *until* the hashed subplan outgrows
+      `work_mem`, at which point Postgres silently reverts to re-executing it
+      per row and the fix is undone on precisely the archives it was written
+      for. A hash join spills to disk instead.
+    - **`DISTINCT` is load-bearing.** A blob is content-addressable and global,
+      so every message carrying those bytes names it independently; without it
+      a blob several messages named admissibly fans out into one row per
+      message, inflating `eligible` past the blob count and breaking the
+      partition. Pinned by
+      `test_a_blob_two_messages_both_named_admissibly_is_counted_once`.
+    - The regression pin is a **plan** assertion, because nothing about the
+      answers changes: `test_extract_queue_sql.py` walks `EXPLAIN (FORMAT
+      JSON)` and requires that no scan of `messages` sit under a `SubPlan`. It
+      keeps the pre-#280 predicate verbatim to prove that assertion can fail —
+      the same role `--predicate-form pre75` plays in `run_browse_explain.py`.
+  - **The buckets have one authority: `BUCKET_WHERE_SQL` (#284).** The SELECT's
+    aggregates, `__post_init__`'s sum, and the `misfiled` guard are all derived
+    from that mapping, so a fifth disposition cannot reach one and miss
+    another. `misfiled_count_sql` closes the gap the sum check leaves — a sum
+    is *implied by* a partition but does not *imply* one, so a blob counted
+    twice plus a blob counted not at all adds up correctly. It casts each
+    predicate to `int` and demands exactly `1`; `IS DISTINCT FROM` rather than
+    `<>` because the total goes SQL `NULL` as soon as any predicate does, which
+    is what relaxing one of the `NOT NULL` columns the predicates pivot on
+    would produce, and a `NULL` filter condition counts nothing and reports the
+    archive healthy. It takes its buckets as a **parameter** so the detector can
+    be tested against contrived predicates — the production four are
+    structurally incapable of overlapping, which is why nothing tested this.
+    `misfiled` is the one field `status_field_names()` excludes: its only
+    non-zero value raises, so reporting it would put a permanently-`0` line in
+    front of an operator.
 - **Transient classification of third-party docling failures (#47)**:
   `extract_worker._is_transient` recognises only the narrow builtin
   `_TRANSIENT_EXC_TYPES` (`ConnectionError`/`TimeoutError`/`MemoryError`) plus

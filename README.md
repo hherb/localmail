@@ -445,8 +445,10 @@ DELETE FROM attachment_text WHERE extractor = 'type-skipped';
 
 ### Reading the attachment counters
 
-`search-status` divides the eligible blobs into four counts that add up to
-`blobs_eligible`, so the four together account for every blob:
+`search-status` divides the **eligible** blobs — the ones an allowlist admits,
+see [Which attachments get extracted](#which-attachments-get-extracted) — into
+four counts that add up to `blobs_eligible`, so the four together account for
+every eligible blob:
 
 | Count | Meaning |
 |---|---|
@@ -464,8 +466,30 @@ SELECT extractor, count(*) FROM attachment_text
  WHERE extracted_text = '' GROUP BY extractor ORDER BY 2 DESC;
 ```
 
-`blobs_gave_up` is the one to act on: `localmail list-failed-extractions` shows
-why, and `localmail retry-failed-extractions` puts them back in the queue.
+`blobs_gave_up` is the one to act on. `localmail retry-failed-extractions` puts
+them back in the queue. `localmail list-failed-extractions` shows why for the
+poison-pill half only — a blob parked by the *transient* budget (a broken OCR
+engine, an expired Hugging Face token) writes no `failed_extractions` row and
+has no list command, so query it directly:
+
+```sql
+SELECT * FROM transient_extractions ORDER BY last_transient_at DESC;
+```
+
+### `blobs_claimable`: the number that is not in the table
+
+The four counts above cover eligible blobs. The extract worker's queue is
+**wider than that** — it claims every unprocessed blob and applies the
+allowlist afterwards, disposing of a miss with a `type-skipped` row. So a blob
+outside both allowlists is real work the worker will do, and it appears in none
+of the four counts.
+
+`blobs_claimable` is that full queue depth, and `blobs_pending` is its
+allowlisted subset. On an archive that is mostly images, `blobs_pending: 0`
+alongside `blobs_claimable: 16000` is the honest reading: nothing left to
+*index*, but hours of claiming and skipping still to go. If the two are far
+apart and stay that way, widening `extractor_mime_allowlist` — or accepting
+the skips — is the decision to make.
 
 ### Scanned PDFs and OCR
 

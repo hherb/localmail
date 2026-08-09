@@ -148,7 +148,8 @@ uv run localmail estimate-upgrade [--format text|json]   # pre-flight size/durat
 # see docs/operations/upgrade-runbook.md
 # search-status reports Phase 2 attachment_text/attachment_chunks counts and
 # body_lang_populated / body_lang_pending / body_lang_declined; its four
-# blobs_{extracted,no_text,gave_up,pending} partition blobs_eligible (#277)
+# blobs_{extracted,no_text,gave_up,pending} partition blobs_eligible, and
+# blobs_claimable is the worker's real queue depth (allowlist-blind) (#277)
 ```
 
 GUI server (Phase: gui-server):
@@ -216,6 +217,7 @@ src/localmail/
     extractor.py    # LightweightExtractor (11 formats) + ExtractorBackend ABC; DoclingExtractor via [extraction] extra
     extract_worker.py # run_extract_worker_once, run_extract_worker (background thread)
     extract_queue.py  # the one claim/eligibility predicate + fetch_queue_counts (#277)
+                    #   + QueueCounts (4-bucket partition + allowlist-blind claimable)
     lang_detect.py  # LinguaDetector + FixedDetector + run_lang_detect_pass for messages.body_lang
                     #   + CLAIMABLE/DECLINED/RELABELABLE_WHERE_SQL, retry_declined (#251),
                     #   reopen_all (#255)
@@ -1177,29 +1179,83 @@ so the two cannot drift. See
     still claimable). `QueueCounts.__post_init__` **raises** when they fail to
     sum, since a gap can only come from a predicate bug and the number an
     operator reads is the command's whole product. `attachment_text.extracted_text`
-    is `NOT NULL`, which is what makes the rowed pair exhaustive.
+    is `NOT NULL`, which is what makes the rowed pair exhaustive; `retry_count`
+    and `transient_count` are too, which is what keeps `NOT (…)` from going
+    three-valued and dropping a row out of *every* bucket. All three joined
+    tables key on `sha256 PRIMARY KEY`, so no join can multiply a blob.
+  - **`blobs_pending` is not the worker's queue depth — `blobs_claimable` is
+    (review follow-up).** The four buckets are allowlist-scoped and
+    `CLAIMABLE_WHERE_SQL` deliberately is not (#216 applies the allowlist in
+    Python, after the claim), so a non-allowlisted un-rowed blob is real work
+    the worker will claim and appears in **no** bucket. Shipping only the four
+    would have left `blobs_pending 0` reading as "queue empty" on exactly the
+    archive #216 was filed about — 16,542 blobs, 0/20 allowlisted in the next
+    claim — i.e. #277's defect inverted, and the under-report is the quieter
+    half. `CLAIMABLE_TOTAL_SQL` is its **own statement**, because the honest
+    number must not inherit the allowlist and folding the allowlist into
+    per-aggregate `FILTER`s would evaluate that correlated `EXISTS` once per
+    aggregate instead of once per row. It is therefore a different snapshot and
+    is **excluded from the partition check** — a worker committing between the
+    two statements can briefly put `claimable` below `pending`, and crashing
+    over a race that resolves itself would be worse than reporting it.
+  - **`ALLOWLISTED_WHERE_SQL` is a hand-maintained restatement of
+    `attachment_kind.is_allowlisted`, and the two had drifted.** Pinned now by a
+    differential test over the same inputs. Two divergences, both found in
+    review: the SQL compared MIME **case-sensitively** and never lowered the
+    *configured* values, so a `config.toml` carrying `"Application/PDF"` or
+    `".PDF"` matched in the worker and in no counter — which makes SQL
+    *under*-count uniformly, so the partition still sums and nothing raises,
+    #277's failure mode wearing a different hat. And `'\.[^.]+$'` matched the
+    whole of a bare dotfile (`.txt`) where `Path(".txt").suffix` is `""`; the
+    regex is `'.(\.[^.]+)$'` now, requiring a character ahead of the final dot.
+    Both operands are lowered — the config half in `allowlist_params`, so the
+    fragment can assume it.
   - **`blobs_extracted` is now scoped to allowlisted blobs**, where it used to
     be a global `attachment_text` count. That is what lets the four sum; the two
-    agreed on the live archive (9202) because only an allowlist *narrowed* after
-    extraction can separate them.
+    agreed on the live archive (9202) chiefly because only an allowlist
+    *narrowed* after extraction separates them — the case-folding divergence
+    above and a blob whose referencing messages were all deleted do too.
   - **`blobs_gave_up` is recoverable and `blobs_no_text` is not.** The former
-    clears with `localmail retry-failed-extractions`; the latter is the one-way
-    door documented under `SKIPPED_EXTRACTOR`, so a steady non-zero reading is
-    **normal** — the same shape as `body_lang_declined`. Break it down with
-    `SELECT extractor, count(*) FROM attachment_text WHERE extracted_text = ''
-    GROUP BY extractor`; a flat int payload was kept over a nested per-extractor
-    map so `--format text` stays one number per line.
-  - **The counters are one aggregate pass, not five queries**, because the
+    clears with `localmail retry-failed-extractions`; the latter is terminal by
+    design — no `retry-…` command reopens it, the deliberate escape hatch being
+    the `DELETE` documented under `SKIPPED_EXTRACTOR` — so a steady non-zero
+    reading is **normal**, the same shape as `body_lang_declined`. Break it down
+    with `SELECT extractor, count(*) FROM attachment_text WHERE extracted_text =
+    '' GROUP BY extractor`; a flat int payload was kept over a nested
+    per-extractor map so `--format text` stays one number per line.
+    **Only half of `blobs_gave_up` is listable**: the transient budget (#153)
+    writes no `failed_extractions` row, so `list-failed-extractions` shows the
+    poison-pill half only and a misconfigured OCR engine reads as "nothing
+    wrong". Query `transient_extractions` directly for the rest.
+  - **The invariant failure is operator-legible, and does not take the report
+    with it.** `QueueCountsInconsistent` is a named `ValueError` so
+    `search_status` can catch exactly it; the blob read is deliberately the
+    **last** one the command makes, so an attachment-side gap still prints the
+    embedding and `body_lang_*` counters (nulled blob keys, then a
+    `ClickException`) rather than discarding eleven healthy numbers and a raw
+    psycopg traceback. `QueueCounts.status_field_names()` / `.status_fields()`
+    derive the payload keys from the dataclass fields, so a bucket added to the
+    type cannot go missing from the command that exists to report it — the
+    hand-copied projection was the last place this drift could hide. `__bool__`
+    raises, like `SweepOutcome`'s (#259).
+  - **The partition is one aggregate pass, not five queries**, because the
     allowlist half is a correlated `EXISTS` over `messages.attachments` and is
-    essentially the whole cost of the command. It is **slow, and that is
-    pre-existing and untouched here**: on the 127k-message Mac archive the old
-    eligibility query alone measured **13:04** and the whole new command
-    **14:07**, matching the planner's 452,749 → 459,756 (the added LEFT JOINs
-    are index scans over ≤16k rows; the same `SubPlan` dominates both). The
-    cause is that `messages_attachments_gin` serves the containment predicate at
-    cost ~42 with a **constant** operand but is abandoned for a per-blob
-    `Seq Scan on messages` at cost ~36,203 once the operand correlates on
-    `b.sha256`. Filed as #280 — do not read it as a cost of this fix.
+    essentially the whole cost of the command. **Do not split it**: one
+    statement is one snapshot under READ COMMITTED, which is the only reason
+    `__post_init__` can treat a gap as a predicate bug rather than as a worker
+    committing mid-read — split, it becomes an intermittent crash on a live
+    archive. It is **slow, and that is pre-existing and untouched here**: on the
+    127k-message Mac archive the old eligibility query alone measured **13:04**
+    and the four-bucket pass **14:07**, matching the planner's 452,749 →
+    459,756 (the added LEFT JOINs are index scans over ≤16k rows; the same
+    `SubPlan` dominates both). The cause is that `messages_attachments_gin`
+    serves the containment predicate at cost ~42 with a **constant** operand but
+    is abandoned for a per-blob `Seq Scan on messages` at cost ~36,203 once the
+    operand correlates on `b.sha256`. Filed as #280 — do not read it as a cost
+    of this fix. `CLAIMABLE_TOTAL_SQL` was added after that measurement and is
+    **not** in the 14:07: it carries no `EXISTS`, only three primary-key lookups
+    per blob, so it should be negligible — but it is unmeasured on the live
+    archive, so confirm that when #280 is next profiled.
 - **Transient classification of third-party docling failures (#47)**:
   `extract_worker._is_transient` recognises only the narrow builtin
   `_TRANSIENT_EXC_TYPES` (`ConnectionError`/`TimeoutError`/`MemoryError`) plus

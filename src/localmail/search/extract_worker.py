@@ -239,7 +239,7 @@ def _claim_batch(conn: psycopg.Connection, cfg: SearchConfig) -> list[tuple]:
             ORDER BY b.first_seen_at
             LIMIT %(batch_size)s
             FOR UPDATE OF b SKIP LOCKED
-            """,  # noqa: S608
+            """,  # noqa: S608 — module constants, no caller input
             {
                 **extract_queue.cap_params(
                     max_retries=cfg.extract_worker_max_retries,

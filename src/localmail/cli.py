@@ -1177,11 +1177,19 @@ def search_status(ctx, fmt):
     The four `blobs_*` dispositions partition `blobs_eligible` the same way:
     `blobs_extracted` produced text, `blobs_no_text` was disposed of with an
     empty-text sentinel (skipped by size or type, extracted to nothing, or
-    healed), `blobs_gave_up` exhausted a retry budget (clear it with
-    `retry-failed-extractions`), and only `blobs_pending` is work the extract
-    worker will still claim. Break the sentinel bucket down with
+    healed), `blobs_gave_up` exhausted a retry budget, and only `blobs_pending`
+    is outstanding work. Break the sentinel bucket down with
     `SELECT extractor, count(*) FROM attachment_text WHERE extracted_text = ''
-    GROUP BY extractor`.
+    GROUP BY extractor`; clear `blobs_gave_up` with `retry-failed-extractions`
+    (`list-failed-extractions` shows only its poison-pill half — the transient
+    half of #153 writes no `failed_extractions` row).
+
+    `blobs_claimable` stands outside that partition: it is every blob the
+    extract worker will claim, allowlist and all, of which `blobs_pending` is
+    the allowlisted subset. The gap between them is blobs the worker will pick
+    up only to dispose of with a `type-skipped` row, so `blobs_pending` alone
+    can read as an empty queue while the worker still has thousands to burn
+    through (#216).
     """
     from localmail.db import open_pool
     from localmail.search import extract_queue, lang_detect
@@ -1205,10 +1213,6 @@ def search_status(ctx, fmt):
             row = cur.fetchone()
             assert row is not None
             failed = row[0]
-            # Both the claim predicate and the allowlist come from
-            # extract_queue, so this can never report work the worker will not
-            # claim — the drift that hid #251 and, on this half, #277.
-            blobs = extract_queue.fetch_queue_counts(conn, cfg.search)
             cur.execute("SELECT count(*) FROM attachment_chunks")
             row = cur.fetchone()
             assert row is not None
@@ -1244,6 +1248,24 @@ def search_status(ctx, fmt):
             row = cur.fetchone()
             assert row is not None
             body_lang_declined = row[0]
+            # Last, because it is the one read that can refuse to answer: its
+            # buckets must account for every eligible blob. Reading it here
+            # means an attachment-side inconsistency still reports the
+            # embedding and body_lang counters rather than taking them with it.
+            #
+            # Both the claim predicate and the allowlist come from
+            # extract_queue, so this can never report work the worker will not
+            # claim — the drift that hid #251 and, on this half, #277.
+            blob_counts: dict[str, int | None] = dict.fromkeys(
+                extract_queue.QueueCounts.status_field_names()
+            )
+            blobs_error: str | None = None
+            try:
+                blob_counts.update(
+                    extract_queue.fetch_queue_counts(conn, cfg.search).status_fields()
+                )
+            except extract_queue.QueueCountsInconsistent as exc:
+                blobs_error = str(exc)
     finally:
         pool.close()
     payload = {
@@ -1252,11 +1274,7 @@ def search_status(ctx, fmt):
         "chunks_embedded": chunks_embedded,
         "chunks_pending": chunks_total - chunks_embedded,
         "failed_embeddings": failed,
-        "blobs_eligible": blobs.eligible,
-        "blobs_extracted": blobs.extracted,
-        "blobs_no_text": blobs.no_text,
-        "blobs_gave_up": blobs.gave_up,
-        "blobs_pending": blobs.pending,
+        **blob_counts,
         "attachment_chunks_total": attachment_chunks_total,
         "attachment_chunks_embedded": attachment_chunks_embedded,
         "failed_extractions": failed_extractions_count,
@@ -1269,6 +1287,8 @@ def search_status(ctx, fmt):
     else:
         for k, v in payload.items():
             click.echo(f"{k:24s} {v}")
+    if blobs_error is not None:
+        raise click.ClickException(blobs_error)
 
 
 def _applied_revisions(conn: psycopg.Connection) -> set[str]:

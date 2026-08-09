@@ -12,6 +12,7 @@ from click.testing import CliRunner
 
 from localmail.cli import main
 from localmail.config import SearchConfig
+from localmail.search.extract_queue import QueueCounts, QueueCountsInconsistent
 
 
 def test_cli_extract_backfill_drains_queue(
@@ -56,9 +57,9 @@ def test_cli_search_status_reports_attachment_counts(
     result = runner.invoke(main, ["search-status", "--format", "json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert "blobs_eligible" in payload
-    assert "blobs_extracted" in payload
-    assert "blobs_pending" in payload
+    # Every field the counts type carries reaches the wire, derived from the
+    # type so a bucket added there cannot go missing from the report.
+    assert set(QueueCounts.status_field_names()) <= set(payload)
     assert "attachment_chunks_total" in payload
     assert "attachment_chunks_embedded" in payload
     assert "failed_extractions" in payload
@@ -152,26 +153,51 @@ def test_search_status_still_reports_genuinely_outstanding_blobs(
     payload = _search_status(monkeypatch, db_dsn)
     assert payload["blobs_pending"] == 1
     assert payload["blobs_extracted"] == 1
+    assert payload["blobs_claimable"] == 1
 
 
-def test_search_status_blob_buckets_sum_to_eligible(
+def test_search_status_reports_claimable_work_no_bucket_counts(
     monkeypatch, db_dsn, db_conn, cli_config
 ) -> None:
-    """Every eligible blob lands in exactly one bucket, so an operator can read
-    the four numbers as an account of the whole population."""
-    _seed_blob(db_conn, "fresh")
-    _seed_text(db_conn, _seed_blob(db_conn, "done"), "lightweight@1.0", "text")
-    _seed_text(db_conn, _seed_blob(db_conn, "skipped"), "type-skipped", "")
+    """`blobs_pending` is allowlist-scoped and the worker's claim is not, so on
+    an archive of images it reads zero while the worker still has claims to
+    burn (#216). `blobs_claimable` is what makes that visible."""
+    _seed_blob(db_conn, "image_1", "image/png")
+    _seed_blob(db_conn, "image_2", "image/png")
     db_conn.commit()
 
     payload = _search_status(monkeypatch, db_dsn)
-    assert (
-        payload["blobs_extracted"]
-        + payload["blobs_no_text"]
-        + payload["blobs_gave_up"]
-        + payload["blobs_pending"]
-        == payload["blobs_eligible"]
+    assert payload["blobs_eligible"] == 0
+    assert payload["blobs_pending"] == 0
+    assert payload["blobs_claimable"] == 2
+
+
+def test_search_status_survives_an_inconsistent_partition(
+    monkeypatch, db_dsn, db_conn, cli_config
+) -> None:
+    """An attachment-side predicate bug must not take the rest of the report
+    with it, and must not reach the operator as a traceback.
+
+    The blob read is deliberately last for this reason: the embedding and
+    body_lang counters — the ones #251 exists to make trustworthy — are
+    already gathered by the time it can refuse to answer.
+    """
+    def _boom(conn, cfg):
+        raise QueueCountsInconsistent("buckets do not sum: contrived")
+
+    monkeypatch.setattr(
+        "localmail.search.extract_queue.fetch_queue_counts", _boom
     )
+    monkeypatch.setattr("localmail.cli._dsn", lambda ctx: db_dsn)
+    result = CliRunner().invoke(main, ["search-status", "--format", "json"])
+
+    assert result.exit_code != 0
+    payload = json.loads(result.output.splitlines()[0])
+    assert payload["messages_total"] == 0
+    assert payload["body_lang_pending"] == 0
+    assert all(payload[k] is None for k in QueueCounts.status_field_names())
+    assert result.exception is None or not isinstance(result.exception, TypeError)
+    assert "Traceback" not in result.output
 
 
 def test_cli_list_failed_extractions(monkeypatch, db_dsn, db_conn) -> None:

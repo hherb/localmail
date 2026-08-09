@@ -11,11 +11,14 @@ of, which is where two defects live that no count can reveal.
 
 **#280 — the eligibility predicate must not correlate on the blob.** The
 extension half reads original filenames out of `messages.attachments` (#216).
-Written as a correlated ``EXISTS`` it was a `SubPlan` re-executed once per
-blob, and Postgres abandons ``messages_attachments_gin`` the moment the operand
-stops being a constant: cost ~36,203 per execution instead of ~42, measured at
-**13:04** for one counter on a 127k-message archive. Nothing about the
-*answers* changes when that is fixed, so only a plan assertion can pin it.
+Written as a correlated ``EXISTS`` it was a `SubPlan` re-executed once per blob,
+because ``messages_attachments_gin`` needs a constant operand and correlating on
+``b.sha256`` costs a ``Seq Scan on messages`` instead: session 21 measured the
+pre-fix eligibility counter alone at **13:04** on a 127k-message archive, of a
+**13:28.45** command that now runs in **0.97 s**. Nothing about the *answers*
+changes when that is fixed, so only a plan assertion can pin it — and it takes
+two, since the structural ``SubPlan`` walk is blind to a ``LEFT JOIN LATERAL``
+re-correlation and the ``Actual Loops`` count is vacuous without seeded rows.
 
 **#284 — the four buckets must partition the eligible population.** The sum
 check `QueueCounts.__post_init__` shipped with is implied by the partition but
@@ -24,10 +27,16 @@ correctly. `misfiled_count_sql` closes that, and is tested here against
 contrived bucket sets because the real predicates cannot be made to overlap
 from data alone — which is precisely why the guard is for a future *predicate*
 edit rather than for a future row.
+
+Its scope is one blob against the four buckets, so it does **not** cover a blob
+duplicated by a join fan-out: each duplicate still lands in exactly one bucket.
+That case is `test_extract_queue.py`'s `DISTINCT` pin, and nothing else.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import fields
@@ -129,7 +138,33 @@ def test_the_counts_query_derives_one_aggregate_per_bucket() -> None:
     moment either grew a bucket; derived, they cannot."""
     for name in extract_queue.BUCKET_WHERE_SQL:
         assert f"AS {name}" in extract_queue.QUEUE_COUNTS_SQL
-    assert "AS misfiled" in extract_queue.QUEUE_COUNTS_SQL
+
+
+def test_the_counts_query_carries_a_real_misfiled_aggregate() -> None:
+    """`misfiled` defaults to ``0``, so an aggregate that stopped arriving —
+    deleted, or degraded to a constant — would leave `class_row` filling that
+    default and the #284 guard silently off, reporting every archive healthy.
+
+    Asserted **without calling `misfiled_count_sql`**: comparing its output
+    against the SQL built from it is a tautology that survives replacing the
+    whole expression with ``0 AS misfiled``. What is checked instead is that
+    the shipped statement counts something derived from the buckets — each
+    predicate appears exactly twice, once as its own ``FILTER`` and once inside
+    the misfiled sum.
+    """
+    sql = extract_queue.QUEUE_COUNTS_SQL
+    assert "IS DISTINCT FROM 1" in sql
+    for predicate in extract_queue.BUCKET_WHERE_SQL.values():
+        assert sql.count(predicate) == 2
+
+
+def test_unreported_fields_are_queue_counts_fields() -> None:
+    """`_UNREPORTED_FIELDS` is matched against field names by string, so a
+    renamed field would desync it and start reporting a permanently-zero
+    ``blobs_*`` line — the noise the exclusion exists to prevent."""
+    assert extract_queue._UNREPORTED_FIELDS <= {
+        f.name for f in fields(extract_queue.QueueCounts)
+    }
 
 
 def test_bucket_count_sql_aliases_each_predicate_by_its_bucket_name() -> None:
@@ -328,8 +363,15 @@ def _scans_inside_a_subplan(
 
 
 def test_the_eligibility_query_reads_messages_outside_any_subplan(db_conn) -> None:
-    """#280's acceptance, as a plan property: one pass over `messages`, not one
-    per blob."""
+    """#280's acceptance as a structural property, holding at any scale.
+
+    Note this is stricter than "one pass, not one per blob": an *uncorrelated*
+    ``IN (SELECT DISTINCT …)`` is a single pass and still lands as a hashed
+    ``SubPlan``, so it fails here too. That is deliberate — it enforces the
+    ``LEFT JOIN`` the module argues for on ``work_mem`` grounds — but a reader
+    hitting this failure should look for that form as well as for a
+    correlation.
+    """
     plan = _plan_root(db_conn, extract_queue.QUEUE_COUNTS_SQL)
     assert _scans_inside_a_subplan(plan, "messages") == []
 
@@ -340,6 +382,88 @@ def test_the_pre_fix_predicate_reads_messages_inside_a_subplan(db_conn) -> None:
     fix replaced puts the scan exactly where the walk looks."""
     plan = _plan_root(db_conn, _PRE280_COUNTS_SQL)
     assert _scans_inside_a_subplan(plan, "messages") != []
+
+
+_PLAN_PROBE_BLOBS = 30
+
+
+def _seed_blobs_and_messages(conn: psycopg.Connection, *, blobs: int) -> None:
+    """Enough rows that the planner makes a real choice.
+
+    Load-bearing: on the empty tables `db_conn` yields, every form reports
+    ``Actual Loops = 0`` and the assertions below are vacuously true. The
+    structural `SubPlan` walk needs no rows; the loop count does.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, imap_host, auth_method)"
+            " VALUES ('plan', 'p@x', 'h', 'password') RETURNING id"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        for i in range(blobs):
+            sha = hashlib.sha256(f"plan-{i}".encode()).digest()
+            cur.execute(
+                "INSERT INTO attachment_blobs (sha256, path, mime_type, size_bytes)"
+                " VALUES (%s, %s, 'application/octet-stream', 10)",
+                (sha, f"/blobs/plan-{i}"),
+            )
+            cur.execute(
+                "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+                " headers, raw_bytes, size_bytes, attachments)"
+                " VALUES (%s, %s, %s, 's', '{}'::jsonb, %s, 1, %s::jsonb)",
+                (
+                    row[0],
+                    f"<plan-{i}>",
+                    sha,
+                    b"raw",
+                    json.dumps([{"filename": f"doc-{i}.pdf", "sha256": sha.hex()}]),
+                ),
+            )
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("ANALYZE attachment_blobs, messages")
+
+
+def _messages_scan_loops(conn: psycopg.Connection, sql: str) -> list[int]:
+    """How many times each scan of `messages` actually ran."""
+    with conn.cursor() as cur:
+        cur.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + sql, _PROBE_PARAMS)
+        row = cur.fetchone()
+        assert row is not None
+    loops: list[int] = []
+
+    def walk(node: dict) -> None:
+        if node.get("Relation Name") == "messages":
+            loops.append(node["Actual Loops"])
+        for child in node.get("Plans", []):
+            walk(child)
+
+    walk(row[0][0]["Plan"])
+    return loops
+
+
+def test_the_eligibility_query_reads_messages_once_not_once_per_blob(
+    db_conn,
+) -> None:
+    """The #280 property in the terms the docstring actually claims.
+
+    The `SubPlan` walk above recognises re-execution only in the shape the
+    pre-fix predicate had. A ``LEFT JOIN LATERAL`` re-correlation — the likeliest
+    accidental regression, since it keeps the join and merely makes it per-blob
+    — puts the scan under a Nested Loop instead and slips past it entirely.
+    ``Actual Loops`` is blind to the shape and counts the thing that cost 13
+    minutes.
+    """
+    _seed_blobs_and_messages(db_conn, blobs=_PLAN_PROBE_BLOBS)
+    assert _messages_scan_loops(db_conn, extract_queue.QUEUE_COUNTS_SQL) == [1]
+
+
+def test_the_pre_fix_predicate_reads_messages_once_per_blob(db_conn) -> None:
+    """The negative control for the assertion above, at a scale where the
+    difference is a number rather than a plan shape."""
+    _seed_blobs_and_messages(db_conn, blobs=_PLAN_PROBE_BLOBS)
+    assert _messages_scan_loops(db_conn, _PRE280_COUNTS_SQL) == [_PLAN_PROBE_BLOBS]
 
 
 def test_the_claim_query_never_reads_messages_at_all(db_conn) -> None:

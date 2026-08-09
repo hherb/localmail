@@ -58,7 +58,11 @@ _UNREPORTED_FIELDS = frozenset({"misfiled"})
 
 
 class QueueCountsInconsistent(ValueError):
-    """The four buckets failed to account for the eligible population.
+    """The four buckets are not a partition of the eligible population.
+
+    They overlap, leave a gap, or fail to sum — the first two being #284's
+    addition, and precisely the case where the buckets *do* account for the
+    population numerically.
 
     Named so `cli.search_status` can catch exactly this and report it to the
     operator, rather than over-catching every `ValueError` the DB layer might
@@ -79,41 +83,68 @@ All three joined tables key on ``sha256 PRIMARY KEY``, so no join can multiply
 a blob into two rows and inflate the counters.
 
 Shared with `extract_worker._claim_batch`, which runs it every sweep under
-``FOR UPDATE … SKIP LOCKED`` — so it stays three primary-key lookups per blob.
-The eligibility lookup, which reads every message, hangs off
-`QUEUE_COUNTS_FROM_SQL` instead.
+``FOR UPDATE OF b SKIP LOCKED``. It is on the worker's hot path, so the join
+keys stay three primary keys; the eligibility lookup, which reads every
+message, hangs off `QUEUE_COUNTS_FROM_SQL` instead. Note the ``OF b`` — a join
+added here must not put the locked relation on an outer join's nullable side,
+which Postgres rejects.
 """
 
 EXTENSION_MATCH_JOIN_SQL = """
     LEFT JOIN (
         SELECT DISTINCT a->>'sha256' AS sha256_hex
           FROM messages m, jsonb_array_elements(m.attachments) AS a
-         WHERE lower(substring(a->>'filename' FROM '.(\\.[^.]+)$'))
+         WHERE jsonb_typeof(m.attachments) = 'array'
+           AND lower(substring(a->>'filename' FROM '.(\\.[^.]+)$'))
                = ANY(%(extension_allowlist)s)
     ) ext ON ext.sha256_hex = encode(b.sha256, 'hex')
 """
 """Which blobs some message named with an allowlisted extension — resolved
 once for the whole archive, not once per blob (#280).
 
-Written as a correlated ``EXISTS`` this was a ``SubPlan``, and correlating the
-operand on ``b.sha256`` is exactly what makes Postgres abandon
-``messages_attachments_gin``: the containment predicate costs ~42 with a
-constant operand and ~36,203 as a per-blob ``Seq Scan on messages``, which on
-the 127k-message Mac archive measured **13:04** for one counter. As a
-decorrelated join the same answer takes ~70 ms.
+Written as a correlated ``EXISTS`` this was a ``SubPlan`` re-executed per blob,
+because correlating the operand on ``b.sha256`` is what makes Postgres abandon
+``messages_attachments_gin`` — that index needs a constant operand, and a
+per-blob one costs a ``Seq Scan on messages`` instead. Session 21 measured the
+pre-fix eligibility counter alone at **13:04** on the 127k-message Mac archive;
+the whole command went **13:28.45 → 0.97 s**.
+
+The shipped form does **not** restore the index plan: it is one
+``Seq Scan on messages`` + ``HashAggregate`` for the whole archive, i.e. the
+scan paid once instead of once per blob. (``messages_attachments_gin``'s
+remaining user is `extract_worker._blob_filenames`, which does pass a constant.)
 
 **A ``LEFT JOIN`` rather than an uncorrelated ``IN (SELECT …)``**, which reads
-more simply and plans the same way *until* the hashed subplan outgrows
-``work_mem`` — at which point Postgres silently reverts to re-executing it per
-row and the fix is undone on precisely the large archives it was written for. A
-hash join spills to disk instead.
+more simply and plans the same way until the planner *estimates* the hashed
+subplan will not fit ``work_mem``, at which point it plans the per-row form
+instead and the fix is undone on precisely the large archives it was written
+for. The estimate is made at plan time from statistics, so bad statistics can
+choose that form on an archive that would have fit. A hash join spills to disk
+instead.
+
+``jsonb_typeof(m.attachments) = 'array'`` is a guard, not a filter. The
+correlated form carried ``m.attachments @> …``, a single-relation qual the
+planner pushed below the lateral, so ``jsonb_array_elements`` only ever saw
+arrays; decorrelated there is no restriction on ``m`` and every message is
+expanded. ``jsonb_array_elements`` raises ``22023`` on an object or a scalar,
+and ``messages.attachments`` is ``JSONB NOT NULL DEFAULT '[]'`` with no
+``CHECK`` — so one malformed row, from a restore or a hand ``UPDATE``, would
+abort the whole statement. No writer produces one today; this keeps the
+report's failure mode where #277 put it.
 
 ``DISTINCT`` is load-bearing: a blob is content-addressable and global, so
 every message carrying those bytes names it independently (#216), and without
-it a blob several messages named admissibly would fan out into one row per
-message — inflating ``eligible`` past the blob count and breaking the
-partition. It also matches `attachment_kind.is_allowlisted`'s "**any** one of
-its filenames" rule, which asks whether a match exists, not how many.
+it a blob several messages named admissibly fans out into one row per message,
+inflating every counter. It also matches `attachment_kind.is_allowlisted`'s
+"**any** one of its filenames" rule, which asks whether a match exists, not how
+many.
+
+**Neither runtime guard catches a missing ``DISTINCT``.** The fan-out
+multiplies ``eligible`` and the buckets equally — each duplicated row still
+matches exactly one bucket — so the sum holds and `misfiled` stays ``0``. The
+only visible symptom is `pending` diverging from `claimable`, which is #277's
+failure mode returning. `test_a_blob_two_messages_both_named_admissibly_is_counted_once`
+is the pin; it is load-bearing, not redundant.
 """
 
 QUEUE_COUNTS_FROM_SQL = QUEUE_FROM_SQL + EXTENSION_MATCH_JOIN_SQL
@@ -174,7 +205,8 @@ The one authority for *what the buckets are*: `QUEUE_COUNTS_SQL`'s aggregates,
 the misfiled check that guards their disjointness, and
 `QueueCounts.__post_init__`'s sum are all derived from it, so a fifth
 disposition cannot reach one and miss another. Adding a key without adding the
-matching field fails loudly at `class_row` construction.
+matching field raises when `class_row` builds the row — and, sooner and without
+a database, in `test_the_bucket_names_are_queue_counts_fields`.
 """
 
 ALLOWLISTED_WHERE_SQL = """
@@ -192,8 +224,8 @@ rather than as a subquery, so this predicate requires `QUEUE_COUNTS_FROM_SQL`,
 not `QUEUE_FROM_SQL`. Unparenthesised; combine it as ``WHERE (…)``.
 
 Two details exist only to keep the mirror exact, and both were divergences
-before #277's review found them. Both now live on the join that resolves the
-extension half, `EXTENSION_MATCH_JOIN_SQL`:
+before #277's review found them. Their extension halves now live on the join,
+`EXTENSION_MATCH_JOIN_SQL`; the MIME comparison's ``lower()`` stays here:
 
 * **Both sides of each comparison are lowercased.** `is_allowlisted` lowers the
   stored value *and* the configured one, so a ``config.toml`` carrying
@@ -248,8 +280,8 @@ QUEUE_COUNTS_SQL = f"""
 """The partition, in one pass.
 
 Aggregated rather than run as one statement per bucket because the allowlist
-half reads every message — still the dominant cost of `search-status` even
-decorrelated (#280), and there is no reason to pay for it more than once.
+half scans every message once (#280), and there is no reason to pay for that
+more than once over.
 
 **Do not split this into separate statements.** One statement is one snapshot
 under READ COMMITTED, which is what lets `QueueCounts.__post_init__` treat a
@@ -267,7 +299,7 @@ CLAIMABLE_TOTAL_SQL = f"""
 
 Its own statement because it must *not* carry `ALLOWLISTED_WHERE_SQL`, and it
 composes `QUEUE_FROM_SQL` rather than `QUEUE_COUNTS_FROM_SQL` so it never
-touches `messages` at all: three primary-key lookups per blob, no subquery.
+touches `messages` at all: three primary-key joins, no subquery.
 """
 
 

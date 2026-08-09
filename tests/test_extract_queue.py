@@ -15,13 +15,17 @@ partition counts only *allowlisted* blobs while the claim ignores the
 allowlist, so `pending` alone under-reports the worker's queue (`claimable` is
 the honest depth), and the SQL allowlist had drifted from the Python one it
 claims to mirror on case-folding and on dotfiles.
+
+These are all questions about what the counts *say* over a seeded archive. The
+statements themselves — which parameters they bind, how the partition is
+derived, and the plan the eligibility predicate produces (#280, #284) — are
+`test_extract_queue_sql.py`.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import re
 
 import pytest
 
@@ -50,116 +54,6 @@ def _cfg(**overrides) -> SearchConfig:
             **overrides,
         }
     )
-
-
-# --------------------------------------------------------------------------
-# Pure: the SQL fragments and the parameter helpers cannot drift apart
-# --------------------------------------------------------------------------
-
-
-def test_every_placeholder_in_the_sql_has_a_parameter_helper_key() -> None:
-    """A renamed placeholder must break here, not at runtime.
-
-    The fragments are strings, so a rename in one and not the other is
-    invisible until psycopg raises `ProgrammingError` on a real archive.
-    """
-    referenced = set(re.findall(r"%\((\w+)\)s", extract_queue.QUEUE_COUNTS_SQL))
-    supplied = set(
-        extract_queue.cap_params(max_retries=1, max_transient_retries=2)
-    ) | set(
-        extract_queue.allowlist_params(
-            mime_allowlist=["text/plain"], extension_allowlist=[".txt"]
-        )
-    )
-    assert referenced == supplied
-
-
-def test_claim_fragments_reference_only_the_cap_parameters() -> None:
-    """The claim has no allowlist half — it is applied in Python (#216)."""
-    referenced = set(
-        re.findall(
-            r"%\((\w+)\)s",
-            extract_queue.QUEUE_FROM_SQL + extract_queue.CLAIMABLE_WHERE_SQL,
-        )
-    )
-    assert referenced == set(
-        extract_queue.cap_params(max_retries=1, max_transient_retries=2)
-    )
-
-
-def test_the_claimable_total_query_has_no_allowlist_half() -> None:
-    """`claimable` is the worker's true queue depth, so it must not inherit the
-    report's allowlist scoping — that gap is the whole reason it exists."""
-    referenced = set(
-        re.findall(r"%\((\w+)\)s", extract_queue.CLAIMABLE_TOTAL_SQL)
-    )
-    assert referenced == set(
-        extract_queue.cap_params(max_retries=1, max_transient_retries=2)
-    )
-    assert "jsonb_array_elements" not in extract_queue.CLAIMABLE_TOTAL_SQL
-
-
-def test_allowlist_params_lowercases_both_allowlists() -> None:
-    """`attachment_kind.is_allowlisted` lowers the configured values as well as
-    the stored ones; the SQL assumes this half has already been done."""
-    params = extract_queue.allowlist_params(
-        mime_allowlist=["Application/PDF"], extension_allowlist=[".PDF"]
-    )
-    assert params == {
-        "mime_allowlist": ["application/pdf"],
-        "extension_allowlist": [".pdf"],
-    }
-
-
-def test_queue_counts_rejects_buckets_that_do_not_account_for_every_blob() -> None:
-    """The four buckets partition the eligible set; a gap is a predicate bug.
-
-    Reported rather than silently absorbed, because the number an operator
-    reads is the whole point of the command.
-    """
-    with pytest.raises(extract_queue.QueueCountsInconsistent, match="do not sum"):
-        extract_queue.QueueCounts(
-            eligible=10, extracted=1, no_text=1, gave_up=1, pending=1
-        )
-
-
-def test_queue_counts_accepts_a_partition() -> None:
-    counts = extract_queue.QueueCounts(
-        eligible=10, extracted=4, no_text=3, gave_up=2, pending=1
-    )
-    assert counts.eligible == 10
-
-
-def test_claimable_is_outside_the_partition_check() -> None:
-    """It comes from a second statement, so a worker committing between the two
-    can briefly put it below `pending`. Crashing over that race would be worse
-    than reporting it."""
-    counts = extract_queue.QueueCounts(
-        eligible=1, extracted=0, no_text=0, gave_up=0, pending=1, claimable=0
-    )
-    assert counts.claimable == 0
-
-
-def test_queue_counts_has_no_truth_value() -> None:
-    """`if counts:` is the implicit read that caused #251 and #259."""
-    counts = extract_queue.QueueCounts(
-        eligible=0, extracted=0, no_text=0, gave_up=0, pending=0
-    )
-    with pytest.raises(TypeError, match="no truth value"):
-        bool(counts)
-
-
-def test_status_field_names_covers_every_field() -> None:
-    """The CLI projects these onto its payload, so a bucket added to the type
-    must not be able to go missing from the command that reports it."""
-    counts = extract_queue.QueueCounts(
-        eligible=3, extracted=1, no_text=1, gave_up=1, pending=0, claimable=9
-    )
-    assert set(counts.status_fields()) == set(
-        extract_queue.QueueCounts.status_field_names()
-    )
-    assert counts.status_fields()["blobs_claimable"] == 9
-    assert counts.status_fields()["blobs_eligible"] == 3
 
 
 # --------------------------------------------------------------------------
@@ -427,10 +321,104 @@ def test_a_blob_allowlisted_only_by_its_original_filename_is_eligible(
     assert counts.pending == 1
 
 
+def _also_named(conn, sha: bytes, filename: str) -> None:
+    """Add a second message referencing the same blob under a different name.
+
+    A blob is content-addressable and global, so the same bytes arrive named
+    differently in every message that carried them — which is why
+    `attachment_kind.is_allowlisted` takes *filenames*, plural.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts WHERE name = 'acct'")
+        row = cur.fetchone()
+        assert row is not None
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " headers, raw_bytes, size_bytes, attachments)"
+            " VALUES (%s, %s, %s, 's', '{}'::jsonb, %s, %s, %s::jsonb)",
+            (
+                row[0],
+                f"<{filename}-{sha.hex()}>",
+                hashlib.sha256(f"{filename}{sha.hex()}".encode()).digest(),
+                b"raw",
+                1,
+                json.dumps([{"filename": filename, "sha256": sha.hex()}]),
+            ),
+        )
+
+
+def test_any_one_allowlisted_name_admits_a_blob_that_arrived_under_several(
+    db_conn,
+) -> None:
+    """The plural half of `is_allowlisted`: a scan saved as `scan.png` by one
+    sender and `scan.txt` by another is the same bytes, and either name
+    admits it."""
+    sha = _blob(db_conn, "shared", "application/octet-stream", filename="scan.png")
+    _also_named(db_conn, sha, "scan.txt")
+    db_conn.commit()
+    assert _counts(db_conn, _cfg()).eligible == 1
+
+
+def test_a_blob_two_messages_both_named_admissibly_is_counted_once(db_conn) -> None:
+    """The eligibility lookup joins against the *distinct* filenames across the
+    whole archive (#280). Without that, a blob every message names admissibly
+    fans out into one counted row per message, inflating every counter on the
+    busiest archives.
+
+    This test is the only thing standing there. Neither runtime guard catches
+    it: the fan-out multiplies `eligible` and the buckets equally, so each
+    duplicated row still matches exactly one bucket, the sum holds, and
+    `misfiled` stays 0. The symptom reaches the operator only as `pending`
+    diverging from `claimable` — #277's failure mode returning. Do not delete
+    this as redundant.
+    """
+    sha = _blob(db_conn, "shared", "application/octet-stream", filename="a.txt")
+    _also_named(db_conn, sha, "b.txt")
+    db_conn.commit()
+    counts = _counts(db_conn, _cfg())
+    assert counts.eligible == 1
+    assert counts.pending == 1
+
+
 def test_a_blob_neither_allowlist_admits_is_not_eligible(db_conn) -> None:
     _blob(db_conn, "photo", NOT_ALLOWLISTED_MIME, filename="photo.png")
     db_conn.commit()
     assert _counts(db_conn, _cfg()).eligible == 0
+
+
+@pytest.mark.parametrize("malformed", ['{"not": "an array"}', "null", "42", '"txt"'])
+def test_a_malformed_attachments_row_does_not_abort_the_report(
+    db_conn, malformed
+) -> None:
+    """``messages.attachments`` is ``JSONB NOT NULL DEFAULT '[]'`` with no
+    ``CHECK``, and ``jsonb_array_elements`` raises ``22023`` on anything that
+    is not an array.
+
+    The pre-#280 correlated form never met one: its ``@>`` containment was a
+    single-relation qual the planner pushed below the lateral, so only arrays
+    were ever expanded. Decorrelated there is no restriction on `messages` at
+    all, so without the ``jsonb_typeof`` guard one bad row — a restore, a hand
+    ``UPDATE`` — aborts the statement with a raw `psycopg.Error`. That escapes
+    `cli.search_status`'s deliberately narrow catch and takes the eleven
+    healthy embedding and `body_lang` counters with it, which is precisely what
+    reading the blob counts last is meant to prevent.
+    """
+    _blob(db_conn, "good", filename="notes.txt")
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts LIMIT 1")
+        row = cur.fetchone()
+        assert row is not None
+        cur.execute(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " headers, raw_bytes, size_bytes, attachments)"
+            " VALUES (%s, '<bad>', %s, 's', '{}'::jsonb, %s, %s, %s::jsonb)",
+            (row[0], hashlib.sha256(b"bad").digest(), b"raw", 1, malformed),
+        )
+    db_conn.commit()
+
+    counts = _counts(db_conn, _cfg())
+    assert counts.eligible == 1
+    assert counts.pending == 1
 
 
 # Cases chosen to cover both halves of the allowlist, the case-folding of each

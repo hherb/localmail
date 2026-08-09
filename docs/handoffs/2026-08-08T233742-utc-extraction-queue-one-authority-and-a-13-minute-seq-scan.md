@@ -2,16 +2,26 @@
 
 > **Status as of 2026-08-09 (session 21).** A **single-issue session**: the
 > operator picked **#277** off the carried robustness backlog. Fixed TDD-style
-> on `fix/277-blobs-pending-counts-sentinels`, commit **`85a2fed`**, opened as
-> **PR #281 — CI green, NOT merged**. `main` is still **`e471f25`**. One new
-> issue filed: **#280** (the eligibility query is a 13-minute per-blob seq
-> scan — measured, pre-existing, deliberately not fixed here).
+> on `fix/277-blobs-pending-counts-sentinels`, then put through a five-agent
+> review that found a real defect and sent it back for a second round. Two
+> commits — **`85a2fed`** (fix) + **`a0b73c9`** (review) — as **PR #281, CI
+> green, NOT merged**. `main` is still **`e471f25`**. Four issues filed:
+> **#280** (the eligibility query is a 13-minute per-blob seq scan — measured,
+> pre-existing), **#283**, **#284**, **#285** (all review fallout, all
+> deliberately out of scope).
+>
+> **Read section 1b before touching `extract_queue.py`.** The review found that
+> the fix had reintroduced its own bug class on the other side of the
+> allowlist — `blobs_pending` was *under*-reporting the worker's queue exactly
+> as the original over-reported it — and that the "SQL mirror" of the Python
+> allowlist had never actually mirrored it. Both are fixed; the reasoning is
+> the part a future session would undo.
 >
 > **Two pieces of good news that change the resume commands:**
 > 1. **The stale-NOTIFY fault has cleared.** Both gates pass and the full suite
 >    is **0 failed**. (Risk 2/16 of every handoff since session 17.)
 > 2. **The macOS `test_daemon_control_socket.py` deselect is obsolete** — #276
->    fixed it. **Run the suite with no `--deselect` at all: 2318 passed.**
+>    fixed it. **Run the suite with no `--deselect` at all: 2342 passed.**
 >
 > **Read "What we shipped" section 0 first:** session 20 shipped the 0.3.0
 > release and a version/socket fix and left **no handoff**, so the session-19
@@ -52,7 +62,7 @@ their own:
 
 Its review filed **#278** and **#279**, both still open (see What's next).
 
-### 1. PR #281 → commit `85a2fed` — the extraction queue has one authority (fixes #277)
+### 1a. PR #281 → commit `85a2fed` — the extraction queue has one authority (fixes #277)
 
 Branch `fix/277-blobs-pending-counts-sentinels`. **Open, CI green, unmerged.**
 No migration, no new dependency, no config change.
@@ -110,6 +120,94 @@ still claimable). `QueueCounts.__post_init__` **raises** when they fail to sum.
   per-extractor map breaks `--format text`'s one-number-per-line shape; the
   docstring and README carry the one-line SQL instead.
 
+### 1b. Commit `a0b73c9` — what the review sent back
+
+Five review agents (code, tests, errors, types, comments) ran against
+`85a2fed`. Four of five independently landed on the same defect, which is the
+one worth reading:
+
+**`blobs_pending` was not the worker's queue depth.** The four buckets are
+allowlist-scoped; `CLAIMABLE_WHERE_SQL` deliberately is not, because #216
+applies the allowlist in Python *after* the claim. So a non-allowlisted un-rowed
+blob is real work the worker will claim, and it appeared in **no bucket at
+all** — while the new README and CLI docstring both said "only `blobs_pending`
+is a backlog, and it does reach zero". On the archive #216 was filed about
+(16,542 blobs, 0/20 allowlisted in the next claim) that reads as an empty queue
+while the worker grinds. **#277's defect inverted, and the under-report is the
+quieter half.** The PR's own test encoded the gap — `assert len(claimed) ==
+counts.pending + 1` — under the name
+`test_pending_matches_exactly_what_the_worker_would_claim`.
+
+Fixed by `CLAIMABLE_TOTAL_SQL` → the new **`blobs_claimable`** counter. Three
+judgement calls in it, all load-bearing:
+
+- **Its own statement, not a fifth `FILTER`.** It must not inherit the
+  allowlist, and folding the allowlist into per-aggregate `FILTER`s instead of
+  the `WHERE` would evaluate that correlated `EXISTS` once *per aggregate*
+  rather than once per row — on a query #280 already measures at 14 minutes.
+- **Excluded from the partition check.** A second statement is a second
+  snapshot, so a worker committing between the two can briefly put `claimable`
+  below `pending`. Asserting otherwise would crash a read-only status command
+  over a race that resolves itself.
+- **`blobs_claimable` is not "pending done right"** — both numbers ship. The
+  gap between them is the actionable signal (blobs the worker will claim only
+  to `type-skipped`), and collapsing them loses it.
+
+**`ALLOWLISTED_WHERE_SQL` was not the mirror of `attachment_kind.is_allowlisted`
+its docstring claimed.** Two divergences, both verified against live Python and
+live Postgres before changing anything:
+
+- **Case-folding.** SQL compared MIME case-*sensitively* and never lowered the
+  **configured** values, while `is_allowlisted` lowers both sides. A
+  `config.toml` carrying `"Application/PDF"` or `".PDF"` therefore matched in
+  the worker and in **no counter**. This is the dangerous one: it makes SQL
+  under-count *uniformly*, so the partition still sums and nothing raises —
+  #277's failure mode wearing a different hat.
+- **Dotfiles.** `'\.[^.]+$'` matched the whole of a bare `.txt`, where
+  `Path(".txt").suffix` is `""` (a dotfile names no format). The regex is
+  `'.(\.[^.]+)$'` now — one character required ahead of the final dot.
+
+Pinned by a differential test over 12 inputs asserting SQL and Python agree,
+including `..txt` and `archive.tar.gz`. Both allowlists are lowered in
+`allowlist_params`, so the SQL fragment can assume a folded operand.
+
+**The extension half had never been true in any test.** No test seeded a
+`messages` row, so the correlated `EXISTS` implementing #216's "MIME **or**
+original-filename extension" rule was unconditionally false: mutating it to
+`FALSE AND EXISTS (…)` left all 26 tests green. Root cause is three near-copies
+of the blob-seeding helper, only one of which can seed `messages.attachments` —
+the new files copied the easy one. Coverage fixed here; the helper
+consolidation is **#283**.
+
+Smaller, same commit:
+
+- `QueueCountsInconsistent` (named, catchable) replaces a bare `ValueError`,
+  and the blob read moved **last** in `search_status`. It used to sit mid-
+  command, so an attachment-side gap discarded eleven already-computed
+  counters — including the `body_lang_*` half #251 exists to make trustworthy —
+  behind a raw psycopg traceback. Now: payload first (blob keys nulled), then a
+  `ClickException`.
+- `status_field_names()` / `status_fields()` derive the wire keys from the
+  dataclass fields. The hand-copied projection in `cli.py` was the last place
+  this drift could hide, and adding a sixth field is exactly the case that
+  would have exposed it.
+- Test caps were `3` / `5` under a comment claiming they were "distinct from
+  the production defaults" — they **were** the defaults, and a mutation making
+  `fetch_queue_counts` ignore its `cfg` passed all 21 tests. Now `2` / `7` with
+  narrowed allowlists.
+- The claim test compares **sets**, over a fixture whose bucket sizes are
+  pairwise distinct (2/4/6/5). Previously `gave_up == pending == 2`, so
+  swapping those two `FILTER`s passed it.
+- `_UNDER_RETRY_CAPS_SQL` is private (composed without the `t.sha256 IS NULL`
+  half it silently admits processed blobs), `__bool__` raises like
+  `SweepOutcome`'s, `slots=True`, `collections.abc.Sequence`.
+
+**The fixes were mutation-tested, because that is what caught the originals.**
+Seven mutations — case-sensitive MIME, reverted regex, un-lowered config,
+disabled extension half, swapped `pending`/`gave_up` FILTERs, `cfg` ignored,
+`claimable` inheriting the allowlist — all now fail the suite. None of them did
+before.
+
 ### 2. Issue #280 filed — measured, not fixed
 
 `search-status` takes **~14 minutes** on the Mac archive, and always has. The
@@ -119,24 +217,38 @@ with a *constant* operand but is abandoned for a per-blob **`Seq Scan on
 messages` at cost ~36,203** once the operand correlates on `b.sha256`.
 
 Both forms were measured so the fix could not be blamed for it: **old
-eligibility query alone 13:04**, **whole new command 14:07**, matching the
+eligibility query alone 13:04**, **the four-bucket pass 14:07**, matching the
 planner's 452,749 → 459,756. The added LEFT JOINs are index scans over ≤16k
 rows. Decorrelating (scan `messages` once into a CTE of `(sha256, extension)`
 pairs) is the obvious first move and needs no schema change.
 
+**Caveat added in the review round:** `CLAIMABLE_TOTAL_SQL` (the
+`blobs_claimable` query, §1b) landed *after* that measurement and is **not** in
+the 14:07. It carries no `EXISTS` — three primary-key lookups per blob — so it
+should be lost in the noise, but that is reasoning, not a reading. **Confirm it
+when #280 is next profiled**, and re-time the whole command rather than
+assuming the old number still describes it.
+
 ### 3. Verification (this Mac, all extras)
 
-- `unset VIRTUAL_ENV && uv run pytest -q` → **2318 passed, 1 skipped, 0
-  failed**, **with no `--deselect`**. `tests/test_daemon_control_socket.py`
-  passes 16/16 on macOS now.
+- `unset VIRTUAL_ENV && uv run pytest -q` → **2342 passed, 1 skipped, 0
+  failed**, **with no `--deselect`** (2318 at `85a2fed`; the review round added
+  24). `tests/test_daemon_control_socket.py` passes 16/16 on macOS now.
 - `unset VIRTUAL_ENV && uv run mypy src/localmail` → **Success, 140 source
   files** (139 + `search/extract_queue.py`).
+- `uv run ruff check` on every changed file → clean. Repo-wide it reports 131
+  pre-existing errors and there is no `[tool.ruff]` config and no CI step —
+  that is **#285**, not this PR.
 - Both NOTIFY gates pass: `pg_notification_queue_usage()` → `0` **and** `LISTEN
   daemon_commands` on `localmail_test` succeeds.
 - Every new test watched fail first. The two CLI tests failed as
   **`assert 4 == 0`** and **`assert 2 == 0`** against the pre-fix command — the
   defect itself, not a missing key.
-- CI green on PR #281 (pytest, PG pg18, Python 3.12, 3m17s).
+- Review round verified by **mutation** rather than by inspection: seven
+  mutations of `extract_queue.py` each fail the suite now and each passed it
+  before (§1b). Worth repeating the technique — it is what proved the original
+  tests were vacuous.
+- CI green on PR #281 at `a0b73c9` (pytest, PG pg18, Python 3.12, 3m07s).
 
 ## What's next
 
@@ -154,6 +266,15 @@ pairs) is the obvious first move and needs no schema change.
      unsure). A daemon restart is *not* required for the counter — it is a CLI
      read — and `_claim_batch`'s rewrite is semantically identical to what is
      already deployed, so there is no urgency on the restart either.
+   - **Two numbers the pre-review handoff did not predict.** `blobs_claimable`
+     is new (§1b) and is expected to be **well above 0** on the Mac even though
+     `blobs_pending` is 0 — the archive holds ~16.6k blobs against 9,490
+     eligible, so most of the remainder are non-allowlisted images the worker
+     will claim and `type-skipped`. That is the counter working, not a
+     regression. And `blobs_eligible` may come in **above 9,490** now that the
+     MIME comparison is case-insensitive; if it does, the delta is blobs a
+     mixed-case allowlist entry had been silently excluding, and it should
+     equal the increase in `blobs_extracted`.
 
 ### 1. **#280 — decorrelate the eligibility query** *(new, and the natural follow-on)*
    Everything needed is in the issue: both plans, both wall-clock timings, three
@@ -172,6 +293,28 @@ pairs) is the obvious first move and needs no schema change.
      `build_hash` that `/v1/version` has **never** emitted, so the "Server
      build" row always shows `?` — while five test files mock the field and make
      it look covered. Either emit a build hash or delete the field end-to-end.
+
+### 2b. **#283, #284, #285 — the review's own fallout** *(new, all small)*
+   Filed rather than folded into `a0b73c9`, each for a stated reason:
+   - **#283 — one shared blob-seeding test helper.** Three near-copies exist
+     and only `test_extract_worker_allowlist.py`'s can seed
+     `messages.attachments`; the #277 tests copied the easy one, which is
+     precisely why the extension half of the allowlist went untested. Coverage
+     is fixed; the *shape* that caused it is not. Mechanical, three test files,
+     no production code.
+   - **#284 — check the partition, not just its sum.** `__post_init__` enforces
+     `sum == eligible`, but the docstring claims disjoint *and* jointly
+     exhaustive; a double-count plus a compensating drop passes. Disjointness is
+     currently structural (all four `FILTER`s pivot on `t.sha256 IS NULL`, then
+     on a `NOT NULL` column each) — but those facts live in three migration
+     files nothing links to. The fix is one more aggregate on the query #280
+     already calls pathological, so **do it alongside #280**, where it gets
+     profiled anyway.
+   - **#285 — every `# noqa: S608` in the tree is a dead directive.** `ruff
+     check --select S608 --ignore-noqa` reports nothing on these files; the rule
+     never fired. There is no `[tool.ruff]` config and no CI step. Two separable
+     decisions (adopt ruff properly, or drop the directives and keep the
+     reasoning as plain comments) — worth deciding once, repo-wide.
 
 ### 3. **Admin GUI phase 5 — Users & ACL panel** *(carried, still the design's next slice)*
    `/v1/admin/users` is already `require_admin()` (bearer-capable) — **no backend
@@ -212,9 +355,11 @@ pairs) is the obvious first move and needs no schema change.
 ## Open decisions & risks
 
 1. **PR #281 is open, green, and yours to merge.** `main` is `e471f25`;
-   the branch is `fix/277-blobs-pending-counts-sentinels` at `85a2fed`.
-   **14 open issues** (13 carried + **#280** filed this session); #277 closes on
-   merge, taking it back to 13. 0 Dependabot alerts.
+   the branch is `fix/277-blobs-pending-counts-sentinels` at **`a0b73c9`**
+   (`85a2fed` fix + `a0b73c9` review round — read §1b).
+   **17 open issues** (13 carried + **#280**, **#283**, **#284**, **#285** filed
+   this session); #277 closes on merge, taking it back to 16. 0 Dependabot
+   alerts.
 2. **`search-status` takes ~14 minutes and that is #280, not a hang** *(new)*.
    It has always been this slow — measured 13:04 for the pre-fix eligibility
    query alone. Confirm with
@@ -268,7 +413,7 @@ pairs) is the obvious first move and needs no schema change.
     replaced the `tmp_path`-derived socket dir with one under the platform temp
     dir, so `tests/test_daemon_control_socket.py` passes 16/16 on macOS.
     `uv run pytest -q` with **no arguments** is now the right command:
-    **2318 passed, 1 skipped**.
+    **2342 passed, 1 skipped**.
 13. **Do not run the test suite while a backfill is draining — or while
     `search-status` is running** *(carried, extended)*. Shared-cluster
     contention produces dozens of false failures, and #280 means `search-status`
@@ -288,7 +433,7 @@ pairs) is the obvious first move and needs no schema change.
 16. **`uv sync` without extras silently downgrades a host** *(carried)*. Use
     `--all-extras` on the Mac and `--extra mcp --extra extraction` on the DGX.
     **`uv` is not on the DGX's default non-interactive PATH** — use
-    `~/.local/bin/uv` over SSH. The pytest count depends on the extras: **2318**
+    `~/.local/bin/uv` over SSH. The pytest count depends on the extras: **2342**
     with all extras on the Mac; fewer without (`mcp` alone gates 3 integration
     tests). CI installs only `--extra mcp`.
 17. **`ExtractorConfigurationError` subclasses `TransientExtractorError`, and
@@ -330,7 +475,7 @@ gh pr list; gh pr checks 281; gh issue list --limit 20
 # Python test suite. NO --deselect any more (risk 12).
 # Do NOT run while a backfill or search-status is in flight (risk 13).
 unset VIRTUAL_ENV && uv run pytest -q
-#   expect: 2318 passed, 1 skipped, 0 failed (all extras installed — risk 16)
+#   expect: 2342 passed, 1 skipped, 0 failed (all extras installed — risk 16)
 
 unset VIRTUAL_ENV && uv run mypy src/localmail
 #   expect: Success, 140 source files
@@ -368,8 +513,9 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
   && cargo clippy --all-targets -- -D warnings && cd ../..
 ```
 
-`main` tip is **`e471f25`** (PR #276). This session's work is **`85a2fed`** on
-`fix/277-blobs-pending-counts-sentinels`, **open as PR #281, CI green, not
-merged**. Latest migration **`0035_messages_body_lang_attempted_at.sql`**; next
-free slot `0036_*.sql` (this session adds none). **Open issues: 14** (13 after
-#281 merges closes #277). Dependabot: **0** open alerts.
+`main` tip is **`e471f25`** (PR #276). This session's work is **`85a2fed`** +
+**`a0b73c9`** on `fix/277-blobs-pending-counts-sentinels`, **open as PR #281, CI
+green at `a0b73c9`, not merged**. Latest migration
+**`0035_messages_body_lang_attempted_at.sql`**; next free slot `0036_*.sql`
+(this session adds none). **Open issues: 17** (16 after #281 merges closes
+#277). Dependabot: **0** open alerts.

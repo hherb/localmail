@@ -148,13 +148,18 @@ def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Ac
 # distribution metadata a second time, independently of `localmail.__version__`,
 # and the two disagree on a tree that was never installed — click raises
 # `RuntimeError` where every other reader degrades to `0.0.0+unknown`.
+# Pinned by test_version_single_source.py::test_cli_version_flag_is_derived_not_a_literal.
 @click.version_option(__version__)
 @click.option(
     "--config",
     "config_path",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Path to config.toml (default: $LOCALMAIL_CONFIG or ~/.config/localmail/config.toml).",
+    help=(
+        "Path to config.toml (default: $LOCALMAIL_CONFIG, else "
+        "$XDG_CONFIG_HOME/localmail/config.toml, else "
+        "~/.config/localmail/config.toml)."
+    ),
 )
 @click.pass_context
 def main(ctx: click.Context, config_path: Path | None) -> None:

@@ -6,8 +6,10 @@ from importlib.metadata import PackageNotFoundError, version as _package_version
 
 # `pyproject.toml` carries the only version literal in the Python tree. This
 # reads it back from the installed distribution metadata rather than repeating
-# it, so the two cannot disagree — and `/v1/version`, the one other reader,
-# goes through this attribute rather than looking it up again.
+# it, so the two cannot disagree — and every other reader (`/v1/version`, the
+# CLI's `--version`) goes through this attribute rather than looking it up
+# again. Phrased as an invariant, not a count: the count was "the one other
+# reader" until #279 added the second and did not update this line.
 #
 # Note the metadata is stamped at *install* time: an editable tree whose
 # pyproject was bumped without a re-sync reports the old version until the next

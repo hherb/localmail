@@ -7,16 +7,22 @@
 >
 > This session did two things: **deployed the DGX** (it was three commits
 > behind) and shipped **#279** — `localmail --version`, the flag the manual has
-> been telling users to run all along. One commit, **`8b752ef`**, open as
-> **PR #289**, **CI green, not merged**.
+> been telling users to run all along. **PR #289** (`8b752ef` + `31ebe44`), **CI
+> green, not merged**; **PR #290** carries this handoff, stacked on it.
+>
+> **A review round followed and it moved the tests, not the code.** The shipped
+> `--version` was correct; all three of its pins were weaker than they read, and
+> each was proven so by mutation before being tightened — see §2b.
 >
 > **Both #280 measurements are now confirmed on live archives, on two hosts:**
-> Mac **1.30 s**, DGX **0.756 s**. The 13½-minute era is over on both.
+> Mac **1.30 s** (13:28.45 before the fix), DGX **0.756 s** (never timed
+> pre-fix — the DGX figure confirms the fix generalises, it is not a
+> before/after).
 >
 > **One number in the last handoff was wrong and you should not trust it:** it
 > recorded `fix/280…` at **2358** tests. The branch as *merged* is **2366** —
 > its own review follow-ups added 8 more tests after that count was taken. See
-> risk 2, because a stale baseline is exactly what makes risk 17 misfire.
+> risk 2, because a stale baseline is exactly what makes risk 20 misfire.
 
 ## Project context (1-minute version)
 
@@ -37,6 +43,8 @@ in `gui/`). See [CLAUDE.md](CLAUDE.md), [README.md](README.md).
 ### 0. The DGX is deployed — `57ce228` → `76fef01`
 
 `git pull`, `~/.local/bin/uv sync --extra mcp --extra extraction`,
+`localmail init-db` (**"schema already up to date"** — #279 adds no migration,
+but keep the step: the recipe is reused for releases that do carry one),
 `systemctl --user restart localmail-daemon localmail-serve`. The sync moved
 **pypdf 6.14.2 → 6.15.0** (the two Dependabot advisories) and nothing else of
 substance. Both units `active`; five heartbeat rows (idle:1 / poll:1 / embed /
@@ -58,6 +66,13 @@ of with `type-skipped` rows long ago). It was never timed pre-fix on this host,
 so there is no before/after — only the confirmation that the fix generalises.
 
 ### 1. `search-status` re-measured on the Mac — 13:28.45 → **1.30 s**
+
+**Treat the baseline as "about a second", not as a specific number.** Three
+independent runs on this host have read **0.97 s** (#280's own, quoted in
+CLAUDE.md), **1.30 s** (this session) and **1.039 s** (the #289 review round).
+The spread is noise; there is no third measurement to reconcile and no
+regression hiding in it. The tripwire that matters is the order of magnitude —
+**seconds means healthy, minutes means #280 has regressed** (risk 3).
 
 Independent re-run of #280's headline claim on the live archive, unchanged
 command:
@@ -127,6 +142,12 @@ first — the first with `No such option '--version'`, i.e. the defect itself:
 | decorator removed | all three |
 | `version=__version__` | *green* — no false positive |
 | `__version__, package_name="localmail"` | *green* — no false positive |
+| `__version__ + "-dev"` | **was fully green — see §2b**; all three now |
+
+The `package_name` row is a *rejected alternative*, not the shipped code: #279's
+issue text suggested it, but an explicit `version=` short-circuits click's
+lookup entirely, so the kwarg is dead weight. Shipped is the bare
+`@click.version_option(__version__)`.
 
 **A process note worth keeping.** The first mutation run was invalid and I
 nearly recorded it as evidence: reverting mutation 1 with `git checkout
@@ -134,6 +155,37 @@ src/localmail/cli.py` discarded the *uncommitted fix* too, so "mutation 2" ran
 against a tree with no fix at all and produced a plausible-looking 3-failure
 result. Back up the file, don't `git checkout` an uncommitted change. Caught by
 noticing `Updated 0 paths from the index` on the second revert.
+
+### 2b. The review round — commit `31ebe44`, and why the tests moved
+
+A four-agent review of #289 found the **code correct** and all **three of its
+pins weaker than they read**. Each weakness was reproduced by mutation before
+being tightened, and each mutation is now caught. Do not relax these back.
+
+| what read as a pin | what it actually allowed | now |
+|---|---|---|
+| `__version__ in result.output` | `0.3.0-dev`, `0.3.0+local` on a `0.3.0` install — the exact wrong answers the flag exists to rule out | `_printed_version` anchors the tail |
+| regex ending `\b` | `@click.version_option(__version__ + "-dev")` — `\b` stops at the identifier and ignores what follows | ends `[,)]`; also strips comments and requires exactly one decorator in the file |
+| `isinstance(control.exception, FileNotFoundError)` | **nothing on CI.** `list-accounts` raises that from the *default* path too, so with no `~/.config/localmail/config.toml` it passed whether or not `$LOCALMAIL_CONFIG` was read | asserts the attempted `filename` |
+| `exit_code == 0` as the "no database" pin | **nothing anywhere Postgres is up** — i.e. CI and both deployments. A version callback reading `schema_migrations` passed every assertion | new `forbid_db` fixture makes any connection attempt fail |
+
+**The two general lessons**, both worth carrying:
+
+- **A negative control has to fail for the reason you name.** The
+  `list-accounts` control was added precisely so the config test would not be
+  "the value test with extra steps" — and on CI it was exactly that, because
+  the *default* path is also missing there. Verified by patching
+  `default_config_path` to ignore the variable: the old assertion stayed green.
+- **`exit_code == 0` is not an "it didn't touch X" assertion.** It only fires
+  when touching X *errors*. If the resource is healthy in every environment you
+  run in, the assertion is decoration. Assert structurally — forbid the call.
+
+Three prose claims were corrected alongside, all in this PR's own text:
+`__init__.py` still called `/v1/version` "the one other reader" after #279 added
+the second; the README said the global options "apply to every command" when
+they must *precede* the subcommand, and omitted `$XDG_CONFIG_HOME` from the
+`--config` chain; and "the only way to read the version" ignored `uv pip show
+localmail`.
 
 ### 3. Verification (this Mac, all extras)
 
@@ -184,7 +236,7 @@ noticing `Updated 0 paths from the index` on the second revert.
      `test_the_claim_join_shape_never_touches_messages`), so the running
      worker's behaviour is **identical**. One command if you want it tidy:
      `launchctl kickstart -k gui/$UID/com.localmail.daemon`. Not urgent, and
-     costs a startup blob-temp sweep (risk 16).
+     costs a startup blob-temp sweep (risk 19).
    - The DGX is already restarted and current.
 
 ### 1. **#278 — the version surface's other half** *(carried; needs YOUR decision first)*
@@ -201,6 +253,9 @@ noticing `Updated 0 paths from the index` on the second revert.
 ### 2. **#285 — ruff, repo-wide** *(carried)*
    Every `# noqa: S608` in the tree is a dead directive: `ruff check --select
    S608 --ignore-noqa` reports nothing on those files, so the rule never fired.
+   **The count keeps growing while the rule stays dead** — 7 at session 22, **9
+   now** across 5 files (`grep -rn "noqa: S608" src/ | wc -l`); #280 added two.
+   Whoever picks this up is deleting more than the issue text implies.
    There is no `[tool.ruff]` config and no CI step; repo-wide `ruff check`
    reports 131 pre-existing errors. Two separable decisions (adopt ruff
    properly, or drop the directives and keep the reasoning as plain comments) —
@@ -217,7 +272,7 @@ noticing `Updated 0 paths from the index` on the second revert.
    identity-based self-action rule. Mirror
    [serve/admin/users_panel_router.py](src/localmail/serve/admin/users_panel_router.py).
    Follow the Daemon-panel shape, and **stub the new API module in both
-   `AdminView.test.ts` and `MainView.test.ts`** (see risk 11).
+   `AdminView.test.ts` and `MainView.test.ts`** (see risk 14).
 
 ### 4. **Remaining robustness backlog** *(carried)*
    **#218** (GUI download commands buffer the full body before enforcing the
@@ -236,23 +291,28 @@ noticing `Updated 0 paths from the index` on the second revert.
    - **Residual implausible language labels are dominated by `ja`** (229 of the
      Mac's 350). 0.24% of labels; the confidence-floor lever was measured
      useless. If ever chased, **sample the `ja` rows first**.
-   - **The DGX drops remain uninvestigated and unexplained** (risk 3).
+   - **The DGX drops remain uninvestigated and unexplained** (risk 4).
    - **#269's suggestion 2** (blob-temp sweep off the critical path) — deferred
      in session 19; reopen only if cold-cache startups grow past tolerable.
 
 ## Open decisions & risks
 
-1. **One PR is open, green, yours to merge.** `main` is `76fef01`. **#289**
-   (`fix/279-cli-version-option` @ `8b752ef`) closes #279. **13 open issues**,
-   → 12 once it merges. **Dependabot: 0 open alerts** (session 22's two cleared
-   when #288 merged).
+1. **Two PRs are open, stacked, yours to merge — in order.** `main` is
+   `76fef01`. **#289** (`fix/279-cli-version-option`) closes #279; **#290**
+   (`docs/session-23-handoff`) carries this handoff and is based on #289, so
+   **merge #289 first, then retarget #290 to `main`**. Merging #290 as-is lands
+   the docs into the fix branch, not into `main`. **13 open issues**, → 12 once
+   #289 merges. **Dependabot: 0 open alerts** (session 22's two cleared when
+   #288 merged).
 2. **Test-count baselines: measure, don't subtract** *(new)*. The last handoff
    recorded `fix/280…` at **2358** and that number never matched `main`: #286's
    own review follow-ups added 8 more tests after the count was taken, so the
    merged branch is **2366**. Measured across the merge run:
    `57ce228` → **2343**, `bc5b556` (#286) → **2366**, `7842603` → 2366,
-   `76fef01` → 2366, this branch → **2369**. Cheap to check without a DB:
-   `uv run pytest --collect-only -q | tail -2`. This matters because risk 17
+   `76fef01` → 2366, this branch → **2369** (`31ebe44` tightened three existing
+   pins and added none, so the count did not move again). Cheap to check
+   without a DB:
+   `uv run pytest --collect-only -q | tail -2`. This matters because risk 20
    uses the count as a tripwire — a stale expected value makes a real
    regression look like the known number.
 3. **`search-status` is fast on BOTH hosts — stop budgeting minutes for it**
@@ -345,7 +405,10 @@ noticing `Updated 0 paths from the index` on the second revert.
     `skipped` count means an extra went missing** — check it rather than
     ignoring it. Verified present this session: `import docling` → OK, and the
     suite ran **0 skipped**. CI installs only `--extra mcp`, so its count
-    differs by design.
+    differs by design. **The skip to look for by name** is
+    `tests/test_extractor.py::test_pdf_pipeline_options_reflect_the_configured_engine`
+    (the #248 OCR-engine pin) — the "1 skipped" that sat in several handoffs
+    was this, and nobody looked.
 21. **`ExtractorConfigurationError` subclasses `TransientExtractorError`, and
     that subclassing *is* the #248 fix — do not "clean it up"** *(carried)*.
 22. **`run_embed_worker_once`'s `failure_log` defaults to the process-wide
@@ -362,6 +425,14 @@ noticing `Updated 0 paths from the index` on the second revert.
 25. **Run vitest from `gui/`, not the repo root** *(carried)*.
 26. **`cargo clippy --all-targets` is clean but ungated** *(carried)* — CI runs
     clippy without `--all-targets`, so `#[cfg(test)]` modules are never linted.
+27. **Do not "tidy up" `_PRE280_CORRELATED_ALLOWLIST_SQL`** *(carried — it was
+    dropped from the last handoff and the #289 review found it living nowhere
+    else)*. [`tests/test_extract_queue_sql.py:306`](tests/test_extract_queue_sql.py#L306)
+    holds the pre-#280 correlated predicate **on purpose**, as the negative
+    control that proves the plan assertions can fail — the same role
+    `--predicate-form pre75` plays in `run_browse_explain.py`. It reads like
+    dead code and is not. Filed for a durable home in the test file itself,
+    since a handoff has now lost it once.
 
 ## Exact commands to resume
 
@@ -372,9 +443,10 @@ git status                               # expect clean
 git branch --show-current
 git log --oneline origin/main..main      # expect 0
 
-# ONE PR is OPEN and GREEN, awaiting your merge (What's next, 0).
+# TWO PRs are OPEN and STACKED, awaiting your merge (What's next, 0).
+# Merge #289 first, THEN retarget #290 to main — #290's base is #289's branch.
 gh pr list
-gh pr checks 289
+for n in 289 290; do gh pr checks $n; done   # #290 is docs-only: no checks
 gh issue list --limit 20                 # 13 open; 12 once #289 merges
 
 # Dependabot: 0 open. A non-zero count right after a lockfile merge is scan
@@ -409,8 +481,11 @@ psql -h localhost -p 5532 -U localmail -d localmail -c \
 
 # The attachment counters — ABOUT ONE SECOND on both hosts (risk 3):
 unset VIRTUAL_ENV && uv run localmail search-status
-#   Mac  expect: blobs_eligible 9493 = 9205 + 106 + 182 + 0, claimable 0
-#   DGX  expect: blobs_eligible 4363 = 4145 +  91 + 127 + 0, claimable 0
+#   These MOVE as the archive grows (9491 -> 9493 -> 9495 within a day), so
+#   check the SHAPE, not the literals: the four buckets must sum to
+#   blobs_eligible, and claimable must equal pending.
+#   Mac  approx: blobs_eligible ~9.5k = ~9.2k + 106 + 182 + 0, claimable 0
+#   DGX  approx: blobs_eligible ~4.4k = ~4.1k +  91 + 127 + 0, claimable 0
 # If it takes minutes again that is a REGRESSION of #280:
 psql -h localhost -p 5532 -U localmail -d localmail -c \
   "SELECT now()-query_start, left(query,60) FROM pg_stat_activity

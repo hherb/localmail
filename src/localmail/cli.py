@@ -18,7 +18,7 @@ import psycopg
 
 import logging
 
-from . import __version__, secrets
+from . import __version__, __version_source__, secrets
 from .config import AccountConfig, Config, default_config_path, load_config
 from .daemon import Daemon
 from .daemon_accounts import account_config_from_row
@@ -54,6 +54,7 @@ from .secrets_store import refresh_username
 from .search import create_searcher
 from .sync import backfill_internal_date, retry_failed_messages, sync_account
 from .upgrade_estimate import ESTIMATORS, EstimateResult
+from .version_report import unknown_version_diagnostic
 
 #: `--older-than-days` is the operator-facing unit; the service layer takes
 #: seconds like every other duration in this codebase.
@@ -143,13 +144,55 @@ def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Ac
         ) from exc
 
 
+def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    """Print the version, and say so on stderr when it could not be determined.
+
+    Replaces `@click.version_option(__version__)` for two reasons, neither of
+    which that decorator can express (#291):
+
+    - **click's callback cannot reach stderr.** Its `message=` is echoed to
+      stdout, and stdout here is a machine-readable line that scripts parse —
+      the manual's install-verification step runs exactly this flag.
+    - **It never sees why the version is what it is.** `0.0.0+unknown` printed
+      with exit 0 and nothing else reports "could not be determined" in a format
+      indistinguishable from a success, at the one moment an operator is
+      diagnosing a broken install.
+
+    The version is still read from `localmail.__version__` rather than looked up
+    again: a second, independent lookup is what makes a *bare*
+    `@click.version_option()` wrong — click raises `RuntimeError` on a tree that
+    was never installed, where every other reader degrades to the sentinel.
+    Reading the module attribute at call time (not freezing it at decoration
+    time, which is what the decorator did) is also what lets the derivation be
+    pinned by rebinding it.
+
+    Exit stays 0 on the unknown path, deliberately: a non-zero status would
+    break every script using `--version` as a liveness check, and the stderr
+    line is what carries the diagnosis.
+    """
+    if not value or ctx.resilient_parsing:
+        return
+    # Matches click's own `%(prog)s, version %(version)s`, so the manual's
+    # expected output is unchanged.
+    click.echo(f"{ctx.find_root().info_name}, version {__version__}")
+    diagnostic = unknown_version_diagnostic(__version_source__)
+    if diagnostic is not None:
+        click.echo(diagnostic, err=True)
+    ctx.exit()
+
+
 @click.group()
-# Passed explicitly rather than letting click detect it: click would read the
-# distribution metadata a second time, independently of `localmail.__version__`,
-# and the two disagree on a tree that was never installed — click raises
-# `RuntimeError` where every other reader degrades to `0.0.0+unknown`.
-# Pinned by test_version_single_source.py::test_cli_version_flag_is_derived_not_a_literal.
-@click.version_option(__version__)
+# Not `@click.version_option(...)` in any spelling — see `_print_version`, and
+# test_version_single_source.py::test_cli_does_not_reintroduce_click_version_option,
+# which forbids it at source level.
+@click.option(
+    "--version",
+    is_flag=True,
+    expose_value=False,
+    is_eager=True,
+    callback=_print_version,
+    help="Show the version and exit.",
+)
 @click.option(
     "--config",
     "config_path",

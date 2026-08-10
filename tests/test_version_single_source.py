@@ -30,6 +30,7 @@ is not expressible, by design.
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.metadata
 import json
@@ -45,51 +46,55 @@ from click.testing import CliRunner
 import localmail
 from localmail.cli import main
 from localmail.serve.routes.version import SERVER_VERSION
+from localmail.version_report import (
+    UNKNOWN_VERSION,
+    VersionSource,
+    unknown_version_diagnostic,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: Accepts the positional and the `version=` spelling, and nothing else — a
-#: bare `@click.version_option()` (which makes click look the version up
-#: itself) has to fail this as surely as a hardcoded literal does. See
-#: `test_cli_version_flag_is_derived_not_a_literal`.
-#:
-#: The trailing `[,)]` is load-bearing: `\b` alone stops at the end of the
-#: identifier and ignores whatever follows, so `__version__ + "-dev"` and
-#: `__version__, message="…+local"` both matched while printing a version that
-#: is not `__version__`. Neither is caught by the value tests either, because
-#: those assert on the *tail* of the output rather than a substring of it.
-_CLI_VERSION_OPTION_RE = re.compile(
-    r"@click\.version_option\(\s*(?:version=)?__version__\s*[,)]"
-)
+def _mentions_version_option(source: str) -> bool:
+    """True if the module's *code* references click's `version_option` at all.
 
-#: Every spelling of the decorator, so the shape check above cannot be
-#: satisfied by a compliant call while a second, bare one sits elsewhere in the
-#: file — `re.search` only needs one match.
-_ANY_VERSION_OPTION_RE = re.compile(r"@click\.version_option\(")
+    An AST walk rather than a regex, because the rationale for not using that
+    decorator necessarily quotes its spelling — in the comment beside the
+    replacement option and in `_print_version`'s docstring. #279's regex-over-
+    stripped-comments approach handled the comment and not the docstring, so
+    writing the reason down broke the pin that enforces it. Prose is not code,
+    and the AST is where that distinction already lives.
 
-
-def _code_lines(source: str) -> str:
-    """Drop whole-line comments so a pin cannot be satisfied by prose.
-
-    The rationale for this decorator is repeated in a comment directly above
-    it; without this, editing the decorator while leaving the comment behind
-    would still pass.
+    Catches the attribute form (`click.version_option`), a bare name from
+    `from click import version_option`, and the import itself.
     """
-    return "\n".join(
-        line for line in source.splitlines() if not line.lstrip().startswith("#")
-    )
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr == "version_option":
+            return True
+        if isinstance(node, ast.Name) and node.id == "version_option":
+            return True
+        if isinstance(node, ast.ImportFrom) and any(
+            alias.name == "version_option" for alias in node.names
+        ):
+            return True
+    return False
 
 
-def _printed_version(output: str) -> str:
-    """The version token from `click.version_option`'s `%(prog)s, version %(v)s`.
+def _printed_version(stdout: str) -> str:
+    """The version token from the `%(prog)s, version %(v)s` line.
 
     Anchored on the tail rather than matched as a substring: `in` is satisfied
     by `0.3.0-dev` and `0.3.0+local` on a `0.3.0` install, i.e. by exactly the
     wrong answers the flag exists to rule out. The prog name is deliberately not
     asserted — it is `main` under `CliRunner` and `localmail` via the console
     script, and neither is what these tests are about.
+
+    **Pass `result.stdout`, never `result.output`.** In click 8.4 `output` is
+    stdout and stderr concatenated, so once #291 put a diagnostic on stderr the
+    tail anchor started reading from whichever stream spoke last — and the
+    diagnostic contains the word "version". Reading stdout is also the honest
+    assertion: the machine-readable line is what stdout is *for* here.
     """
-    return output.strip().rpartition("version ")[2]
+    return stdout.strip().rpartition("version ")[2]
 
 
 @pytest.fixture
@@ -105,6 +110,25 @@ def forbid_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("localmail.db.open_pool", _forbidden)
     monkeypatch.setattr("psycopg.connect", _forbidden)
+
+
+@pytest.fixture
+def unknown_version(monkeypatch: pytest.MonkeyPatch):
+    """Put the CLI in the state where the metadata could not be read.
+
+    Rebinds what the callback actually reads — the two module attributes `cli`
+    imported from the package — rather than stubbing `importlib.metadata` and
+    reloading two modules. The resolution itself is pinned separately, on
+    `resolve_version` (`test_version_report.py`) and on the package attributes
+    (`test_the_fallback_records_which_failure_produced_it`); these tests are
+    about what the *flag* does with the answer.
+    """
+
+    def _install(source: VersionSource) -> None:
+        monkeypatch.setattr("localmail.cli.__version__", UNKNOWN_VERSION)
+        monkeypatch.setattr("localmail.cli.__version_source__", source)
+
+    return _install
 
 
 def _pyproject_version() -> str:
@@ -166,7 +190,37 @@ def test_absent_distribution_falls_back(reimported_localmail: Any) -> None:
     def _raise(_name: str) -> str:
         raise importlib.metadata.PackageNotFoundError(_name)
 
-    assert reimported_localmail(_raise).__version__ == "0.0.0+unknown"
+    assert reimported_localmail(_raise).__version__ == UNKNOWN_VERSION
+
+
+def test_a_readable_version_is_sourced_as_installed(reimported_localmail: Any) -> None:
+    """`__version_source__` sits beside `__version__` so a reader can tell a
+    real version from the sentinel without string-matching it (#291).
+
+    Resolved **once**, at package import, and exported — not re-derived by each
+    reader. A second independent lookup is the exact footgun a bare
+    `@click.version_option()` carries: same question, different failure
+    semantics, answers that diverge precisely where the guards earn their keep.
+    """
+    reloaded = reimported_localmail(lambda _name: "1.2.3+sentinel")
+    assert reloaded.__version_source__ is VersionSource.INSTALLED
+
+
+def test_the_fallback_records_which_failure_produced_it(
+    reimported_localmail: Any,
+) -> None:
+    """The sentinel alone cannot say whether anything is installed, and the two
+    remedies differ — so the cause travels with it."""
+
+    def _raise(_name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(_name)
+
+    assert reimported_localmail(_raise).__version_source__ is (
+        VersionSource.NOT_INSTALLED
+    )
+    assert reimported_localmail(lambda _name: None).__version_source__ is (
+        VersionSource.METADATA_INCOMPLETE
+    )
 
 
 def test_version_less_metadata_falls_back(reimported_localmail: Any) -> None:
@@ -201,7 +255,7 @@ def test_cli_version_flag_reports_the_package_version() -> None:
     """
     result = CliRunner().invoke(main, ["--version"])
     assert result.exit_code == 0, result.output
-    assert _printed_version(result.output) == localmail.__version__
+    assert _printed_version(result.stdout) == localmail.__version__
 
 
 def test_cli_version_flag_needs_no_config_or_database(
@@ -235,7 +289,7 @@ def test_cli_version_flag_needs_no_config_or_database(
         control = runner.invoke(main, ["list-accounts"], env=env)
 
     assert result.exit_code == 0, result.output
-    assert _printed_version(result.output) == localmail.__version__
+    assert _printed_version(result.stdout) == localmail.__version__
 
     assert isinstance(control.exception, FileNotFoundError)
     assert control.exception.filename is not None
@@ -245,27 +299,125 @@ def test_cli_version_flag_needs_no_config_or_database(
 
 
 def test_cli_version_flag_is_derived_not_a_literal() -> None:
-    """Pins the derivation at source level, for the reason
-    `test_gui_client_version_is_injected_not_a_literal` does: the value test
-    above cannot tell a derivation from a literal that happens to match the
-    installed distribution, which is the normal state right after a release.
+    """Pins the derivation *behaviourally*, which the old source regex could not.
 
-    Two spellings are rejected, not one. A hardcoded string is the obvious
-    regression. The subtler one is a bare `@click.version_option()`, which
-    looks equivalent — click then reads the distribution metadata itself — but
-    adds a second, independent lookup that disagrees with `__version__` in
-    exactly the case the `or`/`except` guards in `localmail/__init__.py` exist
-    for: on a tree that was never installed click raises `RuntimeError` where
-    every other reader degrades to `0.0.0+unknown`.
-
-    Comments are stripped first, and the decorator is required to appear
-    exactly once: the rationale above lives in a comment beside the call, and
-    `re.search` is satisfied by any single match — so without both, prose or a
-    second bare decorator elsewhere in the file could carry the pin.
+    The value test above cannot tell a derivation from a literal that happens
+    to match the installed distribution — the normal state right after a
+    release — so #279 pinned the decorator's spelling with a regex instead.
+    #291 replaced the decorator with a callback, and this is the stronger
+    replacement rather than a looser one: rebinding the module attribute the
+    callback reads proves the printed value *comes from* `localmail.__version__`
+    at call time. A hardcoded string fails here; so does one assembled around
+    the attribute (`__version__ + "-dev"`), which is the case the regex needed a
+    trailing `[,)]` to catch and would still have missed inside an f-string.
     """
-    src = _code_lines((REPO_ROOT / "src/localmail/cli.py").read_text())
-    assert len(_ANY_VERSION_OPTION_RE.findall(src)) == 1
-    assert _CLI_VERSION_OPTION_RE.search(src)
+    monkeypatched = "9.9.9+sentinel"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("localmail.cli.__version__", monkeypatched)
+        result = CliRunner().invoke(main, ["--version"])
+
+    assert result.exit_code == 0, result.output
+    assert _printed_version(result.stdout) == monkeypatched
+
+
+def test_cli_does_not_reintroduce_click_version_option() -> None:
+    """`@click.version_option` must not come back, in any spelling.
+
+    It is the one property only source can express, and it is now stricter than
+    #279's version of this pin, which permitted the compliant
+    `@click.version_option(__version__)`. Two independent reasons to forbid it
+    outright:
+
+    - **It bypasses the diagnostic.** click's own callback prints the line and
+      exits; a version_option that happened to be passed `__version__` would
+      print `0.0.0+unknown` and say nothing, i.e. reinstate #291 exactly.
+    - **The bare form adds a second metadata reader.** click then looks the
+      version up itself, independently of `__version__`, and the two disagree
+      precisely where `version_report`'s guards earn their keep: on a tree that
+      was never installed click raises `RuntimeError` where every other reader
+      degrades to the sentinel.
+
+    Asserted over the AST, not the text: the reason above is written down in
+    `cli.py` too, and prose quoting a forbidden spelling must not be able to
+    satisfy — or, as happened here first, to break — a source pin.
+    """
+    src = (REPO_ROOT / "src/localmail/cli.py").read_text()
+    assert not _mentions_version_option(src)
+
+
+def test_cli_version_flag_says_nothing_on_stderr_when_the_version_is_known() -> None:
+    """The overwhelmingly common case must stay quiet, or the warning that
+    matters gets filtered out by habit."""
+    result = CliRunner().invoke(main, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+
+
+def test_cli_version_flag_reports_an_unknown_version_as_a_failure(
+    unknown_version: Any,
+) -> None:
+    """#291: the sentinel used to print with exit 0 and nothing else — "the
+    version could not be determined", in a format indistinguishable from a
+    successful answer, at the one moment an operator is diagnosing a broken
+    install. The stderr line is what carries the value.
+    """
+    unknown_version(VersionSource.NOT_INSTALLED)
+    result = CliRunner().invoke(main, ["--version"])
+
+    assert _printed_version(result.stdout) == UNKNOWN_VERSION
+    assert result.stderr == (
+        unknown_version_diagnostic(VersionSource.NOT_INSTALLED) or ""
+    ) + "\n"
+
+
+def test_cli_version_flag_keeps_the_diagnostic_off_stdout(
+    unknown_version: Any,
+) -> None:
+    """stdout stays exactly one machine-readable line.
+
+    Load-bearing, and the reason the diagnostic is not simply folded into
+    `version_option(message=…)`: `localmail --version` is scripted (the
+    manual's install-verification step), and a warning on stdout breaks every
+    naive parser of it — including `_printed_version` here, whose tail anchor
+    would read the diagnostic's own "version" instead.
+    """
+    unknown_version(VersionSource.METADATA_INCOMPLETE)
+    result = CliRunner().invoke(main, ["--version"])
+
+    assert len(result.stdout.splitlines()) == 1
+    assert _printed_version(result.stdout) == UNKNOWN_VERSION
+    assert result.stderr != ""
+
+
+def test_cli_version_flag_still_exits_zero_when_the_version_is_unknown(
+    unknown_version: Any,
+) -> None:
+    """An explicit decision, not an oversight (#291).
+
+    A non-zero exit would break every script that runs `--version` as a
+    liveness check, and it argues against the deliberate choice to degrade
+    gracefully rather than raise the way click's own lookup does. The report is
+    the remedy here; the exit status is not the channel for it.
+    """
+    unknown_version(VersionSource.NOT_INSTALLED)
+    assert CliRunner().invoke(main, ["--version"]).exit_code == 0
+
+
+def test_cli_version_flag_tells_the_two_unknown_causes_apart(
+    unknown_version: Any,
+) -> None:
+    """Both print the same sentinel, so the stderr line is the only thing that
+    can point at the right remedy — `uv sync` does not repair a dist-info that
+    is already present."""
+    unknown_version(VersionSource.NOT_INSTALLED)
+    never_installed = CliRunner().invoke(main, ["--version"]).stderr
+
+    unknown_version(VersionSource.METADATA_INCOMPLETE)
+    damaged = CliRunner().invoke(main, ["--version"]).stderr
+
+    assert never_installed != damaged
+    assert "--reinstall" in damaged
+    assert "--reinstall" not in never_installed
 
 
 def test_cargo_manifest_matches_pyproject() -> None:

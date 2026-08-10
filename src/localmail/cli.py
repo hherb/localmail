@@ -18,7 +18,7 @@ import psycopg
 
 import logging
 
-from . import secrets
+from . import __version__, secrets
 from .config import AccountConfig, Config, default_config_path, load_config
 from .daemon import Daemon
 from .daemon_accounts import account_config_from_row
@@ -144,6 +144,11 @@ def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Ac
 
 
 @click.group()
+# Passed explicitly rather than letting click detect it: click would read the
+# distribution metadata a second time, independently of `localmail.__version__`,
+# and the two disagree on a tree that was never installed — click raises
+# `RuntimeError` where every other reader degrades to `0.0.0+unknown`.
+@click.version_option(__version__)
 @click.option(
     "--config",
     "config_path",

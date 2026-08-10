@@ -61,6 +61,13 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 
 ## CLI
 
+Two options apply to every command. `--config PATH` overrides the config file
+(default `$LOCALMAIL_CONFIG`, else `~/.config/localmail/config.toml`).
+`localmail --version` prints the installed version; it reads no config and
+touches no database, so it still answers on a half-set-up host — and it is the
+only way to read the version on a machine running just the sync daemon, since
+`/v1/version` needs `serve`.
+
 ### Sync & accounts
 
 > **The database is canonical for accounts.** `config.toml` `[[accounts]]`

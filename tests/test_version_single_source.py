@@ -40,11 +40,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 
 import localmail
+from localmail.cli import main
 from localmail.serve.routes.version import SERVER_VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: Accepts the positional and the `version=` spelling, and nothing else — a
+#: bare `@click.version_option()` (which makes click look the version up
+#: itself) has to fail this as surely as a hardcoded literal does. See
+#: `test_cli_version_flag_is_derived_not_a_literal`.
+_CLI_VERSION_OPTION_RE = re.compile(
+    r"@click\.version_option\(\s*(?:version=)?__version__\b"
+)
 
 
 def _pyproject_version() -> str:
@@ -128,6 +138,61 @@ def test_serve_reports_the_package_version() -> None:
     end-to-end pin is in `test_serve_app_baseline.py::test_version_unauth`.
     """
     assert SERVER_VERSION == localmail.__version__
+
+
+def test_cli_version_flag_reports_the_package_version() -> None:
+    """`localmail --version` is the manual's install-verification step (#279).
+
+    Before this option existed it printed a usage error, i.e. it failed at the
+    one point where a user has no way to tell a broken install from a missing
+    flag. It is also the only way to read the version on a host running just
+    the sync daemon — `/v1/version` needs `serve`.
+    """
+    result = CliRunner().invoke(main, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert localmail.__version__ in result.output
+
+
+def test_cli_version_flag_needs_no_config_or_database() -> None:
+    """The flag answers "did my deploy land?", so it must answer it on a host
+    where nothing else works yet — no config file written, no Postgres running.
+
+    That rules out folding anything config- or DB-derived (a DSN, the applied
+    migration revision) into this output: the one moment an operator most needs
+    a version is the moment those lookups fail.
+
+    `list-accounts` is the negative control, and it is what stops this from
+    being the previous test with extra steps: it proves the pointed-nowhere
+    `LOCALMAIL_CONFIG` actually bites, so `--version` surviving it is a real
+    property of the flag rather than of an env var nothing reads.
+    """
+    env = {"LOCALMAIL_CONFIG": "./nonexistent/config.toml"}
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, ["--version"], env=env)
+        control = runner.invoke(main, ["list-accounts"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert localmail.__version__ in result.output
+    assert isinstance(control.exception, FileNotFoundError)
+
+
+def test_cli_version_flag_is_derived_not_a_literal() -> None:
+    """Pins the derivation at source level, for the reason
+    `test_gui_client_version_is_injected_not_a_literal` does: the value test
+    above cannot tell a derivation from a literal that happens to match the
+    installed distribution, which is the normal state right after a release.
+
+    Two spellings are rejected, not one. A hardcoded string is the obvious
+    regression. The subtler one is a bare `@click.version_option()`, which
+    looks equivalent — click then reads the distribution metadata itself — but
+    adds a second, independent lookup that disagrees with `__version__` in
+    exactly the case the `or`/`except` guards in `localmail/__init__.py` exist
+    for: on a tree that was never installed click raises `RuntimeError` where
+    every other reader degrades to `0.0.0+unknown`.
+    """
+    src = (REPO_ROOT / "src/localmail/cli.py").read_text()
+    assert _CLI_VERSION_OPTION_RE.search(src)
 
 
 def test_cargo_manifest_matches_pyproject() -> None:

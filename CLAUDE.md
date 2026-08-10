@@ -124,6 +124,7 @@ attachment tree without touching IMAP.
 ```bash
 uv sync                          # install deps
 uv run pytest                    # full test suite (skips DB tests if PG unreachable)
+uv run localmail --version       # installed version; reads no config, no DB (#279)
 uv run localmail init-db         # apply pending migrations
 uv run localmail list-accounts   # show config'd accounts and whether a secret is stored
 uv run localmail add-account N   # store password for account N (must exist in config.toml)
@@ -180,6 +181,25 @@ every command by `tests/test_cli_config_path.py`, which probes the DSN that
 reaches `open_pool`/`psycopg.connect`. `search.create_searcher(cfg=None)` still
 falls back to a no-path `load_config()` — that is the library default, where no
 click context exists, and is why `secrets.configure`'s pin is kept.
+
+**`--version` is the CLI's second reader of `localmail.__version__` (#279).**
+The manual's *install-verification* step tells users to run it, and it printed a
+usage error — failing at the one point where a user cannot tell a broken install
+from a missing flag. It also closes a real diagnostic gap: on a host running
+just the sync daemon the version was otherwise unobtainable without starting
+`serve` for `/v1/version`. **The version is passed to `click.version_option`
+explicitly**, never detected: a bare `@click.version_option()` makes click read
+the distribution metadata a *second* time, independently of `__version__`, and
+the two disagree exactly where `__init__.py`'s guards earn their keep — on a
+tree that was never installed click raises `RuntimeError` where every other
+reader degrades to `0.0.0+unknown`. Both spellings are rejected by a source-level
+pin in `tests/test_version_single_source.py`, for the same reason
+`test_gui_client_version_is_injected_not_a_literal` is source-level: comparing
+values cannot tell a derivation from a literal that happens to match the
+installed distribution, which is the normal state right after a release. The
+flag must stay config- and DB-free — the moment an operator most needs a version
+is the moment those lookups fail — which is pinned with `list-accounts` as a
+negative control proving the pointed-nowhere `LOCALMAIL_CONFIG` actually bites.
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)

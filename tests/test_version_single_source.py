@@ -195,8 +195,9 @@ def test_cli_version_flag_reports_the_package_version() -> None:
 
     Before this option existed it printed a usage error, i.e. it failed at the
     one point where a user has no way to tell a broken install from a missing
-    flag. It is also the only way to read the version on a host running just
-    the sync daemon — `/v1/version` needs `serve`.
+    flag. It is also the only `localmail` command that reports the version, so
+    on a host running just the sync daemon reading it otherwise meant starting
+    `serve` for `/v1/version`.
     """
     result = CliRunner().invoke(main, ["--version"])
     assert result.exit_code == 0, result.output

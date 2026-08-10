@@ -61,6 +61,18 @@ uv run localmail run        # foreground; supervise via systemd / launchd
 
 ## CLI
 
+Two **global** options go *before* the subcommand — `localmail --config PATH
+<command>`, not `localmail <command> --config PATH`, which is an error.
+
+`--config PATH` overrides the config file. The default is `$LOCALMAIL_CONFIG`,
+else `$XDG_CONFIG_HOME/localmail/config.toml`, else
+`~/.config/localmail/config.toml`.
+
+`localmail --version` prints the installed version; it reads no config and
+touches no database, so it still answers on a half-set-up host. It is the only
+`localmail` command that reports the version — on a machine running just the
+sync daemon, `/v1/version` would mean starting `serve`.
+
 ### Sync & accounts
 
 > **The database is canonical for accounts.** `config.toml` `[[accounts]]`

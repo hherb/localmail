@@ -40,11 +40,71 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 
 import localmail
+from localmail.cli import main
 from localmail.serve.routes.version import SERVER_VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: Accepts the positional and the `version=` spelling, and nothing else — a
+#: bare `@click.version_option()` (which makes click look the version up
+#: itself) has to fail this as surely as a hardcoded literal does. See
+#: `test_cli_version_flag_is_derived_not_a_literal`.
+#:
+#: The trailing `[,)]` is load-bearing: `\b` alone stops at the end of the
+#: identifier and ignores whatever follows, so `__version__ + "-dev"` and
+#: `__version__, message="…+local"` both matched while printing a version that
+#: is not `__version__`. Neither is caught by the value tests either, because
+#: those assert on the *tail* of the output rather than a substring of it.
+_CLI_VERSION_OPTION_RE = re.compile(
+    r"@click\.version_option\(\s*(?:version=)?__version__\s*[,)]"
+)
+
+#: Every spelling of the decorator, so the shape check above cannot be
+#: satisfied by a compliant call while a second, bare one sits elsewhere in the
+#: file — `re.search` only needs one match.
+_ANY_VERSION_OPTION_RE = re.compile(r"@click\.version_option\(")
+
+
+def _code_lines(source: str) -> str:
+    """Drop whole-line comments so a pin cannot be satisfied by prose.
+
+    The rationale for this decorator is repeated in a comment directly above
+    it; without this, editing the decorator while leaving the comment behind
+    would still pass.
+    """
+    return "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _printed_version(output: str) -> str:
+    """The version token from `click.version_option`'s `%(prog)s, version %(v)s`.
+
+    Anchored on the tail rather than matched as a substring: `in` is satisfied
+    by `0.3.0-dev` and `0.3.0+local` on a `0.3.0` install, i.e. by exactly the
+    wrong answers the flag exists to rule out. The prog name is deliberately not
+    asserted — it is `main` under `CliRunner` and `localmail` via the console
+    script, and neither is what these tests are about.
+    """
+    return output.strip().rpartition("version ")[2]
+
+
+@pytest.fixture
+def forbid_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make any database connection attempt fail loudly.
+
+    Both entry points, mirroring `test_cli_config_path.py::dsn_probe`:
+    `open_pool` for the pooled commands, `psycopg.connect` for the direct ones.
+    """
+
+    def _forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("--version must not open a database connection")
+
+    monkeypatch.setattr("localmail.db.open_pool", _forbidden)
+    monkeypatch.setattr("psycopg.connect", _forbidden)
 
 
 def _pyproject_version() -> str:
@@ -130,6 +190,84 @@ def test_serve_reports_the_package_version() -> None:
     assert SERVER_VERSION == localmail.__version__
 
 
+def test_cli_version_flag_reports_the_package_version() -> None:
+    """`localmail --version` is the manual's install-verification step (#279).
+
+    Before this option existed it printed a usage error, i.e. it failed at the
+    one point where a user has no way to tell a broken install from a missing
+    flag. It is also the only `localmail` command that reports the version, so
+    on a host running just the sync daemon reading it otherwise meant starting
+    `serve` for `/v1/version`.
+    """
+    result = CliRunner().invoke(main, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert _printed_version(result.output) == localmail.__version__
+
+
+def test_cli_version_flag_needs_no_config_or_database(
+    forbid_db: None,
+) -> None:
+    """The flag answers "did my deploy land?", so it must answer it on a host
+    where nothing else works yet — no config file written, no Postgres running.
+
+    That rules out folding anything config- or DB-derived (a DSN, the applied
+    migration revision) into this output: the one moment an operator most needs
+    a version is the moment those lookups fail.
+
+    Both halves are asserted structurally, because neither holds by accident:
+
+    - **The DB half needs `forbid_db`.** Asserting only `exit_code == 0` tests
+      nothing while Postgres is reachable, which it is on CI and on both
+      deployments — a version callback that read `schema_migrations` passed
+      every assertion this test used to make. `forbid_db` makes *any* connection
+      attempt fail regardless of whether a server is up.
+    - **The config half needs the control's `filename`.** `list-accounts` raises
+      `FileNotFoundError` from the *default* path too, so on a runner with no
+      `~/.config/localmail/config.toml` the bare `isinstance` check passed
+      whether or not `$LOCALMAIL_CONFIG` was read at all. Asserting the path it
+      actually tried is what makes the control discriminating — it fails if
+      `default_config_path` stops honouring the variable.
+    """
+    env = {"LOCALMAIL_CONFIG": "./nonexistent/config.toml"}
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, ["--version"], env=env)
+        control = runner.invoke(main, ["list-accounts"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert _printed_version(result.output) == localmail.__version__
+
+    assert isinstance(control.exception, FileNotFoundError)
+    assert control.exception.filename is not None
+    assert control.exception.filename.endswith("nonexistent/config.toml"), (
+        control.exception.filename
+    )
+
+
+def test_cli_version_flag_is_derived_not_a_literal() -> None:
+    """Pins the derivation at source level, for the reason
+    `test_gui_client_version_is_injected_not_a_literal` does: the value test
+    above cannot tell a derivation from a literal that happens to match the
+    installed distribution, which is the normal state right after a release.
+
+    Two spellings are rejected, not one. A hardcoded string is the obvious
+    regression. The subtler one is a bare `@click.version_option()`, which
+    looks equivalent — click then reads the distribution metadata itself — but
+    adds a second, independent lookup that disagrees with `__version__` in
+    exactly the case the `or`/`except` guards in `localmail/__init__.py` exist
+    for: on a tree that was never installed click raises `RuntimeError` where
+    every other reader degrades to `0.0.0+unknown`.
+
+    Comments are stripped first, and the decorator is required to appear
+    exactly once: the rationale above lives in a comment beside the call, and
+    `re.search` is satisfied by any single match — so without both, prose or a
+    second bare decorator elsewhere in the file could carry the pin.
+    """
+    src = _code_lines((REPO_ROOT / "src/localmail/cli.py").read_text())
+    assert len(_ANY_VERSION_OPTION_RE.findall(src)) == 1
+    assert _CLI_VERSION_OPTION_RE.search(src)
+
+
 def test_cargo_manifest_matches_pyproject() -> None:
     with (REPO_ROOT / "gui/src-tauri/Cargo.toml").open("rb") as fh:
         cargo = tomllib.load(fh)
@@ -169,3 +307,4 @@ def test_gui_client_version_is_injected_not_a_literal() -> None:
     src = (REPO_ROOT / "gui/src/screens/settings/SettingsAbout.svelte").read_text()
     assert "__APP_VERSION__" in src
     assert not re.search(r"""CLIENT_VERSION\s*=\s*["']""", src)
+

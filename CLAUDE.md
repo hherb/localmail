@@ -182,24 +182,44 @@ reaches `open_pool`/`psycopg.connect`. `search.create_searcher(cfg=None)` still
 falls back to a no-path `load_config()` — that is the library default, where no
 click context exists, and is why `secrets.configure`'s pin is kept.
 
-**`--version` is the CLI's second reader of `localmail.__version__` (#279).**
-The manual's *install-verification* step tells users to run it, and it printed a
-usage error — failing at the one point where a user cannot tell a broken install
-from a missing flag. It also closes a real diagnostic gap: on a host running
-just the sync daemon the version was otherwise unobtainable without starting
-`serve` for `/v1/version`. **The version is passed to `click.version_option`
-explicitly**, never detected: a bare `@click.version_option()` makes click read
-the distribution metadata a *second* time, independently of `__version__`, and
-the two disagree exactly where `__init__.py`'s guards earn their keep — on a
-tree that was never installed click raises `RuntimeError` where every other
-reader degrades to `0.0.0+unknown`. Both spellings are rejected by a source-level
-pin in `tests/test_version_single_source.py`, for the same reason
-`test_gui_client_version_is_injected_not_a_literal` is source-level: comparing
-values cannot tell a derivation from a literal that happens to match the
-installed distribution, which is the normal state right after a release. The
-flag must stay config- and DB-free — the moment an operator most needs a version
-is the moment those lookups fail — which is pinned with `list-accounts` as a
-negative control proving the pointed-nowhere `LOCALMAIL_CONFIG` actually bites.
+**`--version` is the second reader of `localmail.__version__`, after
+`/v1/version` (#279).** The manual's *install-verification* step tells users to
+run it, and it printed a usage error — failing at the one point where a user
+cannot tell a broken install from a missing flag. It also closes a real
+diagnostic gap: it is the only `localmail` command that reports the version, so
+on a host running just the sync daemon reading it meant starting `serve` for
+`/v1/version`. (`uv pip show localmail` still works — the claim is about the
+CLI's own surface, not about the value being unobtainable.) **The version is
+passed to `click.version_option` explicitly**, never detected: a bare
+`@click.version_option()` makes click read the distribution metadata a *second*
+time, independently of `__version__`, and the two disagree exactly where
+`__init__.py`'s guards earn their keep — on a tree that was never installed
+click raises `RuntimeError` where every other reader degrades to
+`0.0.0+unknown`. Both spellings are rejected by a source-level pin in
+`tests/test_version_single_source.py`, for the same reason
+`test_version_is_derived_not_a_literal` is: comparing values cannot tell a
+derivation from a literal that happens to match the installed distribution,
+which is the normal state right after a release.
+
+**Three pins, each of which was weaker than it read** (review of #289 — every
+one was proven by mutation, so do not relax them back):
+
+- The value assertions anchor the *tail* of the output (`_printed_version`),
+  because `__version__ in output` is also satisfied by `0.3.0-dev` and
+  `0.3.0+local` on a `0.3.0` install — the wrong answers the flag exists to
+  rule out.
+- The source pin's regex ends `[,)]`, not `\b`, for the same reason: `\b` stops
+  at the identifier and ignores a trailing ` + "-dev"`. It also strips comments
+  and requires exactly one `@click.version_option(` in the file, since the
+  rationale lives in a comment beside the call and `re.search` needs only one
+  match.
+- The config-free pin's `list-accounts` negative control asserts the
+  `FileNotFoundError`'s **filename**, not just its class. `list-accounts` raises
+  that from the *default* path too, so on any host without
+  `~/.config/localmail/config.toml` — i.e. CI — the class check passed whether
+  or not `$LOCALMAIL_CONFIG` was read at all. The DB half is asserted
+  structurally by the `forbid_db` fixture; `exit_code == 0` tested nothing while
+  Postgres was reachable, which it is on CI and both deployments.
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)

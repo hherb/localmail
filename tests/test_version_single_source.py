@@ -31,8 +31,10 @@ is not expressible, by design.
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib
 import importlib.metadata
+import io
 import json
 import re
 import tomllib
@@ -41,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from click.shell_completion import ShellComplete
 from click.testing import CliRunner
 
 import localmail
@@ -53,6 +56,12 @@ from localmail.version_report import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: The stdout contract: click's own `%(prog)s, version %(version)s`, which the
+#: manual's install-verification step and any script grepping it depend on.
+#: `_printed_version` alone cannot pin this — see its docstring.
+_VERSION_LINE_RE = re.compile(r"^\S[^\n]*, version (?P<version>\S+)\n\Z")
+
 
 def _mentions_version_option(source: str) -> bool:
     """True if the module's *code* references click's `version_option` at all.
@@ -88,11 +97,19 @@ def _printed_version(stdout: str) -> str:
     asserted — it is `main` under `CliRunner` and `localmail` via the console
     script, and neither is what these tests are about.
 
-    **Pass `result.stdout`, never `result.output`.** In click 8.4 `output` is
-    stdout and stderr concatenated, so once #291 put a diagnostic on stderr the
-    tail anchor started reading from whichever stream spoke last — and the
-    diagnostic contains the word "version". Reading stdout is also the honest
-    assertion: the machine-readable line is what stdout is *for* here.
+    **This helper cannot pin the line's shape, and must not be asked to.**
+    `rpartition` returns the whole string when the separator is absent, so
+    `"0.3.0"`, `"localmail, version 0.3.0"` and `"nonsense, version 0.3.0"` all
+    reduce to `"0.3.0"` here — deleting the documented `%(prog)s, version `
+    prefix would pass every assertion built on this. That contract is pinned
+    once, separately, by `test_cli_version_line_keeps_click_s_documented_format`
+    via `_VERSION_LINE_RE`.
+
+    **Pass `result.stdout`, never `result.output`.** Since click 8.2 `output`
+    interleaves stdout and stderr in write order, so once #291 put a diagnostic
+    on stderr the tail anchor started reading from whichever stream spoke last —
+    and the diagnostic contains the word "version". Reading stdout is also the
+    honest assertion: the machine-readable line is what stdout is *for* here.
     """
     return stdout.strip().rpartition("version ")[2]
 
@@ -232,7 +249,7 @@ def test_version_less_metadata_falls_back(reimported_localmail: Any) -> None:
     field as a non-optional String — fails the entire trust flow with an error
     naming no field.
     """
-    assert reimported_localmail(lambda _name: None).__version__ == "0.0.0+unknown"
+    assert reimported_localmail(lambda _name: None).__version__ == UNKNOWN_VERSION
 
 
 def test_serve_reports_the_package_version() -> None:
@@ -340,9 +357,53 @@ def test_cli_does_not_reintroduce_click_version_option() -> None:
     Asserted over the AST, not the text: the reason above is written down in
     `cli.py` too, and prose quoting a forbidden spelling must not be able to
     satisfy — or, as happened here first, to break — a source pin.
+
+    `daemon_cli.py` is covered as well as `cli.py`: it defines a second click
+    group that `cli.py` mounts with `main.add_command(daemon_group)`, so a
+    `version_option` added there would attach to the same `localmail` CLI while
+    sitting outside a `cli.py`-only pin.
     """
-    src = (REPO_ROOT / "src/localmail/cli.py").read_text()
-    assert not _mentions_version_option(src)
+    for module in ("src/localmail/cli.py", "src/localmail/daemon_cli.py"):
+        assert not _mentions_version_option(
+            (REPO_ROOT / module).read_text()
+        ), module
+
+
+def test_cli_version_line_keeps_click_s_documented_format() -> None:
+    """stdout is `%(prog)s, version %(version)s` — one line, prefix included.
+
+    The prefix is a contract, not decoration: CLAUDE.md and `_print_version`'s
+    own comment promise the output is unchanged from `click.version_option`,
+    and the manual's install-verification step prints it for a human to read.
+    Nothing else pins it — `_printed_version` reduces a bare `0.3.0`, the real
+    line, and `nonsense, version 0.3.0` to the same token (see its docstring),
+    so every other assertion in this module survives deleting the prefix
+    outright. This is the one test that would not.
+    """
+    result = CliRunner().invoke(main, ["--version"])
+
+    assert result.exit_code == 0, result.output
+    match = _VERSION_LINE_RE.match(result.stdout)
+    assert match is not None, repr(result.stdout)
+    assert match.group("version") == localmail.__version__
+
+
+def test_cli_version_flag_stays_silent_during_completion() -> None:
+    """Shell completion must not see the version line.
+
+    click sets `resilient_parsing` while resolving completions, and the
+    callback returns early on it. Without that guard the version is echoed into
+    the completion protocol stream the shell parses, so `localmail --version
+    <TAB>` offers `localmail, version 0.3.0` as a candidate — for every user
+    with completion installed. The guard is one clause in `_print_version` and
+    nothing else holds it there.
+    """
+    buffer = io.StringIO()
+    completer = ShellComplete(main, {}, "localmail", "_LOCALMAIL_COMPLETE")
+    with contextlib.redirect_stdout(buffer):
+        completer.get_completions(["--version"], "")
+
+    assert buffer.getvalue() == ""
 
 
 def test_cli_version_flag_says_nothing_on_stderr_when_the_version_is_known() -> None:

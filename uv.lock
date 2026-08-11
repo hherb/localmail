@@ -1261,7 +1261,7 @@ dev = [
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "chardet", specifier = ">=5.2" },
-    { name = "click", specifier = ">=8.1" },
+    { name = "click", specifier = ">=8.2" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "docling", marker = "extra == 'extraction'", specifier = ">=2.94.0" },
     { name = "fastapi", specifier = ">=0.115" },

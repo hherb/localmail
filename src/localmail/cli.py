@@ -158,18 +158,26 @@ def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> 
       indistinguishable from a success, at the one moment an operator is
       diagnosing a broken install.
 
-    The version is still read from `localmail.__version__` rather than looked up
-    again: a second, independent lookup is what makes a *bare*
+    The version is still resolved once, by the package, rather than looked up
+    again here: a second, independent lookup is what makes a *bare*
     `@click.version_option()` wrong — click raises `RuntimeError` on a tree that
     was never installed, where every other reader degrades to the sentinel.
-    Reading the module attribute at call time (not freezing it at decoration
-    time, which is what the decorator did) is also what lets the derivation be
-    pinned by rebinding it.
+
+    The value comes from the module-global `__version__` that this module
+    imported from the package — read at call time, not frozen at decoration
+    time the way the decorator's argument was, which is what lets the
+    derivation be pinned by rebinding `localmail.cli.__version__`. Rebinding
+    `localmail.__version__` does *not* reach it: `from . import __version__`
+    creates an independent binding.
 
     Exit stays 0 on the unknown path, deliberately: a non-zero status would
     break every script using `--version` as a liveness check, and the stderr
     line is what carries the diagnosis.
     """
+    # `resilient_parsing` is set while click is resolving shell completions.
+    # Without this the version line is echoed into the completion protocol
+    # stream the shell parses — pinned by
+    # test_version_single_source.py::test_cli_version_flag_stays_silent_during_completion.
     if not value or ctx.resilient_parsing:
         return
     # Matches click's own `%(prog)s, version %(version)s`, so the manual's

@@ -74,10 +74,11 @@ touches no database, so it still answers on a half-set-up host. It is the only
 sync daemon, `/v1/version` would mean starting `serve`.
 
 If the version cannot be read at all it prints `0.0.0+unknown` and explains why
-**on stderr**, naming the fix — either nothing is installed (run `uv sync`, or
-`uv tool install localmail`) or the install is damaged (add `--reinstall`).
-stdout stays the single machine-readable version line, so scripts that parse it
-are unaffected, and the exit status stays `0`.
+**on stderr**, naming the exact command to run — either nothing is installed
+(`uv sync`, or `uv tool install localmail`) or the install is damaged, which
+needs reinstalling *over* what is there rather than adding to it. stdout stays
+the single machine-readable version line, so scripts that parse it are
+unaffected, and the exit status stays `0`.
 
 ### Sync & accounts
 

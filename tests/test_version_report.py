@@ -23,6 +23,7 @@ to the same string.
 from __future__ import annotations
 
 import importlib.metadata
+from enum import Enum
 
 import pytest
 
@@ -56,9 +57,14 @@ def test_readable_metadata_resolves_to_the_installed_version(metadata_version) -
 
 
 def test_absent_distribution_resolves_to_the_sentinel(metadata_version) -> None:
-    """A source tree that was never installed — `python -m localmail` from a
-    checkout, which is a first-class entry point (the 2B.4 supervisor launches
-    the daemon that way)."""
+    """The sources importable without their distribution metadata.
+
+    Not `python -m localmail` from a bare checkout — the src layout makes that
+    a `ModuleNotFoundError` before this branch is reached, and the 2B.4
+    supervisor runs `sys.executable -m localmail` against an interpreter where
+    the package *is* installed. The reachable shapes are `PYTHONPATH=src`, a
+    vendored copy of the tree, and a dist-info removed by a partial sync.
+    """
 
     def _raise(name: str) -> str:
         raise importlib.metadata.PackageNotFoundError(name)
@@ -105,10 +111,14 @@ def test_each_unknown_cause_names_a_distinct_remedy() -> None:
 
 
 def test_every_unknown_source_has_a_diagnostic() -> None:
-    """Exhaustiveness, for the reason `BUCKET_WHERE_SQL` is one authority: a
-    fourth cause added to the enum without a message would silently return
-    `None` — i.e. reinstate exactly the #291 defect for that cause, with the
-    flag looking healthy.
+    """Exhaustiveness — the backstop to the enum's own construction guard.
+
+    A cause with no message returns `None`, and `None` is also how this module
+    says "healthy, stay quiet": that is #291 itself one level up, with the flag
+    looking fine. Declaring the remedy on the member means *omitting* it now
+    raises `TypeError` at class creation, so the common slip cannot reach CI.
+    What construction cannot catch is a member written `("x", None)` on
+    purpose, which is what this test is for.
     """
     unmapped = [
         source
@@ -117,6 +127,28 @@ def test_every_unknown_source_has_a_diagnostic() -> None:
         and unknown_version_diagnostic(source) is None
     ]
     assert unmapped == []
+
+
+def test_a_cause_declared_without_a_remedy_fails_at_import() -> None:
+    """The construction guard the test above backstops.
+
+    `_DIAGNOSTICS`-as-a-dict made forgetting a remedy a silent `None`; the
+    member payload makes it a `TypeError` before the module finishes importing.
+    Reproduced on a stand-in rather than by mutating `VersionSource`, which
+    cannot be extended after creation.
+    """
+    with pytest.raises(TypeError, match="diagnostic"):
+
+        class _Incomplete(Enum):
+            diagnostic: str | None
+
+            def __new__(cls, value: str, diagnostic: str | None) -> "_Incomplete":
+                member = object.__new__(cls)
+                member._value_ = value
+                member.diagnostic = diagnostic
+                return member
+
+            FORGOTTEN = "no-remedy-supplied"
 
 
 def test_the_sentinel_is_named_not_repeated() -> None:

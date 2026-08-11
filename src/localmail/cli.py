@@ -54,6 +54,7 @@ from .secrets_store import refresh_username
 from .search import create_searcher
 from .sync import backfill_internal_date, retry_failed_messages, sync_account
 from .upgrade_estimate import ESTIMATORS, EstimateResult
+from .version_report import log_version_diagnostic
 
 #: `--older-than-days` is the operator-facing unit; the service layer takes
 #: seconds like every other duration in this codebase.
@@ -1756,6 +1757,14 @@ def serve_cmd(
         )
         imports_cfg = cfg.imports
         attachments_root = cfg.attachments.root
+
+    # Before the schema check, not after: that check exits non-zero on an
+    # unreachable Postgres, and `create_app` — which reports the version — is
+    # never reached. An operator whose install is damaged enough to lose its
+    # version has a fair chance of a host that is broken in other ways too,
+    # which is the same reasoning `Daemon.__init__` already acts on. The report
+    # is deduped per process, so `create_app`'s call below stays silent (#295).
+    log_version_diagnostic(logging.getLogger("localmail.serve"), __version_diagnostic__)
 
     try:
         pending = pending_migrations(dsn)

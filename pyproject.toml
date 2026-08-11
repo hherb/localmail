@@ -10,7 +10,11 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "chardet>=5.2",
-    "click>=8.1",
+    # 8.2 is the floor the *tests* need, not the runtime: `CliRunner` gained
+    # separately-captured stderr there (`mix_stderr` removed), and #291's
+    # diagnostic is asserted on `result.stderr`. On 8.1 those tests raise
+    # `ValueError: stderr not separately captured` rather than fail honestly.
+    "click>=8.2",
     "fastembed>=0.8.0",
     "google-auth>=2.30",
     "google-auth-oauthlib>=1.2",

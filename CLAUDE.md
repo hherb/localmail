@@ -125,6 +125,8 @@ attachment tree without touching IMAP.
 uv sync                          # install deps
 uv run pytest                    # full test suite (skips DB tests if PG unreachable)
 uv run localmail --version       # installed version; reads no config, no DB (#279)
+                                 #   stdout = the version line; stderr warns + names
+                                 #   the remedy when it cannot be read (#291)
 uv run localmail init-db         # apply pending migrations
 uv run localmail list-accounts   # show config'd accounts and whether a secret is stored
 uv run localmail add-account N   # store password for account N (must exist in config.toml)
@@ -190,16 +192,18 @@ diagnostic gap: it is the only `localmail` command that reports the version, so
 on a host running just the sync daemon reading it meant starting `serve` for
 `/v1/version`. (`uv pip show localmail` still works — the claim is about the
 CLI's own surface, not about the value being unobtainable.) **The version is
-passed to `click.version_option` explicitly**, never detected: a bare
-`@click.version_option()` makes click read the distribution metadata a *second*
-time, independently of `__version__`, and the two disagree exactly where
-`__init__.py`'s guards earn their keep — on a tree that was never installed
-click raises `RuntimeError` where every other reader degrades to
-`0.0.0+unknown`. Both spellings are rejected by a source-level pin in
-`tests/test_version_single_source.py`, for the same reason
-`test_version_is_derived_not_a_literal` is: comparing values cannot tell a
-derivation from a literal that happens to match the installed distribution,
-which is the normal state right after a release.
+never detected by click**: a bare `@click.version_option()` makes click read
+the distribution metadata a *second* time, independently of `__version__`, and
+the two disagree exactly where the resolution guards earn their keep — on a
+tree that was never installed click raises `RuntimeError` where every other
+reader degrades to `UNKNOWN_VERSION`.
+
+**#291 replaced the decorator outright**, so `@click.version_option` is now
+forbidden in `cli.py` **in every spelling**, not merely required to carry
+`__version__`. Two independent reasons, and the first is the new one: click's
+own callback prints and exits without ever consulting *why* the version is what
+it is, so even the compliant `@click.version_option(__version__)` printed
+`0.0.0+unknown` and said nothing. See the `version_report` section below.
 
 **Three pins, each of which was weaker than it read** (review of #289 — every
 one was proven by mutation, so do not relax them back):
@@ -208,11 +212,15 @@ one was proven by mutation, so do not relax them back):
   because `__version__ in output` is also satisfied by `0.3.0-dev` and
   `0.3.0+local` on a `0.3.0` install — the wrong answers the flag exists to
   rule out.
-- The source pin's regex ends `[,)]`, not `\b`, for the same reason: `\b` stops
-  at the identifier and ignores a trailing ` + "-dev"`. It also strips comments
-  and requires exactly one `@click.version_option(` in the file, since the
-  rationale lives in a comment beside the call and `re.search` needs only one
-  match.
+- The derivation pin was a source regex ending `[,)]`, not `\b` — `\b` stops at
+  the identifier and ignores a trailing ` + "-dev"`. **#291 retired the regex
+  for a behavioural pin**: it rebinds `localmail.cli.__version__` and asserts
+  the flag prints the rebound value. That is why `_print_version` reads the
+  module attribute at call time; the decorator froze it at *decoration* time,
+  which made it a literal from the callback's point of view (the mutation
+  proves it — the pin fails against the old decorator with
+  `assert '<installed version>' == '9.9.9+sentinel'`). It catches an
+  f-string-assembled version too, which no regex reliably does.
 - The config-free pin's `list-accounts` negative control asserts the
   `FileNotFoundError`'s **filename**, not just its class. `list-accounts` raises
   that from the *default* path too, so on any host without
@@ -220,6 +228,90 @@ one was proven by mutation, so do not relax them back):
   or not `$LOCALMAIL_CONFIG` was read at all. The DB half is asserted
   structurally by the `forbid_db` fixture; `exit_code == 0` tested nothing while
   Postgres was reachable, which it is on CI and both deployments.
+
+**An unresolvable version is reported, not passed off as an answer (#291).**
+`localmail --version` printed `0.0.0+unknown` with exit 0 and nothing on
+stderr — "the version could not be determined", in a format indistinguishable
+from success, at the one moment an operator is diagnosing a broken install. The
+sentinel existed in `__init__.py` and was surfaced nowhere.
+
+- The rule is [src/localmail/version_report.py](src/localmail/version_report.py):
+  `UNKNOWN_VERSION` (named, not repeated — it had been written out twice and
+  quoted in a comment), `VersionSource`, `resolve_version`, and the pure
+  `unknown_version_diagnostic`. `__init__.py` resolves **once** and exports the
+  pair `__version__` / `__version_source__`; re-deriving per reader is the
+  footgun the bare decorator carries. Everything else `version_report` exports
+  is aliased private there and `_resolved` is `del`'d, so `localmail` gains no
+  public second way to ask the same question.
+- **The two failure causes are kept apart because the remedies differ**, which
+  is the only reason to read the line: `NOT_INSTALLED` (no dist-info) wants an
+  install, `METADATA_INCOMPLETE` (dist-info present, no `Version:`) wants a
+  reinstall *over* it. `uv sync` does not repair the second. They used to
+  collapse to one string.
+- **`NOT_INSTALLED` is not reached by `python -m localmail` from a checkout** —
+  the src layout makes that a `ModuleNotFoundError` first, and the 2B.4
+  supervisor runs `sys.executable -m localmail` against an interpreter where the
+  package is installed. The reachable shapes are the sources imported without
+  their metadata (`PYTHONPATH=src`, a vendored copy) and a dist-info removed by
+  a partial sync. The earlier claim that the supervisor path exercised this was
+  wrong in three places and is corrected; do not reinstate it.
+- **The remedy lives on the `VersionSource` member, not in a dict beside it.**
+  A `dict[VersionSource, str]` read with `.get()` returns `None` for an unmapped
+  member, and `None` is also how the module says "healthy, stay quiet" — a cause
+  added without a message would report a broken install as fine, i.e. #291 one
+  level up. Declared as a member payload, omitting it raises `TypeError` at
+  **class creation**, so the common slip cannot reach CI at all. Same
+  by-construction call as `ExtractedText.__post_init__` (#249/#266) and
+  `_HttpJsonRewriter.base_url_setting` (#235).
+  `test_every_unknown_source_has_a_diagnostic` remains as the backstop for the
+  one thing construction cannot catch: a member written `("x", None)` on purpose.
+  The member *values* are debugging aids, **not** a wire contract — nothing
+  serialises or parses them (contrast `rewrite_note_code`).
+- **The version line stays on stdout; the diagnostic goes to stderr.** That is
+  why the fix is not `version_option(message=…)`, whose message is echoed to
+  stdout: `--version` is scripted (it is the manual's install-verification
+  step), and a warning on stdout breaks every naive parser of it. Pinned by
+  `test_cli_version_flag_keeps_the_diagnostic_off_stdout`.
+- **Exit stays 0 on the unknown path** — an explicit decision. A non-zero status
+  would break every script using `--version` as a liveness check, and it argues
+  against the deliberate choice to degrade gracefully rather than raise the way
+  click's own lookup does. The stderr line carries the diagnosis.
+- **stdout's `%(prog)s, version %(version)s` shape is pinned separately** by
+  `test_cli_version_line_keeps_click_s_documented_format`, and that separation
+  is load-bearing: `_printed_version` uses `rpartition`, which returns the whole
+  string when the separator is absent, so a bare `0.3.0`, the real line, and
+  `nonsense, version 0.3.0` all reduce to the same token. Every value assertion
+  in the module survives deleting the documented prefix; only that one test does
+  not.
+- **The `resilient_parsing` early return is pinned** by
+  `test_cli_version_flag_stays_silent_during_completion`. click sets that flag
+  while resolving shell completions; without the guard the version line is
+  echoed into the completion protocol stream, so `localmail --version <TAB>`
+  offers it as a candidate. Deleting the clause otherwise leaves the suite green.
+- **`_mentions_version_option` walks the AST, not the text.** The rationale for
+  banning that decorator necessarily quotes its spelling — in a comment beside
+  the replacement option *and* in `_print_version`'s docstring — and #279's
+  regex-over-stripped-comments approach handled the comment but not the
+  docstring, so writing the reason down broke the pin that enforces it (it did,
+  once, during #291). Prose is not code, and the AST is where that distinction
+  already lives. It covers `daemon_cli.py` as well as `cli.py`: that module
+  defines a second click group mounted by `main.add_command(daemon_group)`, so a
+  `version_option` there would attach to the same CLI from outside the pin.
+- **Test helpers take `result.stdout`, never `result.output`.** Since click
+  **8.2** `output` interleaves stdout and stderr in write order, so
+  `_printed_version`'s tail anchor started reading from whichever stream spoke
+  last — and the diagnostic contains the word "version". 8.2 is also why
+  `pyproject.toml` floors `click>=8.2`: `CliRunner` gained separately-captured
+  stderr there, and on 8.1 the four stderr assertions raise `ValueError: stderr
+  not separately captured` instead of failing honestly. The runtime is fine on
+  8.1 — this floor is the *tests'*.
+- **Two known gaps, filed not fixed.** `__version_source__` has exactly one
+  reader (`cli.py`): `/v1/version`, `serve` and `run` still ship the sentinel
+  with no signal, on precisely the `NOT_INSTALLED` path above (**#295**). And
+  `resolve_version` catches only `PackageNotFoundError`, so an undecodable or
+  unreadable METADATA propagates out of `import localmail` and kills every entry
+  point including `--version` — pre-existing, unchanged by #291, but the cause
+  `VersionSource` does not enumerate (**#296**).
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)
@@ -238,6 +330,7 @@ src/localmail/
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
   pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
   ocr_policy.py     # pure: plan_ocr / unknown_engine_message (#248)
+  version_report.py # resolve_version + pure unknown_version_diagnostic (#291)
   attachments.py    # write_attachments(conn, parsed, root) -> JSONB rows (content-addressable)
   blob_temps.py     # writer temp naming (new_temp_path) + its collector (sweep_blob_temps) (#237)
   fetch_retry.py    # bounded BODY[] hold (#222A) + give-up tombstones/rewind planner (#239)

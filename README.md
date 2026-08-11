@@ -73,6 +73,13 @@ touches no database, so it still answers on a half-set-up host. It is the only
 `localmail` command that reports the version — on a machine running just the
 sync daemon, `/v1/version` would mean starting `serve`.
 
+If the version cannot be read at all it prints `0.0.0+unknown` and explains why
+**on stderr**, naming the exact command to run — either nothing is installed
+(`uv sync`, or `uv tool install localmail`) or the install is damaged, which
+needs reinstalling *over* what is there rather than adding to it. stdout stays
+the single machine-readable version line, so scripts that parse it are
+unaffected, and the exit status stays `0`.
+
 ### Sync & accounts
 
 > **The database is canonical for accounts.** `config.toml` `[[accounts]]`

@@ -6,7 +6,7 @@
 >
 > This session closed **both** issues session 23's review had filed, by opposite
 > means. **#291** — `--version` reporting `0.0.0+unknown` silently — is fixed in
-> **PR #293** (`d8f49b4`), **CI green, not merged**. **#292** — the
+> **PR #293** (`d8f49b4` + the review commit `2b1bc87`), **CI green, not merged**. **#292** — the
 > `_PRE280_CORRELATED_ALLOWLIST_SQL` "museum piece" note — was **closed with no
 > code**: its premise did not survive checking (§2).
 >
@@ -20,6 +20,13 @@
 > **One process lesson worth more than the code:** a source-*text* pin and the
 > prose explaining it are in conflict by construction. Writing down *why*
 > `@click.version_option` is banned broke the pin that bans it. See risk 3.
+>
+> **PR #293 was then reviewed and carries a second commit (`2b1bc87`).** The
+> review found two behaviours that were *documented but unpinned* — the stdout
+> line's `%(prog)s, version ` prefix and the `resilient_parsing` guard — plus a
+> dependency floor that was false for the test suite, and a rationale that was
+> wrong in three places. It also produced **#295** and **#296**, filed not fixed.
+> Read §1a before trusting any sentence in §1: several were corrected.
 
 ## Project context (1-minute version)
 
@@ -64,14 +71,20 @@ to read the line at all:
 
 | cause | meaning | remedy |
 |---|---|---|
-| `NOT_INSTALLED` | no dist-info — an uninstalled tree | `uv sync`, or `uv tool install localmail` |
-| `METADATA_INCOMPLETE` | dist-info present, no `Version:` | add `--reinstall` |
+| `NOT_INSTALLED` | no dist-info — the sources without their metadata | `uv sync`, or `uv tool install localmail` |
+| `METADATA_INCOMPLETE` | dist-info present, no `Version:` | `uv sync --reinstall-package localmail`, or `uv tool install --reinstall localmail` |
 
 `uv sync` does not repair the second. They used to collapse to one string.
-`python -m localmail` from a checkout is a first-class entry point (the 2B.4
-supervisor launches the daemon that way), so `NOT_INSTALLED` is the reachable
-case; `uv tool install` stamps metadata, so the manual's install-verification
-path does not normally land here.
+
+> **Corrected in review.** This section originally justified `NOT_INSTALLED` as
+> "`python -m localmail` from a checkout is a first-class entry point (the 2B.4
+> supervisor launches the daemon that way)". That is false, and it had been
+> written into three files. The **src layout** makes `python -m localmail` from a
+> bare checkout a `ModuleNotFoundError` before the branch is reached, and
+> `default_daemon_argv` builds `sys.executable -m localmail` — an interpreter
+> where the package *is* installed, which resolves `INSTALLED`. Both verified
+> directly. The reachable triggers are `PYTHONPATH=src`, a vendored copy of the
+> tree, and a dist-info removed by a partial sync.
 
 **Three deliberate calls a future session would plausibly undo — don't:**
 
@@ -98,9 +111,15 @@ path does not normally land here.
 
 The derivation pin is the interesting one. The decorator froze its argument at
 **decoration** time, so from the callback's point of view it *was* a literal —
-the mutation proves it, failing with `assert '0.3.0' == '9.9.9+sentinel'`. That
-is why `_print_version` reads the module attribute at **call** time. The new pin
-also catches an f-string-assembled version, which no regex reliably does.
+the mutation proves it, failing with
+`assert '<installed version>' == '9.9.9+sentinel'`. That is why `_print_version`
+reads the module attribute at **call** time. The new pin also catches an
+f-string-assembled version, which no regex reliably does.
+
+Note **which** attribute: `cli.py` does `from . import __version__`, an
+independent binding, so the pin rebinds `localmail.cli.__version__`. Rebinding
+`localmail.__version__` does not reach the callback. `_print_version`'s docstring
+said otherwise until the review.
 
 **10 mutations run, each caught** (every file restored from a **copy**, never
 `git checkout` — session 23's trap):
@@ -117,6 +136,73 @@ also catches an f-string-assembled version, which no regex reliably does.
 | non-zero exit on the unknown path | 1 |
 | empty-string metadata treated as a real version | 1 |
 | warn even when the version IS known | 2 |
+
+**That table describes the 10 mutations the author chose.** The review ran six
+more and **four survived** — see §1a. A mutation set proves what it covers, not
+that coverage is complete; say which it was.
+
+### 1a. PR #293 → commit `2b1bc87` — the review round
+
+Six changes and two filings. The two that matter most are behaviours this
+handoff already *claimed* as contracts while nothing held them.
+
+- **stdout's `%(prog)s, version ` prefix was unpinned.** `_printed_version` uses
+  `rpartition`, which returns the **whole string** when the separator is absent —
+  so `0.3.0`, `localmail, version 0.3.0` and `nonsense, version 0.3.0` all reduce
+  to the same token. Every value assertion in the module survived deleting the
+  documented prefix outright. Now pinned once by
+  `test_cli_version_line_keeps_click_s_documented_format` (a full-line regex),
+  and `_printed_version`'s docstring says explicitly that it cannot do this job.
+- **The `resilient_parsing` early return was unpinned.** Deleting it left the
+  suite green while echoing the version line into the shell-completion protocol
+  stream — `localmail --version <TAB>` would offer `localmail, version 0.3.0` as
+  a candidate, for every user with completion installed. Now pinned by
+  `test_cli_version_flag_stays_silent_during_completion`, which drives click's
+  real `ShellComplete` under `redirect_stdout`.
+- **The remedy moved onto the `VersionSource` member.** `_DIAGNOSTICS.get(source)`
+  returned `None` for an unmapped member, and `None` is *also* how the module
+  says "healthy, stay quiet" — a cause added without a message would report a
+  broken install as fine, which is **#291 itself one level up**, guarded only by
+  a CI test where this repo's convention is by-construction. As a member payload
+  (`__new__` taking `(value, diagnostic)`), omitting it raises `TypeError` at
+  **class creation**. `_DIAGNOSTICS` is gone; `unknown_version_diagnostic` is now
+  `return source.diagnostic`. The exhaustiveness test stays as the backstop for
+  the one thing construction cannot catch: `("x", None)` written on purpose.
+- **`click>=8.1` → `>=8.2`.** Four tests read `result.stderr`, which raised
+  `ValueError: stderr not separately captured` before 8.2 (`mix_stderr` was the
+  default and was removed there). `uv.lock` resolves 8.4, so CI would never have
+  seen it — the declared floor was simply false for the suite. The **runtime** is
+  fine on 8.1; this floor is the tests'.
+- **The AST pin now covers `daemon_cli.py`**, which mounts a second click group
+  onto the same CLI via `main.add_command(daemon_group)` — outside a
+  `cli.py`-only pin.
+- **`__init__.py` aliases its imports private and `del`s `_resolved`**, so
+  `localmail.resolve_version` is no longer a public second way to ask the
+  question the file's own comment warns about.
+
+Three mutations run on the new pins, each caught by its intended test, each
+reverted from a **file copy** (risk 6). Suite **2388** (+3 over `d8f49b4`), mypy
+clean on 141 files, ruff clean on every changed file.
+
+**Filed not fixed, and now recorded in CLAUDE.md as gaps rather than silence:**
+
+- **#295** — `__version_source__` has exactly **one** reader (`cli.py`).
+  `/v1/version`, `serve` and `run` still ship the sentinel with no signal, on
+  precisely the `NOT_INSTALLED` path. #291 one reader over. The proposed fix is a
+  startup WARNING reusing the remedy text, not a wire change: the GUI's
+  non-optional decode is *why* the sentinel exists rather than a null.
+- **#296** — `resolve_version` catches only `PackageNotFoundError`, so an
+  undecodable or unreadable METADATA propagates out of `import localmail` and
+  kills every entry point **including `--version`**. Reproduced with a latin-1
+  byte in a dist-info. **Pre-existing** — identical on `main` — but the cause
+  `VersionSource` presents itself as enumerating and does not.
+
+One review finding was **rejected on checking**: that the "GUI decodes
+`server_version` as a non-optional String" rationale was stale.
+`commands/version.rs` is indeed `Option<String>`, but the comment names the
+**connect probe**, and `commands/connect.rs:23` is a non-optional `String`. The
+claim is correct; a clarifying parenthetical was added so the next reader does
+not re-litigate it.
 
 ### 2. #292 closed with no code — the premise did not survive checking
 
@@ -140,9 +226,10 @@ Closed as already satisfied, with that evidence posted on the issue.
 
 ### 3. Verification (this Mac, all extras)
 
-- `unset VIRTUAL_ENV && uv run pytest -q` → **2385 passed, 0 skipped, 0 failed**
-  in 180 s. `main` measures **2369** (+16: 8 in `test_version_report.py`, 8 in
-  `test_version_single_source.py`).
+- `unset VIRTUAL_ENV && uv run pytest -q` → **2388 passed, 0 skipped, 0 failed**
+  in 177 s. `main` measures **2369** (+19: `d8f49b4` added 16, the review commit
+  `2b1bc87` added 3 — the stdout-format pin, the completion pin, and the
+  import-time construction guard).
 - `unset VIRTUAL_ENV && uv run mypy src/localmail` → **Success, 141 source
   files** (was 140; +1 for `version_report.py`).
 - `uv run ruff check` on every changed file → clean. The 10 repo-wide errors are
@@ -182,9 +269,11 @@ Partition sums, `claimable` agrees with `pending`. Two blobs more than session
 
 ## What's next
 
-### 0. **Merge PR #293** — the only open PR
-   Green and unmerged; **the operator merges** (project convention). Closes
-   #291, taking open issues **13 → 12**.
+### 0. **Merge PR #293** — the only open code PR
+   Green and unmerged; **the operator merges** (project convention). Two commits
+   now: `d8f49b4` (the fix) and `2b1bc87` (the review round, §1a). Closes #291,
+   taking open issues **15 → 14** — 15 rather than 13 because the review filed
+   **#295** and **#296**.
    - **Acceptance:** `uv run localmail --version` still prints `localmail,
      version 0.3.0` with **empty stderr** on both hosts. The diagnostic path is
      unreachable on an installed host by design — do not try to provoke it there;
@@ -256,9 +345,10 @@ Partition sums, `claimable` agrees with `pending`. Two blobs more than session
 
 ## Open decisions & risks
 
-1. **One PR is open and yours to merge.** `main` is `8d31045`; **#293**
-   (`fix/291-version-unknown-diagnostic`) closes #291. **13 open issues** → 12
-   once it merges (#292 was closed this session). **Dependabot: 0 open alerts.**
+1. **One code PR is open and yours to merge.** `main` is `8d31045`; **#293**
+   (`fix/291-version-unknown-diagnostic`, two commits) closes #291. **15 open
+   issues** → 14 once it merges (#292 was closed this session; #295 and #296 were
+   filed by the review). **Dependabot: 0 open alerts.**
 2. **`--version`'s contract is now four things, all pinned** *(supersedes session
    23's risk 10)*. It must (a) read no config and touch no database — the moment
    an operator most needs a version is the moment those lookups fail; (b) keep
@@ -277,11 +367,24 @@ Partition sums, `claimable` agrees with `pending`. Two blobs more than session
    mid-session. `_mentions_version_option` walks `ast.parse` instead: prose is
    not code, and the AST is where that distinction already lives. Applies to any
    future "this construct must not appear" pin.
-4. **`CliRunner.result.output` is stdout AND stderr concatenated in click 8.4**
+4. **`CliRunner.result.output` interleaves stdout AND stderr — since click 8.2**
    *(new)*. `_printed_version` anchors on the tail (`rpartition("version ")`), so
    once a diagnostic containing the word "version" went to stderr it started
    reading from whichever stream spoke last. **Pass `result.stdout`.** Any new
-   assertion about a CLI's machine-readable output has the same trap.
+   assertion about a CLI's machine-readable output has the same trap. 8.2 is also
+   where `CliRunner` gained separately-captured stderr, which is why
+   `pyproject.toml` now floors `click>=8.2` — a **test** floor, not a runtime one.
+4a. **`rpartition` is not an anchor when the separator can be absent** *(new,
+   review of #293)*. `"0.3.0".rpartition("version ")[2]` is `"0.3.0"` — the whole
+   string — so a helper built on it silently accepts output whose documented
+   prefix was deleted. Two mutations proved it. If a helper *extracts* a field,
+   something else must pin the **shape**; do not let the extractor stand in for
+   the format assertion. Generalises to `partition`, `split(..., 1)`, and every
+   `str.removeprefix` that ignores a miss.
+4b. **A mutation set proves what it covers, and nothing more** *(new, review of
+   #293)*. #293 shipped "10 mutations, each caught"; the review ran six more and
+   **four survived**, two of them on behaviours this handoff already described as
+   contracts. State which mutations were run, not that mutation testing was done.
 5. **An issue's premise can be wrong — check the tree, not the handoff** *(new,
    #292)*. #292 was filed on a review finding that a rule lived nowhere; it lived
    in three places, one of them two live tests that make deletion a `NameError`.
@@ -337,7 +440,7 @@ Partition sums, `claimable` agrees with `pending`. Two blobs more than session
     1,973 DGX). **Do not add normalisation steps to `lang_text.py` without a
     measurement** — every candidate beyond URL-stripping measured zero.
 14. **Test-count baselines: measure, don't subtract** *(carried)*. `main` →
-    **2369**, this branch → **2385**. Cheap to check without a DB:
+    **2369**, this branch → **2388**. Cheap to check without a DB:
     `uv run pytest --collect-only -q | tail -2`.
 15. **Do not run the test suite while a backfill is draining** *(carried)*.
     Shared-cluster contention produces dozens of false failures. `search-status`
@@ -397,7 +500,7 @@ git log --oneline origin/main..main      # expect 0
 # ONE PR is open, awaiting your merge (What's next, 0).
 gh pr list
 gh pr checks 293
-gh issue list --limit 20                 # 13 open; 12 once #293 merges
+gh issue list --limit 20                 # 15 open; 14 once #293 merges
 
 # Dependabot: 0 open. A non-zero count right after a lockfile merge is scan
 # lag — check uv.lock before chasing it.
@@ -415,7 +518,7 @@ unset VIRTUAL_ENV && uv run localmail --version 2>/tmp/v.err; echo "exit=$?"; wc
 # Do NOT run while a backfill is draining (risk 15).
 unset VIRTUAL_ENV && uv sync --all-extras   # NOT a bare `uv sync` — risk 19
 unset VIRTUAL_ENV && uv run pytest -q
-#   expect: 2385 passed, 0 SKIPPED on fix/291…; 2369 on main.
+#   expect: 2388 passed, 0 SKIPPED on fix/291…; 2369 on main.
 #   MEASURE, don't subtract (risk 14):
 unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2   # no DB needed
 

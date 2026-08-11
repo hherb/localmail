@@ -77,15 +77,21 @@ If the version cannot be read at all it prints `0.0.0+unknown` and explains why
 **on stderr**, naming the exact command to run. There are three causes and the
 remedies differ: nothing is installed (`uv sync`, or `uv tool install
 localmail`); the install is damaged, which needs reinstalling *over* what is
-there rather than adding to it; or the metadata could not be read at all — a
-corrupt file, or a faulty mount under `site-packages` — in which case the line
-also names the exception behind it, and no reinstall will help until the
-filesystem does. stdout stays the single machine-readable version line, so
-scripts that parse it are unaffected, and the exit status stays `0`.
+there rather than adding to it; or the metadata could not be read at all. That
+third case prints a `cause:` line naming the exception — read it before acting,
+because the catch behind it is deliberately broad (an import must never fail
+here) and also sees failures that are not about the file at all. An `OSError`
+there means checking the filesystem under `site-packages` first, since no
+reinstall fixes a failing mount. stdout stays the single machine-readable
+version line, so scripts that parse it are unaffected, and the exit status
+stays `0` — the stderr line is the failure signal, so do not consume stdout
+alone when you are verifying an install.
 
-`localmail serve` and `localmail run` log that same warning once at startup, so
-a headless host reports a broken install where its operator actually looks —
-in the service log, without needing `--version` run by hand. Nothing is logged
+`localmail serve` and `localmail run` log that same message once at startup, at
+**ERROR**, so a headless host reports a broken install where its operator
+actually looks — in the service log, without needing `--version` run by hand.
+ERROR rather than warning because `run --log-level ERROR` is a supported choice
+and a report you can be configured out of is not a report. Nothing is logged
 when the version reads normally, and `/v1/version` is unchanged.
 
 ### Sync & accounts

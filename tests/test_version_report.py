@@ -126,7 +126,10 @@ def test_an_unreadable_metadata_file_is_a_third_cause(metadata_version, exc) -> 
     resolved = resolve_version()
     assert resolved.version == UNKNOWN_VERSION
     assert resolved.source is VersionSource.METADATA_UNREADABLE
-    assert resolved.detail == type(exc).__name__
+    assert resolved.detail is not None
+    # The type name always leads, so `str(exc)` alone (empty for much of what
+    # fails here) cannot satisfy this.
+    assert resolved.detail.startswith(type(exc).__name__)
 
 
 def test_the_unreadable_cause_reports_which_exception_it_swallowed() -> None:
@@ -134,15 +137,49 @@ def test_the_unreadable_cause_reports_which_exception_it_swallowed() -> None:
     is *reported* rather than discarded — a `UnicodeDecodeError` and an EIO on a
     network mount need different investigations, and the remedy text cannot tell
     them apart.
-
-    The **type name**, not `str(exc)`, for the reason CLAUDE.md already records
-    for `failure_pacing.py`: `str(exc)` is empty for much of what fails here.
     """
     rendered = unknown_version_diagnostic(
         VersionSource.METADATA_UNREADABLE, detail="UnicodeDecodeError"
     )
     assert rendered is not None
     assert "UnicodeDecodeError" in rendered
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (OSError(5, "Input/output error"), "[Errno 5]"),
+        (
+            PermissionError(13, "Permission denied", "/site-packages/METADATA"),
+            "/site-packages/METADATA",
+        ),
+        (
+            UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte"),
+            "position 0",
+        ),
+    ],
+    ids=["errno", "filename", "decode-position"],
+)
+def test_the_cause_keeps_what_separates_one_failure_from_another(
+    metadata_version, exc, expected
+) -> None:
+    """A bare type name is not enough to act on, which is the whole point of
+    reporting the catch rather than swallowing it.
+
+    `OSError` alone cannot distinguish EIO (hardware) from ESTALE (remount) from
+    EACCES (`chmod`) — three different remedies, i.e. exactly the distinction
+    this module exists to preserve — and the remedy text defers to this line
+    precisely because the catch is broader than it can speak to. `format_
+    exception_only` also retains **no frames**, which matters because `detail`
+    becomes a module global at import.
+    """
+
+    def _raise(_name: str) -> str:
+        raise exc
+
+    metadata_version(_raise)
+    detail = resolve_version().detail
+    assert detail is not None and expected in detail
 
 
 def test_a_detail_is_only_rendered_when_there_is_one() -> None:
@@ -165,6 +202,35 @@ def test_a_detail_is_only_rendered_when_there_is_one() -> None:
     assert with_detail is not None and _CAUSE_PREFIX in with_detail
 
 
+def test_a_detail_is_appended_to_the_remedy_never_substituted_for_it() -> None:
+    """The remedy is what an operator acts on; the cause sits below it.
+
+    Asserted as a *relation* between the two renderings rather than as
+    containment, because `"OSError" in rendered` and `_CAUSE_PREFIX in rendered`
+    are both satisfied by a rendering that returns the cause line **alone** —
+    and since `resolve_version` always sets `detail` on this path, that is the
+    only string a #296-affected operator ever sees. A rendering that dropped the
+    remedy would leave them `  cause: OSError` and no remedy at all, with every
+    other assertion in this module still green.
+    """
+    plain = unknown_version_diagnostic(VersionSource.METADATA_UNREADABLE, detail=None)
+    with_detail = unknown_version_diagnostic(
+        VersionSource.METADATA_UNREADABLE, detail="OSError"
+    )
+    assert plain is not None and with_detail is not None
+    assert with_detail == f"{plain}\n{_CAUSE_PREFIX}OSError"
+    # Its own line — pins the newline the `_CAUSE_PREFIX` comment promises.
+    assert with_detail.splitlines()[-1] == f"{_CAUSE_PREFIX}OSError"
+
+
+def test_a_healthy_source_carrying_a_swallowed_exception_is_rejected() -> None:
+    """The one pairing the renderer cannot express, made loud rather than
+    silent: it used to return `None`, discarding the exception *and* reporting
+    the install healthy — #291's shape, in the function written to end it."""
+    with pytest.raises(ValueError, match="cannot both be true"):
+        unknown_version_diagnostic(VersionSource.INSTALLED, detail="OSError")
+
+
 @pytest.mark.parametrize("exc", [KeyboardInterrupt(), SystemExit(1)])
 def test_the_broad_catch_does_not_swallow_a_base_exception(metadata_version, exc) -> None:
     """`except Exception` is deliberate and must not be widened to
@@ -185,6 +251,32 @@ def test_a_healthy_resolution_carries_no_detail(metadata_version) -> None:
     """`detail` is failure bookkeeping; a real version has nothing to explain."""
     metadata_version(lambda _name: "1.2.3+sentinel")
     assert resolve_version().detail is None
+
+
+def test_an_unreadable_resolution_cannot_be_built_without_its_cause() -> None:
+    """The invariant stated as an *obligation*, not merely a permission.
+
+    `unresolvable(METADATA_UNREADABLE)` used to be reachable and produced a
+    remedy with no `cause:` line — the broad `except Exception` reporting
+    nothing about what it caught. Enforced at construction, in the same
+    layering `VersionSource` uses one level up, so the slip cannot reach CI.
+    """
+    with pytest.raises(ValueError, match="must carry a detail"):
+        ResolvedVersion(UNKNOWN_VERSION, VersionSource.METADATA_UNREADABLE)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [VersionSource.INSTALLED, VersionSource.NOT_INSTALLED,
+     VersionSource.METADATA_INCOMPLETE],
+)
+def test_a_cause_that_raised_nothing_cannot_carry_a_detail(source) -> None:
+    """The other direction. These causes are reached without anything being
+    raised, so a detail on one could only be a caller pairing them by mistake —
+    and it would render an empty-looking `cause:` line as if a real one were
+    being withheld."""
+    with pytest.raises(ValueError, match="must carry no detail"):
+        ResolvedVersion(UNKNOWN_VERSION, source, "OSError")
 
 
 def test_a_known_version_carries_no_diagnostic() -> None:

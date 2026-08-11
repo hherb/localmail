@@ -241,17 +241,26 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   `UNKNOWN_VERSION` (named, not repeated — it had been written out twice and
   quoted in a comment), `VersionSource`, `resolve_version`, and the pure
   `unknown_version_diagnostic`. `__init__.py` resolves **once** and exports the
-  pair `__version__` / `__version_source__`; re-deriving per reader is the
-  footgun the bare decorator carries. Everything else `version_report` exports
-  is aliased private there and `_resolved` is `del`'d, so `localmail` gains no
-  public second way to ask the same question.
+  three projections of that resolution (`__version__` / `__version_source__` /
+  `__version_diagnostic__` — see the bullet below); re-deriving any of them per
+  reader is the footgun the bare decorator carries. Everything else
+  `version_report` exports is aliased private there and `_resolved` is `del`'d,
+  so `localmail` gains no public second way to ask the same question.
 - **The three failure causes are kept apart because the remedies differ**, which
   is the only reason to read the line: `NOT_INSTALLED` (no dist-info) wants an
   install, `METADATA_INCOMPLETE` (dist-info present, no `Version:`) wants a
   reinstall *over* it, `METADATA_UNREADABLE` (#296 — the read itself raised)
-  wants the filesystem checked **first**, since no reinstall repairs a failing
-  mount. `uv sync` does not repair the second. They used to collapse to one
-  string.
+  wants the cause line read **first**, since the catch behind it is broader than
+  any single remedy can speak to. `uv sync` does not repair the second. They
+  used to collapse to one string.
+- **The unreadable remedy defers to the cause line, deliberately.** `MemoryError`,
+  `RecursionError` and anything a third-party `sys.meta_path` finder raises are
+  all `Exception` subclasses reaching that branch, and none of them is a corrupt
+  METADATA. The wording asserted a faulty filesystem for every one of them, which
+  would send an OOMing host to `fsck` a healthy volume — the "causes are kept
+  apart because remedies differ" principle inverted at the point #296 added a
+  cause. Do not restore an unconditional filesystem claim here; the honest move
+  when the catch is broad is to name the observation and let `cause:` diagnose.
 - **`NOT_INSTALLED` is not reached by `python -m localmail` from a checkout** —
   the src layout makes that a `ModuleNotFoundError` first, and the 2B.4
   supervisor runs `sys.executable -m localmail` against an interpreter where the
@@ -321,40 +330,74 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   `METADATA` is pure ASCII today (`[project]` declares no `readme`), so the
   truncation variant was latent; the encoding and `OSError` variants were live.
   - **The broad `except Exception` is defensible only because it reports what it
-    caught.** `type(exc).__name__` travels on `ResolvedVersion.detail` and is
-    rendered as a `cause:` line — the type, not `str(exc)`, for the reason
-    `failure_pacing.py` already records. A discarded exception here would be a
-    silent catch, i.e. #291 wearing a third hat.
+    caught.** `ResolvedVersion.unreadable(exc)` renders it onto `.detail` and the
+    line carries it as `cause:`. The rendering is `traceback.format_exception_only`,
+    **not** `type(exc).__name__`: a bare `OSError` cannot separate EIO (hardware)
+    from ESTALE (remount) from EACCES (`chmod`) — three different remedies, i.e.
+    exactly the distinction this module exists to preserve — and the type name
+    also loses the filename and the decode offset that #296's own reproduction
+    turns on. It retains **no frame references**, which matters because `detail`
+    becomes a module global at import; a traceback would pin frames for the
+    process's life. The type name still leads, which is `failure_pacing.py`'s
+    point (`str(exc)` alone is empty for much of what fails here). A discarded
+    exception would be a silent catch, i.e. #291 wearing a third hat.
+  - **The rendering rule lives on `ResolvedVersion.unreadable`, not at the catch
+    site**, so a second catch cannot re-decide it — the one-authority argument
+    `pgtext.strip_nuls` and `text_empty.is_blank` already make.
   - **`Exception`, never `BaseException`**, and `PackageNotFoundError` must stay
     **ahead** of it: it is a `ModuleNotFoundError` subclass, so reordering the
     two silently reclassifies every uninstalled tree as a corrupt one and sends
     the operator to `fsck` instead of `uv sync`. Both pinned.
-  - Deliberately **no `# noqa: BLE001`** — the rule is not in ruff's default set,
-    so the directive would be dead on arrival and #285 is already about nine of
-    those. The reasoning is a plain comment instead.
+  - **This site carries no `# noqa: BLE001` while fourteen sibling broad catches
+    in `src/` do.** That is a *divergence*, not a convention — do not copy either
+    shape from here. The rule is not in ruff's default set, so the directive is
+    inert under the pinned ruff (0.11.0) but live under newer ones, and #285
+    (open) is what decides whether ruff gates CI at all. Revisit both together.
+    The earlier claim that writing `# noqa` inside this comment would itself
+    create a directive is **wrong as applied**: a directive binds to its own
+    line, and this comment is not on the `except` line. A *trailing* comment on
+    that line would suppress.
 - **Every long-running process reports an unresolvable version at startup
   (#295).** #291 fixed `--version` and only that, leaving `__version_source__`
   with exactly one reader — so on a headless host `serve` and `run` shipped the
   sentinel in silence, `/v1/version` answered `0.0.0+unknown` as if it were a
   version, and the GUI rendered it. #291 verbatim, one reader over.
   - The rule is `version_report.log_version_diagnostic(log, diagnostic)` — one
-    WARNING, or nothing — called by `create_app` and `Daemon.__init__`. Shared so
-    the two cannot drift to different levels or wordings; WARNING because INFO
-    sits below most supervisors' threshold, which on a headless host is the whole
-    audience. The CLI is deliberately **not** a caller: its stderr goes through
-    click because its stdout is the machine-readable line.
-  - **Both calls run before the gate they precede**, and that ordering is pinned,
+    ERROR, or nothing — called by `serve_cmd`, `create_app` and `Daemon.__init__`.
+    Shared so they cannot drift to different levels or wordings. The CLI's
+    `--version` is deliberately **not** a caller: its stderr goes through click
+    because its stdout is the machine-readable line.
+  - **ERROR, not WARNING.** `localmail run --log-level ERROR` is an offered
+    `click.Choice` and `run_cmd` calls `basicConfig` with it *before* constructing
+    the daemon, so at WARNING the line was filtered out entirely — and
+    `basicConfig`'s root handler also removes the `logging.lastResort` escape that
+    saves the `serve` path. A report the process can be told to discard is not a
+    report. Pinned by a test that reads the choices off `run_cmd` itself, so
+    adding a quieter one fails rather than silently reopening the hole.
+  - **Reported once per process** (`_REPORTED`, with `reset_version_reports()` and
+    an autouse conftest fixture — the `embed_worker._FAILURE_LOG` shape), because
+    `serve` now reports at two layers. Under `uvicorn --workers N` each worker is
+    its own process and still reports.
+  - **Every call runs before the gate it precedes**, and that ordering is pinned,
     not just commented: the daemon reports before `retry_with_backoff` waits on
     Postgres (a host broken enough to lose its version may well have a DB down
-    too, and that wait is unbounded), and `create_app` reports before the
-    `state_signing_key` check raises. A diagnostic emitted after a raise is a
-    diagnostic never emitted.
+    too, and that wait is unbounded); `create_app` reports before the
+    `state_signing_key` check raises; and **`serve_cmd` reports before
+    `pending_migrations`**, which is the one that actually mattered — that check
+    raises `ClickException("… Is Postgres reachable?")` and `create_app` is never
+    reached, so on an unreachable DB `serve` was still silent after #295's first
+    pass. A diagnostic emitted after a raise is a diagnostic never emitted.
   - **`/v1/version` gained no field, deliberately.** The GUI's connect probe
     decodes `server_version` as a non-optional String — which is *why* the
     sentinel exists rather than a null — and a new key nothing renders is #278
     from the other end (the About tab renders a `build_hash` the server has never
-    emitted, with five test files mocking it into looking covered). Reversible;
-    removing a shipped wire key is not.
+    emitted, with four test files and a Rust `#[cfg(test)]` module mocking it
+    into looking covered). Reversible; removing a shipped wire key is not.
+    **#300 tracks the consequence**: an unresolvable version is now legible to a
+    human on every entry point and to a *machine* on none — `--version` exits 0
+    with a well-formed line and `/v1/version` ships the sentinel unflagged. That
+    issue is also why `__version_source__` is retained despite having no
+    production reader: it is the structured input either fix would need.
 - **`__init__.py` exports three attributes, and `__version_diagnostic__` is
   rendered there rather than by each reader.** The exception type behind a
   `METADATA_UNREADABLE` resolution is known only at resolution time, so a reader
@@ -1091,6 +1134,10 @@ report names how many it swallowed, so nothing is lost, only deferred.
 - **The line names `type(exc).__name__`** and does not leave it to the
   traceback: `str(exc)` is empty for `ConnectionError()`, `MemoryError()` and
   much of what a backend raises, and the message line is what a log grep shows.
+  (`version_report` cites this reasoning but renders more — see #296 there: its
+  exceptions come from the OS and the codec machinery, which always populate
+  `errno`/`filename`/`reason`, so the premise that `str(exc)` adds nothing does
+  not hold at that site.)
 
 **Phase 4 (`--smart` query rewriter) — shipped**, see
 [docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md](docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md)

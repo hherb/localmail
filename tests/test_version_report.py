@@ -14,11 +14,12 @@ version could not be determined", in a format indistinguishable from a
 successful answer, at the one moment an operator is diagnosing a broken
 install.
 
-The two causes are kept apart because they have **different remedies**, which
-is the whole reason an operator reads this line: nothing is installed (run an
-install) versus the dist-info is present but has no `Version:` header (a
-damaged install — reinstalling *over* it is what helps). They used to collapse
-to the same string.
+The causes are kept apart because they have **different remedies**, which is the
+whole reason an operator reads this line: nothing is installed (run an install)
+versus the dist-info is present but has no `Version:` header (a damaged install
+— reinstalling *over* it is what helps) versus the metadata could not be read
+at all (#296 — the file or the filesystem under it is broken). They used to
+collapse to the same string.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from localmail.version_report import (
     resolve_version,
     unknown_version_diagnostic,
 )
+from localmail.version_report import _CAUSE_PREFIX
 
 
 @pytest.fixture
@@ -90,24 +92,126 @@ def test_version_less_metadata_is_a_separate_cause(metadata_version, empty) -> N
     )
 
 
+#: The two shapes #296 reproduced. A `METADATA` written in another encoding (or
+#: truncated mid-multibyte) decodes to `UnicodeDecodeError`; a failing or
+#: network-mounted `site-packages` gives a bare `OSError`. Neither is in
+#: `PathDistribution.read_text`'s `suppress(...)` list, so both propagate.
+_UNREADABLE_METADATA_ERRORS = [
+    UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte"),
+    OSError(5, "Input/output error"),
+]
+
+
+@pytest.mark.parametrize(
+    "exc", _UNREADABLE_METADATA_ERRORS, ids=lambda e: type(e).__name__
+)
+def test_an_unreadable_metadata_file_is_a_third_cause(metadata_version, exc) -> None:
+    """#296: reading the metadata can *fail*, not just come back empty.
+
+    `resolve_version` used to guard only `PackageNotFoundError`, so anything
+    else propagated straight out of `import localmail` and killed every entry
+    point — including `--version`, the one command whose whole purpose is
+    diagnosing a broken install. Reproduced end-to-end with a latin-1 byte in a
+    `localmail-9.9.9.dist-info/METADATA` placed ahead on `sys.path`.
+
+    Distinct from `METADATA_INCOMPLETE` because the damage is different: there
+    the file was read and had no `Version:`; here it could not be read at all,
+    which a filesystem fault can cause without the install being wrong.
+    """
+
+    def _raise(_name: str) -> str:
+        raise exc
+
+    metadata_version(_raise)
+    resolved = resolve_version()
+    assert resolved.version == UNKNOWN_VERSION
+    assert resolved.source is VersionSource.METADATA_UNREADABLE
+    assert resolved.detail == type(exc).__name__
+
+
+def test_the_unreadable_cause_reports_which_exception_it_swallowed() -> None:
+    """Broadening the catch to `Exception` is only defensible if the exception
+    is *reported* rather than discarded — a `UnicodeDecodeError` and an EIO on a
+    network mount need different investigations, and the remedy text cannot tell
+    them apart.
+
+    The **type name**, not `str(exc)`, for the reason CLAUDE.md already records
+    for `failure_pacing.py`: `str(exc)` is empty for much of what fails here.
+    """
+    rendered = unknown_version_diagnostic(
+        VersionSource.METADATA_UNREADABLE, detail="UnicodeDecodeError"
+    )
+    assert rendered is not None
+    assert "UnicodeDecodeError" in rendered
+
+
+def test_a_detail_is_only_rendered_when_there_is_one() -> None:
+    """The two older causes carry no exception, and must not grow an empty
+    `cause:` line reading as if something were withheld.
+
+    Asserted against the module's own `_CAUSE_PREFIX` rather than a literal
+    `"cause:"`: a rename would otherwise leave this asserting the absence of a
+    string that never appears anywhere, i.e. an assertion that cannot fail. Same
+    trap as `_printed_version`'s `rpartition` (session 24).
+    """
+    rendered = unknown_version_diagnostic(VersionSource.NOT_INSTALLED, detail=None)
+    assert rendered is not None
+    assert _CAUSE_PREFIX not in rendered
+    # And the positive control, so the check above is known to be capable of
+    # firing on the same helper.
+    with_detail = unknown_version_diagnostic(
+        VersionSource.METADATA_UNREADABLE, detail="OSError"
+    )
+    assert with_detail is not None and _CAUSE_PREFIX in with_detail
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt(), SystemExit(1)])
+def test_the_broad_catch_does_not_swallow_a_base_exception(metadata_version, exc) -> None:
+    """`except Exception` is deliberate and must not be widened to
+    `BaseException`. An operator's Ctrl-C during a slow metadata read on a
+    hung network mount has to interrupt the process, not be reported as a
+    damaged install and then hidden behind a version string.
+    """
+
+    def _raise(_name: str) -> str:
+        raise exc
+
+    metadata_version(_raise)
+    with pytest.raises(type(exc)):
+        resolve_version()
+
+
+def test_a_healthy_resolution_carries_no_detail(metadata_version) -> None:
+    """`detail` is failure bookkeeping; a real version has nothing to explain."""
+    metadata_version(lambda _name: "1.2.3+sentinel")
+    assert resolve_version().detail is None
+
+
 def test_a_known_version_carries_no_diagnostic() -> None:
     """The overwhelmingly common case. A warning here would train operators to
     ignore the line that matters."""
-    assert unknown_version_diagnostic(VersionSource.INSTALLED) is None
+    assert unknown_version_diagnostic(VersionSource.INSTALLED, detail=None) is None
 
 
 def test_each_unknown_cause_names_a_distinct_remedy() -> None:
     """The point of splitting the causes: `uv sync` does not repair a dist-info
-    that is already present, and `--reinstall` is wasted on a tree that has
-    none. If both branches said the same thing, the split would be decoration.
+    that is already present, `--reinstall` is wasted on a tree that has none,
+    and neither repairs a filesystem that cannot serve the file. If the branches
+    said the same thing, the split would be decoration.
     """
-    never = unknown_version_diagnostic(VersionSource.NOT_INSTALLED)
-    damaged = unknown_version_diagnostic(VersionSource.METADATA_INCOMPLETE)
-    assert never is not None and damaged is not None
-    assert never != damaged
+    never = unknown_version_diagnostic(VersionSource.NOT_INSTALLED, detail=None)
+    damaged = unknown_version_diagnostic(VersionSource.METADATA_INCOMPLETE, detail=None)
+    unreadable = unknown_version_diagnostic(
+        VersionSource.METADATA_UNREADABLE, detail=None
+    )
+    assert never is not None and damaged is not None and unreadable is not None
+    assert len({never, damaged, unreadable}) == 3
     assert "uv tool install localmail" in never
     assert "--reinstall" in damaged
     assert "--reinstall" not in never
+    # The one remedy no reinstall can supply, and the reason this is a third
+    # cause rather than a second spelling of the damaged-install one.
+    assert "filesystem" in unreadable
 
 
 def test_every_unknown_source_has_a_diagnostic() -> None:
@@ -124,7 +228,7 @@ def test_every_unknown_source_has_a_diagnostic() -> None:
         source
         for source in VersionSource
         if source is not VersionSource.INSTALLED
-        and unknown_version_diagnostic(source) is None
+        and unknown_version_diagnostic(source, detail=None) is None
     ]
     assert unmapped == []
 

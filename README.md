@@ -74,11 +74,19 @@ touches no database, so it still answers on a half-set-up host. It is the only
 sync daemon, `/v1/version` would mean starting `serve`.
 
 If the version cannot be read at all it prints `0.0.0+unknown` and explains why
-**on stderr**, naming the exact command to run — either nothing is installed
-(`uv sync`, or `uv tool install localmail`) or the install is damaged, which
-needs reinstalling *over* what is there rather than adding to it. stdout stays
-the single machine-readable version line, so scripts that parse it are
-unaffected, and the exit status stays `0`.
+**on stderr**, naming the exact command to run. There are three causes and the
+remedies differ: nothing is installed (`uv sync`, or `uv tool install
+localmail`); the install is damaged, which needs reinstalling *over* what is
+there rather than adding to it; or the metadata could not be read at all — a
+corrupt file, or a faulty mount under `site-packages` — in which case the line
+also names the exception behind it, and no reinstall will help until the
+filesystem does. stdout stays the single machine-readable version line, so
+scripts that parse it are unaffected, and the exit status stays `0`.
+
+`localmail serve` and `localmail run` log that same warning once at startup, so
+a headless host reports a broken install where its operator actually looks —
+in the service log, without needing `--version` run by hand. Nothing is logged
+when the version reads normally, and `/v1/version` is unchanged.
 
 ### Sync & accounts
 

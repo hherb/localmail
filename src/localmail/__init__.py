@@ -6,6 +6,7 @@ from localmail.version_report import (
     ResolvedVersion as _ResolvedVersion,
     VersionSource as _VersionSource,
     resolve_version as _resolve_version,
+    unknown_version_diagnostic as _unknown_version_diagnostic,
 )
 
 # `pyproject.toml` carries the only version literal in the Python tree. This
@@ -43,8 +44,25 @@ __version__: str = _resolved.version
 
 #: Why `__version__` is what it is, so the sentinel can be reported as a
 #: failure instead of passing for an answer (#291). Not inferable from
-#: `__version__` alone: the two failure causes share one sentinel and have
+#: `__version__` alone: the failure causes share one sentinel and have
 #: different remedies.
 __version_source__: _VersionSource = _resolved.source
+
+#: The finished operator-facing warning, or None when the version is real.
+#:
+#: Rendered here rather than by each reader, and that is load-bearing (#295,
+#: #296). There are three readers now — `--version`, `serve`, the daemon — and
+#: the exception type behind a `METADATA_UNREADABLE` resolution is known *only*
+#: at resolution time, so a reader handed just `__version_source__` would drop
+#: it silently. Exporting the finished string makes that omission impossible
+#: rather than merely discouraged, which is the same call `unknown_version_
+#: diagnostic`'s keyword-only `detail` makes one layer down.
+#:
+#: Deliberately not on the wire: `/v1/version` keeps its three keys. The GUI's
+#: connect probe is why the sentinel exists at all rather than a null, and a new
+#: key nothing renders is #278 from the other end.
+__version_diagnostic__: str | None = _unknown_version_diagnostic(
+    _resolved.source, detail=_resolved.detail
+)
 
 del _resolved

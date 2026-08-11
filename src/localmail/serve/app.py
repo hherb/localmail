@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg_pool import ConnectionPool
 
+from localmail import __version_diagnostic__
 from localmail.api.admin import imports as _imports_svc
 from localmail.api.errors import APIError, RateLimited
 from localmail.config import (
@@ -60,6 +61,7 @@ from localmail.serve.routes import messages as messages_routes
 from localmail.serve.routes import changes as changes_routes
 from localmail.serve.routes import search as search_routes
 from localmail.serve.routes import version as version_routes
+from localmail.version_report import log_version_diagnostic
 
 
 def _try_build_mcp(pool, searcher, mcp_config, serve_config, auth_config):
@@ -142,6 +144,13 @@ def create_app(
     (#120). None disables the web OAuth flow (the service raises at
     flow-build time).
     """
+    # Before the pool opens, and before the state_signing_key check below: an
+    # operator reading a startup failure needs to know the version reported
+    # alongside it could not be resolved (#295). `/v1/version` still answers
+    # with the sentinel — the GUI decodes that field as a non-optional String,
+    # which is why it is a sentinel and not a null — so the log is the only
+    # place this can surface on a headless host.
+    log_version_diagnostic(logging.getLogger("localmail.serve"), __version_diagnostic__)
     cfg = serve_config or ServeConfig()
     auth_cfg = auth_config or AuthConfig()
     daemon_cfg = daemon_config or DaemonConfig()

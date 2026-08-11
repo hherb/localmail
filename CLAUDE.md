@@ -126,7 +126,9 @@ uv sync                          # install deps
 uv run pytest                    # full test suite (skips DB tests if PG unreachable)
 uv run localmail --version       # installed version; reads no config, no DB (#279)
                                  #   stdout = the version line; stderr warns + names
-                                 #   the remedy when it cannot be read (#291)
+                                 #   the remedy when it cannot be read (#291), and
+                                 #   the exception that stopped it (#296). `serve`
+                                 #   and `run` log the same line at startup (#295).
 uv run localmail init-db         # apply pending migrations
 uv run localmail list-accounts   # show config'd accounts and whether a secret is stored
 uv run localmail add-account N   # store password for account N (must exist in config.toml)
@@ -243,11 +245,13 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   footgun the bare decorator carries. Everything else `version_report` exports
   is aliased private there and `_resolved` is `del`'d, so `localmail` gains no
   public second way to ask the same question.
-- **The two failure causes are kept apart because the remedies differ**, which
+- **The three failure causes are kept apart because the remedies differ**, which
   is the only reason to read the line: `NOT_INSTALLED` (no dist-info) wants an
   install, `METADATA_INCOMPLETE` (dist-info present, no `Version:`) wants a
-  reinstall *over* it. `uv sync` does not repair the second. They used to
-  collapse to one string.
+  reinstall *over* it, `METADATA_UNREADABLE` (#296 — the read itself raised)
+  wants the filesystem checked **first**, since no reinstall repairs a failing
+  mount. `uv sync` does not repair the second. They used to collapse to one
+  string.
 - **`NOT_INSTALLED` is not reached by `python -m localmail` from a checkout** —
   the src layout makes that a `ModuleNotFoundError` first, and the 2B.4
   supervisor runs `sys.executable -m localmail` against an interpreter where the
@@ -305,13 +309,61 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   stderr there, and on 8.1 the four stderr assertions raise `ValueError: stderr
   not separately captured` instead of failing honestly. The runtime is fine on
   8.1 — this floor is the *tests'*.
-- **Two known gaps, filed not fixed.** `__version_source__` has exactly one
-  reader (`cli.py`): `/v1/version`, `serve` and `run` still ship the sentinel
-  with no signal, on precisely the `NOT_INSTALLED` path above (**#295**). And
-  `resolve_version` catches only `PackageNotFoundError`, so an undecodable or
-  unreadable METADATA propagates out of `import localmail` and kills every entry
-  point including `--version` — pre-existing, unchanged by #291, but the cause
-  `VersionSource` does not enumerate (**#296**).
+- **`import must not fail` is enforced against every exception, not one (#296).**
+  `importlib.metadata.version` reads `METADATA` as UTF-8 through a
+  `suppress(...)` list covering neither `UnicodeDecodeError` nor a generic
+  `OSError`, so a file in another encoding — or an EIO on a network-mounted
+  `site-packages` — propagated out of `import localmail` and killed **every**
+  entry point with a bare traceback: CLI, `serve`, daemon, MCP, and `--version`
+  itself, the one command whose purpose is diagnosing a broken install.
+  Reproduced end-to-end with a latin-1 byte in a
+  `localmail-9.9.9.dist-info/METADATA` placed ahead on `sys.path`. The shipped
+  `METADATA` is pure ASCII today (`[project]` declares no `readme`), so the
+  truncation variant was latent; the encoding and `OSError` variants were live.
+  - **The broad `except Exception` is defensible only because it reports what it
+    caught.** `type(exc).__name__` travels on `ResolvedVersion.detail` and is
+    rendered as a `cause:` line — the type, not `str(exc)`, for the reason
+    `failure_pacing.py` already records. A discarded exception here would be a
+    silent catch, i.e. #291 wearing a third hat.
+  - **`Exception`, never `BaseException`**, and `PackageNotFoundError` must stay
+    **ahead** of it: it is a `ModuleNotFoundError` subclass, so reordering the
+    two silently reclassifies every uninstalled tree as a corrupt one and sends
+    the operator to `fsck` instead of `uv sync`. Both pinned.
+  - Deliberately **no `# noqa: BLE001`** — the rule is not in ruff's default set,
+    so the directive would be dead on arrival and #285 is already about nine of
+    those. The reasoning is a plain comment instead.
+- **Every long-running process reports an unresolvable version at startup
+  (#295).** #291 fixed `--version` and only that, leaving `__version_source__`
+  with exactly one reader — so on a headless host `serve` and `run` shipped the
+  sentinel in silence, `/v1/version` answered `0.0.0+unknown` as if it were a
+  version, and the GUI rendered it. #291 verbatim, one reader over.
+  - The rule is `version_report.log_version_diagnostic(log, diagnostic)` — one
+    WARNING, or nothing — called by `create_app` and `Daemon.__init__`. Shared so
+    the two cannot drift to different levels or wordings; WARNING because INFO
+    sits below most supervisors' threshold, which on a headless host is the whole
+    audience. The CLI is deliberately **not** a caller: its stderr goes through
+    click because its stdout is the machine-readable line.
+  - **Both calls run before the gate they precede**, and that ordering is pinned,
+    not just commented: the daemon reports before `retry_with_backoff` waits on
+    Postgres (a host broken enough to lose its version may well have a DB down
+    too, and that wait is unbounded), and `create_app` reports before the
+    `state_signing_key` check raises. A diagnostic emitted after a raise is a
+    diagnostic never emitted.
+  - **`/v1/version` gained no field, deliberately.** The GUI's connect probe
+    decodes `server_version` as a non-optional String — which is *why* the
+    sentinel exists rather than a null — and a new key nothing renders is #278
+    from the other end (the About tab renders a `build_hash` the server has never
+    emitted, with five test files mocking it into looking covered). Reversible;
+    removing a shipped wire key is not.
+- **`__init__.py` exports three attributes, and `__version_diagnostic__` is
+  rendered there rather than by each reader.** The exception type behind a
+  `METADATA_UNREADABLE` resolution is known only at resolution time, so a reader
+  handed just `__version_source__` drops it silently — and there are three
+  readers now. `unknown_version_diagnostic`'s `detail` is keyword-only **with no
+  default** (#234's shape) for the same reason one layer down; there is exactly
+  one production call site, which is what makes that free rather than noisy.
+  Each reader imports with `from … import`, so a test must rebind the *reader's*
+  binding — `localmail.__version_diagnostic__` reaches none of them.
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)
@@ -331,6 +383,7 @@ src/localmail/
   pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
   ocr_policy.py     # pure: plan_ocr / unknown_engine_message (#248)
   version_report.py # resolve_version + pure unknown_version_diagnostic (#291)
+                    #   + METADATA_UNREADABLE (#296) + log_version_diagnostic (#295)
   attachments.py    # write_attachments(conn, parsed, root) -> JSONB rows (content-addressable)
   blob_temps.py     # writer temp naming (new_temp_path) + its collector (sweep_blob_temps) (#237)
   fetch_retry.py    # bounded BODY[] hold (#222A) + give-up tombstones/rewind planner (#239)

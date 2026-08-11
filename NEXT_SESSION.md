@@ -16,7 +16,7 @@
 >
 > **The last handoff asserted a host revision it had not checked, and it was
 > wrong.** It said "Both hosts run `8d31045`"; the DGX was at **`76fef01`**,
-> three commits behind. Deployed to `29f5fae` this session. See risk 2 — this is
+> four commits behind. Deployed to `29f5fae` this session. See risk 2 — this is
 > the second consecutive handoff to carry a number nobody measured.
 >
 > **One new trap, and it is a good one:** writing the words `# noqa` *in a
@@ -161,7 +161,7 @@ finding.
 - The 4 pytest warnings are pre-existing (websockets #25 + `psycopg_pool`
   teardown `ResourceWarning`s); the count varies with teardown timing.
 
-### 3. The DGX is deployed — `76fef01` → `29f5fae` (three commits, not one)
+### 3. The DGX is deployed — `76fef01` → `29f5fae` (four commits, not one)
 
 `git pull`, `~/.local/bin/uv sync --extra mcp --extra extraction` (moved
 `nvidia-cusparselt-cu13` only), `localmail init-db` → **"schema already up to
@@ -266,7 +266,8 @@ Partition sums on both hosts, `claimable` agrees with `pending` on both.
      I first wrote "−4" here on the assumption that replacing a call with an
      attribute read shortened the file; it did not, because the docstring gained
      a paragraph. Risk 2, in miniature, inside the handoff about risk 2.
-   - **165 `docling: File format not allowed` failures on the Mac** (of 182
+   - **165 docling failures on the Mac**, of which 31 are `File format not
+     allowed` and 134 are `Input document ... is not valid` (of 182
      `blobs_gave_up`), and **127** on the DGX.
    - **Residual implausible language labels are dominated by `ja`** (229 of the
      Mac's 350). 0.24% of labels; the confidence-floor lever was measured useless.
@@ -281,7 +282,7 @@ Partition sums on both hosts, `claimable` agrees with `pending` on both.
    (`fix/295-296-version-diagnostic-reach`, one commit `42920f6`) closes #295 and
    #296. **14 open issues** → 12 once it merges. **Dependabot: 0 open alerts.**
 2. **Verify host revisions; do not infer them** *(new)*. Session 24's handoff
-   stated "Both hosts run `8d31045`" — the DGX was at `76fef01`, three commits
+   stated "Both hosts run `8d31045`" — the DGX was at `76fef01`, four commits
    behind, because that session planned the deploy and the plan became the claim.
    One `ssh 10.0.0.3 'cd ~/src/localmail && git log --oneline -1'` settles it, and
    it is in the resume block for that reason. Same family as risk 6 (measure test

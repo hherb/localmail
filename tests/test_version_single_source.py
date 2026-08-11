@@ -141,12 +141,11 @@ def unknown_version(monkeypatch: pytest.MonkeyPatch):
     about what the *flag* does with the answer.
     """
 
-    def _install(source: VersionSource) -> None:
+    def _install(source: VersionSource, *, detail: str | None = None) -> str:
+        rendered = unknown_version_diagnostic(source, detail=detail)
         monkeypatch.setattr("localmail.cli.__version__", UNKNOWN_VERSION)
-        monkeypatch.setattr(
-            "localmail.cli.__version_diagnostic__",
-            unknown_version_diagnostic(source, detail=None),
-        )
+        monkeypatch.setattr("localmail.cli.__version_diagnostic__", rendered)
+        return rendered or ""
 
     return _install
 
@@ -511,21 +510,50 @@ def test_cli_version_flag_still_exits_zero_when_the_version_is_unknown(
     assert CliRunner().invoke(main, ["--version"]).exit_code == 0
 
 
-def test_cli_version_flag_tells_the_two_unknown_causes_apart(
+def test_cli_version_flag_tells_the_unknown_causes_apart(
     unknown_version: Any,
 ) -> None:
-    """Both print the same sentinel, so the stderr line is the only thing that
-    can point at the right remedy — `uv sync` does not repair a dist-info that
-    is already present."""
+    """All three print the same sentinel, so the stderr line is the only thing
+    that can point at the right remedy — `uv sync` does not repair a dist-info
+    that is already present, and neither repairs a filesystem that cannot serve
+    the file."""
     unknown_version(VersionSource.NOT_INSTALLED)
     never_installed = CliRunner().invoke(main, ["--version"]).stderr
 
     unknown_version(VersionSource.METADATA_INCOMPLETE)
     damaged = CliRunner().invoke(main, ["--version"]).stderr
 
-    assert never_installed != damaged
+    unknown_version(VersionSource.METADATA_UNREADABLE, detail="OSError")
+    unreadable = CliRunner().invoke(main, ["--version"]).stderr
+
+    assert len({never_installed, damaged, unreadable}) == 3
     assert "--reinstall" in damaged
     assert "--reinstall" not in never_installed
+    assert "filesystem" in unreadable
+
+
+def test_cli_version_flag_carries_the_swallowed_cause_to_stderr(
+    unknown_version: Any,
+) -> None:
+    """#296's cause line reaches the operator through the flag, not only the log.
+
+    Every other CLI assertion in this module renders with `detail=None`, so a
+    callback that truncated the diagnostic — printing only the two lines the
+    older causes have — would pass all of them. `METADATA_UNREADABLE` is the one
+    cause that *always* carries a third line, and it is the line naming what the
+    broad `except Exception` actually caught.
+    """
+    rendered = unknown_version(
+        VersionSource.METADATA_UNREADABLE,
+        detail="OSError: [Errno 5] Input/output error",
+    )
+    result = CliRunner().invoke(main, ["--version"])
+
+    assert result.stderr == rendered + "\n"
+    assert "[Errno 5]" in result.stderr
+    # And stdout stays the single machine-readable line regardless.
+    assert len(result.stdout.splitlines()) == 1
+    assert _printed_version(result.stdout) == UNKNOWN_VERSION
 
 
 def test_cargo_manifest_matches_pyproject() -> None:

@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 import psycopg
 
+from . import __version_diagnostic__
 from .api.admin.accounts import Account, list_syncable_accounts
 from .api.admin.daemon import (
     DaemonCommand,
@@ -36,6 +37,7 @@ from .idle import run_inbox_idle_loop
 from .poller import run_poll_loop
 from .retry import retry_with_backoff
 from .shutdown_budget import Joinable, wind_down_threads
+from .version_report import log_version_diagnostic
 from .worker import WorkerContext
 
 log = logging.getLogger(__name__)
@@ -61,6 +63,11 @@ class Daemon:
         stop_event: threading.Event | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        # Before the DB touch below, deliberately: an operator whose install is
+        # damaged is quite likely to have a DB that is also down, and the
+        # backoff loop would otherwise hold the one line that explains why the
+        # running deploy cannot be identified (#295).
+        log_version_diagnostic(log, __version_diagnostic__)
         self.cfg = cfg
         self.ssl = ssl
         self._dsn = dsn or cfg.database.dsn

@@ -18,7 +18,7 @@ import psycopg
 
 import logging
 
-from . import __version__, __version_source__, secrets
+from . import __version__, __version_diagnostic__, secrets
 from .config import AccountConfig, Config, default_config_path, load_config
 from .daemon import Daemon
 from .daemon_accounts import account_config_from_row
@@ -54,7 +54,6 @@ from .secrets_store import refresh_username
 from .search import create_searcher
 from .sync import backfill_internal_date, retry_failed_messages, sync_account
 from .upgrade_estimate import ESTIMATORS, EstimateResult
-from .version_report import unknown_version_diagnostic
 
 #: `--older-than-days` is the operator-facing unit; the service layer takes
 #: seconds like every other duration in this codebase.
@@ -168,7 +167,14 @@ def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> 
     time the way the decorator's argument was, which is what lets the
     derivation be pinned by rebinding `localmail.cli.__version__`. Rebinding
     `localmail.__version__` does *not* reach it: `from . import __version__`
-    creates an independent binding.
+    creates an independent binding. The same holds for
+    `__version_diagnostic__` beside it.
+
+    The diagnostic arrives **already rendered** rather than being composed here
+    from `__version_source__`: since #296 the line can carry the type of the
+    exception the resolution swallowed, which is known only at resolution time.
+    Composing it per reader is what would drop that detail silently — see
+    `localmail/__init__.py`.
 
     Exit stays 0 on the unknown path, deliberately: a non-zero status would
     break every script using `--version` as a liveness check, and the stderr
@@ -183,9 +189,8 @@ def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> 
     # Matches click's own `%(prog)s, version %(version)s`, so the manual's
     # expected output is unchanged.
     click.echo(f"{ctx.find_root().info_name}, version {__version__}")
-    diagnostic = unknown_version_diagnostic(__version_source__)
-    if diagnostic is not None:
-        click.echo(diagnostic, err=True)
+    if __version_diagnostic__ is not None:
+        click.echo(__version_diagnostic__, err=True)
     ctx.exit()
 
 

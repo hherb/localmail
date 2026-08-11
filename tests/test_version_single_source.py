@@ -143,7 +143,10 @@ def unknown_version(monkeypatch: pytest.MonkeyPatch):
 
     def _install(source: VersionSource) -> None:
         monkeypatch.setattr("localmail.cli.__version__", UNKNOWN_VERSION)
-        monkeypatch.setattr("localmail.cli.__version_source__", source)
+        monkeypatch.setattr(
+            "localmail.cli.__version_diagnostic__",
+            unknown_version_diagnostic(source, detail=None),
+        )
 
     return _install
 
@@ -238,6 +241,50 @@ def test_the_fallback_records_which_failure_produced_it(
     assert reimported_localmail(lambda _name: None).__version_source__ is (
         VersionSource.METADATA_INCOMPLETE
     )
+
+
+def test_import_survives_metadata_that_cannot_be_read(reimported_localmail: Any) -> None:
+    """#296, the headline: `import must not fail` is the module's stated contract.
+
+    A `METADATA` in the wrong encoding — or an EIO on a network-mounted
+    `site-packages` — raises out of `importlib.metadata.version`, and neither
+    exception is in `PathDistribution.read_text`'s suppress list. Before #296
+    that propagated through `localmail/__init__.py` and killed **every** entry
+    point with a bare traceback: the CLI, `serve`, the daemon, MCP — including
+    `--version` itself, whose entire purpose is diagnosing a broken install.
+
+    Reproduced with a latin-1 byte in a `localmail-9.9.9.dist-info/METADATA`
+    ahead on `sys.path`; the stub here is that failure without the filesystem.
+    """
+
+    def _raise(_name: str) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
+
+    reloaded = reimported_localmail(_raise)
+    assert reloaded.__version__ == UNKNOWN_VERSION
+    assert reloaded.__version_source__ is VersionSource.METADATA_UNREADABLE
+
+
+def test_the_rendered_diagnostic_travels_with_the_version(
+    reimported_localmail: Any,
+) -> None:
+    """The package renders the operator-facing line **once**, beside the version.
+
+    Rendering is not left to each reader: the exception type behind
+    `METADATA_UNREADABLE` is known only at resolution time, so a reader handed
+    just the source would silently drop it — and there are now three readers
+    (`--version`, `serve`, the daemon). Exporting the finished string is what
+    makes that omission impossible rather than merely discouraged.
+    """
+    healthy = reimported_localmail(lambda _name: "1.2.3+sentinel")
+    assert healthy.__version_diagnostic__ is None
+
+    def _raise(_name: str) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
+
+    broken = reimported_localmail(_raise)
+    assert broken.__version_diagnostic__ is not None
+    assert "UnicodeDecodeError" in broken.__version_diagnostic__
 
 
 def test_version_less_metadata_falls_back(reimported_localmail: Any) -> None:
@@ -427,7 +474,7 @@ def test_cli_version_flag_reports_an_unknown_version_as_a_failure(
 
     assert _printed_version(result.stdout) == UNKNOWN_VERSION
     assert result.stderr == (
-        unknown_version_diagnostic(VersionSource.NOT_INSTALLED) or ""
+        unknown_version_diagnostic(VersionSource.NOT_INSTALLED, detail=None) or ""
     ) + "\n"
 
 

@@ -44,9 +44,11 @@ in `gui/`). See [CLAUDE.md](CLAUDE.md), [README.md](README.md).
 
 ### 1. The stranded session-25 review round, recovered onto `main`
 
-Branch `fix/session25-review-round`. **Open as a PR, unmerged.** No migration,
-no new dependency, no config change. **This is not new work** — it is
-already-reviewed, already-CI-green work that had no path to `main`.
+Branch `fix/session25-review-round`, commits `dcd54dd` (the recovery) + `04ff86e`
+(the convention + this handoff). **Open as PR #301, base `main`, CI green
+(3m23s), unmerged.** No migration, no new dependency, no config change. **This is
+not new work** — it is already-reviewed, already-CI-green work that had no path
+to `main`.
 
 **How it was found.** `NEXT_SESSION.md` on `main` was session **24**'s, while
 `git log` showed session 25's fix already merged. `git branch -r` then showed
@@ -209,9 +211,9 @@ because dropping is destructive and is the operator's call.
 
 ## What's next
 
-### 0. **Merge the recovery PR** — the only open PR
-   **The operator merges** (project convention). It closes no issue; it restores
-   work `main` silently lost.
+### 0. **Merge PR #301** — the only open PR
+   Green and unmerged; **the operator merges** (project convention). It closes no
+   issue; it restores work `main` silently lost.
    - **Acceptance:** on `main` afterwards, `uv run pytest --collect-only -q`
      reports **2419** (it reports 2405 today), and the §1b negative control
      inverts — `serve` against an unreachable Postgres on a corrupt-metadata tree
@@ -298,10 +300,12 @@ because dropping is destructive and is the operator's call.
 
 ## Open decisions & risks
 
-1. **One PR is open and yours to merge.** `main` is `cb77108`;
-   `fix/session25-review-round` restores session 25's review round. **14 open
-   issues**, unchanged by the merge (it closes none). **Dependabot: 0 open
-   alerts.**
+1. **One PR is open and yours to merge.** `main` is `cb77108`; **#301**
+   (`fix/session25-review-round`, two commits) restores session 25's review
+   round. **14 open issues**, unchanged by the merge (it closes none).
+   **Dependabot: 0 open alerts.** `origin/fix/295-296-version-diagnostic-reach`
+   can be deleted once #301 merges — until then it is the only other copy of
+   this work.
 2. **Base every branch on `main`; put a session's code and its handoff in ONE
    PR** *(new, and the reason this session exists)*. Session 25 based its handoff
    PR on the fix branch. The fix PR merged to `main`; the handoff PR merged into
@@ -448,6 +452,8 @@ gh pr view <N> --json state,baseRefName --jq '{state,base:.baseRefName}'
 
 # ONE PR is open, awaiting your merge (What's next, 0).
 gh pr list
+gh pr checks 301
+gh pr view 301 --json baseRefName --jq .baseRefName   # MUST be "main" (risk 7)
 gh issue list --limit 20                 # 14 open; the merge closes none
 
 gh api repos/hherb/localmail/dependabot/alerts \
@@ -515,8 +521,9 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
   && cargo clippy --all-targets -- -D warnings && cd ../..
 ```
 
-`main` tip is **`cb77108`** (PR #297). This session's work is on
-`fix/session25-review-round` — the cherry-pick of the stranded `562f7c9`, plus a
+`main` tip is **`cb77108`** (PR #297). This session's work is **`dcd54dd`** +
+**`04ff86e`** on `fix/session25-review-round`, **open as PR #301, base `main`, CI
+green (3m23s), not merged** — the cherry-pick of the stranded `562f7c9`, plus a
 CLAUDE.md Conventions rule and this handoff. Latest migration
 **`0035_messages_body_lang_attempted_at.sql`**; next free slot `0036_*.sql` (this
 session adds none). **Open issues: 14**, unchanged by the merge. **Dependabot: 0

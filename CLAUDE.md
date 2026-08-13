@@ -2887,6 +2887,26 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   push whatever was already set up, so get the branch right first. (Session 14
   pushed four commits directly to `main`; CI passed and the work stood, but the
   review gate was gone and could not be restored.)
+
+  **Base every branch on `main`, never on another in-flight branch — and put a
+  session's code and its handoff in ONE PR.** Session 25 based its handoff PR
+  (#298) on the *fix* branch (`fix/295-296-version-diagnostic-reach`) rather
+  than on `main`. The operator merged the fix PR (#297) to `main` at 10:18:30
+  and #298 merged into the already-merged fix branch 13 seconds later, so
+  everything in #298 — **the entire review round: four closed gaps, 14 tests,
+  the README and CLAUDE.md updates, the handoff** — landed on a branch nothing
+  would ever merge again. `main` kept the pre-review fix and lost the rest, with
+  no failing check and no open PR to notice. Session 26 recovered it by
+  cherry-picking onto `main` (see the `version_report` §296 notes, all of which
+  arrived that way).
+
+  The failure is silent by construction, so the rule has to be structural: a
+  second PR stacked on an in-flight branch is stranded the instant the first one
+  merges, and *nothing* reports it — `gh pr list` is empty, CI is green, the
+  branch is "merged". **`git log --oneline main..origin/<branch>` after a merge
+  is the check**; a non-empty result on a branch whose PR is already merged is
+  exactly this bug. One PR per session removes the window entirely, which is why
+  that is the convention rather than merely the advice.
 - **No comments unless the WHY is non-obvious.** Don't restate the SQL or the
   Python.
 - **Don't write `.eml` fixtures to disk** — `tests/_eml.py` builds messages

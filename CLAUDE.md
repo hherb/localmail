@@ -241,17 +241,26 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   `UNKNOWN_VERSION` (named, not repeated — it had been written out twice and
   quoted in a comment), `VersionSource`, `resolve_version`, and the pure
   `unknown_version_diagnostic`. `__init__.py` resolves **once** and exports the
-  pair `__version__` / `__version_source__`; re-deriving per reader is the
-  footgun the bare decorator carries. Everything else `version_report` exports
-  is aliased private there and `_resolved` is `del`'d, so `localmail` gains no
-  public second way to ask the same question.
+  three projections of that resolution (`__version__` / `__version_source__` /
+  `__version_diagnostic__` — see the bullet below); re-deriving any of them per
+  reader is the footgun the bare decorator carries. Everything else
+  `version_report` exports is aliased private there and `_resolved` is `del`'d,
+  so `localmail` gains no public second way to ask the same question.
 - **The three failure causes are kept apart because the remedies differ**, which
   is the only reason to read the line: `NOT_INSTALLED` (no dist-info) wants an
   install, `METADATA_INCOMPLETE` (dist-info present, no `Version:`) wants a
   reinstall *over* it, `METADATA_UNREADABLE` (#296 — the read itself raised)
-  wants the filesystem checked **first**, since no reinstall repairs a failing
-  mount. `uv sync` does not repair the second. They used to collapse to one
-  string.
+  wants the cause line read **first**, since the catch behind it is broader than
+  any single remedy can speak to. `uv sync` does not repair the second. They
+  used to collapse to one string.
+- **The unreadable remedy defers to the cause line, deliberately.** `MemoryError`,
+  `RecursionError` and anything a third-party `sys.meta_path` finder raises are
+  all `Exception` subclasses reaching that branch, and none of them is a corrupt
+  METADATA. The wording asserted a faulty filesystem for every one of them, which
+  would send an OOMing host to `fsck` a healthy volume — the "causes are kept
+  apart because remedies differ" principle inverted at the point #296 added a
+  cause. Do not restore an unconditional filesystem claim here; the honest move
+  when the catch is broad is to name the observation and let `cause:` diagnose.
 - **`NOT_INSTALLED` is not reached by `python -m localmail` from a checkout** —
   the src layout makes that a `ModuleNotFoundError` first, and the 2B.4
   supervisor runs `sys.executable -m localmail` against an interpreter where the
@@ -321,40 +330,154 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   `METADATA` is pure ASCII today (`[project]` declares no `readme`), so the
   truncation variant was latent; the encoding and `OSError` variants were live.
   - **The broad `except Exception` is defensible only because it reports what it
-    caught.** `type(exc).__name__` travels on `ResolvedVersion.detail` and is
-    rendered as a `cause:` line — the type, not `str(exc)`, for the reason
-    `failure_pacing.py` already records. A discarded exception here would be a
-    silent catch, i.e. #291 wearing a third hat.
+    caught.** `ResolvedVersion.unreadable(exc)` renders it onto `.detail` and the
+    line carries it as `cause:`. The rendering is `traceback.format_exception_only`,
+    **not** `type(exc).__name__`: a bare `OSError` cannot separate EIO (hardware)
+    from ESTALE (remount) from EACCES (`chmod`) — three different remedies, i.e.
+    exactly the distinction this module exists to preserve — and the type name
+    also loses the filename and the decode offset that #296's own reproduction
+    turns on. It retains **no frame references**, which matters because `detail`
+    becomes a module global at import; a traceback would pin frames for the
+    process's life. The type name still leads, which is `failure_pacing.py`'s
+    point (`str(exc)` alone is empty for much of what fails here). A discarded
+    exception would be a silent catch, i.e. #291 wearing a third hat.
+  - **The rendering rule lives on `ResolvedVersion.unreadable`, not at the catch
+    site**, so a second catch cannot re-decide it — the one-authority argument
+    `pgtext.strip_nuls` and `text_empty.is_blank` already make.
   - **`Exception`, never `BaseException`**, and `PackageNotFoundError` must stay
     **ahead** of it: it is a `ModuleNotFoundError` subclass, so reordering the
     two silently reclassifies every uninstalled tree as a corrupt one and sends
     the operator to `fsck` instead of `uv sync`. Both pinned.
-  - Deliberately **no `# noqa: BLE001`** — the rule is not in ruff's default set,
-    so the directive would be dead on arrival and #285 is already about nine of
-    those. The reasoning is a plain comment instead.
+  - **This site carries no `# noqa: BLE001`, and neither do most of its
+    siblings.** Of the 79 `except Exception` sites in `src/`, **14 carry the
+    directive and 65 do not** — so there is no convention here in either
+    direction, and this site is with the majority rather than diverging from
+    anything. (An earlier wording said "fourteen sibling broad catches do,
+    that is a divergence", which counted correctly and framed it backwards.)
+    Nor is the directive inert on principle: BLE001 is **not** in ruff 0.11's
+    default set but **is** from 0.16, and this tree has been run with both
+    (`.ruff_cache/` holds each) — so "inert under the pinned ruff but live under
+    newer ones" was self-refuting, since being live under newer ones *is* it
+    entering the default set. **Nothing pins a ruff version**: there is no ruff
+    in `pyproject.toml`, none in `uv.lock`, no `[tool.ruff]` section, and no
+    lint step in either CI workflow. #285 (open) decides whether ruff gates CI
+    at all; revisit this bullet with it.
+    The earlier claim that writing `# noqa` inside this comment would itself
+    create a directive is **wrong as applied**: a directive binds to its own
+    line, and this comment is not on the `except` line. A *trailing* comment on
+    that line would suppress.
+  - **The reporting step is guarded too, and that is not decoration.**
+    `traceback.format_exception_only` is not total — it calls `.rstrip()` on
+    `SyntaxError.text` unconditionally, so an exception carrying a non-`str`
+    there makes the renderer raise — and it allocates (a `TracebackException`,
+    a `StackSummary` per chain link, `linecache` reads), which is what fails
+    again under the very `MemoryError` the remedy text names. Running unguarded
+    *inside* the handler, it propagated straight back out and killed `import
+    localmail`: #296's defect restored by #296's own fix, and violently — the
+    unguarded form takes the interpreter down with "lost sys.stderr", and takes
+    pytest itself down with an `INTERNALERROR`. `unreadable` therefore renders
+    in a `try`, falling back to the bounded pre-#296 `type(exc).__name__`, so
+    the cause degrades rather than being lost. The rendering is also **capped**
+    (`_MAX_DETAIL_CHARS`, 500): `detail` becomes a module global for the life of
+    the process and is logged in full at every startup, while
+    `format_exception_only` embeds the whole of `str(exc)` plus every PEP 678
+    note — both chosen by whatever raised.
+  - **`ResolvedVersion.__post_init__` enforces three pairings, not one.** The
+    `detail` ⟺ `METADATA_UNREADABLE` biconditional is the one #301 shipped; the
+    other two are rules the field's own comment already claimed and nothing
+    checked. A **blank** detail is rejected (`is not None` admitted `""`, which
+    rendered a bare `cause:` line — verbatim the "reads as if a detail were
+    withheld" outcome the guard exists to prevent). And a **failed source must
+    carry the sentinel**: `unresolvable(INSTALLED)` otherwise yielded
+    `__version__ = "0.0.0+unknown"` with `__version_diagnostic__ = None`, which
+    is #291's shape exactly, in the module written to end it. That rule is
+    **one-directional on purpose** — the converse would fail `import localmail`
+    for a pyproject that ever declared `0.0.0+unknown`, over a cosmetic
+    collision, and import not failing is this module's first rule.
+  - **An empty remedy on a `VersionSource` member is rejected at class
+    creation** by the module-level `reject_empty_diagnostic`, which
+    `VersionSource.__new__` is the only caller of. A member written
+    `("new-cause", "")` supplies both payload elements, so the signature is
+    satisfied and no `TypeError` fires — and `log_version_diagnostic`'s falsy
+    guard then discards it, reporting a broken install as healthy. That is #291
+    one level up, i.e. precisely what declaring the remedy on the member is
+    supposed to make impossible. It is a **module-level function rather than an
+    inline check** because enum machinery replaces `__new__` after class
+    creation, so no test can reach the production one to prove the rule fires
+    for a *future* member.
 - **Every long-running process reports an unresolvable version at startup
   (#295).** #291 fixed `--version` and only that, leaving `__version_source__`
   with exactly one reader — so on a headless host `serve` and `run` shipped the
   sentinel in silence, `/v1/version` answered `0.0.0+unknown` as if it were a
   version, and the GUI rendered it. #291 verbatim, one reader over.
   - The rule is `version_report.log_version_diagnostic(log, diagnostic)` — one
-    WARNING, or nothing — called by `create_app` and `Daemon.__init__`. Shared so
-    the two cannot drift to different levels or wordings; WARNING because INFO
-    sits below most supervisors' threshold, which on a headless host is the whole
-    audience. The CLI is deliberately **not** a caller: its stderr goes through
-    click because its stdout is the machine-readable line.
-  - **Both calls run before the gate they precede**, and that ordering is pinned,
+    ERROR, or nothing — called by `serve_cmd`, `create_app`, `run_cmd` and
+    `Daemon.__init__`. Shared so they cannot drift to different levels or
+    wordings. The CLI's `--version` is deliberately **not** a caller: its stderr
+    goes through click because its stdout is the machine-readable line.
+    **Only these three entry points report at all** — the other 36 CLI commands
+    catch an unresolvable version and surface it nowhere, which for a cron
+    `localmail sync` turned #296's loud crash into a silent success. Tracked as
+    #304; the fix is one call in the `main` group callback, and the dedup is
+    what makes it free. Two smaller scope notes live with it: the line's
+    `warning:` prefix versus its ERROR level, and `serve` emitting through
+    `logging.lastResort` unformatted (#302); and `--version` still dying on a
+    missing third-party dependency before click parses the flag, because
+    `cli.py` imports the daemon at module scope (#305).
+  - **ERROR, not WARNING.** `localmail run --log-level ERROR` is an offered
+    `click.Choice` and `run_cmd` calls `basicConfig` with it *before* constructing
+    the daemon, so at WARNING the line was filtered out entirely — and
+    `basicConfig`'s root handler also removes the `logging.lastResort` escape that
+    saves the `serve` path. A report the process can be told to discard is not a
+    report. Pinned by a test that reads the choices off `run_cmd` itself, so
+    adding a quieter one fails rather than silently reopening the hole.
+  - **Reported once per process** (`_REPORTED`, with `reset_version_reports()` and
+    an autouse conftest fixture — the `embed_worker._FAILURE_LOG` shape), because
+    `serve` and `run` each report at two layers. Under `uvicorn --workers N` each
+    worker is its own process and still reports. **Keyed on the diagnostic
+    string, not on a "have we said anything yet" flag** — the flag form silences
+    a *different* second problem for the life of the process, a suppression bug
+    inside the module written to end suppression bugs. Both halves are pinned
+    now; neither was, and deleting the dedup outright left the whole suite green,
+    which is what let the `cli.py` comment assert "create_app's call below stays
+    silent" with nothing behind it. (The `embed_worker._FAILURE_LOG` comparison
+    is about the module-global-plus-reset shape only: that one also takes a
+    `failure_log=` parameter defaulting to the global, and this has no such
+    seam — three callers, all entry points, so there is nothing to inject.)
+  - **Every call runs before the gate it precedes**, and that ordering is pinned,
     not just commented: the daemon reports before `retry_with_backoff` waits on
     Postgres (a host broken enough to lose its version may well have a DB down
-    too, and that wait is unbounded), and `create_app` reports before the
-    `state_signing_key` check raises. A diagnostic emitted after a raise is a
-    diagnostic never emitted.
+    too, and that wait is unbounded); `create_app` reports before the
+    `state_signing_key` check raises; and **`serve_cmd` reports before
+    `pending_migrations`**, which is the one that actually mattered — that check
+    raises `ClickException("… Is Postgres reachable?")` and `create_app` is never
+    reached, so on an unreachable DB `serve` was still silent after #295's first
+    pass. A diagnostic emitted after a raise is a diagnostic never emitted.
+  - **`load_config` is a gate too, and it took a third pass to cover it.** The
+    rule above was stated absolutely but applied to one gate per command:
+    `serve_cmd` reported *after* `load_config`, and `run_cmd` reported only from
+    inside `Daemon.__init__` — one gate later still. A missing or malformed
+    config raises at `load_config`, so on a host mid-deploy neither command said
+    anything. `serve_cmd`'s call is now the **first statement in its body**,
+    ahead of the deferred `import uvicorn` (a partial `uv sync` that dropped the
+    dist-info can equally have dropped `uvicorn`), the `--no-tls` usage check,
+    `load_config`, and the schema check; `run_cmd` gained its own call between
+    `basicConfig` and `load_config`, on `localmail.daemon` so the grep target is
+    unchanged. The dedup is what makes the extra call sites free. The gap
+    survived #295 because the test that pinned the schema gate drives the
+    `LOCALMAIL_DSN_OVERRIDE` branch, which **skips `load_config` entirely** — a
+    reminder that a pin proves only the path it takes.
   - **`/v1/version` gained no field, deliberately.** The GUI's connect probe
     decodes `server_version` as a non-optional String — which is *why* the
     sentinel exists rather than a null — and a new key nothing renders is #278
     from the other end (the About tab renders a `build_hash` the server has never
-    emitted, with five test files mocking it into looking covered). Reversible;
-    removing a shipped wire key is not.
+    emitted, with four test files and a Rust `#[cfg(test)]` module mocking it
+    into looking covered). Reversible; removing a shipped wire key is not.
+    **#300 tracks the consequence**: an unresolvable version is now legible to a
+    human on every entry point and to a *machine* on none — `--version` exits 0
+    with a well-formed line and `/v1/version` ships the sentinel unflagged. That
+    issue is also why `__version_source__` is retained despite having no
+    production reader: it is the structured input either fix would need.
 - **`__init__.py` exports three attributes, and `__version_diagnostic__` is
   rendered there rather than by each reader.** The exception type behind a
   `METADATA_UNREADABLE` resolution is known only at resolution time, so a reader
@@ -1091,6 +1214,13 @@ report names how many it swallowed, so nothing is lost, only deferred.
 - **The line names `type(exc).__name__`** and does not leave it to the
   traceback: `str(exc)` is empty for `ConnectionError()`, `MemoryError()` and
   much of what a backend raises, and the message line is what a log grep shows.
+  (`version_report` cites this reasoning but renders more — see #296 there: the
+  exceptions it *reproduces* come from the OS and the codec machinery, which
+  populate `errno`/`filename`/`reason`, so the premise that `str(exc)` adds
+  nothing does not hold for them. Not "always", though — that site's own
+  docstring names `MemoryError` and `RecursionError` as reachable through the
+  same branch, and `format_exception_only(MemoryError())` is the bare type name.
+  The type name leading is what covers both cases.)
 
 **Phase 4 (`--smart` query rewriter) — shipped**, see
 [docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md](docs/superpowers/specs/2026-06-07-smart-query-rewriter-design.md)
@@ -2840,6 +2970,26 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   push whatever was already set up, so get the branch right first. (Session 14
   pushed four commits directly to `main`; CI passed and the work stood, but the
   review gate was gone and could not be restored.)
+
+  **Base every branch on `main`, never on another in-flight branch — and put a
+  session's code and its handoff in ONE PR.** Session 25 based its handoff PR
+  (#298) on the *fix* branch (`fix/295-296-version-diagnostic-reach`) rather
+  than on `main`. The operator merged the fix PR (#297) to `main` at 10:18:30
+  and #298 merged into the already-merged fix branch 13 seconds later, so
+  everything in #298 — **the entire review round: four closed gaps, 14 tests,
+  the README and CLAUDE.md updates, the handoff** — landed on a branch nothing
+  would ever merge again. `main` kept the pre-review fix and lost the rest, with
+  no failing check and no open PR to notice. Session 26 recovered it by
+  cherry-picking onto `main` (see the `version_report` §296 notes, all of which
+  arrived that way).
+
+  The failure is silent by construction, so the rule has to be structural: a
+  second PR stacked on an in-flight branch is stranded the instant the first one
+  merges, and *nothing* reports it — `gh pr list` is empty, CI is green, the
+  branch is "merged". **`git log --oneline main..origin/<branch>` after a merge
+  is the check**; a non-empty result on a branch whose PR is already merged is
+  exactly this bug. One PR per session removes the window entirely, which is why
+  that is the convention rather than merely the advice.
 - **No comments unless the WHY is non-obvious.** Don't restate the SQL or the
   Python.
 - **Don't write `.eml` fixtures to disk** — `tests/_eml.py` builds messages

@@ -54,6 +54,7 @@ from .secrets_store import refresh_username
 from .search import create_searcher
 from .sync import backfill_internal_date, retry_failed_messages, sync_account
 from .upgrade_estimate import ESTIMATORS, EstimateResult
+from .version_report import log_version_diagnostic
 
 #: `--older-than-days` is the operator-facing unit; the service layer takes
 #: seconds like every other duration in this codebase.
@@ -824,6 +825,12 @@ def run_cmd(ctx: click.Context, no_ssl: bool, log_level: str) -> None:
         level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(threadName)s %(name)s %(message)s",
     )
+    # After `basicConfig` so the line is formatted like every other, but before
+    # `load_config` — `Daemon.__init__` reports too, and that is one gate too
+    # late: a missing or malformed config raises here and the daemon is never
+    # constructed. Same logger the daemon uses, so an operator has one grep
+    # target; deduped per process, so the daemon's own call stays silent.
+    log_version_diagnostic(logging.getLogger("localmail.daemon"), __version_diagnostic__)
     cfg = load_config(ctx.obj["config_path"])
     daemon = Daemon(cfg, ssl=not no_ssl)
     daemon.run_forever()
@@ -1722,6 +1729,17 @@ def serve_cmd(
     no_tls: bool,
 ) -> None:
     """Run the HTTPS API server."""
+    # First statement in the body, ahead of every gate this command can exit
+    # through — the deferred `import uvicorn` below, the `--no-tls` usage check,
+    # `load_config`, and the schema check. A diagnostic emitted after a raise is
+    # a diagnostic never emitted, and each of those gates shares a plausible
+    # cause with an unreadable version: a partial `uv sync` that dropped the
+    # dist-info can equally have dropped `uvicorn`, and a host mid-deploy can
+    # equally be missing its config. Same reasoning `Daemon.__init__` acts on.
+    # The report is deduped per process, so `create_app`'s call stays silent
+    # (#295).
+    log_version_diagnostic(logging.getLogger("localmail.serve"), __version_diagnostic__)
+
     import uvicorn
     from localmail.db import pending_migrations
     from localmail.serve.app import create_app

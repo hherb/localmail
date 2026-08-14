@@ -32,6 +32,7 @@ from localmail.version_report import (
     UNKNOWN_VERSION,
     ResolvedVersion,
     VersionSource,
+    reject_empty_diagnostic,
     resolve_version,
     unknown_version_diagnostic,
 )
@@ -126,7 +127,94 @@ def test_an_unreadable_metadata_file_is_a_third_cause(metadata_version, exc) -> 
     resolved = resolve_version()
     assert resolved.version == UNKNOWN_VERSION
     assert resolved.source is VersionSource.METADATA_UNREADABLE
-    assert resolved.detail == type(exc).__name__
+    assert resolved.detail is not None
+    # The type name leads for both of these, so `str(exc)` alone (empty for much
+    # of what fails here) cannot satisfy this. Not an absolute across every
+    # exception — see `test_a_rendering_that_raises_degrades_to_the_type_name`.
+    assert resolved.detail.startswith(type(exc).__name__)
+
+
+class _ThirdPartyHookError(Exception):
+    """Stands in for whatever a third-party `sys.meta_path` finder raises.
+
+    Deliberately outside every builtin hierarchy the module names, because that
+    is the point: the catch is `except Exception` precisely so it does not need
+    to know this class exists.
+    """
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [MemoryError(), RecursionError(), _ThirdPartyHookError("finder exploded")],
+    ids=["memory", "recursion", "third-party-hook"],
+)
+def test_the_catch_is_broad_enough_for_causes_that_are_not_about_the_file(
+    metadata_version, exc
+) -> None:
+    """#296's actual claim: enforced against *every* exception, not a list.
+
+    The two reproductions above are both file-shaped, so a revert of the broad
+    catch to `except (UnicodeDecodeError, OSError)` — the pre-#296 shape —
+    satisfied every other test in this suite while `import localmail` died again
+    on anything else. These three are the causes the module docstring and the
+    remedy wording explicitly name as reachable and *not* about the file, which
+    is why they are the ones worth pinning: if the catch is ever narrowed to a
+    type list, it will be narrowed to a list of file errors.
+    """
+
+    def _raise(_name: str) -> str:
+        raise exc
+
+    metadata_version(_raise)
+    resolved = resolve_version()
+    assert resolved.source is VersionSource.METADATA_UNREADABLE
+    assert resolved.detail is not None and type(exc).__name__ in resolved.detail
+
+
+def test_a_rendering_that_raises_degrades_to_the_type_name(metadata_version) -> None:
+    """The reporting step may not raise either — it runs inside the handler.
+
+    `traceback.format_exception_only` is not total: it calls `.rstrip()` on
+    `SyntaxError.text` unconditionally, so an exception carrying a non-`str`
+    there makes the *renderer* raise, straight back out of `except Exception`
+    and out of `import localmail`. That is #296's defect restored by #296's own
+    fix; unguarded it killed the interpreter outright ("lost sys.stderr"). The
+    fallback is the bounded pre-#296 rendering, so the cause degrades rather
+    than being lost.
+    """
+    hostile = SyntaxError("bad")
+    hostile.text = object()  # type: ignore[assignment]
+    hostile.lineno = 1
+    hostile.filename = "<meta-path-finder>"
+
+    def _raise(_name: str) -> str:
+        raise hostile
+
+    metadata_version(_raise)
+    resolved = resolve_version()
+    assert resolved.source is VersionSource.METADATA_UNREADABLE
+    assert resolved.detail == "SyntaxError"
+
+
+def test_a_vast_exception_message_cannot_become_an_unbounded_global(
+    metadata_version,
+) -> None:
+    """`detail` lives for the process and is logged in full at every startup.
+
+    `format_exception_only` embeds the whole of `str(exc)` plus every PEP 678
+    note, and a third-party hook chooses both. The pre-#296 type name was
+    bounded by construction; this keeps a bound while keeping the errno,
+    filename and decode offset that motivated the richer rendering.
+    """
+
+    def _raise(_name: str) -> str:
+        raise RuntimeError("x" * 100_000)
+
+    metadata_version(_raise)
+    detail = resolve_version().detail
+    assert detail is not None
+    assert len(detail) < 1_000
+    assert detail.startswith("RuntimeError")
 
 
 def test_the_unreadable_cause_reports_which_exception_it_swallowed() -> None:
@@ -134,15 +222,49 @@ def test_the_unreadable_cause_reports_which_exception_it_swallowed() -> None:
     is *reported* rather than discarded — a `UnicodeDecodeError` and an EIO on a
     network mount need different investigations, and the remedy text cannot tell
     them apart.
-
-    The **type name**, not `str(exc)`, for the reason CLAUDE.md already records
-    for `failure_pacing.py`: `str(exc)` is empty for much of what fails here.
     """
     rendered = unknown_version_diagnostic(
         VersionSource.METADATA_UNREADABLE, detail="UnicodeDecodeError"
     )
     assert rendered is not None
     assert "UnicodeDecodeError" in rendered
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (OSError(5, "Input/output error"), "[Errno 5]"),
+        (
+            PermissionError(13, "Permission denied", "/site-packages/METADATA"),
+            "/site-packages/METADATA",
+        ),
+        (
+            UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte"),
+            "position 0",
+        ),
+    ],
+    ids=["errno", "filename", "decode-position"],
+)
+def test_the_cause_keeps_what_separates_one_failure_from_another(
+    metadata_version, exc, expected
+) -> None:
+    """A bare type name is not enough to act on, which is the whole point of
+    reporting the catch rather than swallowing it.
+
+    `OSError` alone cannot distinguish EIO (hardware) from ESTALE (remount) from
+    EACCES (`chmod`) — three different remedies, i.e. exactly the distinction
+    this module exists to preserve — and the remedy text defers to this line
+    precisely because the catch is broader than it can speak to. `format_
+    exception_only` also retains **no frames**, which matters because `detail`
+    becomes a module global at import.
+    """
+
+    def _raise(_name: str) -> str:
+        raise exc
+
+    metadata_version(_raise)
+    detail = resolve_version().detail
+    assert detail is not None and expected in detail
 
 
 def test_a_detail_is_only_rendered_when_there_is_one() -> None:
@@ -165,6 +287,35 @@ def test_a_detail_is_only_rendered_when_there_is_one() -> None:
     assert with_detail is not None and _CAUSE_PREFIX in with_detail
 
 
+def test_a_detail_is_appended_to_the_remedy_never_substituted_for_it() -> None:
+    """The remedy is what an operator acts on; the cause sits below it.
+
+    Asserted as a *relation* between the two renderings rather than as
+    containment, because `"OSError" in rendered` and `_CAUSE_PREFIX in rendered`
+    are both satisfied by a rendering that returns the cause line **alone** —
+    and since `resolve_version` always sets `detail` on this path, that is the
+    only string a #296-affected operator ever sees. A rendering that dropped the
+    remedy would leave them `  cause: OSError` and no remedy at all, with every
+    other assertion in this module still green.
+    """
+    plain = unknown_version_diagnostic(VersionSource.METADATA_UNREADABLE, detail=None)
+    with_detail = unknown_version_diagnostic(
+        VersionSource.METADATA_UNREADABLE, detail="OSError"
+    )
+    assert plain is not None and with_detail is not None
+    assert with_detail == f"{plain}\n{_CAUSE_PREFIX}OSError"
+    # Its own line — pins the newline the `_CAUSE_PREFIX` comment promises.
+    assert with_detail.splitlines()[-1] == f"{_CAUSE_PREFIX}OSError"
+
+
+def test_a_healthy_source_carrying_a_swallowed_exception_is_rejected() -> None:
+    """The one pairing the renderer cannot express, made loud rather than
+    silent: it used to return `None`, discarding the exception *and* reporting
+    the install healthy — #291's shape, in the function written to end it."""
+    with pytest.raises(ValueError, match="cannot both be true"):
+        unknown_version_diagnostic(VersionSource.INSTALLED, detail="OSError")
+
+
 @pytest.mark.parametrize("exc", [KeyboardInterrupt(), SystemExit(1)])
 def test_the_broad_catch_does_not_swallow_a_base_exception(metadata_version, exc) -> None:
     """`except Exception` is deliberate and must not be widened to
@@ -185,6 +336,78 @@ def test_a_healthy_resolution_carries_no_detail(metadata_version) -> None:
     """`detail` is failure bookkeeping; a real version has nothing to explain."""
     metadata_version(lambda _name: "1.2.3+sentinel")
     assert resolve_version().detail is None
+
+
+def test_an_unreadable_resolution_cannot_be_built_without_its_cause() -> None:
+    """The invariant stated as an *obligation*, not merely a permission.
+
+    `unresolvable(METADATA_UNREADABLE)` used to be reachable and produced a
+    remedy with no `cause:` line — the broad `except Exception` reporting
+    nothing about what it caught. Enforced at construction, in the same
+    layering `VersionSource` uses one level up, so the slip cannot reach CI.
+    """
+    with pytest.raises(ValueError, match="must carry a detail"):
+        ResolvedVersion(UNKNOWN_VERSION, VersionSource.METADATA_UNREADABLE)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [VersionSource.INSTALLED, VersionSource.NOT_INSTALLED,
+     VersionSource.METADATA_INCOMPLETE],
+)
+def test_a_cause_that_raised_nothing_cannot_carry_a_detail(source) -> None:
+    """The other direction. These causes are reached without anything being
+    raised, so a detail on one could only be a caller pairing them by mistake —
+    and it would render an empty-looking `cause:` line as if a real one were
+    being withheld."""
+    with pytest.raises(ValueError, match="must carry no detail"):
+        ResolvedVersion(UNKNOWN_VERSION, source, "OSError")
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n"], ids=["empty", "spaces", "newline"])
+def test_a_blank_detail_is_rejected_rather_than_rendered(blank) -> None:
+    """The field's stated invariant is non-emptiness, not non-`None`-ness.
+
+    `detail=""` satisfied `is not None`, so it constructed cleanly and rendered
+    a dangling `cause:` with nothing after it — verbatim the "reads as if a
+    detail were being withheld" outcome the field comment says must never
+    happen. `log_version_diagnostic`'s falsy guard does not catch it either,
+    because the *whole* diagnostic is non-empty.
+    """
+    with pytest.raises(ValueError, match="non-blank"):
+        ResolvedVersion(UNKNOWN_VERSION, VersionSource.METADATA_UNREADABLE, blank)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        VersionSource.NOT_INSTALLED,
+        VersionSource.METADATA_INCOMPLETE,
+        VersionSource.METADATA_UNREADABLE,
+    ],
+)
+def test_a_failed_resolution_cannot_carry_a_real_version(source) -> None:
+    """The older of the two pairings, and the one #291 is actually about.
+
+    A failed source paired with a real-looking version yields `__version__`
+    reporting something plausible while `__version_diagnostic__` explains a
+    failure — or, inverted, the sentinel with no diagnostic at all, which is
+    #291's shape exactly. Nothing enforced this until now; `unresolvable`
+    supplying the sentinel was discipline, not a guarantee.
+    """
+    detail = "OSError" if source is VersionSource.METADATA_UNREADABLE else None
+    with pytest.raises(ValueError, match="must carry"):
+        ResolvedVersion("0.3.0", source, detail)
+
+
+def test_the_sentinel_is_still_allowed_to_be_a_real_version() -> None:
+    """The converse is deliberately *not* asserted.
+
+    A pyproject that ever declared `0.0.0+unknown` would otherwise fail `import
+    localmail` over a cosmetic collision — and the module's first rule is that
+    import does not fail. The version guard is one-directional on purpose.
+    """
+    assert ResolvedVersion.installed(UNKNOWN_VERSION).version == UNKNOWN_VERSION
 
 
 def test_a_known_version_carries_no_diagnostic() -> None:
@@ -214,6 +437,29 @@ def test_each_unknown_cause_names_a_distinct_remedy() -> None:
     assert "filesystem" in unreadable
 
 
+def test_the_unreadable_remedy_defers_to_the_cause_instead_of_asserting_one() -> None:
+    """CLAUDE.md: "Do not restore an unconditional filesystem claim here."
+
+    The earlier wording asserted a corrupt file or a faulty filesystem for
+    *every* exception the broad catch sees, which sends an OOMing host to `fsck`
+    a healthy volume. Both wordings contain the word "filesystem", so the
+    containment check above is satisfied by exactly the string this test exists
+    to keep out — pinning the rule needs an assertion the old wording cannot
+    pass.
+    """
+    unreadable = unknown_version_diagnostic(
+        VersionSource.METADATA_UNREADABLE, detail=None
+    )
+    assert unreadable is not None
+    # Defers: the operator is sent to the cause line first, and the filesystem
+    # claim is scoped to the one exception type it holds for.
+    assert "read the cause below first" in unreadable
+    assert "For an OSError" in unreadable
+    # The old wording's unconditional claim, in the two spellings it had.
+    assert "the file is corrupt" not in unreadable
+    assert "filesystem holding it is faulty" not in unreadable
+
+
 def test_every_unknown_source_has_a_diagnostic() -> None:
     """Exhaustiveness — the backstop to the enum's own construction guard.
 
@@ -228,9 +474,48 @@ def test_every_unknown_source_has_a_diagnostic() -> None:
         source
         for source in VersionSource
         if source is not VersionSource.INSTALLED
-        and unknown_version_diagnostic(source, detail=None) is None
+        # Falsy, not `is None`: an empty remedy is swallowed by
+        # `log_version_diagnostic`'s falsy guard just as a missing one is, so
+        # asserting only against `None` left the same hole one value over.
+        and not unknown_version_diagnostic(source, detail=None)
     ]
     assert unmapped == []
+
+
+def test_a_cause_declared_with_an_empty_remedy_fails_at_import() -> None:
+    """The gap between "supplied a remedy" and "supplied a *real* one".
+
+    A member written `("new-cause", "")` supplies both payload elements, so the
+    signature is satisfied and no `TypeError` fires; the test above passed it
+    while `is None` was the predicate; and `log_version_diagnostic`'s falsy
+    guard then discards it. Net effect: a broken install reported as healthy on
+    `serve` and `run` — #291 one level up, which is the exact outcome declaring
+    the remedy on the member is supposed to make impossible.
+    """
+    with pytest.raises(TypeError, match="empty diagnostic"):
+        reject_empty_diagnostic("new-cause", "")
+    with pytest.raises(TypeError, match="empty diagnostic"):
+        reject_empty_diagnostic("new-cause", "   ")
+    # The two legitimate shapes are untouched: the healthy member's silence, and
+    # a real remedy.
+    assert reject_empty_diagnostic("installed", None) is None
+    assert reject_empty_diagnostic("new-cause", "do this") == "do this"
+
+
+def test_every_declared_source_went_through_the_diagnostic_guard() -> None:
+    """The rule above is only worth anything if `VersionSource` applies it.
+
+    Enum machinery replaces `__new__` after class creation, so a test cannot
+    build a stand-in that calls the production one — which is why the rule is a
+    module-level function. This is the other half: every shipped member's
+    payload satisfies it, so the guard is demonstrably wired to the type rather
+    than merely existing beside it.
+    """
+    for source in VersionSource:
+        assert (
+            reject_empty_diagnostic(source.value, source.diagnostic)
+            is source.diagnostic
+        )
 
 
 def test_a_cause_declared_without_a_remedy_fails_at_import() -> None:

@@ -244,22 +244,28 @@ because dropping is destructive and is the operator's call.
 
 ### 3. **#278 — the version surface's other half** *(carried; needs YOUR decision first)*
    The GUI About tab renders a `build_hash` that `/v1/version` has **never**
-   emitted, so "Server build" always shows `?`, while five test files mock the
-   field and make it look covered. **Two options, product call before any code:**
+   emitted, so "Server build" always shows `?`, while four test files and a Rust
+   `#[cfg(test)]` module mock the field and make it look covered. **Two options,
+   product call before any code:**
    emit a real build hash (from git, at build time — but the version is stamped at
    *install* time, so this needs a story for `uv tool install` from a tarball), or
-   delete the field end-to-end including the five mocks. Deleting is cheaper and
+   delete the field end-to-end including those five mocks. Deleting is cheaper and
    honest; emitting is more useful where `--version` alone cannot distinguish two
    builds of `0.3.0`.
 
 ### 4. **#285 — ruff, repo-wide** *(carried)*
    Still **9** dead `# noqa: S608` directives across 5 files, and **10**
    pre-existing `ruff check src/localmail/` errors; no `[tool.ruff]` config and no
-   CI step. The recovered round leaves a **live divergence worth resolving with
-   it**: `version_report.py`'s broad catch deliberately carries no `BLE001`
-   suppression while fourteen sibling catches in `src/` do. The comment there now
-   says explicitly that this is a divergence, not a settled convention — the rule
-   is inert under the pinned ruff and live under newer ones. **Decide both
+   CI step. The `BLE001` question sits with it: of the **79** `except Exception`
+   sites in `src/`, **14** carry the suppression and **65** do not, so there is no
+   convention in either direction — and whether the fourteen do anything depends
+   on which ruff runs. **BLE001 is not in ruff 0.11's default set but is from
+   0.16**, and nothing in this repo pins a version (no ruff in `pyproject.toml`
+   or `uv.lock`, no `[tool.ruff]`, no lint step in CI), while `.ruff_cache/` shows
+   both have been run here. An earlier wording of this note called the site a
+   "divergence" and said the rule "is not in ruff's default set, so the directive
+   is inert under the pinned ruff but live under newer ones" — the first framed
+   the majority as the exception, and the second is self-refuting. **Decide both
    together.**
 
 ### 5. **Admin GUI phase 5 — Users & ACL panel** *(carried, still the design's next slice)*

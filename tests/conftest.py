@@ -67,6 +67,23 @@ def fresh_embed_failure_log():
 
 
 @pytest.fixture(autouse=True)
+def fresh_version_reports():
+    """Clear the process-wide record of reported version diagnostics (#295).
+
+    `log_version_diagnostic` reports each distinct diagnostic once per process,
+    so `serve_cmd` and `create_app` on one startup path do not print the same
+    line twice. Without this reset the *first* test to construct an entry point
+    would silence every later one — the same shape as the embed worker's
+    failure log above.
+    """
+    from localmail.version_report import reset_version_reports
+
+    reset_version_reports()
+    yield
+    reset_version_reports()
+
+
+@pytest.fixture(autouse=True)
 def default_secret_backend():
     """Restore the keyring secret backend after every test.
 

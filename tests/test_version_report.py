@@ -33,10 +33,11 @@ from localmail.version_report import (
     ResolvedVersion,
     VersionSource,
     reject_empty_diagnostic,
+    render_exception_chain,
     resolve_version,
     unknown_version_diagnostic,
 )
-from localmail.version_report import _CAUSE_PREFIX
+from localmail.version_report import _CAUSE_PREFIX, _CHAIN_SEPARATOR, _MAX_CHAIN_LINKS
 
 
 @pytest.fixture
@@ -265,6 +266,142 @@ def test_the_cause_keeps_what_separates_one_failure_from_another(
     metadata_version(_raise)
     detail = resolve_version().detail
     assert detail is not None and expected in detail
+
+
+def test_the_cause_follows_a_wrapper_to_the_exception_that_names_the_fault(
+    metadata_version,
+) -> None:
+    """#303: `format_exception_only` renders only the *outermost* exception.
+
+    The rendering was chosen over a bare type name because it keeps the errno,
+    the filename and the decode offset — the three things that separate EIO from
+    ESTALE from EACCES. When the interesting exception is a `__cause__` it
+    discarded exactly what it was chosen to preserve, and sent the operator to a
+    remedy that says "read the cause below first" over a cause naming nothing
+    actionable.
+
+    A wrapper is not hypothetical here: the module docstring names a third-party
+    `sys.meta_path` finder as a reachable trigger, and wrapping a low-level
+    `OSError` in a library-specific error is the normal thing such a finder does.
+    """
+
+    def _raise(_name: str) -> str:
+        raise RuntimeError("finder failed") from OSError(
+            5, "Input/output error", "/nfs/site-packages/localmail.dist-info/METADATA"
+        )
+
+    metadata_version(_raise)
+    detail = resolve_version().detail
+    assert detail is not None
+    # The exception that was actually raised still leads — it is what the
+    # traceback would have shown, and the reader needs to recognise it.
+    assert detail.startswith("RuntimeError")
+    # ...and the two things the remedy tells them to act on survive it.
+    assert "[Errno 5]" in detail
+    assert "/nfs/site-packages/localmail.dist-info/METADATA" in detail
+
+
+def _chain_of(depth: int) -> BaseException:
+    """`depth` exceptions, each raised *from* the next, innermost named last."""
+    exc: BaseException = OSError(5, "innermost")
+    for level in reversed(range(depth - 1)):
+        try:
+            raise RuntimeError(f"wrapper {level}") from exc
+        except RuntimeError as raised:
+            exc = raised
+    return exc
+
+
+def test_an_unwrapped_exception_gains_no_chain_decoration() -> None:
+    """The overwhelmingly common shape, and the regression guard for #303's fix.
+
+    Both causes #296 actually reproduced — a bare `OSError`, a
+    `UnicodeDecodeError` — are unwrapped, so a chain walk that appended a
+    separator, a trailing marker or an empty link would change every real
+    rendering to buy a case that had not happened yet.
+    """
+    rendered = render_exception_chain(OSError(5, "Input/output error"))
+    assert _CHAIN_SEPARATOR not in rendered
+    assert rendered == "OSError: [Errno 5] Input/output error"
+
+
+def test_a_detached_context_is_not_reported_as_a_cause() -> None:
+    """`raise X from None` detaches the context on purpose; printing it anyway
+    contradicts the author and `traceback`'s own behaviour.
+
+    The distinction matters on this path: a finder that catches an `OSError` and
+    deliberately re-raises without it is saying the `OSError` is not the fault to
+    act on, and the remedy line sends the operator to whatever this names.
+    """
+    try:
+        try:
+            raise OSError(5, "detached")
+        except OSError:
+            raise RuntimeError("replaced") from None
+    except RuntimeError as exc:
+        rendered = render_exception_chain(exc)
+    assert rendered == "RuntimeError: replaced"
+    assert "detached" not in rendered
+
+
+def test_an_implicit_context_is_followed() -> None:
+    """A bare `raise` inside an `except` sets `__context__`, not `__cause__`.
+
+    Third-party code raises this shape far more often than it writes `from`, so
+    following only `__cause__` would miss most real wrappers — the case #303 is
+    about.
+    """
+    try:
+        try:
+            raise OSError(5, "Input/output error", "/mnt/METADATA")
+        except OSError:
+            raise RuntimeError("finder failed")
+    except RuntimeError as exc:
+        rendered = render_exception_chain(exc)
+    assert rendered.startswith("RuntimeError: finder failed")
+    assert "[Errno 5]" in rendered and "/mnt/METADATA" in rendered
+
+
+def test_a_cyclic_chain_terminates() -> None:
+    """Reachable, not theoretical: an exception re-raised while its own cause is
+    being handled closes the loop. Unguarded this is an infinite walk on the
+    import path — a worse failure than the one the chain exists to fix, since it
+    hangs rather than raising.
+    """
+    first = RuntimeError("first")
+    second = RuntimeError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+    rendered = render_exception_chain(first)
+    assert rendered == f"RuntimeError: first{_CHAIN_SEPARATOR}RuntimeError: second"
+
+
+def test_a_long_chain_is_truncated_to_the_link_bound() -> None:
+    """The other bound. `detail` becomes a module global and is logged in full at
+    every startup, and a chain's length is chosen by whatever raised."""
+    rendered = render_exception_chain(_chain_of(_MAX_CHAIN_LINKS + 4))
+    assert rendered.count(_CHAIN_SEPARATOR) == _MAX_CHAIN_LINKS - 1
+    # The innermost link is what gets dropped, which is the right end to lose:
+    # the exception actually raised is the one the reader must recognise.
+    assert "innermost" not in rendered
+
+
+def test_a_chain_of_vast_messages_stays_bounded(metadata_version) -> None:
+    """The character ceiling applies to the joined chain, not per link.
+
+    `test_a_vast_exception_message_cannot_become_an_unbounded_global` proves the
+    single-exception case; a chain multiplies it by `_MAX_CHAIN_LINKS`, so the
+    bound has to be applied after the join or it is five times looser than it
+    reads.
+    """
+
+    def _raise(_name: str) -> str:
+        raise RuntimeError("x" * 100_000) from OSError(5, "y" * 100_000)
+
+    metadata_version(_raise)
+    detail = resolve_version().detail
+    assert detail is not None
+    assert len(detail) < 1_000
 
 
 def test_a_detail_is_only_rendered_when_there_is_one() -> None:

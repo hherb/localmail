@@ -125,10 +125,13 @@ attachment tree without touching IMAP.
 uv sync                          # install deps
 uv run pytest                    # full test suite (skips DB tests if PG unreachable)
 uv run localmail --version       # installed version; reads no config, no DB (#279)
-                                 #   stdout = the version line; stderr warns + names
-                                 #   the remedy when it cannot be read (#291), and
-                                 #   the exception that stopped it (#296). `serve`
-                                 #   and `run` log the same line at startup (#295).
+                                 #   stdout = the version line; stderr names the
+                                 #   remedy when it cannot be read (#291), the
+                                 #   exception that stopped it (#296) and the chain
+                                 #   it was raised from (#303). EVERY command logs
+                                 #   that line at startup (#295, #304); `run`/`serve`
+                                 #   do it themselves, the group callback does it for
+                                 #   the other 36 (cli.SELF_REPORTING_COMMANDS).
 uv run localmail init-db         # apply pending migrations
 uv run localmail list-accounts   # show config'd accounts and whether a secret is stored
 uv run localmail add-account N   # store password for account N (must exist in config.toml)
@@ -344,6 +347,33 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   - **The rendering rule lives on `ResolvedVersion.unreadable`, not at the catch
     site**, so a second catch cannot re-decide it — the one-authority argument
     `pgtext.strip_nuls` and `text_empty.is_blank` already make.
+  - **It renders the whole `__cause__`/`__context__` chain, not the outermost
+    exception (#303).** `format_exception_only` formats one exception, so
+    `raise RuntimeError("finder failed") from OSError(5, …, "/nfs/…/METADATA")`
+    rendered as `cause: RuntimeError: finder failed` — the errno and filename
+    gone, i.e. the rendering discarding exactly what it was chosen over a type
+    name to keep, under a remedy that says "read the cause below first". A
+    wrapper is the normal shape for the third-party `sys.meta_path` finder the
+    docstring names as reachable. The rule is the pure
+    `version_report.render_exception_chain`, outermost first, joined by
+    `_CHAIN_SEPARATOR`.
+    - **Three bounds, because this runs on the import path inside a handler that
+      may not fail**: `_MAX_CHAIN_LINKS` (5) ends a pathological wrapper stack,
+      an identity set ends a `__context__` cycle (reachable — an exception
+      re-raised while its own cause is handled), and `_MAX_DETAIL_CHARS` still
+      applies **to the joined result**, so the ceiling is not silently five
+      times looser. All four are mutation-pinned.
+    - **`__suppress_context__` is honoured**, so `raise X from None` prints no
+      chain: the author detached it deliberately and `traceback` agrees. The
+      walk follows `__cause__` first, then `__context__` unless suppressed —
+      following only `__cause__` would miss most real wrappers, since a bare
+      `raise` inside an `except` sets the context, not the cause.
+    - **Each link is rendered in its own `try`** (`render_one_exception`), so one
+      hostile link costs its own detail rather than the whole chain's; the outer
+      guard in `unreadable` remains, because reading `__cause__` off a hostile
+      object can raise too. An unwrapped exception gains **no** separator and no
+      empty link — pinned, since both shapes #296 reproduced are unwrapped and a
+      chain walk must not change every real rendering to buy an unseen case.
   - **`Exception`, never `BaseException`**, and `PackageNotFoundError` must stay
     **ahead** of it: it is a `ModuleNotFoundError` subclass, so reordering the
     two silently reclassifies every uninstalled tree as a corrupt one and sends
@@ -405,25 +435,72 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     inline check** because enum machinery replaces `__new__` after class
     creation, so no test can reach the production one to prove the rule fires
     for a *future* member.
-- **Every long-running process reports an unresolvable version at startup
-  (#295).** #291 fixed `--version` and only that, leaving `__version_source__`
-  with exactly one reader — so on a headless host `serve` and `run` shipped the
-  sentinel in silence, `/v1/version` answered `0.0.0+unknown` as if it were a
-  version, and the GUI rendered it. #291 verbatim, one reader over.
+- **Every entry point reports an unresolvable version at startup (#295, #304).**
+  #291 fixed `--version` and only that, leaving `__version_source__` with exactly
+  one reader — so on a headless host `serve` and `run` shipped the sentinel in
+  silence, `/v1/version` answered `0.0.0+unknown` as if it were a version, and
+  the GUI rendered it. #291 verbatim, one reader over.
   - The rule is `version_report.log_version_diagnostic(log, diagnostic)` — one
-    ERROR, or nothing — called by `serve_cmd`, `create_app`, `run_cmd` and
-    `Daemon.__init__`. Shared so they cannot drift to different levels or
-    wordings. The CLI's `--version` is deliberately **not** a caller: its stderr
-    goes through click because its stdout is the machine-readable line.
-    **Only these three entry points report at all** — the other 36 CLI commands
-    catch an unresolvable version and surface it nowhere, which for a cron
-    `localmail sync` turned #296's loud crash into a silent success. Tracked as
-    #304; the fix is one call in the `main` group callback, and the dedup is
-    what makes it free. Two smaller scope notes live with it: the line's
-    `warning:` prefix versus its ERROR level, and `serve` emitting through
-    `logging.lastResort` unformatted (#302); and `--version` still dying on a
-    missing third-party dependency before click parses the flag, because
-    `cli.py` imports the daemon at module scope (#305).
+    ERROR, or nothing — called by `serve_cmd`, `create_app`, `run_cmd`,
+    `Daemon.__init__`, and the `main` **group callback**. Shared so they cannot
+    drift to different levels or wordings. The CLI's `--version` is deliberately
+    **not** a caller: its stderr goes through click because its stdout is the
+    machine-readable line, and its option is eager and exits inside its own
+    callback, so the group callback never runs for it (pinned).
+  - **#304 was the reach gap, and it was the one that mattered operationally.**
+    #295 wired the report to the two entry points it named; the other **36** of
+    38 commands caught an unresolvable version and surfaced it nowhere. Since
+    #296 deliberately traded a loud crash for graceful degradation, that made a
+    cron `localmail sync` on a host with a failing `site-packages` mount run to
+    completion with exit 0 and say nothing — where before #296 it failed loudly
+    on the first night. The RED test reproduced the headline exactly: **36
+    failures**, one per command.
+    - **`cli.SELF_REPORTING_COMMANDS` (`{"run", "serve"}`) is what the group
+      callback steps aside for**, because both configure logging first and their
+      line therefore carries a level and a timestamp. Reporting for them in the
+      group callback would win the per-process dedup with an *earlier,
+      unformatted* line and silently downgrade it — verified by mutation (three
+      existing ordering pins fail).
+    - **Only one drift direction is survivable, so the set is derived and
+      compared, never trusted.** A command listed but not reporting goes
+      **silent** (#304 reopened for exactly the long-running processes #295 was
+      about); a command reporting but not listed merely loses its formatting.
+      `test_the_skip_set_is_exactly_the_commands_that_report_themselves` reads
+      the **live** `main.commands` registry — so a command added later is in
+      scope without anyone updating a list — and decides by walking each
+      callback's **AST**, not its text: the reason for the rule is written in
+      comments beside it, and #291 already paid for the lesson that a text match
+      cannot tell prose from code. Mutation-pinned in both directions, plus a
+      third mutation proving a prose mention does *not* count.
+  - **The severity word is derived from the level, not written beside it
+    (#302).** All three remedies opened with `warning:` while the record was an
+    ERROR, so journald showed `ERROR … warning: …` and an operator told to grep
+    for one found the other. `_SEVERITY_PREFIX` is now
+    `logging.getLevelName(_REPORT_LEVEL).lower()`, so the two cannot be changed
+    apart — the one-authority call again. The pin reads the word back off a
+    record the module actually emitted rather than comparing against a literal
+    `"error"`, which would pass against a remedy set and a level that agree with
+    the literal and not with each other.
+    - **Most paths print no level at all, which is why the word carries weight.**
+      `run_cmd` has called `basicConfig`; `serve`, and the group callback that
+      covers the other 36, have not, and nothing they import does — so those
+      records go out through `logging.lastResort`: stderr, message only, no
+      level, no timestamp, no logger name. Configuring logging in the group
+      callback to fix that was **rejected**: it precedes all 38 commands, and
+      installing a root handler for every one of them changes far more than the
+      line it would format. The level still matters where it is not decoration —
+      `run` after `basicConfig`, `create_app` under uvicorn's `dictConfig`, and
+      any embedder constructing `Daemon` directly.
+  - **`--version` still dies on the *other* broken install (#305, open).** What
+    the broad catch buys is an unreadable METADATA, and only that: `cli.py`
+    imports the daemon — and so `sqlparse`, `psycopg`, `keyring` — at module
+    scope, so a partial `uv sync` that dropped any third-party dependency kills
+    the command with a bare traceback before click parses the flag. Reproduced by
+    blocking one module on `sys.meta_path`: `import localmail` succeeds and
+    resolves its version, `import localmail.cli` does not. The module docstring
+    states the scope rather than overclaiming; making it survivable means
+    deferring those imports into the command bodies, which belongs with the
+    `cli.py` refactor already owed.
   - **ERROR, not WARNING.** `localmail run --log-level ERROR` is an offered
     `click.Choice` and `run_cmd` calls `basicConfig` with it *before* constructing
     the daemon, so at WARNING the line was filtered out entirely — and
@@ -482,7 +559,8 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   rendered there rather than by each reader.** The exception type behind a
   `METADATA_UNREADABLE` resolution is known only at resolution time, so a reader
   handed just `__version_source__` drops it silently — and there are three
-  readers now. `unknown_version_diagnostic`'s `detail` is keyword-only **with no
+  reader *modules* now (`cli.py` reads it twice since #304: `_print_version` and
+  the group callback). `unknown_version_diagnostic`'s `detail` is keyword-only **with no
   default** (#234's shape) for the same reason one layer down; there is exactly
   one production call site, which is what makes that free rather than noisy.
   Each reader imports with `from … import`, so a test must rebind the *reader's*
@@ -507,6 +585,7 @@ src/localmail/
   ocr_policy.py     # pure: plan_ocr / unknown_engine_message (#248)
   version_report.py # resolve_version + pure unknown_version_diagnostic (#291)
                     #   + METADATA_UNREADABLE (#296) + log_version_diagnostic (#295)
+                    #   + pure render_exception_chain (#303) + _SEVERITY_PREFIX (#302)
   attachments.py    # write_attachments(conn, parsed, root) -> JSONB rows (content-addressable)
   blob_temps.py     # writer temp naming (new_temp_path) + its collector (sweep_blob_temps) (#237)
   fetch_retry.py    # bounded BODY[] hold (#222A) + give-up tombstones/rewind planner (#239)

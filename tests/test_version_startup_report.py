@@ -25,19 +25,21 @@ puts it on stderr rather than stdout is pinned in `test_version_single_source.py
 from __future__ import annotations
 
 import ast
+import inspect
 import logging
+import textwrap
 import threading
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
-from localmail.cli import main
+from localmail.cli import SELF_REPORTING_COMMANDS, main
 from localmail.config import LocalmailConfig, McpConfig, ServeConfig
 from localmail.daemon import Daemon
 from localmail.retry import RetryAborted
 from localmail.serve.app import create_app
-from localmail.version_report import log_version_diagnostic
+from localmail.version_report import VersionSource, log_version_diagnostic
 
 #: Stands in for a rendered diagnostic. Deliberately **not** a real one: these
 #: tests assert the string is carried, and rebuilding it here from
@@ -206,6 +208,32 @@ def test_an_unresolvable_version_is_reported_at_error() -> None:
     records = _records_from(_PROBE)
     assert [r.levelno for r in records] == [logging.ERROR]
     assert _PROBE in records[0].getMessage()
+
+
+def test_the_severity_word_matches_the_level_the_line_is_logged_at() -> None:
+    """#302: the text said `warning:` while the record was an ERROR.
+
+    One string serves two consumers. `--version` writes it to stderr through
+    click, where there is no level and the word is the only severity marker; the
+    startup callers hand it to `logging`, where the level is. They disagreed, so
+    journald showed `ERROR ... warning: ...` and an operator told to grep for
+    one found the other.
+
+    Asserted as a **relation** — the word is read back off a record this module
+    actually emitted, not compared against a literal `"error"` — so the two
+    cannot be changed apart. A literal would pass against a remedy set and a
+    level that agree with the literal and not with each other.
+    """
+    record = _records_from(_PROBE)[0]
+    expected = f"{record.levelname.lower()}: "
+    for source in VersionSource:
+        if source.diagnostic is None:
+            continue
+        assert source.diagnostic.startswith(expected), (
+            f"{source.value}'s remedy opens with "
+            f"{source.diagnostic.split(':')[0]!r} but the line is logged at "
+            f"{record.levelname}"
+        )
 
 
 def test_the_report_survives_the_quietest_log_level_the_cli_offers() -> None:
@@ -392,6 +420,131 @@ def test_serve_reports_before_its_schema_check_rejects_an_unreachable_db(
 #: A config path nothing answers on. `load_config` raises `FileNotFoundError`
 #: for an explicitly-named file that is absent, which is the gate below.
 _MISSING_CONFIG = "/nonexistent/localmail/config.toml"
+
+#: The name the group callback reports under — the package logger, since the
+#: report is now made on behalf of whichever of the 38 commands is running.
+_GROUP_LOGGER = "localmail"
+
+
+def _invoke_reporting(argv, monkeypatch: pytest.MonkeyPatch, caplog):
+    """Run `argv` with an unresolvable version and no reachable config.
+
+    Every command resolves its DSN through `load_config`, which raises on a
+    named-but-absent file — so each one fails before it can touch Postgres,
+    while still passing through the group callback the report now lives in.
+    """
+    monkeypatch.setattr("localmail.cli.__version_diagnostic__", _PROBE)
+    monkeypatch.setenv("LOCALMAIL_CONFIG", _MISSING_CONFIG)
+    monkeypatch.delenv("LOCALMAIL_DSN_OVERRIDE", raising=False)
+    with caplog.at_level("ERROR", logger=_GROUP_LOGGER):
+        CliRunner().invoke(main, argv)
+    return [r for r in caplog.records if _PROBE in r.getMessage()]
+
+
+#: Every command that does *not* report for itself — i.e. the 36 that #304 found
+#: reporting nowhere. Derived from the registered commands rather than listed,
+#: so a command added later is covered without anyone remembering to add it.
+_DELEGATING_COMMANDS = sorted(set(main.commands) - SELF_REPORTING_COMMANDS)
+
+
+@pytest.mark.parametrize("command", _DELEGATING_COMMANDS)
+def test_every_other_command_reports_an_unresolvable_version(
+    command: str, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """#304: of 38 commands, exactly three surfaced it — `--version`, `serve`,
+    `run`. The other 36 caught the failure and reported it nowhere.
+
+    That matters more than it looks, because #296 deliberately traded a loud
+    crash for graceful degradation: before it, an unreadable `METADATA`
+    propagated out of `import localmail` and killed the command with a
+    traceback. The compensating report was only ever wired to the two entry
+    points #295 named — so for a cron `localmail sync` on a host whose
+    `site-packages` mount has started raising EIO, #296 converted a loud nightly
+    failure into a silent success with exit 0.
+
+    Parametrised over every command rather than a sample: the defect was a *set*
+    of commands, so a sample would let the next one added rejoin the silent 36.
+    """
+    assert _invoke_reporting([command], monkeypatch, caplog), (
+        f"`localmail {command}` reports an unresolvable version nowhere"
+    )
+
+
+#: The reporter, named once so the AST walk below and the code it checks cannot
+#: be renamed apart.
+_REPORTER = log_version_diagnostic.__name__
+
+
+def _commands_that_report() -> set[str]:
+    """Every registered `main` subcommand whose own body calls the reporter.
+
+    Read off the live command registry (so a command added later is in scope
+    without anyone updating a list) and decided by walking each callback's AST
+    rather than grepping its source — the distinction #291 already paid for
+    here: the *reason* for a rule is written in comments and docstrings beside
+    it, and a text match cannot tell prose from code.
+    """
+    reporting = set()
+    for name, command in main.commands.items():
+        if command.callback is None:
+            continue
+        tree = ast.parse(textwrap.dedent(inspect.getsource(command.callback)))
+        if any(
+            isinstance(node, ast.Call) and getattr(node.func, "id", None) == _REPORTER
+            for node in ast.walk(tree)
+        ):
+            reporting.add(name)
+    return reporting
+
+
+def test_the_skip_set_is_exactly_the_commands_that_report_themselves() -> None:
+    """The skip-set is a hardcoded pair, and only one of its drift directions is
+    survivable — so the pair is derived from the code and compared, not trusted.
+
+    A command **listed but not reporting** goes silent: the group callback steps
+    aside for it and nothing takes its place, which is #304 reopened for exactly
+    the long-running processes #295 was about. A command **reporting but not
+    listed** merely loses its formatting, because the group callback's earlier
+    line wins the per-process dedup.
+
+    Stated as set equality rather than two containments so both are one
+    assertion, and so the failure message names the offending command.
+    """
+    assert _commands_that_report() == set(SELF_REPORTING_COMMANDS)
+
+
+def test_a_command_stays_quiet_when_the_version_is_known(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The common case, pinned separately: "report unconditionally" satisfies
+    every assertion above and would put an ERROR in front of an operator on
+    every healthy invocation of all 38 commands."""
+    monkeypatch.setattr("localmail.cli.__version_diagnostic__", None)
+    monkeypatch.setenv("LOCALMAIL_CONFIG", _MISSING_CONFIG)
+    with caplog.at_level("ERROR", logger=_GROUP_LOGGER):
+        CliRunner().invoke(main, ["list-accounts"])
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_the_version_flag_is_not_a_group_callback_reporter(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """`--version` must keep reporting through click, and must not also log.
+
+    Its stdout is the machine-readable line the manual's install-verification
+    step parses, and click is what keeps the diagnostic off it. The flag is
+    eager and exits inside its own callback, so the group callback never runs —
+    this pins that, because a report added there *without* the eager exit would
+    duplicate the stderr line and a report moved *out* of `_print_version` would
+    leave `--version` silent again, which is #291.
+    """
+    monkeypatch.setattr("localmail.cli.__version_diagnostic__", _PROBE)
+    with caplog.at_level("ERROR", logger=_GROUP_LOGGER):
+        result = CliRunner().invoke(main, ["--version"])
+    assert result.exit_code == 0
+    assert _PROBE in result.stderr
+    assert _PROBE not in result.stdout
+    assert [r for r in caplog.records if _PROBE in r.getMessage()] == []
 
 
 @pytest.mark.parametrize(

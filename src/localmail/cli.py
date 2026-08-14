@@ -144,6 +144,23 @@ def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Ac
         ) from exc
 
 
+#: The subcommands that report an unresolvable version *themselves*, so the
+#: group callback below leaves them alone (#304).
+#:
+#: Both configure logging first — `run_cmd` calls `basicConfig`, and `serve`
+#: hands off to uvicorn — so their line carries a level and a timestamp, which is
+#: what a long-running process's operator greps. Reporting for them here would
+#: win the dedup with an earlier, unformatted line and silently downgrade it.
+#:
+#: Pinned by test_version_startup_report.py::
+#: test_the_skip_set_is_exactly_the_commands_that_report_themselves, which reads
+#: the registered commands and walks each callback's AST. Both drift directions
+#: are closed there, and only one is benign: a command listed here that stops
+#: reporting goes **silent**, while one that reports without being listed merely
+#: loses its formatting to the group callback's earlier line.
+SELF_REPORTING_COMMANDS = frozenset({"run", "serve"})
+
+
 def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
     """Print the version, and say so on stderr when it could not be determined.
 
@@ -221,6 +238,19 @@ def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> 
 @click.pass_context
 def main(ctx: click.Context, config_path: Path | None) -> None:
     """Local PostgreSQL archive of one or more IMAP accounts."""
+    # First statement, ahead of everything the command it precedes can fail on
+    # — the rule every other call site in this module already follows, applied
+    # once for the 36 commands that had no call site at all (#304). Before #296
+    # an unreadable METADATA killed them with a traceback; #296 traded that for
+    # a graceful degradation and only `serve`/`run` got the compensating report,
+    # so a cron `localmail sync` on a host with a failing `site-packages` mount
+    # ran to completion with exit 0 and said nothing.
+    #
+    # `--version` never reaches here: its option is eager and exits inside its
+    # own callback, which is what keeps its stderr going through click while its
+    # stdout stays the machine-readable line.
+    if ctx.invoked_subcommand not in SELF_REPORTING_COMMANDS:
+        log_version_diagnostic(logging.getLogger("localmail"), __version_diagnostic__)
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path or default_config_path()
 

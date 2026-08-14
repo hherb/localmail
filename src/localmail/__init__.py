@@ -16,12 +16,14 @@ from localmail.version_report import (
 # again. Phrased as an invariant, not a count: the count was "the one other
 # reader" until #279 added the second and did not update this line.
 #
-# Resolved exactly once, here, and exported as the resolution's three
-# projections: the string, the cause, and the finished operator-facing line.
-# Re-deriving any of them per reader is the footgun a bare
-# `@click.version_option()` carries — the same question asked twice, with
-# different failure semantics. Phrased as an invariant rather than a roster for
-# the reason the paragraph above gives: the roster is what goes stale.
+# Resolved exactly once, here, and exported as every projection of that
+# resolution a reader needs — each `__version*` attribute below is a view of
+# the same `_resolved`, never a second lookup. Re-deriving any of them per
+# reader is the footgun a bare `@click.version_option()` carries: the same
+# question asked twice, with different failure semantics. Stated as that
+# invariant rather than as a list, for the reason the paragraph above gives —
+# an enumeration here is one more count to go stale, and the previous wording
+# managed to enumerate three while claiming to do the opposite.
 #
 # Note the metadata is stamped at *install* time: an editable tree whose
 # pyproject was bumped without a re-sync reports the old version until the next
@@ -57,9 +59,10 @@ __version_source__: _VersionSource = _resolved.source
 #: The finished operator-facing warning, or None when the version is real.
 #:
 #: Rendered here rather than by each reader, and that is load-bearing (#295,
-#: #296). There are three readers now — `--version`, `serve`, the daemon — and
-#: the exception type behind a `METADATA_UNREADABLE` resolution is known *only*
-#: at resolution time, so a reader handed just `__version_source__` would drop
+#: #296). Every long-running entry point reads it — `--version`, and `serve` and
+#: the daemon at two layers each — and the exception type behind a
+#: `METADATA_UNREADABLE` resolution is known *only* at resolution time, so a
+#: reader handed just `__version_source__` would drop
 #: it silently. Exporting the finished string makes that omission impossible
 #: rather than merely discouraged, which is the same call `unknown_version_
 #: diagnostic`'s keyword-only `detail` makes one layer down.

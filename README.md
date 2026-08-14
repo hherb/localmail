@@ -91,8 +91,11 @@ alone when you are verifying an install.
 **ERROR**, so a headless host reports a broken install where its operator
 actually looks — in the service log, without needing `--version` run by hand.
 ERROR rather than warning because `run --log-level ERROR` is a supported choice
-and a report you can be configured out of is not a report. Nothing is logged
-when the version reads normally, and `/v1/version` is unchanged.
+and a report you can be configured out of is not a report. Both report before
+they read `config.toml` and before they touch Postgres, so a host that is broken
+in more than one way still tells you about its version first. Nothing is logged
+when the version reads normally, and `/v1/version` is unchanged. Other
+subcommands do not report it yet — see issue #304.
 
 ### Sync & accounts
 

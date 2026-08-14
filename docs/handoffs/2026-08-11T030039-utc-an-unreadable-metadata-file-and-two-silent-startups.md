@@ -220,11 +220,12 @@ Partition sums on both hosts, `claimable` agrees with `pending` on both.
 ### 1. **#278 — the version surface's other half** *(carried; needs YOUR decision first)*
    Now the last unclosed member of the version cluster (#279, #291, #295, #296 all
    done). The GUI About tab renders a `build_hash` that `/v1/version` has **never**
-   emitted, so "Server build" always shows `?`, while five test files mock the
-   field and make it look covered. **Two options, product call before any code:**
+   emitted, so "Server build" always shows `?`, while four test files and a Rust
+   `#[cfg(test)]` module mock the field and make it look covered. **Two options,
+   product call before any code:**
    emit a real build hash (from git, at build time — but the version is stamped at
    *install* time, so this needs a story for `uv tool install` from a tarball), or
-   delete the field end-to-end including the five mocks. Deleting is cheaper and
+   delete the field end-to-end including those five mocks. Deleting is cheaper and
    honest; emitting is more useful where `--version` alone cannot distinguish two
    builds of `0.3.0`. **Note this session's precedent:** #295's wire question was
    decided *against* adding a field, citing #278 as the cautionary case.

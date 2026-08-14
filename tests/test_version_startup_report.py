@@ -62,9 +62,15 @@ _DEAD_DSN = "postgresql://localmail@127.0.0.1:1/nope"
 #: is satisfied by any attribute of that name, so the reach tests below cannot
 #: see the difference between importing the package's value and defining a
 #: module-local `None` — see the AST pin.
+#: `cli.py` is here because it is the reader this pin most needs: every test in
+#: this file and in `test_version_single_source.py` rebinds
+#: `localmail.cli.__version_diagnostic__`, so replacing its package import with
+#: a module-local `= None` left `--version` (#291) *and* `serve` (#295)
+#: permanently silent with the entire suite green. Verified by mutation.
 _READER_SOURCES = {
-    "src/localmail/daemon.py": ("localmail", None),
-    "src/localmail/serve/app.py": ("localmail", None),
+    "src/localmail/cli.py": "localmail",
+    "src/localmail/daemon.py": "localmail",
+    "src/localmail/serve/app.py": "localmail",
 }
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -133,10 +139,58 @@ def _records_from(diagnostic: str | None) -> list[logging.LogRecord]:
     return records
 
 
-def test_a_healthy_install_logs_nothing() -> None:
+@pytest.mark.parametrize("quiet", [None, ""], ids=["none", "empty"])
+def test_a_healthy_install_logs_nothing(quiet) -> None:
     """`None` is the healthy answer and must not become an empty WARNING — a
-    line that fires on every start is a line operators learn to skip."""
-    assert _records_from(None) == []
+    line that fires on every start is a line operators learn to skip.
+
+    `""` is parametrised beside it because the guard is deliberately falsy
+    rather than `is None`, and narrowing it to `is None` otherwise passed every
+    test in this file while emitting a blank ERROR at every startup.
+    """
+    assert _records_from(quiet) == []
+
+
+def _records_from_calls(*diagnostics: str | None) -> list[logging.LogRecord]:
+    """Everything `log_version_diagnostic` emits across successive calls on one
+    logger — i.e. within one process, which is the scope the dedup is keyed to."""
+    log = logging.getLogger("localmail.test.version-repeat")
+    records: list[logging.LogRecord] = []
+    log.addHandler(_Collect(records))
+    log.setLevel(logging.DEBUG)
+    try:
+        for diagnostic in diagnostics:
+            log_version_diagnostic(log, diagnostic)
+    finally:
+        log.handlers.clear()
+    return records
+
+
+def test_the_same_diagnostic_is_reported_once_per_process() -> None:
+    """The mechanism that makes the two `serve` call sites safe.
+
+    `serve_cmd` reports, then `create_app` reports again on the same startup;
+    without the dedup an operator sees the same eight-line block twice and
+    learns to skip it. Nothing pinned this — deleting the dedup outright left
+    the whole suite green, which is what let the comment at `cli.py`'s call site
+    assert "create_app's call below stays silent" with nothing behind it.
+    """
+    assert [r.getMessage() for r in _records_from_calls(_PROBE, _PROBE)] == [_PROBE]
+
+
+def test_a_second_distinct_diagnostic_is_still_reported() -> None:
+    """The dedup is keyed on the diagnostic, not on "have we said anything yet".
+
+    A bool flag passes the test above and is the mutation that matters: it
+    silences a *different* second problem for the life of the process — a
+    suppression bug inside the module written to end suppression bugs. Verified
+    by mutation: the flag form left the entire suite green.
+    """
+    other = _PROBE + " (a different cause)"
+    assert [r.getMessage() for r in _records_from_calls(_PROBE, other, _PROBE)] == [
+        _PROBE,
+        other,
+    ]
 
 
 def test_an_unresolvable_version_is_reported_at_error() -> None:
@@ -195,7 +249,7 @@ def test_each_startup_reader_takes_the_diagnostic_from_the_package(
     place the derivation is visible, which is why
     `test_cli_does_not_reintroduce_click_version_option` walks the AST as well.
     """
-    expected_module, _ = _READER_SOURCES[module]
+    expected_module = _READER_SOURCES[module]
     tree = ast.parse((_REPO_ROOT / module).read_text())
     imports = [
         node
@@ -325,7 +379,54 @@ def test_serve_reports_before_its_schema_check_rejects_an_unreachable_db(
         result = CliRunner().invoke(main, ["serve", "--no-tls", "--bind", "127.0.0.1"])
     assert result.exit_code != 0
     assert "Is Postgres reachable?" in result.output
-    assert [r for r in caplog.records if _PROBE in r.getMessage()], (
+    matching = [r for r in caplog.records if _PROBE in r.getMessage()]
+    assert matching, (
         "serve must report an unresolvable version before its schema check, "
         "not from inside create_app which that check prevents it from reaching"
     )
+    # The logger name is the operator's grep target, and `caplog` collects at the
+    # root regardless of it — the same reason the reach tests assert it.
+    assert {r.name for r in matching} == {"localmail.serve"}
+
+
+#: A config path nothing answers on. `load_config` raises `FileNotFoundError`
+#: for an explicitly-named file that is absent, which is the gate below.
+_MISSING_CONFIG = "/nonexistent/localmail/config.toml"
+
+
+@pytest.mark.parametrize(
+    ("argv", "logger_name"),
+    [
+        (["serve", "--no-tls", "--bind", "127.0.0.1"], "localmail.serve"),
+        (["run"], "localmail.daemon"),
+    ],
+    ids=["serve", "run"],
+)
+def test_a_startup_path_reports_before_its_config_gate(
+    argv, logger_name, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The gate ahead of the two both commands already pin.
+
+    `serve_cmd` reported after `load_config`, and `run_cmd` reported only from
+    inside `Daemon.__init__` — one gate later still. A missing or malformed
+    config raises there, so on a host mid-deploy neither command said anything,
+    which is the same hole #295 closed one gate further down. The test that
+    pinned the schema gate could not see it: it drives the
+    `LOCALMAIL_DSN_OVERRIDE` branch, which skips `load_config` entirely.
+
+    A host damaged enough to lose its version metadata is exactly a host whose
+    config may not be there either, which is why CLAUDE.md states the rule
+    without qualification: every call runs before the gate it precedes.
+    """
+    monkeypatch.setattr("localmail.cli.__version_diagnostic__", _PROBE)
+    monkeypatch.setenv("LOCALMAIL_CONFIG", _MISSING_CONFIG)
+    monkeypatch.delenv("LOCALMAIL_DSN_OVERRIDE", raising=False)
+    with caplog.at_level("ERROR", logger=logger_name):
+        result = CliRunner().invoke(main, argv)
+    assert result.exit_code != 0
+    assert isinstance(result.exception, (FileNotFoundError, SystemExit))
+    matching = [r for r in caplog.records if _PROBE in r.getMessage()]
+    assert matching, (
+        f"{argv[0]} must report an unresolvable version before it loads config"
+    )
+    assert {r.name for r in matching} == {logger_name}

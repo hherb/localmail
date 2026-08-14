@@ -151,10 +151,11 @@ def create_app(
     # which is why it is a sentinel and not a null — so the log is the only
     # place this can surface on a headless host.
     #
-    # `serve_cmd` reports earlier still (its schema check exits before reaching
-    # here), so on the CLI path this call is the deduped no-op. It stays because
-    # `create_app` is also the entry point for anything embedding the app, which
-    # never runs `serve_cmd`.
+    # `serve_cmd` reports as its first statement — ahead of the config load and
+    # the schema check, either of which can exit before reaching here — so on
+    # the CLI path this call is the deduped no-op. It stays because `create_app`
+    # is reached without `serve_cmd` by the test suite today and by any embedder
+    # tomorrow, and neither runs the command's own report.
     log_version_diagnostic(logging.getLogger("localmail.serve"), __version_diagnostic__)
     cfg = serve_config or ServeConfig()
     auth_cfg = auth_config or AuthConfig()

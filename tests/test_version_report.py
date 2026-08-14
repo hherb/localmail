@@ -37,7 +37,13 @@ from localmail.version_report import (
     resolve_version,
     unknown_version_diagnostic,
 )
-from localmail.version_report import _CAUSE_PREFIX, _CHAIN_SEPARATOR, _MAX_CHAIN_LINKS
+from localmail.version_report import (
+    _CAUSE_PREFIX,
+    _CHAIN_SEPARATOR,
+    _MAX_CHAIN_LINKS,
+    _MAX_DETAIL_CHARS,
+    _TRUNCATION_MARKER,
+)
 
 
 @pytest.fixture
@@ -344,6 +350,33 @@ def test_a_detached_context_is_not_reported_as_a_cause() -> None:
     assert "detached" not in rendered
 
 
+def test_a_cause_that_is_falsy_is_still_followed() -> None:
+    """The walk asks whether there *is* a cause, not whether it is truthy.
+
+    An exception is an ordinary object: one whose class defines `__bool__` or
+    `__len__` — an error type that doubles as a collection of what failed is the
+    realistic shape — is falsy while being perfectly present. Written as
+    `__cause__ or __context__` such a link is skipped, which is #303's own defect
+    (the rendering dropping the exception that names the fault) reintroduced by
+    the walk added to fix it.
+
+    Note the fallback cannot cover for it: assigning `__cause__` sets
+    `__suppress_context__`, so the skipped link is not replaced by the context —
+    it is simply lost.
+    """
+
+    class FalsyError(Exception):
+        def __bool__(self) -> bool:
+            return False
+
+    outer = RuntimeError("finder failed")
+    outer.__cause__ = FalsyError("the real fault")
+
+    rendered = render_exception_chain(outer)
+    assert rendered.startswith(f"RuntimeError: finder failed{_CHAIN_SEPARATOR}")
+    assert rendered.endswith("FalsyError: the real fault")
+
+
 def test_an_implicit_context_is_followed() -> None:
     """A bare `raise` inside an `except` sets `__context__`, not `__cause__`.
 
@@ -373,17 +406,48 @@ def test_a_cyclic_chain_terminates() -> None:
     first.__cause__ = second
     second.__cause__ = first
     rendered = render_exception_chain(first)
-    assert rendered == f"RuntimeError: first{_CHAIN_SEPARATOR}RuntimeError: second"
+    assert rendered == (
+        f"RuntimeError: first{_CHAIN_SEPARATOR}RuntimeError: second"
+        f"{_CHAIN_SEPARATOR}{_TRUNCATION_MARKER}"
+    )
 
 
 def test_a_long_chain_is_truncated_to_the_link_bound() -> None:
     """The other bound. `detail` becomes a module global and is logged in full at
     every startup, and a chain's length is chosen by whatever raised."""
     rendered = render_exception_chain(_chain_of(_MAX_CHAIN_LINKS + 4))
-    assert rendered.count(_CHAIN_SEPARATOR) == _MAX_CHAIN_LINKS - 1
+    # `max_links` renderings, plus the marker that says so.
+    assert rendered.count(_CHAIN_SEPARATOR) == _MAX_CHAIN_LINKS
     # The innermost link is what gets dropped, which is the right end to lose:
     # the exception actually raised is the one the reader must recognise.
     assert "innermost" not in rendered
+
+
+def test_a_truncated_chain_says_that_it_was_truncated() -> None:
+    """Both early exits mark the rendering; a natural end does not.
+
+    The end a cut walk drops is the innermost, which is where the errno and the
+    filename are — so an unmarked truncation hands the operator a degraded cause
+    in a shape indistinguishable from a complete one, under a remedy line that
+    tells them to read it first. That is #291's defect (an unresolvable answer
+    presented as an answer) one layer down, which is why the marker is a pin and
+    not a nicety.
+    """
+    cyclic = RuntimeError("first")
+    cyclic.__cause__ = RuntimeError("second")
+    cyclic.__cause__.__cause__ = cyclic
+
+    for cut in (_chain_of(_MAX_CHAIN_LINKS + 1), cyclic):
+        assert render_exception_chain(cut).endswith(
+            f"{_CHAIN_SEPARATOR}{_TRUNCATION_MARKER}"
+        )
+
+    # The common shapes #296 actually reproduced end naturally and must stay
+    # byte-identical — a marker on every rendering would say nothing.
+    assert _TRUNCATION_MARKER not in render_exception_chain(OSError(5, "eio"))
+    assert _TRUNCATION_MARKER not in render_exception_chain(
+        _chain_of(_MAX_CHAIN_LINKS)
+    )
 
 
 def test_a_chain_of_vast_messages_stays_bounded(metadata_version) -> None:
@@ -393,6 +457,12 @@ def test_a_chain_of_vast_messages_stays_bounded(metadata_version) -> None:
     single-exception case; a chain multiplies it by `_MAX_CHAIN_LINKS`, so the
     bound has to be applied after the join or it is five times looser than it
     reads.
+
+    Asserted against `_MAX_DETAIL_CHARS` rather than a round number: at the
+    shipped values a *per-link* ceiling would render 1014 characters, so a
+    literal `1_000` catches the regression by a 14-character margin that
+    shortening `_CHAIN_SEPARATOR` — or lowering the ceiling — would silently
+    spend, leaving a pin that reads strict and proves nothing.
     """
 
     def _raise(_name: str) -> str:
@@ -401,7 +471,27 @@ def test_a_chain_of_vast_messages_stays_bounded(metadata_version) -> None:
     metadata_version(_raise)
     detail = resolve_version().detail
     assert detail is not None
-    assert len(detail) < 1_000
+    assert len(detail) <= _MAX_DETAIL_CHARS + len(_TRUNCATION_MARKER)
+
+
+def test_a_whitespace_only_rendering_does_not_kill_the_import(monkeypatch) -> None:
+    """`__post_init__` rejects a blank detail by *raising*, on the import path.
+
+    So the fallback guarding it has to catch whitespace, not merely emptiness: a
+    bare `or` passes `"   "` through as truthy and straight into that raise —
+    `import localmail` dying inside the handler written to stop `import
+    localmail` dying, which is #296 turned on itself.
+
+    Unreachable through the real renderer today, and deliberately pinned anyway:
+    what makes it unreachable is that `_CHAIN_SEPARATOR` happens to contain
+    letters, so the guard's correctness rests on a constant it does not own and
+    nothing else would notice that coming apart.
+    """
+    monkeypatch.setattr(
+        "localmail.version_report.render_exception_chain", lambda _exc: "   \n\t "
+    )
+    resolved = ResolvedVersion.unreadable(OSError(5, "Input/output error"))
+    assert resolved.detail == "OSError"
 
 
 def test_a_detail_is_only_rendered_when_there_is_one() -> None:

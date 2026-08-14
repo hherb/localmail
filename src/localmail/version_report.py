@@ -159,6 +159,13 @@ _MAX_CHAIN_LINKS = 5
 #: read by an operator, not parsed.
 _CHAIN_SEPARATOR = " <- caused by "
 
+#: Appended wherever a rendering was cut short. Named once because both bounds
+#: on this path use it — the character ceiling in `ResolvedVersion.unreadable`
+#: and the link/cycle bound in `render_exception_chain` — and a marker that
+#: appears for one truncation but not the other is worse than none: it teaches
+#: the reader that an unmarked line is complete.
+_TRUNCATION_MARKER = "…"
+
 
 def render_one_exception(exc: BaseException) -> str:
     """Render `exc` alone, degrading to its type name rather than raising.
@@ -202,6 +209,12 @@ def render_exception_chain(
     which is what makes it safe for a value that becomes a module global: every
     link goes through `format_exception_only`, never `format_exception`.
 
+    **A walk cut short by either of the first two ends in `_TRUNCATION_MARKER`**,
+    so a partial chain cannot be read as a complete one — the end it loses is the
+    innermost, i.e. the errno this function exists to surface. A chain that ends
+    naturally gains nothing, which is what keeps the overwhelmingly common
+    unwrapped rendering byte-identical.
+
     The join is truncated as a whole rather than per link, so a pathological
     outermost message can still crowd out an inner errno. Accepted: one bound is
     one rule, and a per-link budget would truncate the common *unwrapped*
@@ -214,9 +227,27 @@ def render_exception_chain(
     while current is not None and len(parts) < max_links and id(current) not in seen:
         seen.add(id(current))
         parts.append(render_one_exception(current))
-        current = current.__cause__ or (
-            None if current.__suppress_context__ else current.__context__
-        )
+        # `is not None`, never `or`: an exception whose class defines
+        # `__bool__`/`__len__` is falsy while being perfectly present, and `or`
+        # would skip it — this rendering dropping the exception that names the
+        # fault, which is the whole of #303. Nor does the fallback cover for it:
+        # assigning `__cause__` sets `__suppress_context__`, so a skipped cause
+        # is lost rather than replaced by the context. Read lazily so a hostile
+        # `__context__` is not touched when a cause already answered.
+        cause = current.__cause__
+        if cause is not None:
+            current = cause
+        elif current.__suppress_context__:
+            current = None
+        else:
+            current = current.__context__
+    if current is not None:
+        # The walk stopped early — `max_links`, or the cycle guard — and the end
+        # it drops is the innermost, which is where the errno and the filename
+        # are. Marking it is not decoration: an unmarked truncation is a
+        # degraded diagnostic presented as a complete one, which is the shape of
+        # #291 and #302 both, in the module written to end it.
+        parts.append(_TRUNCATION_MARKER)
     return _CHAIN_SEPARATOR.join(parts)
 
 
@@ -431,14 +462,20 @@ class ResolvedVersion:
         except Exception:
             rendered = type(exc).__name__
         if len(rendered) > _MAX_DETAIL_CHARS:
-            rendered = rendered[:_MAX_DETAIL_CHARS] + "…"
-        # `or` covers a rendering that is empty or whitespace-only, which
-        # `__post_init__` rejects outright — the cause must never be a blank
-        # `cause:` line reading as if a detail were being withheld.
+            rendered = rendered[:_MAX_DETAIL_CHARS] + _TRUNCATION_MARKER
+        # Tested with `.strip()`, not for truthiness: `__post_init__` rejects a
+        # *blank* detail, and it raises — on the import path, inside the handler
+        # that may not fail — so a whitespace-only rendering would take `import
+        # localmail` down exactly the way #296 exists to prevent. A bare `or`
+        # only catches `""`; `"   "` is truthy and would sail through to that
+        # raise. Unreachable today, but only because every rendering here either
+        # strips to empty or carries the separator's own letters — i.e. the guard
+        # was relying on a property of a *different* constant, which is the kind
+        # of coupling that comes apart silently.
         return cls(
             UNKNOWN_VERSION,
             VersionSource.METADATA_UNREADABLE,
-            rendered or type(exc).__name__,
+            rendered if rendered.strip() else type(exc).__name__,
         )
 
 

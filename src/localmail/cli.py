@@ -147,17 +147,26 @@ def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Ac
 #: The subcommands that report an unresolvable version *themselves*, so the
 #: group callback below leaves them alone (#304).
 #:
-#: Both configure logging first — `run_cmd` calls `basicConfig`, and `serve`
-#: hands off to uvicorn — so their line carries a level and a timestamp, which is
-#: what a long-running process's operator greps. Reporting for them here would
-#: win the dedup with an earlier, unformatted line and silently downgrade it.
+#: The two are here for different reasons, and only `run`'s is about formatting.
+#: `run_cmd` calls `basicConfig` before it reports, so its line carries a level
+#: and a timestamp; the group callback runs earlier and would win the per-process
+#: dedup with an *unformatted* line, silently downgrading it.
+#:
+#: `serve_cmd` reports as the first statement in its body, ahead of the deferred
+#: `import uvicorn`, so nothing has configured logging yet and its line goes out
+#: through `logging.lastResort` exactly as the group callback's would. What it
+#: keeps is the `localmail.serve` logger name, which is what says *which* process
+#: is broken on a host running both planes. Do not restate this as "serve
+#: configures logging first": it does not, and `log_version_diagnostic`'s
+#: docstring reasons from it not having.
 #:
 #: Pinned by test_version_startup_report.py::
 #: test_the_skip_set_is_exactly_the_commands_that_report_themselves, which reads
 #: the registered commands and walks each callback's AST. Both drift directions
 #: are closed there, and only one is benign: a command listed here that stops
 #: reporting goes **silent**, while one that reports without being listed merely
-#: loses its formatting to the group callback's earlier line.
+#: loses its logger name — and, for `run`, its formatting — to the group
+#: callback's earlier line.
 SELF_REPORTING_COMMANDS = frozenset({"run", "serve"})
 
 

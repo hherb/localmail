@@ -362,12 +362,34 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
       an identity set ends a `__context__` cycle (reachable — an exception
       re-raised while its own cause is handled), and `_MAX_DETAIL_CHARS` still
       applies **to the joined result**, so the ceiling is not silently five
-      times looser. All four are mutation-pinned.
+      times looser. All four are mutation-pinned. The bound test asserts against
+      `_MAX_DETAIL_CHARS + len(_TRUNCATION_MARKER)`, **not** a round number: at
+      the shipped values a per-link ceiling renders 1014 characters, so the
+      literal `1_000` it used to carry caught that regression by 14 characters —
+      a margin shortening `_CHAIN_SEPARATOR` would silently spend.
+    - **A walk cut short by either of the first two ends in
+      `_TRUNCATION_MARKER`** (review follow-up to #303). The end it drops is the
+      *innermost*, which is where the errno and the filename are, so an unmarked
+      truncation hands over a degraded cause in a shape indistinguishable from a
+      complete one — under a remedy line that says to read it first, i.e. #291's
+      defect one layer down. The marker is **named once** and shared with the
+      character ceiling: one that appeared for one truncation and not the other
+      would teach the reader that an unmarked line is complete. A chain ending
+      naturally gains nothing, which keeps the common unwrapped rendering
+      byte-identical.
     - **`__suppress_context__` is honoured**, so `raise X from None` prints no
       chain: the author detached it deliberately and `traceback` agrees. The
       walk follows `__cause__` first, then `__context__` unless suppressed —
       following only `__cause__` would miss most real wrappers, since a bare
       `raise` inside an `except` sets the context, not the cause.
+    - **The link test is `is not None`, never `or`** (review follow-up to #303).
+      An exception whose class defines `__bool__`/`__len__` is falsy while being
+      perfectly present, and `or` skipped it — this rendering dropping the
+      exception that names the fault, which is the whole of #303, reintroduced
+      by the walk added to fix it. The fallback cannot cover for it either:
+      assigning `__cause__` sets `__suppress_context__`, so a skipped cause is
+      lost rather than replaced by the context. Read lazily, so a hostile
+      `__context__` is not touched once a cause has answered.
     - **Each link is rendered in its own `try`** (`render_one_exception`), so one
       hostile link costs its own detail rather than the whole chain's; the outer
       guard in `unreadable` remains, because reading `__cause__` off a hostile
@@ -424,6 +446,14 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     **one-directional on purpose** — the converse would fail `import localmail`
     for a pyproject that ever declared `0.0.0+unknown`, over a cosmetic
     collision, and import not failing is this module's first rule.
+    - **Because that blank check *raises*, `unreadable`'s fallback tests
+      `rendered.strip()`, not truthiness** (review follow-up to #303). A bare
+      `or` catches only `""`; `"   "` is truthy and sails through to the raise —
+      `import localmail` dying inside the handler written to stop `import
+      localmail` dying. Unreachable through the real renderer today, and pinned
+      anyway, because what makes it unreachable is that `_CHAIN_SEPARATOR`
+      happens to contain letters: the guard's correctness rested on a constant it
+      does not own. Mutation-pinned (restoring the `or` raises `ValueError`).
   - **An empty remedy on a `VersionSource` member is rejected at class
     creation** by the module-level `reject_empty_diagnostic`, which
     `VersionSource.__new__` is the only caller of. A member written
@@ -456,15 +486,26 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     on the first night. The RED test reproduced the headline exactly: **36
     failures**, one per command.
     - **`cli.SELF_REPORTING_COMMANDS` (`{"run", "serve"}`) is what the group
-      callback steps aside for**, because both configure logging first and their
-      line therefore carries a level and a timestamp. Reporting for them in the
-      group callback would win the per-process dedup with an *earlier,
-      unformatted* line and silently downgrade it — verified by mutation (three
-      existing ordering pins fail).
+      callback steps aside for — and the two are in it for different reasons.**
+      Only `run`'s is about formatting: `run_cmd` calls `basicConfig` before it
+      reports, so reporting for it in the group callback would win the
+      per-process dedup with an *earlier, unformatted* line and silently
+      downgrade it. **`serve` does not configure logging first** — it reports as
+      the first statement in its body, ahead of the deferred `import uvicorn`,
+      so its line goes through `logging.lastResort` exactly as the group
+      callback's would; what it keeps is the `localmail.serve` **logger name**,
+      which says *which* process is broken on a host running both planes.
+      Verified by mutation: dropping `serve` from the set fails three existing
+      ordering pins, and the failure names `localmail` vs `localmail.serve`. An
+      earlier wording here (and in `cli.py`) said both commands "configure
+      logging first"; that was false for `serve` and contradicted
+      `log_version_diagnostic`'s own docstring two sections down, which reasons
+      from `serve` *not* having configured logging. Do not restore it.
     - **Only one drift direction is survivable, so the set is derived and
       compared, never trusted.** A command listed but not reporting goes
       **silent** (#304 reopened for exactly the long-running processes #295 was
-      about); a command reporting but not listed merely loses its formatting.
+      about); a command reporting but not listed merely loses its logger name
+      (and, for `run`, its formatting).
       `test_the_skip_set_is_exactly_the_commands_that_report_themselves` reads
       the **live** `main.commands` registry — so a command added later is in
       scope without anyone updating a list — and decides by walking each
@@ -472,6 +513,12 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
       comments beside it, and #291 already paid for the lesson that a text match
       cannot tell prose from code. Mutation-pinned in both directions, plus a
       third mutation proving a prose mention does *not* count.
+    - **The callback also fires for `localmail <cmd> --help`** — click resolves
+      the subcommand before applying its `--help` — while bare `localmail`,
+      `localmail --help` and an unknown command stay silent, because
+      `no_args_is_help` short-circuits ahead of it. **#307 (open)** decides which
+      way to make that consistent; nothing pins the current shape, since it is a
+      side effect of click's parse order rather than a choice.
   - **The severity word is derived from the level, not written beside it
     (#302).** All three remedies opened with `warning:` while the record was an
     ERROR, so journald showed `ERROR … warning: …` and an operator told to grep

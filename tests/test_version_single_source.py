@@ -264,6 +264,42 @@ def test_import_survives_metadata_that_cannot_be_read(reimported_localmail: Any)
     assert reloaded.__version_source__ is VersionSource.METADATA_UNREADABLE
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [
+        OSError(5, "Input/output error", "/nfs/site-packages/METADATA"),
+        MemoryError(),
+        RecursionError(),
+    ],
+    ids=["eio", "memory", "recursion"],
+)
+def test_import_survives_any_exception_from_the_metadata_read(
+    reimported_localmail: Any, exc
+) -> None:
+    """The contract is "every exception", and only one was covered here.
+
+    The test above stubs a `UnicodeDecodeError`, which is the *one* cause a
+    narrow two-type suppress list also handles — so reverting the broad catch
+    left this file green. The bare `OSError` is the live variant per CLAUDE.md
+    (a failing network mount); `MemoryError` and `RecursionError` are the two
+    the remedy wording names as reachable and not about the file at all, and
+    they are also what makes the rendering step itself most likely to fail.
+
+    Asserted at the *package* level rather than on `resolve_version`, because
+    the property that matters is that `import localmail` completes — every
+    entry point, including `--version`, is downstream of it.
+    """
+
+    def _raise(_name: str) -> str:
+        raise exc
+
+    reloaded = reimported_localmail(_raise)
+    assert reloaded.__version__ == UNKNOWN_VERSION
+    assert reloaded.__version_source__ is VersionSource.METADATA_UNREADABLE
+    assert reloaded.__version_diagnostic__ is not None
+    assert type(exc).__name__ in reloaded.__version_diagnostic__
+
+
 def test_the_rendered_diagnostic_travels_with_the_version(
     reimported_localmail: Any,
 ) -> None:

@@ -36,6 +36,21 @@ it is only defensible because it *reports* what it caught:
 `ResolvedVersion.unreadable` renders the exception onto `.detail` and the line
 carries it below the remedy.
 
+**The reporting step is guarded too**, which is not a belt-and-braces flourish:
+`traceback.format_exception_only` is not total and it allocates, so unguarded it
+raised straight back out of the handler and killed `import localmail` — #296
+restored by #296's own fix, on the very `MemoryError` the remedy text names.
+The rule is the same one the read obeys: nothing on this path may raise, so
+every step on it degrades instead. See `ResolvedVersion.unreadable`.
+
+**Scope, so the claim above is not read wider than it is.** What survives here
+is an unreadable *METADATA*. `--version` can still die before click parses it,
+because `cli.py` imports the daemon (and so `sqlparse`) at module scope, so a
+partial sync that dropped any dependency kills it with a bare traceback —
+#305. And the resolution is *reported* on three entry points, not all 38 CLI
+commands — #304. The cause rendering also drops a `__cause__` chain, which is
+where an errno often is — #303.
+
 **The catch is broader than the remedy can speak to, and the wording admits
 it.** `MemoryError`, `RecursionError` and anything a third-party `sys.meta_path`
 finder raises are all `Exception` subclasses reached through this branch, and
@@ -99,7 +114,40 @@ _UNREADABLE_METADATA_REMEDY = (
 
 #: Prefix for the swallowed exception's rendering. Its own line so the remedy
 #: stays the thing an operator acts on and the technical cause sits below it.
+#: A multi-line rendering (PEP 678 notes, a `SyntaxError`) prefixes only its
+#: first line — the continuation lines are the exception's own shape and
+#: re-indenting them would corrupt a caret line.
 _CAUSE_PREFIX = "  cause: "
+
+#: Ceiling on a rendered cause. `str(exc)` is attacker-shaped only in the sense
+#: that a third-party import hook picks it, but the value becomes a module
+#: global for the life of the process and is logged in full at every startup,
+#: so it is bounded rather than trusted. Generous enough that no realistic
+#: `OSError`/`UnicodeDecodeError` rendering is touched.
+_MAX_DETAIL_CHARS = 500
+
+
+def reject_empty_diagnostic(value: str, diagnostic: str | None) -> str | None:
+    """Return `diagnostic`, or raise if it is present but says nothing.
+
+    `None` is the one healthy member's "stay quiet"; `""` is a member that
+    *meant* to carry a remedy and shipped an empty one, which
+    `log_version_diagnostic`'s falsy guard then swallows — a broken install
+    reported as fine, i.e. the #291 shape that declaring the remedy on the
+    member exists to prevent. Supplying both payload elements satisfies
+    `__new__`'s signature, so nothing else distinguishes the two.
+
+    A module-level function rather than an inline check because enum machinery
+    replaces `__new__` after class creation, so a test cannot reach the
+    production one to prove the rule fires for a *future* member. This is the
+    rule; `VersionSource.__new__` is its only caller.
+    """
+    if diagnostic is not None and not diagnostic.strip():
+        raise TypeError(
+            f"VersionSource.{value} carries an empty diagnostic; use None for "
+            f"the healthy member and a real remedy for every other."
+        )
+    return diagnostic
 
 
 class VersionSource(Enum):
@@ -131,7 +179,7 @@ class VersionSource(Enum):
     def __new__(cls, value: str, diagnostic: str | None) -> VersionSource:
         member = object.__new__(cls)
         member._value_ = value
-        member.diagnostic = diagnostic
+        member.diagnostic = reject_empty_diagnostic(value, diagnostic)
         return member
 
     #: The distribution metadata was read; `__version__` is real.
@@ -180,14 +228,48 @@ class ResolvedVersion:
 
         A raise, not a normalisation, for `QueueCounts`' reason rather than
         `ExtractedText`'s: a mismatch here is a caller bug, not a value to
-        clean up.
+        clean up. Neither direction *has* a repair, which is what makes that
+        the only option rather than merely the preferred one: an absent
+        exception cannot be normalised into existence, and discarding a present
+        one is exactly what #296 forbids.
+
+        Three pairings, not one. The `detail` biconditional is the newest; the
+        blank-detail and version rules are the two the field's own comment
+        already claimed and nothing enforced.
+
+        **The version rule is one-directional on purpose.** A failed resolution
+        must carry the sentinel — `unresolvable(INSTALLED)` otherwise yields
+        `__version__ = UNKNOWN_VERSION` with `__version_diagnostic__ = None`,
+        which is #291's shape exactly. The converse is *not* asserted: a
+        pyproject that ever declared `0.0.0+unknown` would then fail `import
+        localmail` over a cosmetic collision, and the module's first rule is
+        that import does not fail.
+
+        This guard runs on the import path (`__init__.py` resolves at import),
+        so a raise here kills every entry point. That is safe only because
+        every production constructor satisfies it by construction — `unreadable`
+        hardcodes its own source and its own non-empty rendering — leaving this
+        to catch a *developer's* mispairing loudly, in CI, where both directions
+        are pinned.
         """
-        carries = self.detail is not None
+        has_detail = self.detail is not None
         should = self.source is VersionSource.METADATA_UNREADABLE
-        if carries is not should:
+        if has_detail is not should:
             raise ValueError(
                 f"{self.source.value} resolutions must carry "
                 f"{'a' if should else 'no'} detail; got {self.detail!r}"
+            )
+        if self.detail is not None and not self.detail.strip():
+            raise ValueError(
+                f"{self.source.value} resolutions must carry a non-blank "
+                f"detail; got {self.detail!r}, which renders a bare "
+                f"'{_CAUSE_PREFIX.strip()}' line reading as if one were withheld."
+            )
+        failed = self.source is not VersionSource.INSTALLED
+        if failed and self.version != UNKNOWN_VERSION:
+            raise ValueError(
+                f"{self.source.value} is a failed resolution and must carry "
+                f"{UNKNOWN_VERSION!r}; got {self.version!r}."
             )
 
     @classmethod
@@ -216,10 +298,46 @@ class ResolvedVersion:
         from EACCES, three different remedies — and unlike a traceback it
         retains **no frame references**, which matters for a value that becomes
         a module global at import. `str(exc)` alone is empty for much of what
-        fails here (`failure_pacing.py`'s reason), so the type name always leads.
+        fails here (`failure_pacing.py`'s reason), so the type name leads in
+        every rendering the realistic causes produce. It is not an absolute:
+        `format_exception_only` puts the source line first for a `SyntaxError`
+        and appends PEP 678 `__notes__` on their own lines, so a `detail` is not
+        guaranteed to be one line or to start with the type.
+
+        **The render is itself guarded, and that is the whole reason this method
+        exists rather than a one-liner at the catch site.** It runs *inside* the
+        `except Exception` whose contract is that nothing escapes into `import
+        localmail`, and `format_exception_only` is not total: it calls `.rstrip()`
+        on `SyntaxError.text` unconditionally (a third-party `sys.meta_path`
+        finder can hand back an object that has no such method), and it allocates
+        — a `TracebackException`, a `StackSummary` per chain link, `linecache`
+        reads — which is precisely what fails again under the `MemoryError` the
+        remedy text names. Unguarded, the reporting step reintroduced the bare
+        traceback out of `import localmail` that #296 exists to end. Verified:
+        the unguarded form killed the interpreter outright ("lost sys.stderr").
+        The fallback is the bounded pre-#296 rendering, so the cause is degraded,
+        never lost.
+
+        Truncated for the same reason it holds no frames: `detail` becomes a
+        module global at import and is logged in full at every `serve`/`run`
+        start, and `format_exception_only` embeds the whole of `str(exc)` plus
+        every note. The old type name was bounded; this keeps a bound while
+        keeping the errno/filename/offset that motivated the change.
         """
-        rendered = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-        return cls(UNKNOWN_VERSION, VersionSource.METADATA_UNREADABLE, rendered)
+        try:
+            rendered = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        except Exception:
+            rendered = type(exc).__name__
+        if len(rendered) > _MAX_DETAIL_CHARS:
+            rendered = rendered[:_MAX_DETAIL_CHARS] + "…"
+        # `or` covers a rendering that is empty or whitespace-only, which
+        # `__post_init__` rejects outright — the cause must never be a blank
+        # `cause:` line reading as if a detail were being withheld.
+        return cls(
+            UNKNOWN_VERSION,
+            VersionSource.METADATA_UNREADABLE,
+            rendered or type(exc).__name__,
+        )
 
 
 def resolve_version() -> ResolvedVersion:
@@ -247,12 +365,19 @@ def resolve_version() -> ResolvedVersion:
         # what it caught rather than swallowing it — `unreadable` below is that
         # report, and the module docstring is the rationale.
         #
-        # This site carries no BLE001 suppression while fourteen sibling broad
-        # catches in `src/` do. That is a divergence, not a settled convention:
-        # the rule is not in ruff's default set, so the directive is inert under
-        # the pinned ruff — but it is live under newer ones, and #285 (still
-        # open) is the issue that decides whether ruff gates CI at all. Revisit
-        # both together rather than copying either shape from here.
+        # This site carries no BLE001 suppression, and neither do most of its
+        # siblings: of the 79 `except Exception` sites in `src/`, 14 carry the
+        # directive and 65 do not. So there is no convention here to follow in
+        # either direction — do not copy either shape from this site on the
+        # assumption that it settles anything.
+        #
+        # Nor is the directive inert on principle. BLE001 is not in ruff 0.11's
+        # default set (the version on this developer's PATH) but *is* from 0.16,
+        # which this tree has also been run with — so whether the fourteen do
+        # anything is a function of which ruff runs, and nothing pins one: there
+        # is no ruff in `pyproject.toml`, none in `uv.lock`, no `[tool.ruff]`
+        # section, and no lint step in either CI workflow. #285 (open) is what
+        # decides whether ruff gates CI at all; revisit this comment with it.
         #
         # `Exception`, never `BaseException`: a Ctrl-C during a slow read on a
         # hung mount must interrupt the process, not be reported as a damaged
@@ -330,8 +455,18 @@ def log_version_diagnostic(log: logging.Logger, diagnostic: str | None) -> None:
     `click.Choice`, and `run_cmd` calls `basicConfig` with it *before*
     constructing the daemon — so at WARNING this line was filtered out entirely,
     with `basicConfig`'s root handler also removing the `logging.lastResort`
-    escape. A report the process can be told to discard is not a report, and
-    ERROR is the loudest level that CLI offers. It costs one line at startup.
+    escape. A report the process can be told to discard is not a report. ERROR
+    is the highest severity the CLI's `--log-level` can be set to, so it is the
+    only level that clears every setting an operator can choose; the pinning
+    test calls that the *quietest* setting, which is the same fact named from
+    the operator's side rather than the record's. It costs one line at startup.
+
+    Note the two log paths differ in how the line reaches anyone. `run_cmd` has
+    called `basicConfig`, so the record is formatted like every other. `serve`
+    configures no logging at this point and nothing it imports does either, so
+    the record goes out through `logging.lastResort` — stderr, message only, no
+    level or timestamp. Both reach the operator; only one is greppable by
+    level, which is what #302 is about.
 
     The falsy guard covers `""` as well as `None`: an empty diagnostic would
     otherwise emit a blank line, and a line that fires on every start is a line

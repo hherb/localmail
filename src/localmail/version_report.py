@@ -43,13 +43,16 @@ restored by #296's own fix, on the very `MemoryError` the remedy text names.
 The rule is the same one the read obeys: nothing on this path may raise, so
 every step on it degrades instead. See `ResolvedVersion.unreadable`.
 
-**Scope, so the claim above is not read wider than it is.** What survives here
-is an unreadable *METADATA*. `--version` can still die before click parses it,
-because `cli.py` imports the daemon (and so `sqlparse`) at module scope, so a
-partial sync that dropped any dependency kills it with a bare traceback —
-#305. And the resolution is *reported* on three entry points, not all 38 CLI
-commands — #304. The cause rendering also drops a `__cause__` chain, which is
-where an errno often is — #303.
+**Scope, so the claim above is not read wider than it is (#305).** What survives
+here is an unreadable *METADATA*, and only that. `localmail --version` still
+dies on the *other* broken install: `cli.py` imports the daemon — and so
+`sqlparse`, `psycopg`, `keyring` — at module scope, so a partial `uv sync` that
+dropped any third-party dependency kills the command with a bare traceback
+before click parses the flag. Reproduced by blocking one module on
+`sys.meta_path`: `import localmail` succeeds and resolves its version,
+`import localmail.cli` does not. Making that survivable means deferring those
+imports into the command bodies that need them, which is a change to `cli.py`
+rather than to this module, and belongs with the refactor it already owes.
 
 **The catch is broader than the remedy can speak to, and the wording admits
 it.** `MemoryError`, `RecursionError` and anything a third-party `sys.meta_path`
@@ -83,8 +86,26 @@ DISTRIBUTION_NAME = "localmail"
 #: quoted a third time in a comment, and no reader compared against any of them.
 UNKNOWN_VERSION = "0.0.0+unknown"
 
+#: The level every log consumer sees this at. Named because the severity word
+#: below is derived from it: the two were written independently and disagreed
+#: (#302), so journald showed `ERROR ... warning: ...`. The rationale for the
+#: level itself is on `log_version_diagnostic`.
+_REPORT_LEVEL = logging.ERROR
+
+#: The severity word every remedy opens with, derived from the level rather than
+#: written beside it (#302).
+#:
+#: One string serves two consumers and has to be right for both. `--version`
+#: writes it to stderr through click, where there is no level and this word is
+#: the *only* severity marker; `log_version_diagnostic`'s callers hand it to
+#: `logging`, where the level is the marker — and on the paths that reach
+#: `logging.lastResort` (no formatter, so no level is printed) the word is again
+#: the only one. Deriving it means the two cannot be changed apart, which is the
+#: same one-authority call `pgtext.strip_nuls` and `text_empty.is_blank` make.
+_SEVERITY_PREFIX = f"{logging.getLevelName(_REPORT_LEVEL).lower()}: "
+
 _NEVER_INSTALLED_REMEDY = (
-    f"warning: the {DISTRIBUTION_NAME} version could not be determined — no "
+    f"{_SEVERITY_PREFIX}the {DISTRIBUTION_NAME} version could not be determined — no "
     f"distribution metadata is installed for it here, so this is a source "
     f"tree that was never installed.\n"
     f"  remedy: run `uv sync` in a development checkout, or "
@@ -92,7 +113,7 @@ _NEVER_INSTALLED_REMEDY = (
 )
 
 _DAMAGED_INSTALL_REMEDY = (
-    f"warning: the {DISTRIBUTION_NAME} version could not be determined — its "
+    f"{_SEVERITY_PREFIX}the {DISTRIBUTION_NAME} version could not be determined — its "
     f"distribution metadata is installed but carries no version, so the "
     f"install is damaged.\n"
     f"  remedy: run `uv sync --reinstall-package {DISTRIBUTION_NAME}` in a "
@@ -101,7 +122,7 @@ _DAMAGED_INSTALL_REMEDY = (
 )
 
 _UNREADABLE_METADATA_REMEDY = (
-    f"warning: the {DISTRIBUTION_NAME} version could not be determined — "
+    f"{_SEVERITY_PREFIX}the {DISTRIBUTION_NAME} version could not be determined — "
     f"reading its distribution metadata raised.\n"
     f"  remedy: read the cause below first. The catch behind this line is broad "
     f"on purpose (import must not fail), so it also sees failures that are not "
@@ -125,6 +146,109 @@ _CAUSE_PREFIX = "  cause: "
 #: so it is bounded rather than trusted. Generous enough that no realistic
 #: `OSError`/`UnicodeDecodeError` rendering is touched.
 _MAX_DETAIL_CHARS = 500
+
+#: How many links of a `__cause__`/`__context__` chain the cause line renders.
+#: Bounded for the same reason the character count is, and for one more: this
+#: walk runs inside the handler that may not fail, on the import path. Five is
+#: past anything a real wrapper stack produces — a finder wrapping an `OSError`
+#: is two — while still terminating a pathological one.
+_MAX_CHAIN_LINKS = 5
+
+#: Between two links, read outermost-first: the exception that was raised, then
+#: what it was raised from. Prose rather than a bare arrow because the line is
+#: read by an operator, not parsed.
+_CHAIN_SEPARATOR = " <- caused by "
+
+#: Appended wherever a rendering was cut short. Named once because both bounds
+#: on this path use it — the character ceiling in `ResolvedVersion.unreadable`
+#: and the link/cycle bound in `render_exception_chain` — and a marker that
+#: appears for one truncation but not the other is worse than none: it teaches
+#: the reader that an unmarked line is complete.
+_TRUNCATION_MARKER = "…"
+
+
+def render_one_exception(exc: BaseException) -> str:
+    """Render `exc` alone, degrading to its type name rather than raising.
+
+    `traceback.format_exception_only` is not total — it calls `.rstrip()` on
+    `SyntaxError.text` unconditionally, so an exception carrying a non-`str`
+    there makes the *renderer* raise — and it allocates, which is what fails
+    again under the `MemoryError` the remedy text names. Per link rather than
+    once around the whole walk so one hostile link costs its own detail instead
+    of the entire chain's; `render_exception_chain`'s caller still guards the
+    walk itself, since reading `__cause__` off a hostile object can raise too.
+    """
+    try:
+        return "".join(traceback.format_exception_only(type(exc), exc)).strip()
+    except Exception:
+        return type(exc).__name__
+
+
+def render_exception_chain(
+    exc: BaseException, *, max_links: int = _MAX_CHAIN_LINKS
+) -> str:
+    """Render `exc` and what it was raised from, outermost first (#303).
+
+    Pure. The exception that was raised leads — it is what a traceback would
+    have shown, and what the reader has to recognise — and each link it was
+    raised *from* follows, because that is where an errno or a filename usually
+    is. `format_exception_only` renders only the outermost, so on a wrapped
+    exception it discarded precisely the detail it was chosen over a bare type
+    name to keep.
+
+    **Follows `__cause__` first, then `__context__` unless suppressed**, which is
+    what `raise X from None` asks for and what `traceback` itself honours.
+    Ignoring `__suppress_context__` would print a chain the author explicitly
+    detached.
+
+    Two bounds and a cycle guard, all three because this runs on the import path
+    inside a handler that may not fail: `max_links` ends a pathological wrapper
+    stack, the identity set ends a `__context__` cycle (reachable — an exception
+    re-raised inside the handling of its own cause), and the character ceiling is
+    applied by the caller to the joined result. Retains **no frame references**,
+    which is what makes it safe for a value that becomes a module global: every
+    link goes through `format_exception_only`, never `format_exception`.
+
+    **A walk cut short by either of the first two ends in `_TRUNCATION_MARKER`**,
+    so a partial chain cannot be read as a complete one — the end it loses is the
+    innermost, i.e. the errno this function exists to surface. A chain that ends
+    naturally gains nothing, which is what keeps the overwhelmingly common
+    unwrapped rendering byte-identical.
+
+    The join is truncated as a whole rather than per link, so a pathological
+    outermost message can still crowd out an inner errno. Accepted: one bound is
+    one rule, and a per-link budget would truncate the common *unwrapped*
+    rendering — the case that motivated the ceiling's generous size — to a fifth
+    of it.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(parts) < max_links and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(render_one_exception(current))
+        # `is not None`, never `or`: an exception whose class defines
+        # `__bool__`/`__len__` is falsy while being perfectly present, and `or`
+        # would skip it — this rendering dropping the exception that names the
+        # fault, which is the whole of #303. Nor does the fallback cover for it:
+        # assigning `__cause__` sets `__suppress_context__`, so a skipped cause
+        # is lost rather than replaced by the context. Read lazily so a hostile
+        # `__context__` is not touched when a cause already answered.
+        cause = current.__cause__
+        if cause is not None:
+            current = cause
+        elif current.__suppress_context__:
+            current = None
+        else:
+            current = current.__context__
+    if current is not None:
+        # The walk stopped early — `max_links`, or the cycle guard — and the end
+        # it drops is the innermost, which is where the errno and the filename
+        # are. Marking it is not decoration: an unmarked truncation is a
+        # degraded diagnostic presented as a complete one, which is the shape of
+        # #291 and #302 both, in the module written to end it.
+        parts.append(_TRUNCATION_MARKER)
+    return _CHAIN_SEPARATOR.join(parts)
 
 
 def reject_empty_diagnostic(value: str, diagnostic: str | None) -> str | None:
@@ -304,6 +428,13 @@ class ResolvedVersion:
         and appends PEP 678 `__notes__` on their own lines, so a `detail` is not
         guaranteed to be one line or to start with the type.
 
+        **Applied to the whole `__cause__` chain, not just `exc` (#303)**, via
+        `render_exception_chain`. `format_exception_only` renders one exception,
+        so a wrapped one — the normal shape for the third-party finder named
+        above — dropped the errno and filename this rendering was chosen to
+        keep. See that function for the two bounds and the cycle guard, all of
+        which exist because this runs on the import path.
+
         **The render is itself guarded, and that is the whole reason this method
         exists rather than a one-liner at the catch site.** It runs *inside* the
         `except Exception` whose contract is that nothing escapes into `import
@@ -316,7 +447,9 @@ class ResolvedVersion:
         traceback out of `import localmail` that #296 exists to end. Verified:
         the unguarded form killed the interpreter outright ("lost sys.stderr").
         The fallback is the bounded pre-#296 rendering, so the cause is degraded,
-        never lost.
+        never lost. `render_one_exception` guards each link as well, so the
+        chain survives one hostile member; this outer guard covers the *walk*,
+        since reading `__cause__` off a hostile object can raise too.
 
         Truncated for the same reason it holds no frames: `detail` becomes a
         module global at import and is logged in full at every `serve`/`run`
@@ -325,18 +458,24 @@ class ResolvedVersion:
         keeping the errno/filename/offset that motivated the change.
         """
         try:
-            rendered = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            rendered = render_exception_chain(exc)
         except Exception:
             rendered = type(exc).__name__
         if len(rendered) > _MAX_DETAIL_CHARS:
-            rendered = rendered[:_MAX_DETAIL_CHARS] + "…"
-        # `or` covers a rendering that is empty or whitespace-only, which
-        # `__post_init__` rejects outright — the cause must never be a blank
-        # `cause:` line reading as if a detail were being withheld.
+            rendered = rendered[:_MAX_DETAIL_CHARS] + _TRUNCATION_MARKER
+        # Tested with `.strip()`, not for truthiness: `__post_init__` rejects a
+        # *blank* detail, and it raises — on the import path, inside the handler
+        # that may not fail — so a whitespace-only rendering would take `import
+        # localmail` down exactly the way #296 exists to prevent. A bare `or`
+        # only catches `""`; `"   "` is truthy and would sail through to that
+        # raise. Unreachable today, but only because every rendering here either
+        # strips to empty or carries the separator's own letters — i.e. the guard
+        # was relying on a property of a *different* constant, which is the kind
+        # of coupling that comes apart silently.
         return cls(
             UNKNOWN_VERSION,
             VersionSource.METADATA_UNREADABLE,
-            rendered or type(exc).__name__,
+            rendered if rendered.strip() else type(exc).__name__,
         )
 
 
@@ -445,11 +584,12 @@ def reset_version_reports() -> None:
 def log_version_diagnostic(log: logging.Logger, diagnostic: str | None) -> None:
     """Report `diagnostic` once per process, or say nothing when there is none.
 
-    The one rule for how a long-running process surfaces an unresolvable version
-    (#295), shared by `serve` and the daemon so the two cannot drift to different
-    levels or wordings. The CLI is deliberately not a caller: `--version` writes
-    to stderr through click, because its stdout is a machine-readable line that
-    the manual's install-verification step parses.
+    The one rule for how a process surfaces an unresolvable version (#295),
+    shared by `serve`, the daemon, and — since #304 — the `main` group callback
+    on behalf of every other CLI command, so none of them can drift to a
+    different level or wording. `--version` alone is deliberately not a caller:
+    it writes to stderr through click, because its stdout is a machine-readable
+    line that the manual's install-verification step parses.
 
     **ERROR, not WARNING.** `localmail run --log-level ERROR` is an offered
     `click.Choice`, and `run_cmd` calls `basicConfig` with it *before*
@@ -461,12 +601,24 @@ def log_version_diagnostic(log: logging.Logger, diagnostic: str | None) -> None:
     test calls that the *quietest* setting, which is the same fact named from
     the operator's side rather than the record's. It costs one line at startup.
 
-    Note the two log paths differ in how the line reaches anyone. `run_cmd` has
-    called `basicConfig`, so the record is formatted like every other. `serve`
-    configures no logging at this point and nothing it imports does either, so
-    the record goes out through `logging.lastResort` — stderr, message only, no
-    level or timestamp. Both reach the operator; only one is greppable by
-    level, which is what #302 is about.
+    **How the line reaches anyone differs by caller, and the wording is what
+    covers the gap (#302).** `run_cmd` has called `basicConfig`, so its record is
+    formatted like every other and is greppable by level. `serve` configures no
+    logging at this point and nothing it imports does either, and neither does
+    the group callback that reports for the remaining 36 commands — so those
+    records go out through `logging.lastResort`: stderr, message only, no level,
+    no timestamp, no logger name. All of them reach the operator; most are not
+    greppable by level. That is why `_SEVERITY_PREFIX` exists and why it is
+    derived from `_REPORT_LEVEL` rather than written beside it — on every
+    unformatted path the word in the text is the only severity marker there is,
+    so it must not contradict the record.
+
+    Configuring logging here to close that was rejected: this function is called
+    from a group callback that precedes all 38 commands, and installing a root
+    handler for every one of them changes far more than the line it would
+    format. The level still matters where it is not decoration — `run` after
+    `basicConfig`, `create_app` under uvicorn's `dictConfig`, and any embedder
+    that constructs `Daemon` directly.
 
     The falsy guard covers `""` as well as `None`: an empty diagnostic would
     otherwise emit a blank line, and a line that fires on every start is a line
@@ -475,4 +627,4 @@ def log_version_diagnostic(log: logging.Logger, diagnostic: str | None) -> None:
     if not diagnostic or diagnostic in _REPORTED:
         return
     _REPORTED.add(diagnostic)
-    log.error("%s", diagnostic)
+    log.log(_REPORT_LEVEL, "%s", diagnostic)

@@ -82,20 +82,26 @@ third case prints a `cause:` line naming the exception — read it before acting
 because the catch behind it is deliberately broad (an import must never fail
 here) and also sees failures that are not about the file at all. An `OSError`
 there means checking the filesystem under `site-packages` first, since no
-reinstall fixes a failing mount. stdout stays the single machine-readable
+reinstall fixes a failing mount. When the exception was raised *from* another
+one, the cause line follows the chain — `RuntimeError: finder failed <- caused
+by OSError: [Errno 5] …/METADATA` — because the errno and the filename you act
+on are usually in the inner one. stdout stays the single machine-readable
 version line, so scripts that parse it are unaffected, and the exit status
 stays `0` — the stderr line is the failure signal, so do not consume stdout
 alone when you are verifying an install.
 
-`localmail serve` and `localmail run` log that same message once at startup, at
-**ERROR**, so a headless host reports a broken install where its operator
-actually looks — in the service log, without needing `--version` run by hand.
-ERROR rather than warning because `run --log-level ERROR` is a supported choice
-and a report you can be configured out of is not a report. Both report before
-they read `config.toml` and before they touch Postgres, so a host that is broken
-in more than one way still tells you about its version first. Nothing is logged
-when the version reads normally, and `/v1/version` is unchanged. Other
-subcommands do not report it yet — see issue #304.
+**Every command reports it, not just `--version`.** A broken install is
+announced once by whichever `localmail` command you run, before it reads
+`config.toml` and before it touches Postgres — so a host that is broken in more
+than one way still tells you about its version first, and a nightly cron
+`localmail sync` on a host whose `site-packages` mount has started failing says
+so instead of exiting 0 in silence. `serve` and `run` report through their own
+loggers at **ERROR**, once per process, so a headless deployment surfaces it
+where its operator actually looks. ERROR rather than warning because `run
+--log-level ERROR` is a supported choice and a report you can be configured out
+of is not a report; the line's own `error:` prefix is derived from that level,
+so it still carries a severity on the paths that print no level. Nothing is
+logged when the version reads normally, and `/v1/version` is unchanged.
 
 ### Sync & accounts
 

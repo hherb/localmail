@@ -643,6 +643,57 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   one production call site, which is what makes that free rather than noisy.
   Each reader imports with `from … import`, so a test must rebind the *reader's*
   binding — `localmail.__version_diagnostic__` reaches none of them.
+- **The build identity is resolved from the checkout, not stamped at build time
+  (#278, #300).** `/v1/version` now carries `build_hash`, `build_source` and
+  `version_source`. Design:
+  [docs/superpowers/specs/2026-08-15-build-provenance-design.md](docs/superpowers/specs/2026-08-15-build-provenance-design.md).
+  - **There is no build**, which is why. Both CI workflows are test-only, there
+    are no tags, nothing publishes, and *both* deployments run editable installs
+    from a git checkout — so a hash stamped into a wheel would be absent on the
+    only machines the row is ever read on. `STAMPED` is a declared seam reading
+    a `_build_info.py` nothing writes; implement the hatchling hook when a
+    release pipeline exists, not before.
+  - **`build_report.py` never logs and no source carries a remedy** — the one
+    place it deliberately breaks from `version_report`. An unresolvable
+    *version* is always a fault; an unresolvable *build hash* usually is not,
+    since `NOT_A_REPO` is the correct state of an installed artifact. Copying
+    `VersionSource`'s forced-remedy rule across would put an ERROR in front of
+    an operator for a healthy install, i.e. #291 inverted.
+  - **Resolution is lazy and cached, never at import.** `import localmail` runs
+    for all 38 CLI commands and a `git` subprocess there can hang on a stale
+    mount — the #296 scenario. Caching also gives the semantics the row wants:
+    pinned for the life of the process, so it reports what the process is
+    *running*, not what the tree says now. That is live on an editable install,
+    where a `git pull` moves the tree under a daemon that keeps executing the
+    code it already imported. `reset_build_info()` + an autouse conftest
+    fixture, the `reset_version_reports()` shape.
+  - **The repo it finds must be ours**, checked by requiring
+    `<toplevel>/src/localmail/__init__.py` to resolve to the file we imported.
+    Containment is not enough: a virtualenv inside a dotfiles repo *is*
+    contained, and would report that project's SHA as localmail's build. Its
+    own test, because it fails silently.
+  - **`-dirty` measures tracked files only** (`git diff --quiet HEAD`). Scratch
+    files would make every deployment read dirty forever, and a marker that is
+    always on carries no information. A single
+    `git describe --always --dirty` would halve the subprocess count and was
+    **rejected**: the day someone tags a release it silently returns
+    `v0.4.0-3-geec8e09-dirty`, changing the field's format under us.
+  - **The wire strings are declared, never derived.** `BuildSource`'s value IS
+    its wire string; `VersionSource` carries a separate `wire_name`, because its
+    own values are hyphenated debugging aids (`"not-installed"`) while this
+    API's wire enums are underscored (`rewrite_note_code` ships
+    `not_configured`). `reject_empty_wire_name` enforces non-emptiness at class
+    creation, beside `reject_empty_diagnostic` and for the same reason.
+  - **The diagnostic text is deliberately NOT on the wire.** `/v1/version` is
+    unauthenticated and `__version_diagnostic__` embeds rendered exception text
+    carrying errno values and filesystem paths (#303). `version_source` is an
+    identifier; the human line stays in the logs where #295 put it. If a
+    machine-readable *reason* beyond the enum is ever wanted, it belongs on an
+    authenticated endpoint.
+  - **`--version` gained no flag.** stderr is non-empty iff the version is
+    unresolvable — true since #291, now stated in README and pinned by
+    `tests/test_cli_version_stderr_contract.py`. stdout stays the single line
+    and exit stays 0, so neither is a failure signal.
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)
@@ -686,6 +737,7 @@ src/localmail/
   version_report.py # resolve_version + pure unknown_version_diagnostic (#291)
                     #   + METADATA_UNREADABLE (#296) + log_version_diagnostic (#295)
                     #   + pure render_exception_chain (#303) + _SEVERITY_PREFIX (#302)
+  build_report.py   # pure enum + BuildInfo, lazy git resolution (#278, #300)
   attachments.py    # write_attachments(conn, parsed, root) -> JSONB rows (content-addressable)
   blob_temps.py     # writer temp naming (new_temp_path) + its collector (sweep_blob_temps) (#237)
   fetch_retry.py    # bounded BODY[] hold (#222A) + give-up tombstones/rewind planner (#239)

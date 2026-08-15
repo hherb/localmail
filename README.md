@@ -109,6 +109,21 @@ line and the exit status stays `0` in both cases, so neither is a failure
 signal — check stderr, or read `version_source` from `/v1/version`, which
 reports the same four outcomes as a machine-readable string.
 
+`GET /v1/version` (unauthenticated) reports six fields: `api_major`,
+`api_minor`, `server_version`, `build_hash`, `build_source`, `version_source`.
+
+`build_hash` is the short git SHA of the checkout the server is running,
+suffixed `-dirty` when tracked files differ from it — the answer to "did the
+daemon get restarted after my pull?". It is `null` when there is no identity to
+report, and `build_source` says why: `git_checkout`, `stamped`, `not_a_repo`,
+`git_unavailable`, `git_failed`.
+
+`version_source` is `installed` on a healthy install, and `not_installed`,
+`metadata_incomplete` or `metadata_unreadable` when `server_version` is the
+`0.0.0+unknown` sentinel — so a monitoring client can alert on a broken install
+rather than displaying the sentinel as though it were a version. Both source
+fields are always present; only `build_hash` is nullable.
+
 Asking for **help** is the one exception: `localmail <command> --help` stays
 quiet, as bare `localmail` and `localmail --help` already did. Help does no
 archive work and touches neither config nor database, and the line was landing

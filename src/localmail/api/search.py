@@ -15,7 +15,6 @@ from typing import Any
 from localmail.api.errors import SearchCursorExpired, ValidationFailed
 from localmail.api.ids import parse_int_id
 from localmail.api.search_cursor import (
-    DEFAULT_SORT,
     KEYSET_SORT,
     SearchCursor,
     decode_keyset_cursor,
@@ -38,6 +37,7 @@ from localmail.search.rewrite_status import (
     rewrite_skipped_for_status,
 )
 from localmail.search.searcher import (
+    DEFAULT_SORT,
     KeysetCursorUnusable,
     SearchPage,
     SearchResult,

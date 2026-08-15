@@ -513,12 +513,43 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
       comments beside it, and #291 already paid for the lesson that a text match
       cannot tell prose from code. Mutation-pinned in both directions, plus a
       third mutation proving a prose mention does *not* count.
-    - **The callback also fires for `localmail <cmd> --help`** — click resolves
+    - **A help request is skipped, and all four shapes are now pinned (#307).**
+      The callback used to fire for `localmail <cmd> --help` — click resolves
       the subcommand before applying its `--help` — while bare `localmail`,
-      `localmail --help` and an unknown command stay silent, because
-      `no_args_is_help` short-circuits ahead of it. **#307 (open)** decides which
-      way to make that consistent; nothing pins the current shape, since it is a
-      side effect of click's parse order rather than a choice.
+      `localmail --help` and an unknown command stayed silent, because
+      `no_args_is_help` short-circuits ahead of it. Help does no archive work
+      and touches neither config nor DB, and the line landed ahead of the text
+      the operator had explicitly asked to read; the decision was to quieten
+      the odd one out rather than make the other three loud. `--version` still
+      reports, being the command whose whole job is diagnosing the install.
+      - The rule is the pure
+        [src/localmail/cli_help_request.py](src/localmail/cli_help_request.py)`::is_help_request`,
+        shaped like `account_names.py::account_name_error`. It reads
+        `ctx.help_option_names` rather than spelling `--help` (click lets a
+        project add `-h`) and stops at a bare `--`, since click would not treat
+        a later token as the option either. **Known imprecision, deliberate**:
+        a help token consumed as an option *value* reads as a help request,
+        because judging otherwise means knowing every option's arity — a second
+        parser to keep in step with the first, for the cost of one suppressed
+        diagnostic on a pathological invocation.
+      - **The callback cannot answer this itself**, which is why there is a
+        `_HelpAwareGroup`: by the time click runs the group callback the
+        resolved subcommand's own arguments are off the context (`ctx.args` is
+        empty whether or not `--help` was typed). They are still in place one
+        frame out, in `Group.invoke`, so the *question* is asked there and the
+        verdict passed via `ctx.meta`; the **report stays in the callback**,
+        beside the `SELF_REPORTING_COMMANDS` skip it shares a decision with. A
+        nested group's help (`localmail daemon status --help`) arrives as the
+        root's pending `['status', '--help']`, which the scan covers and a rule
+        reading only the first pending argument would miss.
+      - **The three shapes that were already quiet are pinned too**, since
+        their silence is a side effect of click's parse order rather than a
+        choice — an `invoke_without_command=True` would flip them loud with
+        nothing failing. And a **positive control** (`localmail sync` still
+        reports) guards the other direction: a rule matching too broadly
+        reopens #304 for the 36 commands it was filed about, and every
+        quiet-shape assertion would still pass. Mutation-pinned — forcing
+        `is_help_request` to `True` fails 43 tests, including the reach pins.
   - **The severity word is derived from the level, not written beside it
     (#302).** All three remedies opened with `warning:` while the record was an
     ERROR, so journald showed `ERROR … warning: …` and an operator told to grep
@@ -622,6 +653,7 @@ pick the wrong interpreter. Prefix with `unset VIRTUAL_ENV && …` to be safe.
 ```
 src/localmail/
   cli.py            # click entry point
+  cli_help_request.py # pure: is_help_request — keeps the version line off help (#307)
   config.py         # pydantic models + TOML loader
   db.py             # connection pool + migration runner
   secrets.py        # keyring wrapper
@@ -2743,11 +2775,61 @@ for the full design.
       under `python -O` — `upsert_message`'s reasoning). The guard fires before
       any connection is opened, which its test asserts by handing the Searcher
       a pool that raises when touched.
+    - **`sort=None` is resolved to `DEFAULT_SORT` once, at the top of
+      `Searcher.search` (#312).** It used to be neither accepted nor rejected:
+      it fell through the `== "date"` test into the hybrid branch, which is the
+      right *ordering* by accident and the wrong *record* — the raw argument is
+      what the pool is cached with, and `_check_pool_sort` reads that field
+      back to decide a 400. A pool built by a `sort=None` caller reported its
+      sort as `None`, so the very next paging request stating the sort it would
+      actually be served was told the cursor continues a `None`-sorted search
+      and rejected. Every read inside the function goes through
+      `effective_sort`; a surviving raw read is the defect.
+      - **`DEFAULT_SORT` moved to `search/searcher.py`, beside the `SortMode`
+        it ranges over**, and `api/search.py` imports it from there —
+        `api/search_cursor.py` can no longer define it, because two layers
+        resolving "unstated" from two literals is the drift itself. The api
+        layer still resolves it explicitly at its own boundary (pinned by
+        `test_an_omitted_sort_still_means_rank_when_there_is_no_cursor`, which
+        mocks the Searcher and so cannot see its resolution); that is not
+        duplication now that both read the same constant.
+      - **The signature is `SortMode | None = None`, not a removed default.**
+        `allowed_account_ids` is keyword-only-with-no-default because no safe
+        value exists for it (#234); a sort has one, so the fix is to make
+        "unstated" mean it explicitly rather than to make it unspellable.
   - **Page-cache miss surfaces as HTTP 409 `/problems/search-cursor-expired`,
     never a 500.** TTL eviction, LRU eviction, and cross-user replay all
     take this path. The GUI re-runs the query without a cursor on 409 and
     appends past rows it already holds — keep this transparent recovery
     working when touching `serve/routes/search.py` or `api/search.py`.
+    - **409 and 400 are different kinds, and the client must not treat them
+      alike (#311).** A 409 is recoverable — the request was well formed and
+      only the pool is gone. A 400 is *permanent for that cursor*: re-issuing
+      the identical pair cannot succeed, so a client must retire the cursor.
+      The GUI recovered from 409 only, leaving `cursor`/`hasMore` untouched on
+      a 400 — and its `IntersectionObserver` re-fires `loadMore` on every
+      scroll event while `hasMore` is true, so the fix #308 shipped turned a
+      silent restart into a request loop behind an error banner.
+      - The two rules are the pure
+        [gui/src/lib/search_paging.ts](gui/src/lib/search_paging.ts) —
+        `statedSort` (a request carrying a cursor states **no** sort, which is
+        what `docs/mcp-usage.md` tells every other client) and
+        `isCursorRejected` (any 400 from a paging request stops the scroll).
+        Minting the request and interpreting its refusal live together for the
+        reason `api/search_cursor.py` gives on the server side.
+      - **Omitting the sort is the load-bearing half**: it makes the
+        contradicting-sort 400 unreachable from the GUI rather than merely
+        recoverable, since the store's `sort` is user-mutable while a cursor
+        is live. The 409 recovery re-runs with **no** cursor, so it must keep
+        stating the sort — mutation-pinned, because omitting it there silently
+        flips a `sort=date` search back to rank.
+      - **`loadMore` guards on `loading` as well as `loadingMore`.** A fresh
+        search in flight has already bumped `#submitSeq`, so neither response
+        discards the other and the page's rows are appended to a *different*
+        query's results. `isCursorRejected` keys on the status alone and reuses
+        `admin_error.httpStatusOf`; the message the user sees is the server's
+        own problem+json `title: detail`, which `formatError` already renders —
+        the wording stays server-side, as with `rewrite_note_code`.
   - **`reranker_enabled` defaults to `False`.** The cross-encoder is
     O(pool size) and the cursor's `grow_pool` doubles the pool on each
     miss (50 → 100 → … → 800). On CPU that overruns request timeouts.
@@ -3153,6 +3235,9 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   Routing the auth-method comparisons through functions also stops TS from
   narrowing a local `$state` to its initialiser's literal type, which made
   `authMethod !== "archive"` look unreachable to `svelte-check`.
+  `lib/search_paging.ts` (`statedSort`/`isCursorRejected`) is the third, and
+  `admin_error.httpStatusOf` gained its first non-admin consumer through it —
+  see the #311 bullets under **Browse & search pagination**.
 - **Deliberately absent — do not "finish" without backend work first:**
   Gmail **Connect**. `POST /v1/admin/accounts/{id}/oauth/start` lives in
   `oauth_router.py`, which #203 did *not* swap to `require_admin()`, so it is

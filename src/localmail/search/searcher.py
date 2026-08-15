@@ -41,6 +41,12 @@ from localmail.search.rewriter import QueryRewriter, RewriteParseError, apply_re
 
 SortMode = Literal["rank", "date"]
 
+#: The sort a caller gets when it states none. It lives here, beside the
+#: type it ranges over, because ``Searcher.search`` and
+#: ``api.search_cursor`` both resolve an unstated sort and must not be
+#: able to answer differently (#312).
+DEFAULT_SORT: SortMode = "rank"
+
 # Sentinel for "no usable date" — sorts strictly older than any real
 # timestamp so NULLs land at the end of a `sort=date` page under
 # Python's reverse=True ordering.
@@ -713,7 +719,7 @@ class Searcher:
         page: int,
         page_size: int,
         conn: psycopg.Connection | None = None,
-        sort: SortMode = "rank",
+        sort: SortMode = DEFAULT_SORT,
     ) -> list[SearchResult]:
         """Assemble SearchResult objects for one page from the ordered hydrated pool.
 
@@ -866,7 +872,7 @@ class Searcher:
 
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
                             rerank_pool_size, use_cache, user_id: int | None = None,
-                            sort: SortMode = "rank"):
+                            sort: SortMode = DEFAULT_SORT):
         """Variant of search() that takes an already-parsed query.
 
         Connection scope: retrieval + hydrate inside one 'with' block. The
@@ -937,7 +943,7 @@ class Searcher:
         smart: bool = False,
         disable_rerank: bool = False,
         user_id: int | None = None,
-        sort: SortMode = "rank",
+        sort: SortMode | None = None,
         keyset_cursor: KeysetCursor | None = None,
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
@@ -957,8 +963,16 @@ class Searcher:
         empty-query branch is already date-ordered, so the param has no
         effect there. ``continue_page`` honors whichever sort was used
         when the cursor was minted.
+
+        `sort=None` means "unstated" — the spelling every other layer of this
+        cluster uses since #308 — and resolves to `DEFAULT_SORT` here, once,
+        before anything reads it. It used to be neither accepted nor rejected:
+        it fell through the `== "date"` test to the same ordering by accident,
+        and was then cached as the pool's own sort, which `_check_pool_sort`
+        reads back to decide a 400 (#312).
         """
         t0 = time.monotonic()
+        effective_sort: SortMode = DEFAULT_SORT if sort is None else sort
         cfg = self._cfg
         effective_page_size: int = min(page_size or cfg.page_size_default,
                                        cfg.page_size_max)
@@ -1010,7 +1024,7 @@ class Searcher:
         # ``messages.fts_v2`` (same column Arm 1 uses) gives identical
         # lexical recall, and the keyset cursor lets them scroll back
         # arbitrarily far.
-        if sort == "date" and parsed.free_text.strip():
+        if effective_sort == "date" and parsed.free_text.strip():
             t = time.monotonic()
             with self._pool.connection() as conn:
                 parsed = self._resolve_account_names(conn, parsed)
@@ -1043,7 +1057,7 @@ class Searcher:
             shape = "a blank" if not parsed.free_text.strip() else "a non-empty"
             raise KeysetCursorUnusable(
                 "keyset_cursor requires sort='date' and a non-empty query; "
-                f"got sort={sort!r} with {shape} query. Note the query is "
+                f"got sort={effective_sort!r} with {shape} query. Note the query is "
                 "measured after filter operators are parsed out of it, so a "
                 "query of nothing but operators counts as blank"
             )
@@ -1107,11 +1121,11 @@ class Searcher:
             with self._pool.connection() as conn:
                 results = self._build_results(hydrated, parsed, scores, page=1,
                                               page_size=effective_page_size, conn=conn,
-                                              sort=sort)
+                                              sort=effective_sort)
         else:
             results = self._build_results(hydrated, parsed, scores, page=1,
                                           page_size=effective_page_size, conn=None,
-                                          sort=sort)
+                                          sort=effective_sort)
         timing["total"] = (time.monotonic() - t0) * 1000
 
         token: str | None = None
@@ -1122,7 +1136,7 @@ class Searcher:
                 "candidates_per_arm": cpa, "rerank_pool_size": rps,
                 "page_size": effective_page_size,
                 "user_id": user_id,
-                "sort": sort,
+                "sort": effective_sort,
             })
         pool_size = len(hydrated)
         return SearchPage(

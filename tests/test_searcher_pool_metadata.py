@@ -21,7 +21,7 @@ from localmail.config import SearchConfig
 from localmail.db import open_pool
 from localmail.search.embed_worker import run_embed_worker_once
 from localmail.search.query import parse_query
-from localmail.search.searcher import PoolMetadata, Searcher
+from localmail.search.searcher import DEFAULT_SORT, PoolMetadata, Searcher
 
 
 class _E:
@@ -141,6 +141,36 @@ def test_pool_metadata_reports_the_sort_the_pool_was_actually_built_with(db_dsn)
             s.get_pool_metadata("tok-no-sort")
     finally:
         pool.close()
+
+
+def test_an_unstated_sort_is_resolved_before_it_reaches_the_pool(db_dsn, db_conn):
+    """``sort=None`` means "unstated", and must not travel as itself (#312).
+
+    Since #308, ``None`` is how every layer of this cluster says "I state no
+    sort; use the default" — the wire field, ``resolve_cursor_mode``,
+    ``run_search``, the MCP tool schema. ``Searcher.search`` merely fell
+    through its ``sort == "date"`` test into the hybrid branch, which is the
+    right *ordering* by accident and the wrong *record*: the raw argument is
+    what the pool is cached with, and since #309 ``_check_pool_sort`` reads
+    that field back to decide a 400. A pool built by a ``sort=None`` caller
+    reported its sort as ``None``, so the very next paging request stating
+    ``sort="rank"`` — the sort it would actually be served — was told the
+    cursor continues a ``None``-sorted search and rejected.
+    """
+    _seed(db_conn, n=6)
+    cfg = SearchConfig(page_size_default=3)
+    run_embed_worker_once(db_conn, cfg, _E())
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
+        page = s.search("test", allowed_account_ids=None, sort=None)
+        assert page.search_token is not None
+        meta = s.get_pool_metadata(page.search_token)
+    finally:
+        pool.close()
+
+    assert meta is not None
+    assert meta.sort == DEFAULT_SORT
 
 
 def test_get_pool_metadata_scoped_to_user_id(db_dsn, db_conn):

@@ -526,6 +526,62 @@ def test_a_command_stays_quiet_when_the_version_is_known(
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
+@pytest.mark.parametrize("argv", [
+    ["sync", "--help"],
+    ["list-accounts", "--help"],
+    ["daemon", "status", "--help"],
+], ids=["sync", "list-accounts", "nested-group"])
+def test_a_help_request_stays_quiet(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """#307: `--help` does no archive work, touches no config and no DB.
+
+    click resolves the subcommand before applying its `--help`, so #304's
+    group-callback report ran for `<cmd> --help` and put an ERROR ahead of the
+    text the operator had explicitly asked to read — while bare `localmail`,
+    `localmail --help` and an unknown command stayed quiet, because
+    `no_args_is_help` short-circuits ahead of the callback. The decision
+    (option 2) was to make all four shapes quiet rather than make the other
+    three loud.
+
+    The nested case is parametrised too: `daemon` is a second group mounted on
+    `main`, so its help arrives as `['status', '--help']` on the root context
+    and a rule reading only the first pending argument would miss it.
+    """
+    records = _invoke_reporting(argv, monkeypatch, caplog)
+    assert records == [], f"`localmail {' '.join(argv)}` reported on a help screen"
+
+
+@pytest.mark.parametrize("argv", [
+    [],
+    ["--help"],
+    ["nosuchcommand"],
+], ids=["bare", "group-help", "unknown-command"])
+def test_the_shapes_that_never_reached_the_callback_are_still_quiet(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The other three of #307's four shapes, pinned rather than assumed.
+
+    Their silence is a side effect of click's parse order (`no_args_is_help`
+    short-circuits before the callback), which is exactly why the issue asked
+    for a pin: nothing asserted it, so a future `invoke_without_command=True`
+    would flip them loud without a failing test.
+    """
+    assert _invoke_reporting(argv, monkeypatch, caplog) == []
+
+
+def test_a_real_invocation_of_the_same_command_still_reports(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The positive control for the two above.
+
+    Skipping on a help request must not become skipping on the command: a
+    rule that matched too broadly would return #304 for the 36 commands it was
+    filed about, and every assertion above would still pass.
+    """
+    assert _invoke_reporting(["sync"], monkeypatch, caplog)
+
+
 def test_the_version_flag_is_not_a_group_callback_reporter(
     monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:

@@ -75,23 +75,30 @@ def test_an_unresolvable_version_is_flagged_on_the_wire(
     assert body["version_source"] == "metadata_unreadable"
 
 
-def test_the_diagnostic_text_never_reaches_the_unauthenticated_body(
-    db_dsn: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_route_never_reads_the_human_diagnostic(db_dsn: str) -> None:
     """The endpoint is unauthenticated and the diagnostic embeds rendered
     exception text — errno values and filesystem paths since #303.
 
-    Asserted against the module's own constants with a positive control beside
-    them: `"cause:" not in body` cannot fail once the prefix is renamed.
+    **An AST pin, because a value assertion here cannot work.** The obvious
+    test — monkeypatch the source, assert `"cause:" not in body` — is vacuous:
+    the route emits no diagnostic and `__version_diagnostic__` is `None` in any
+    healthy test process, so there is no text to leak and the assertion cannot
+    fail. Adding the real global to the body survived it. The AST is also what
+    keeps this from breaking when the reason is written down beside the code:
+    the docstring above necessarily names the thing it forbids, which is the
+    #291 lesson `_mentions_version_option` already paid for.
     """
-    from localmail.version_report import _CAUSE_PREFIX, _SEVERITY_PREFIX
+    import ast
+    from pathlib import Path
 
-    monkeypatch.setattr(
-        version_route, "VERSION_SOURCE", VersionSource.METADATA_UNREADABLE
-    )
-    raw = _client(db_dsn).get("/v1/version").text
+    source = Path(version_route.__file__).read_text()
+    referenced = {
+        node.attr if isinstance(node, ast.Attribute) else node.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.Name, ast.Attribute))
+    }
 
-    assert _CAUSE_PREFIX not in raw
-    assert _SEVERITY_PREFIX not in raw
-    # Positive control: the source that would carry them IS what we are reporting.
-    assert "metadata_unreadable" in raw
+    assert "__version_diagnostic__" not in referenced
+    # Positive control: the walk really does see this module's identifiers, so
+    # a rename of the collector cannot make the assertion above pass vacuously.
+    assert "resolve_build_info" in referenced

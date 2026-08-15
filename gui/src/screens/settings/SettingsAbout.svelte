@@ -12,6 +12,8 @@
 
   const CLIENT_VERSION = __APP_VERSION__;
 
+  const serverFault = $derived(versionWarning(version.snapshot.info?.version_source));
+
   async function openLogs(): Promise<void> {
     try {
       await invoke("open_logs_cmd");
@@ -33,8 +35,8 @@
     <dt>Server</dt>
     <dd>
       {version.snapshot.info?.server_version ?? "?"}
-      {#if versionWarning(version.snapshot.info?.version_source)}
-        <span class="fault">({versionWarning(version.snapshot.info?.version_source)})</span>
+      {#if serverFault}
+        <span class="fault">({serverFault})</span>
       {/if}
     </dd>
     <dt>Server build</dt>

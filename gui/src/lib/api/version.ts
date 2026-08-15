@@ -11,9 +11,10 @@ export interface ServerVersionInfo extends VersionShape {
   build_hash: string | null;
   // Optional, not `string | null`: the *server* always sends these, but this
   // client can be talking to one that predates them. That is the same reason
-  // `buildLabel`/`versionWarning` accept `null | undefined` — and it is why
-  // the ten existing mock sites (MainView, VersionGate, version.test,
-  // SettingsAbout) need no change.
+  // `buildLabel`/`versionWarning` accept `null | undefined` — and it is why the
+  // mock sites that predate this change (MainView, VersionGate, version.test,
+  // SettingsAbout) need no update. Phrased as an invariant, not a count: a
+  // count rots on the next version test anyone adds.
   build_source?: string | null;
   version_source?: string | null;
 }

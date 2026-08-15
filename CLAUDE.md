@@ -632,8 +632,10 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     tracked the consequence: an unresolvable version was legible to a human on
     every entry point and to a *machine* on none.
     **Both are closed now** — see the build-provenance bullet below. What
-    changed is not the objection but the facts it rested on: the new keys have a
-    renderer *and* a machine consumer, which is exactly the test #295 set. The
+    changed is not the objection but the fact it rested on: the new keys have a
+    renderer, which is exactly the test #295 set ("a new key nothing renders").
+    The machine-consumer case is stated in README for external monitoring and
+    has **no in-tree reader** — do not cite it as though it were shipped. The
     `--version` half of #300 needed no flag: stderr is non-empty iff the version
     is unresolvable, now stated in README and pinned. And `__version_source__`'s
     retention paid off as predicted — `version_source` is derived from it.
@@ -654,15 +656,37 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   - **There is no build**, which is why. Both CI workflows are test-only, there
     are no tags, nothing publishes, and *both* deployments run editable installs
     from a git checkout — so a hash stamped into a wheel would be absent on the
-    only machines the row is ever read on. `STAMPED` is a declared seam reading
-    a `_build_info.py` nothing writes; implement the hatchling hook when a
-    release pipeline exists, not before.
-  - **`build_report.py` never logs and no source carries a remedy** — the one
-    place it deliberately breaks from `version_report`. An unresolvable
-    *version* is always a fault; an unresolvable *build hash* usually is not,
-    since `NOT_A_REPO` is the correct state of an installed artifact. Copying
+    only machines the row is ever read on. `STAMPED` is **reserved and
+    unreachable**: nothing reads a `_build_info.py` and nothing writes one, so
+    do not go hunting for the branch — the member exists only to settle the
+    wire value before a release pipeline does. Implement the hatchling hook
+    when there is one, not before.
+  - **No source carries a remedy, and only `GIT_FAILED` logs** — where it
+    deliberately parts from `version_report`. An unresolvable *version* is
+    always a fault; an unresolvable *build hash* usually is not, since
+    `NOT_A_REPO` is the correct state of an installed artifact, so copying
     `VersionSource`'s forced-remedy rule across would put an ERROR in front of
     an operator for a healthy install, i.e. #291 inverted.
+    - **The silence is scoped, not absolute, and the scope is load-bearing.**
+      `GIT_FAILED` is the one member that is a fault by construction, and
+      `capture_output=True` means git's own account of it is already in hand.
+      Discarding it is precisely the silent catch this codebase forbids of
+      `version_report`'s identical broad catch — *"defensible only because it
+      reports what it caught"* — so `_git_failed` logs one WARNING carrying
+      either git's stderr and exit code or the rendered exception chain
+      (`version_report.render_exception_chain`, reused so there is one
+      rendering rule). WARNING, not the sibling's ERROR: a broken *version*
+      breaks the install, while a broken *build hash* degrades one diagnostic
+      field on a server that otherwise works. One line per process, since
+      resolution is cached — no dedup machinery needed. It stays out of the
+      response body for the reason the human diagnostic does: the route is
+      unauthenticated and git's stderr carries filesystem paths.
+    - **`NOT_A_REPO` is exit 128 and nothing else.** `!= 0` routed a
+      signal-killed git (OOM reports `-9`) and a usage error from a future
+      flag change into the *healthy* category — a broken host reported as an
+      installed artifact, which is the collapse this whole feature exists to
+      end, one probe in. The dirty probe's `not in (0, 1)` had the rule right
+      and the two disagreed; they ask the same question now.
   - **Resolution is lazy and cached, never at import.** `import localmail` runs
     for all 38 CLI commands and a `git` subprocess there can hang on a stale
     mount — the #296 scenario. Caching also gives the semantics the row wants:

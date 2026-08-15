@@ -61,7 +61,7 @@ def version() -> dict[str, object]:
         "api_minor": API_MINOR,
         "server_version": SERVER_VERSION,
         "build_hash": build.build_hash,
-        "build_source": build.source.value,
+        "build_source": build.source.wire_name,
         "version_source": VERSION_SOURCE.wire_name,
     }
 

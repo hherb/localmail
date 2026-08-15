@@ -853,3 +853,39 @@ def test_an_empty_wire_name_is_rejected_at_class_creation(bad: str) -> None:
 
     with pytest.raises(ValueError, match="wire_name"):
         reject_empty_wire_name("some-source", bad)
+
+
+def test_the_wire_name_guard_is_wired_into_the_constructor() -> None:
+    """The guard proven by direct call is worthless if nothing calls it.
+
+    Replacing `member.wire_name = reject_empty_wire_name(...)` with a bare
+    assignment left the suite green: the test above still passed (it calls the
+    function itself) and `test_every_member_has_a_wire_name` passes trivially
+    for the members that exist. Since the production `__new__` is unreachable
+    after class creation, the wiring can only be pinned structurally — the same
+    AST-over-text call `_mentions_version_option` makes, and for the same
+    reason: the docstrings around it name the function in prose.
+    """
+    import ast
+    from pathlib import Path
+
+    import localmail.version_report as vr
+
+    tree = ast.parse(Path(vr.__file__).read_text())
+    (cls,) = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "VersionSource"
+    ]
+    (ctor,) = [
+        n for n in cls.body
+        if isinstance(n, ast.FunctionDef) and n.name == "__new__"
+    ]
+    called = {
+        n.func.id for n in ast.walk(ctor)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+
+    assert "reject_empty_wire_name" in called
+    # Positive control: the walk finds the sibling guard too, so a broken
+    # traversal cannot make the assertion above pass by finding nothing.
+    assert "reject_empty_diagnostic" in called

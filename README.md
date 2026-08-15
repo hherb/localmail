@@ -119,8 +119,9 @@ reports the same four outcomes as a machine-readable string.
 `build_hash` is the short git SHA of the checkout the server is running,
 suffixed `-dirty` when tracked files differ from it — the answer to "did the
 daemon get restarted after my pull?". It is `null` when there is no identity to
-report, and `build_source` says why: `git_checkout`, `stamped`, `not_a_repo`,
-`git_unavailable`, `git_failed`.
+report, and `build_source` says why: `git_checkout`, `not_a_repo`,
+`git_unavailable`, `git_failed` (plus `stamped`, reserved for a future release
+pipeline — no server emits it today).
 
 `version_source` is `installed` on a healthy install, and `not_installed`,
 `metadata_incomplete` or `metadata_unreadable` when `server_version` is the

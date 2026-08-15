@@ -18,6 +18,15 @@ describe("buildLabel", () => {
     expect(buildLabel(null, "something_new")).toBe("?");
     expect(buildLabel(null, null)).toBe("?");
   });
+
+  it("does not resolve inherited Object properties as reasons", () => {
+    // `"toString" in {}` is true and `{}["constructor"]` is a function, so an
+    // `in` test or a bare index would render `function toString() { … }` into
+    // the row — the "must not render undefined" contract, failing louder.
+    for (const key of ["toString", "constructor", "valueOf", "__proto__"]) {
+      expect(buildLabel(null, key)).toBe("?");
+    }
+  });
 });
 
 describe("versionWarning", () => {
@@ -31,9 +40,24 @@ describe("versionWarning", () => {
     expect(versionWarning("metadata_unreadable")).toBe("metadata unreadable");
   });
 
-  it("is null for an unknown or absent source", () => {
-    // A server predating the field must not be rendered as broken.
+  it("is null for an absent source", () => {
+    // A server predating the field claims nothing and must not read as broken.
     expect(versionWarning(null)).toBeNull();
-    expect(versionWarning("something_new")).toBeNull();
+    expect(versionWarning(undefined)).toBeNull();
+  });
+
+  it("still reports a fault this client is too old to name", () => {
+    // The half that `?? null` got wrong: every source but `installed` is a
+    // fault by construction server-side, so a newer server reporting a new one
+    // must not render as healthy on the one screen that reports this.
+    expect(versionWarning("something_new")).toBe("version unresolved");
+  });
+
+  it("does not resolve inherited Object properties as faults", () => {
+    // `VERSION_FAULTS["constructor"]` is a function — truthy — so a bare index
+    // would paint a red marker, and its text, onto a healthy install.
+    for (const key of ["toString", "constructor", "valueOf", "__proto__"]) {
+      expect(versionWarning(key)).toBe("version unresolved");
+    }
   });
 });

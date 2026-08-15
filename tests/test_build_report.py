@@ -18,7 +18,8 @@ from pathlib import Path
 import pytest
 
 from localmail.build_report import (
-    UNIDENTIFIED_SOURCES, BuildInfo, BuildSource, _resolve_from_package_dir,
+    _GIT_TIMEOUT_S, _STRIPPED_GIT_ENV, UNIDENTIFIED_SOURCES, BuildInfo,
+    BuildSource, _resolve_from_package_dir, reject_empty_wire_value,
     reset_build_info, resolve_build_info,
 )
 
@@ -224,21 +225,115 @@ def test_a_git_timeout_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_the_probe_strips_inherited_git_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stray GIT_DIR makes `-C` a no-op, pointing us at another repo."""
+    """A stray GIT_DIR makes `-C` a no-op, pointing us at another repo.
+
+    GIT_INDEX_FILE is in the set for a narrower reason than the rest: it does
+    not move the repository, it swaps the index the `-dirty` verdict is read
+    against.
+    """
     seen: dict[str, str] = {}
 
     def capture(argv, **kwargs):
         seen.update(kwargs["env"])
         return subprocess.CompletedProcess(argv, returncode=128, stdout="", stderr="")
 
-    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
-    monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
+    for name in _STRIPPED_GIT_ENV:
+        monkeypatch.setenv(name, "/somewhere/else")
+    # Positive control: only the discovery/index variables are stripped, not
+    # every GIT_* an operator's shell happens to export.
+    monkeypatch.setenv("GIT_EDITOR", "vim")
     monkeypatch.setattr("localmail.build_report.subprocess.run", capture)
 
     _resolve_from_package_dir(tmp_path)
 
-    assert "GIT_DIR" not in seen
-    assert "GIT_WORK_TREE" not in seen
+    assert [k for k in _STRIPPED_GIT_ENV if k in seen] == []
+    assert seen["GIT_EDITOR"] == "vim"
+
+
+def test_every_git_call_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler for a timeout is tested; that one is ever *requested* was not.
+
+    Deleting `timeout=` entirely left the suite green, because the timeout test
+    injects `TimeoutExpired` from a mock rather than provoking one. This is what
+    stops a wedged mount holding the first `/v1/version` open.
+    """
+    timeouts: list[float | None] = []
+
+    def capture(argv, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess(argv, returncode=128, stdout="", stderr="")
+
+    monkeypatch.setattr("localmail.build_report.subprocess.run", capture)
+
+    _resolve_from_package_dir(tmp_path)
+
+    assert timeouts == [_GIT_TIMEOUT_S]
+
+
+def _probe_returning(returncode: int, stdout: str = "", stderr: str = ""):
+    def run(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv, returncode=returncode, stdout=stdout, stderr=stderr
+        )
+    return run
+
+
+def test_exit_128_is_the_only_non_zero_that_reads_as_an_installed_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """128 is git's "not a usable repository" — the whole of NOT_A_REPO."""
+    monkeypatch.setattr(
+        "localmail.build_report.subprocess.run",
+        _probe_returning(128, stderr="fatal: not a git repository"),
+    )
+
+    info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is BuildSource.NOT_A_REPO
+    assert info.build_hash is None
+
+
+@pytest.mark.parametrize("returncode", [-9, -11, 1, 129])
+def test_any_other_non_zero_exit_is_a_failure_not_a_verdict(
+    returncode: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signal kill (OOM reports -9) is not "an installed artifact".
+
+    `!= 0 -> NOT_A_REPO` reported a broken host as the healthy state, which is
+    the collapse this module exists to end, one probe in. The dirty probe below
+    already applied the stricter rule; the two disagreed.
+    """
+    monkeypatch.setattr(
+        "localmail.build_report.subprocess.run",
+        _probe_returning(returncode, stderr="boom"),
+    )
+
+    info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is BuildSource.GIT_FAILED
+    assert info.build_hash is None
+
+
+def test_a_probe_answering_in_an_unparseable_shape_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One line where two were asked for.
+
+    Unpinned, deleting the guard let the unpack below raise `IndexError` out of
+    a function whose contract is that it never raises — a 500 on an
+    unauthenticated route.
+    """
+    monkeypatch.setattr(
+        "localmail.build_report.subprocess.run",
+        _probe_returning(0, stdout="/only/one/line\n"),
+    )
+
+    info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is BuildSource.GIT_FAILED
+    assert info.build_hash is None
 
 
 def test_resolution_never_raises_whatever_git_does(
@@ -282,6 +377,237 @@ def test_a_failure_on_the_dirty_probe_is_named_too(
 
     assert info.source is BuildSource.GIT_FAILED
     assert info.build_hash is None
+
+
+def _ours(tmp_path: Path) -> Path:
+    """A layout `_repo_is_ours` accepts, so the dirty probe is actually reached."""
+    package_dir = tmp_path / "src" / "localmail"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("")
+    return package_dir
+
+
+def _first_probe_ok_then(tmp_path: Path, second):
+    def run(argv, **kwargs):
+        if "diff" in argv:
+            return second(argv, **kwargs)
+        return subprocess.CompletedProcess(
+            argv, returncode=0, stdout=f"{tmp_path}\neec8e09\n", stderr=""
+        )
+    return run
+
+
+@pytest.mark.parametrize("returncode", [-9, 2, 128, 129])
+def test_a_non_verdict_exit_from_the_dirty_probe_is_named(
+    returncode: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0 = clean, 1 = dirty. Anything else is git failing, not a verdict.
+
+    Unpinned, deleting that guard reported `eec8e09` / `git_checkout` — an
+    affirmative *clean tree* — for a probe that never ran successfully. The
+    `-dirty` marker silently absent is worse than a named failure, because it
+    is the marker an operator reads to know a deployment was edited.
+    """
+    monkeypatch.setattr(
+        "localmail.build_report.subprocess.run",
+        _first_probe_ok_then(
+            tmp_path, _probe_returning(returncode, stderr="fatal: bad object")
+        ),
+    )
+
+    info = _resolve_from_package_dir(_ours(tmp_path))
+
+    assert info.source is BuildSource.GIT_FAILED
+    assert info.build_hash is None
+
+
+def test_a_missing_git_on_the_dirty_probe_reads_the_same_as_on_the_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Practically unreachable; pinned so the two probes cannot disagree."""
+    def gone(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(
+        "localmail.build_report.subprocess.run",
+        _first_probe_ok_then(tmp_path, gone),
+    )
+
+    info = _resolve_from_package_dir(_ours(tmp_path))
+
+    assert info.source is BuildSource.GIT_UNAVAILABLE
+
+
+def test_an_unreadable_package_tree_does_not_escape_the_identity_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Path.exists()` re-raises most `OSError`s, and it sat outside the `try`.
+
+    Raised at the seam rather than provoked with a `chmod`, for the reason
+    `parser`'s #314 guard is tested that way: what is reachable through a real
+    fixture depends on the interpreter's own errno list, so a fixture-driven
+    test would quietly stop exercising this on the versions that need it.
+    """
+    monkeypatch.setattr(
+        "localmail.build_report.subprocess.run",
+        _probe_returning(0, stdout=f"{tmp_path}\neec8e09\n"),
+    )
+    monkeypatch.setattr(
+        Path, "exists",
+        lambda self: (_ for _ in ()).throw(PermissionError(13, "Permission denied")),
+    )
+
+    info = _resolve_from_package_dir(_ours(tmp_path))
+
+    assert info.source is BuildSource.NOT_A_REPO
+    assert info.build_hash is None
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_a_blank_wire_value_is_rejected_at_class_creation(value: str) -> None:
+    """The value IS the wire string here, so an empty one is an empty answer.
+
+    Module-level, and tested by direct call, for `reject_empty_wire_name`'s
+    reason: enum machinery replaces `__new__` after class creation, so no test
+    can reach the production one to prove the rule fires for a future member.
+    """
+    with pytest.raises(ValueError, match="empty wire value"):
+        reject_empty_wire_value(value)
+
+
+def test_the_wire_value_guard_is_wired_into_the_constructor() -> None:
+    """A guard proven by direct call is worthless if nothing calls it.
+
+    Structural for the same reason as its `VersionSource` sibling: the
+    production `__new__` is unreachable once the class exists, and the prose
+    around it names the function.
+    """
+    import ast
+
+    import localmail.build_report as br
+
+    tree = ast.parse(Path(br.__file__).read_text())
+    (cls,) = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "BuildSource"
+    ]
+    (ctor,) = [
+        n for n in cls.body
+        if isinstance(n, ast.FunctionDef) and n.name == "__new__"
+    ]
+    called = {
+        n.func.id for n in ast.walk(ctor)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+
+    assert "reject_empty_wire_value" in called
+
+
+def test_every_source_declares_whether_it_carries_a_hash() -> None:
+    """`identifies` rides the member, so omitting it is a TypeError at import.
+
+    The enforcement is `__new__`'s arity and cannot be reached from a test —
+    a member written `NEW = "new"` fails `import localmail.build_report`
+    outright. This asserts the payload is present on every member, which is
+    what makes the derived `UNIDENTIFIED_SOURCES` trustworthy.
+    """
+    assert all(isinstance(s.identifies, bool) for s in BuildSource)
+    assert UNIDENTIFIED_SOURCES == frozenset(
+        s for s in BuildSource if not s.identifies
+    )
+
+
+def test_the_wire_name_of_a_build_source_is_its_value() -> None:
+    """An alias, so every wire enum answers the same question by one name.
+
+    `VersionSource` needs a separate `wire_name` because its values are
+    debugging aids; here the value is the contract. The route reads
+    `.wire_name` on both, so nobody has to know which is which to read it.
+    """
+    assert all(s.wire_name == s.value for s in BuildSource)
+
+
+def test_a_git_failure_says_what_git_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The one source that logs, because it is the one that is always a fault.
+
+    `capture_output=True` means git's own account of the failure is already in
+    hand; discarding it is the silent catch CLAUDE.md forbids of the sibling
+    module's identical broad catch.
+    """
+    monkeypatch.setattr(
+        "localmail.build_report.subprocess.run",
+        _probe_returning(129, stderr="usage: git rev-parse"),
+    )
+
+    with caplog.at_level("WARNING", logger="localmail.build_report"):
+        info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is BuildSource.GIT_FAILED
+    assert "usage: git rev-parse" in caplog.text
+    assert "129" in caplog.text
+
+
+def test_a_raised_failure_logs_the_whole_cause_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reuses `version_report.render_exception_chain` — one rendering rule.
+
+    A wrapper is the normal shape here (a `sys.meta_path` finder, a subprocess
+    helper), and the errno and filename are on the *inner* exception.
+    """
+    def wrapped(*_args, **_kwargs):
+        raise RuntimeError("probe failed") from OSError(5, "I/O error", "/nfs/git")
+
+    monkeypatch.setattr("localmail.build_report.subprocess.run", wrapped)
+
+    with caplog.at_level("WARNING", logger="localmail.build_report"):
+        info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is BuildSource.GIT_FAILED
+    assert "probe failed" in caplog.text
+    assert "/nfs/git" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "returncode, expected",
+    [(128, BuildSource.NOT_A_REPO)],
+)
+def test_a_healthy_resolution_says_nothing(
+    returncode: int, expected: BuildSource,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The positive control, and the reason the silence is scoped not absolute.
+
+    `not_a_repo` is the correct state of an installed artifact. Reporting it
+    would put a warning in front of an operator for a healthy install — #291
+    inverted, which is exactly what this module refuses to do.
+    """
+    monkeypatch.setattr(
+        "localmail.build_report.subprocess.run", _probe_returning(returncode)
+    )
+
+    with caplog.at_level("WARNING", logger="localmail.build_report"):
+        info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is expected
+    assert caplog.text == ""
+
+
+@requires_git
+def test_a_real_clean_checkout_says_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other half of the control: the success path is silent too."""
+    package_dir = _make_repo(tmp_path)
+
+    with caplog.at_level("WARNING", logger="localmail.build_report"):
+        info = _resolve_from_package_dir(package_dir)
+
+    assert info.source is BuildSource.GIT_CHECKOUT
+    assert caplog.text == ""
 
 
 def test_resolution_happens_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:

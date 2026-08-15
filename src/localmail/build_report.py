@@ -3,31 +3,56 @@
 
 """Which build is this process running, and why can we not say (#278, #300).
 
-A sibling of `version_report.py`, and top-level for the same reason:
-`serve/routes/version.py` reads it, and a subpackage would invite an import
-cycle.
+A sibling of `version_report.py`. Top-level rather than under `serve/` because
+it is transport-free and stdlib-plus-`version_report` only: a future CLI or MCP
+reader should not have to import the HTTP layer to ask. Unlike
+`version_report.py`, nothing imports this at package-import time — see
+`resolve_build_info` for why that is deliberate rather than incidental.
 
 Four properties differ from `version_report`, each deliberately:
 
-* **Nothing here logs, and no source carries a remedy.** `VersionSource`
+* **No source carries a remedy, and only `GIT_FAILED` logs.** `VersionSource`
   forces a remedy onto every failure member at class creation, because an
-  unresolvable *version* is always a fault. An unresolvable *build hash*
-  usually is not — `NOT_A_REPO` is the normal, correct state of an installed
-  artifact — so copying that rule across would put an ERROR in front of an
-  operator for a healthy install, which is #291 inverted.
+  unresolvable *version* is always a fault. An unresolvable *build hash* usually
+  is not — `NOT_A_REPO` is the normal, correct state of an installed artifact —
+  so copying that rule across would put a report in front of an operator for a
+  healthy install, which is #291 inverted. `GIT_FAILED` is the one member that
+  is always a fault, and it is the one that speaks; see `_git_failed`.
 * **Resolution is lazy and cached, never at import.** See `resolve_build_info`.
-* **The repo we find must be *ours*.** See `_resolve_from_package_dir`.
+* **The repo we find must be *ours*.** See `_repo_is_ours`.
 * **The enum's own value IS the wire contract**, unlike `VersionSource`'s
   hyphenated debugging aids. Pinned literally in `tests/test_build_report.py`.
 """
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from functools import cache
 from pathlib import Path
+
+from localmail.version_report import render_exception_chain
+
+_log = logging.getLogger(__name__)
+
+
+def reject_empty_wire_value(value: str) -> str:
+    """Reject a blank `BuildSource` value at class creation.
+
+    `BuildSource.__new__` is the only caller. The value *is* the wire string
+    here, so a member written `("", False)` would emit an empty `build_source`
+    as though it were a real answer — `reject_empty_wire_name`'s case one enum
+    over, and the reason that one exists.
+
+    Module-level rather than inline for that function's reason too: enum
+    machinery replaces `__new__` after class creation, so no test can reach the
+    production one to prove the rule fires for a *future* member.
+    """
+    if not value.strip():
+        raise ValueError("BuildSource declares an empty wire value")
+    return value
 
 
 class BuildSource(Enum):
@@ -39,31 +64,62 @@ class BuildSource(Enum):
     `wire_name`.
     """
 
-    #: A generated `_build_info.py` was found. Nothing writes one today; this is
-    #: the declared seam for a future build hook (see the spec's Out of scope).
-    STAMPED = "stamped"
+    #: Whether this source carries a build hash. Declared on the member rather
+    #: than collected in a side-table beside the class: a `frozenset` returns
+    #: `False` for an unmapped member exactly as a `dict` returns `None`, so a
+    #: member added without classifying it would silently mean "must carry a
+    #: hash" — and a *failure* member (three of the five, i.e. the likely shape
+    #: of the next one) would then raise out of `_resolve_from_package_dir`,
+    #: whose contract is that it never does, and 500 an unauthenticated route.
+    #: Declared here, omitting it is a `TypeError` at class creation instead.
+    #: Annotation only — a bare annotation declares no enum member.
+    identifies: bool
+
+    def __new__(cls, value: str, identifies: bool) -> BuildSource:
+        member = object.__new__(cls)
+        member._value_ = reject_empty_wire_value(value)
+        member.identifies = identifies
+        return member
+
+    @property
+    def wire_name(self) -> str:
+        """The string `/v1/version` emits.
+
+        The value *is* the contract here, so this is an alias — it exists so
+        every wire enum answers the same question by the same name. Without it
+        the route reads `build.source.value` beside `VERSION_SOURCE.wire_name`
+        and a reader has to know each enum's private convention to see that both
+        lines emit a wire string.
+        """
+        return self.value
+
+    #: Reserved. Nothing produces this today: there is no read of a generated
+    #: `_build_info.py` and no build hook that writes one. The member is
+    #: declared so the wire value is settled before a release pipeline exists
+    #: (see the spec's Out of scope) — do not go hunting for the branch.
+    STAMPED = ("stamped", True)
     #: Resolved from the working tree the imported package came from.
-    GIT_CHECKOUT = "git_checkout"
+    GIT_CHECKOUT = ("git_checkout", True)
     #: An installed artifact, or a repository that is not this project's. git
-    #: exits 128 here for several causes we deliberately do not separate: no
+    #: exits **128** for several causes we deliberately do not separate: no
     #: repository (the common one), dubious ownership, a repo with no commits.
     #: Telling them apart would mean matching git's stderr text, which this
-    #: codebase forbids on principle — match the type, never the message.
-    NOT_A_REPO = "not_a_repo"
+    #: codebase forbids on principle — match the type, never the message. A
+    #: *different* non-zero exit is git failing, not this verdict, and routes to
+    #: GIT_FAILED; the not-ours case arrives here from a successful exit-0 run.
+    NOT_A_REPO = ("not_a_repo", False)
     #: No `git` binary on PATH.
-    GIT_UNAVAILABLE = "git_unavailable"
-    #: git raised, timed out, or answered in a shape we could not parse. Note a
-    #: non-zero exit from the first probe routes to NOT_A_REPO, not here.
-    GIT_FAILED = "git_failed"
+    GIT_UNAVAILABLE = ("git_unavailable", False)
+    #: git raised, timed out, exited non-zero for anything but 128, or answered
+    #: in a shape we could not parse. The one member that is always a fault,
+    #: which is why it is the one that logs.
+    GIT_FAILED = ("git_failed", False)
 
 
 #: The sources that carry no hash. `build_hash is None` iff `source` is one of
-#: these — the biconditional `BuildInfo.__post_init__` enforces.
-UNIDENTIFIED_SOURCES = frozenset({
-    BuildSource.NOT_A_REPO,
-    BuildSource.GIT_UNAVAILABLE,
-    BuildSource.GIT_FAILED,
-})
+#: these — the biconditional `BuildInfo.__post_init__` enforces. **Derived**, so
+#: the name and its readability survive but nothing can drift from the members.
+UNIDENTIFIED_SOURCES = frozenset(s for s in BuildSource if not s.identifies)
 
 
 @dataclass(frozen=True)
@@ -100,12 +156,64 @@ class BuildInfo:
 #: short enough that a wedged mount does not hold the first `/v1/version` open.
 _GIT_TIMEOUT_S = 2.0
 
-#: Stripped from the subprocess environment. A stray one makes `-C` a no-op, so
-#: we would report an unrelated repository's SHA — cheap to prevent, and
-#: invisible if it ever happened.
-_STRIPPED_GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE")
+#: Stripped from the subprocess environment. A stray one makes `-C` a no-op or
+#: redirects discovery, so we would report an unrelated repository's SHA — or,
+#: for `GIT_INDEX_FILE`, an unrelated index's `-dirty` verdict. Cheap to
+#: prevent, and invisible if it ever happened.
+_STRIPPED_GIT_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_CEILING_DIRECTORIES",
+)
 
 _DIRTY_SUFFIX = "-dirty"
+
+#: git's exit code for "this is not a usable repository" — the whole of
+#: `NOT_A_REPO`. Any other non-zero code is git failing, which is a different
+#: fact with a different remedy, so it must not read as a healthy install.
+_GIT_NOT_A_REPO_EXIT = 128
+
+#: Ceiling on a logged observation. git's stderr and a rendered exception chain
+#: are both chosen by whatever failed, and this line is emitted once per process
+#: on a path that must not become the problem it is reporting.
+_MAX_OBSERVATION_CHARS = 500
+
+#: Appended where an observation was cut short, so a truncated line cannot be
+#: read as a complete one. `version_report._TRUNCATION_MARKER`'s reasoning.
+_TRUNCATION_MARKER = "…"
+
+
+def bounded_observation(text: str) -> str:
+    """Cap a logged observation, marking it when it is cut short."""
+    if len(text) <= _MAX_OBSERVATION_CHARS:
+        return text
+    return text[:_MAX_OBSERVATION_CHARS] + _TRUNCATION_MARKER
+
+
+def _git_failed(observation: str) -> BuildInfo:
+    """Report a git failure, then classify it.
+
+    **The one place in this module that logs**, and the reason the module-wide
+    silence is scoped rather than absolute. `NOT_A_REPO` and `GIT_UNAVAILABLE`
+    are answers; `GIT_FAILED` is a fault, and `capture_output=True` means we are
+    already holding git's own account of it. Discarding that would be the silent
+    catch CLAUDE.md forbids of `version_report`'s identical broad catch — whose
+    breadth is defensible *because* it reports what it caught.
+
+    WARNING rather than the sibling's ERROR: an unresolvable version breaks the
+    install, while an unresolvable build hash degrades one diagnostic field on a
+    server that is otherwise working. Emitted at most once per process, since
+    `resolve_build_info` caches — no dedup machinery needed.
+
+    Stays out of the response body deliberately: `/v1/version` is
+    unauthenticated and git's stderr carries filesystem paths, the same reason
+    `__version_diagnostic__` is not on the wire (#303).
+    """
+    _log.warning("build identity unresolvable: %s", bounded_observation(observation))
+    return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
 
 
 def _run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -129,43 +237,63 @@ def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
 
     Never raises: every failure maps to a `BuildSource`. The broad catch is
     justified as `version_report`'s is — this feeds an endpoint that must
-    answer — with one honest difference: not being on the import path, a raise
-    here would not kill `import localmail`, only 500 an unauthenticated route.
+    answer, and it reports what it caught rather than discarding it — with one
+    honest difference: not being on the import path, a raise here would not kill
+    `import localmail`, only 500 an unauthenticated route.
     """
     try:
         probe = _run_git(package_dir, "rev-parse", "--show-toplevel", "--short", "HEAD")
     except FileNotFoundError:
         return BuildInfo(build_hash=None, source=BuildSource.GIT_UNAVAILABLE)
-    except Exception:
-        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+    except Exception as exc:
+        return _git_failed(render_exception_chain(exc))
 
-    if probe.returncode != 0:
+    if probe.returncode == _GIT_NOT_A_REPO_EXIT:
         return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
+    if probe.returncode != 0:
+        # Not 128, so not a verdict about the repository: a signal kill (OOM
+        # reports -9), a usage error from a git flag change, a wrapper script's
+        # own code. Reading these as NOT_A_REPO would report a broken host as a
+        # healthy installed artifact — the collapse this module exists to end.
+        return _git_failed(
+            f"git rev-parse exited {probe.returncode}: {probe.stderr.strip()}"
+        )
     # `splitlines()`, never `.split()`: the toplevel is a path, and one
     # containing a space would otherwise yield 3+ tokens and report a
     # healthy checkout as GIT_FAILED.
     lines = probe.stdout.strip().splitlines()
     if len(lines) != 2:
-        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+        return _git_failed(
+            f"git rev-parse answered {len(lines)} line(s), expected 2"
+        )
     toplevel, short_sha = Path(lines[0]), lines[1]
 
-    if not short_sha:
+    if not short_sha.strip():
         # Unreachable through `splitlines()` today, and guarded anyway: what
         # makes it unreachable is a property of `str.strip`/`str.splitlines`
         # this module does not own, and the construction below is the one
         # unguarded call in a function whose contract is that it never raises.
-        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+        # `.strip()`, not a bare falsy test, so this asks the same question as
+        # the `__post_init__` invariant it is standing in front of.
+        return _git_failed("git rev-parse answered a blank short SHA")
 
     if not _repo_is_ours(toplevel, package_dir):
         return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
 
     try:
         dirty = _run_git(package_dir, "diff", "--quiet", "HEAD")
-    except Exception:
-        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+    except FileNotFoundError:
+        # Practically unreachable — git answered a moment ago — but classified
+        # the same way as the first probe's, so the two cannot disagree about
+        # what a missing binary means.
+        return BuildInfo(build_hash=None, source=BuildSource.GIT_UNAVAILABLE)
+    except Exception as exc:
+        return _git_failed(render_exception_chain(exc))
     # 0 = clean, 1 = tracked changes. Anything else is git failing, not a verdict.
     if dirty.returncode not in (0, 1):
-        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+        return _git_failed(
+            f"git diff --quiet exited {dirty.returncode}: {dirty.stderr.strip()}"
+        )
     suffix = _DIRTY_SUFFIX if dirty.returncode == 1 else ""
     return BuildInfo(build_hash=f"{short_sha}{suffix}", source=BuildSource.GIT_CHECKOUT)
 
@@ -178,13 +306,20 @@ def _repo_is_ours(toplevel: Path, package_dir: Path) -> bool:
     that project's toplevel. Requiring `<toplevel>/src/localmail/__init__.py` to
     be the very file we imported is what tells the two apart; mere containment
     does not, because the installed copy *is* contained.
+
+    `.exists()` is **inside** the guard, not after it: `Path.exists()` re-raises
+    any `OSError` whose errno is not in a small stdlib-internal list, so a
+    `PermissionError` on our own package tree escaped a function whose caller's
+    contract is that it never raises — and 500'd an unauthenticated route. That
+    errno list is a stdlib internal that has changed across versions, which is
+    the #314 shape: what is reachable differs per interpreter.
     """
     try:
         ours = (package_dir / "__init__.py").resolve()
         candidate = (toplevel / "src" / package_dir.name / "__init__.py").resolve()
+        return candidate == ours and candidate.exists()
     except OSError:
         return False
-    return candidate == ours and candidate.exists()
 
 
 @cache
@@ -203,8 +338,9 @@ def resolve_build_info() -> BuildInfo:
     keeps executing the code it already imported.
 
     `functools.cache` is not atomic, so a burst of concurrent first calls can
-    each resolve once — bounded by the threadpool and by the 2s timeout, after
-    which the cache is warm. Not worth a lock: the window is one cold start.
+    each resolve once — bounded by the threadpool and by the two `_GIT_TIMEOUT_S`
+    waits a single resolution can spend, after which the cache is warm. Not
+    worth a lock: the window is one cold start.
     """
     return _resolve_from_package_dir(Path(__file__).resolve().parent)
 

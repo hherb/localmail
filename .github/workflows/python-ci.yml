@@ -37,7 +37,11 @@ jobs:
       fail-fast: false
       matrix:
         postgres: ["pg18"]
-        python: ["3.12"]
+        # Both, because the bug this matrix now guards is an interpreter
+        # difference: CPython's structured-header parser raises for a
+        # degenerate `Message-Id` on 3.12 and not on 3.13, and `requires-python`
+        # still admits both. One leg alone cannot see a regression in the other.
+        python: ["3.12", "3.13"]
     services:
       postgres:
         image: pgvector/pgvector:${{ matrix.postgres }}
@@ -73,7 +77,11 @@ jobs:
         # `uv run pytest` silently re-locked it on the runner, so no test could
         # catch it either. --locked asserts the lockfile is current and fails
         # if it is not. See tests/test_version_single_source.py.
-        run: uv sync --locked --extra mcp
+        #
+        # --python pins the leg explicitly. `.python-version` (3.13) is read by
+        # every uv command and beats UV_PYTHON, so without this flag the 3.12
+        # leg would silently sync and test 3.13 and the matrix label would lie.
+        run: uv sync --locked --python ${{ matrix.python }} --extra mcp
       - name: Cache embedding model
         # The real-model tests download google/embeddinggemma-300m (~1.2 GB) from
         # HuggingFace. The model is immutable, so a static key persists it across
@@ -89,4 +97,6 @@ jobs:
             /tmp/fastembed_cache
           key: embedding-model-embeddinggemma-300m-onnx-v1
       - name: Run pytest
-        run: uv run pytest -q
+        # --python for the same reason as the sync step: `uv run` reads
+        # `.python-version` too and would otherwise recreate the environment.
+        run: uv run --python ${{ matrix.python }} pytest -q

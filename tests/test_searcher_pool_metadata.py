@@ -20,6 +20,7 @@ import pytest
 from localmail.config import SearchConfig
 from localmail.db import open_pool
 from localmail.search.embed_worker import run_embed_worker_once
+from localmail.search.query import parse_query
 from localmail.search.searcher import PoolMetadata, Searcher
 
 
@@ -101,6 +102,45 @@ def test_get_pool_metadata_returns_metadata_after_search(db_dsn, db_conn):
     # but determined by the actual retrieval result for the seed corpus.
     assert meta.pool_size > 0
     assert meta.pool_size <= 11
+    assert meta.sort == "rank"
+
+
+def test_pool_metadata_reports_the_sort_the_pool_was_actually_built_with(db_dsn):
+    """``_check_pool_sort`` makes a 400/200 call on this field (#308).
+
+    The guard is only as honest as what it reads, and every api-level test
+    mocks ``get_pool_metadata`` — so nothing else exercises the real read.
+    Hardcoding it to ``"rank"``, or restoring the ``entry.get("sort",
+    "rank")`` that the field's own "no default" comment forbids, leaves the
+    rest of the suite green while telling a caller who correctly asks for
+    the pool's own sort that it is not the one they will get.
+    """
+    cfg = SearchConfig()
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
+        # Reach past retrieval: the field must mirror the entry, and only a
+        # date-built pool can tell a truthful read from a hardcoded "rank".
+        s._cache.put("tok-date", {
+            "parsed": parse_query("invoice"), "hydrated": [], "scores": {},
+            "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
+            "user_id": None, "sort": "date",
+        })
+        assert s.get_pool_metadata("tok-date").sort == "date"
+
+        # And the fallback's own failure shape: an entry *missing* the key.
+        # Asserting only the date pool above passes against
+        # `entry.get("sort", "rank")` — the mutant answers "date" too,
+        # because the key is there. What the fallback actually does is
+        # answer "rank" for a writer that forgot, which is the silence the
+        # defaultless field exists to end, so that is what must be loud.
+        entry = dict(s._cache.get("tok-date"))
+        del entry["sort"]
+        s._cache.put("tok-no-sort", entry)
+        with pytest.raises(KeyError):
+            s.get_pool_metadata("tok-no-sort")
+    finally:
+        pool.close()
 
 
 def test_get_pool_metadata_scoped_to_user_id(db_dsn, db_conn):
@@ -186,6 +226,6 @@ def test_pool_metadata_is_frozen_dataclass():
     """PoolMetadata is a value object; immutability prevents downstream
     mutation from being mistaken for cache invalidation."""
     meta = PoolMetadata(candidates_per_arm=50, page_size=20,
-                        rerank_pool_size=100, pool_size=80)
+                        rerank_pool_size=100, pool_size=80, sort="rank")
     with pytest.raises(dataclasses.FrozenInstanceError):
         meta.candidates_per_arm = 99  # type: ignore[misc]

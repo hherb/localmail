@@ -800,7 +800,7 @@ Poll, process, ack. Semantics:
   `[serve] max_subscriptions_per_user` (default 32) distinct names per
   user. Use a small set of stable names, not one per process or run.
 
-`GET /v1/search` supports two cursor flavours, transparently:
+`POST /v1/search` supports two cursor flavours, transparently:
 
 - **Pool cursor** (`"<token>:<page>"`) — paged result from the
   hybrid retrieval pool. When the page advances past the cached pool
@@ -811,6 +811,13 @@ Poll, process, ack. Semantics:
   non-empty query, backed by a lexical FTS scan over
   `COALESCE(internal_date, date_sent)`. Unbounded scroll; no pool
   cap. Same recall as the lexical retrieval arm.
+
+When paging, send the cursor back with the same `query` and filters and
+**leave `sort` unset**. The cursor already carries the ordering it
+continues, so a stated `sort` that contradicts it is a 400 rather than a
+silent restart at page 1 of a differently ordered search. A keyset cursor
+also needs the query re-sent — it rebuilds the lexical walk from it — and
+is rejected without one.
 
 If a paged cursor's underlying pool was evicted from the in-memory
 cache (TTL expiry, LRU eviction, or `serve` restart) the route

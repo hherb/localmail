@@ -30,13 +30,19 @@ def tool_search(
     user_id: int,
     allowed_account_ids: list[int],
     query: str,
-    sort: Literal["rank", "date"] = "rank",
+    sort: Literal["rank", "date"] | None = None,
     limit: int = 50,
     cursor: str | None = None,
     filters: dict[str, Any] | None = None,
     smart: bool = False,
 ) -> dict[str, Any]:
     """Hybrid search, ACL-scoped. Page forward by passing back `next_cursor`.
+
+    `sort` defaults to `rank` and is best left unset when paging: the cursor
+    already carries the ordering it continues. Send back the same `query` and
+    `filters` with it — a `sort=date` cursor walks the archive lexically and
+    rebuilds that walk from the query. A stated `sort` the cursor cannot serve
+    is a validation error, not a silently restarted search.
 
     `smart` opts into an LLM query rewrite (page 1 only). The response carries
     `rewrite_status` (one of `applied`, `unavailable`, `failed`,

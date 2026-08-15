@@ -41,3 +41,24 @@ def test_build_disables_dns_rebinding_protection(db_dsn):
     security = server.settings.transport_security
     assert security is not None
     assert security.enable_dns_rebinding_protection is False
+
+
+def test_search_declares_no_sort_default_of_its_own(db_dsn):
+    """The MCP tool must not fill in a sort the agent did not ask for.
+
+    An agent pages by calling again with `next_cursor` — the documented
+    contract, and the one an unstated default breaks: a "rank" sent on the
+    agent's behalf contradicts a date-sorted cursor, which the API answers
+    by rejecting the call. Absent, the cursor decides and paging works.
+    """
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    sort = (tools["search"].inputSchema or {})["properties"]["sort"]
+    assert sort.get("default") is None, (
+        f"search states sort={sort.get('default')!r} for the agent: "
+        "a cursor's own ordering can never win against it"
+    )

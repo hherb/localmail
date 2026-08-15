@@ -319,6 +319,98 @@ def test_search_cursor_forwarded_to_run_search(
     assert args.args[1] == 2
 
 
+def test_search_pages_a_date_cursor_when_sort_is_omitted(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """`sort` is null-by-default on the wire so that omitting it is not read
+    as asking for "rank": a `K|…` cursor continues a date-sorted walk, and
+    the route must hand the Searcher that sort rather than the model's
+    default, which selects a different retrieval branch and drops the cursor.
+    """
+    from datetime import datetime, timezone
+    from localmail.api.search_cursor import encode_keyset_cursor
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    incoming = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "cursor": encode_keyset_cursor(incoming)},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    call_kwargs = fake.search.call_args.kwargs
+    assert call_kwargs["sort"] == "date"
+    assert call_kwargs["keyset_cursor"] == incoming
+
+
+def test_search_rejects_a_stated_sort_the_cursor_cannot_serve(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """The contradiction is the client's to resolve: honouring the sort means
+    dropping the cursor (a restart dressed as page 2), honouring the cursor
+    means ignoring a field the caller explicitly set."""
+    from datetime import datetime, timezone
+    from localmail.api.search_cursor import encode_keyset_cursor
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    cursor = encode_keyset_cursor(
+        KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+    )
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "sort": "rank", "cursor": cursor},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.json()["type"] == "/problems/validation-failed"
+    fake.search.assert_not_called()
+
+
+def test_search_rejects_a_cursor_whose_query_is_only_filter_operators(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """A caller error must not reach the wire as a 500.
+
+    ``"subject:invoice"`` is a non-blank request field that ``parse_query``
+    reduces to an empty free text, so the lexical branch declines the
+    cursor. When the gate measured the raw string instead, the Searcher's
+    own guard fired and its bare ``ValueError`` — not an ``APIError`` — went
+    out as ``500 Internal Server Error`` with no problem+json body. Only
+    the transport shows that, which is why this test is here and not
+    beside its api-level sibling.
+    """
+    from datetime import datetime, timezone
+    from localmail.api.search_cursor import encode_keyset_cursor
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    cursor = encode_keyset_cursor(
+        KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+    )
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "subject:invoice", "filters": {}, "limit": 20,
+              "cursor": cursor},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.json()["type"] == "/problems/validation-failed"
+    fake.search.assert_not_called()
+
+
 def test_search_smart_param_is_forwarded_to_searcher(
     db_dsn: str, api_token: str, db_conn, api_user,
 ) -> None:

@@ -22,6 +22,7 @@ import {
 import { runSearch } from "../tauri";
 import { formatError } from "../format_error";
 import { isSearchCursorExpired } from "../search_cursor_expired";
+import { isCursorRejected, statedSort } from "../search_paging";
 
 const DEFAULT_LIMIT = 50;
 
@@ -107,7 +108,7 @@ class SearchStore {
         filters: filtersUiToWire(this.#state.filters),
         limit: DEFAULT_LIMIT,
         cursor: null,
-        sort: this.#state.sort,
+        sort: statedSort(null, this.#state.sort),
       });
       if (seq !== this.#submitSeq) return;
       this.#state.results = resp.results;
@@ -131,7 +132,10 @@ class SearchStore {
 
   async loadMore(): Promise<void> {
     if (!this.#state.hasMore || this.#state.cursor === null) return;
-    if (this.#state.loadingMore) return;
+    // `loading` is guarded as well as `loadingMore`: a fresh search in flight
+    // has already bumped #submitSeq, so neither response discards the other and
+    // this page's rows would be appended to a different query's results.
+    if (this.#state.loading || this.#state.loadingMore) return;
     const seq = this.#submitSeq;
     const cursor = this.#state.cursor;
     const priorCount = this.#state.results.length;
@@ -144,7 +148,7 @@ class SearchStore {
           filters: filtersUiToWire(this.#state.filters),
           limit: DEFAULT_LIMIT,
           cursor,
-          sort: this.#state.sort,
+          sort: statedSort(cursor, this.#state.sort),
         });
       } catch (err: unknown) {
         if (!isSearchCursorExpired(err)) throw err;
@@ -155,7 +159,7 @@ class SearchStore {
           filters: filtersUiToWire(this.#state.filters),
           limit: DEFAULT_LIMIT,
           cursor: null,
-          sort: this.#state.sort,
+          sort: statedSort(null, this.#state.sort),
         });
         if (seq !== this.#submitSeq) return;
         if (fresh.results.length <= priorCount) {
@@ -177,6 +181,14 @@ class SearchStore {
       this.#state.hasMore = resp.next_cursor !== null;
     } catch (err: unknown) {
       if (seq !== this.#submitSeq) return;
+      if (isCursorRejected(err)) {
+        // Permanent for this cursor — re-issuing the identical request cannot
+        // clear it, so retire the continuation. Left live, infinite scroll
+        // re-fires it on every scroll event behind the error banner. The rows
+        // already fetched still answer the query and stay on screen.
+        this.#state.cursor = null;
+        this.#state.hasMore = false;
+      }
       this.#state.errorMessage = formatError(err);
     } finally {
       this.#state.loadingMore = false;

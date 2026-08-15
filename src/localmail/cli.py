@@ -38,6 +38,7 @@ from .api.admin.accounts import (
     update_account,
 )
 from .cli_account_resolve import Found, NotFound, plan_account_resolution
+from .cli_help_request import is_help_request
 from .cli_sync_toggle import plan_sync_toggle
 from .db import apply_migrations
 from .fetch_retry import (
@@ -169,6 +170,31 @@ def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Ac
 #: callback's earlier line.
 SELF_REPORTING_COMMANDS = frozenset({"run", "serve"})
 
+#: `ctx.meta` key carrying `_HelpAwareGroup`'s verdict to the group callback.
+_HELP_REQUEST_META_KEY = "localmail.help_request"
+
+
+class _HelpAwareGroup(click.Group):
+    """Records, for the callback, whether this invocation only wants help (#307).
+
+    The callback cannot answer that itself: by the time click runs it, the
+    resolved subcommand's own arguments have been taken off the context
+    (`ctx.args` is empty there, whether or not `--help` was typed). They are
+    still in place one frame out, in `Group.invoke`, which is why the question
+    is asked here and the answer passed along rather than the report being
+    moved — the report stays in the callback beside the skip-set it shares a
+    decision with.
+
+    A nested group's help (`localmail daemon status --help`) arrives here as
+    the root's pending `['status', '--help']`, which the scan covers.
+    """
+
+    def invoke(self, ctx: click.Context) -> object:
+        ctx.meta[_HELP_REQUEST_META_KEY] = is_help_request(
+            ctx.args, ctx.help_option_names
+        )
+        return super().invoke(ctx)
+
 
 def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
     """Print the version, and say so on stderr when it could not be determined.
@@ -221,7 +247,7 @@ def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> 
     ctx.exit()
 
 
-@click.group()
+@click.group(cls=_HelpAwareGroup)
 # Not `@click.version_option(...)` in any spelling — see `_print_version`, and
 # test_version_single_source.py::test_cli_does_not_reintroduce_click_version_option,
 # which forbids it at source level.
@@ -258,7 +284,16 @@ def main(ctx: click.Context, config_path: Path | None) -> None:
     # `--version` never reaches here: its option is eager and exits inside its
     # own callback, which is what keeps its stderr going through click while its
     # stdout stays the machine-readable line.
-    if ctx.invoked_subcommand not in SELF_REPORTING_COMMANDS:
+    #
+    # A help request is skipped (#307): click resolves the subcommand before
+    # applying its `--help`, so this ran for `<cmd> --help` and put an ERROR
+    # ahead of the text the operator asked to read — while the three shapes that
+    # never reach the callback (bare `localmail`, `localmail --help`, an unknown
+    # command) stayed quiet. All four are quiet now; `--version` still reports,
+    # being the command whose whole job is diagnosing the install.
+    if not ctx.meta.get(_HELP_REQUEST_META_KEY) and (
+        ctx.invoked_subcommand not in SELF_REPORTING_COMMANDS
+    ):
         log_version_diagnostic(logging.getLogger("localmail"), __version_diagnostic__)
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path or default_config_path()

@@ -31,9 +31,6 @@ from localmail.search.searcher import KeysetCursor, SortMode
 
 _KEYSET_PREFIX = "K|"
 
-#: The sort a request gets when it states none and has no cursor to inherit one from.
-DEFAULT_SORT: SortMode = "rank"
-
 #: The only sort a keyset cursor can continue — the lexical-date branch is the
 #: sole minter and the sole reader of that cursor kind.
 KEYSET_SORT: SortMode = "date"

@@ -103,6 +103,12 @@ of is not a report; the line's own `error:` prefix is derived from that level,
 so it still carries a severity on the paths that print no level. Nothing is
 logged when the version reads normally, and `/v1/version` is unchanged.
 
+Asking for **help** is the one exception: `localmail <command> --help` stays
+quiet, as bare `localmail` and `localmail --help` already did. Help does no
+archive work and touches neither config nor database, and the line was landing
+ahead of the text you had just asked to read. Use `localmail --version` when
+what you want *is* the state of the install.
+
 ### Sync & accounts
 
 > **The database is canonical for accounts.** `config.toml` `[[accounts]]`
@@ -824,6 +830,15 @@ cache (TTL expiry, LRU eviction, or `serve` restart) the route
 returns HTTP 409 with `type: /problems/search-cursor-expired`. The
 GUI handles this transparently by re-issuing the original query
 without a cursor and skipping past rows it already holds.
+
+The two failures are different kinds and want different client handling. A
+**409** is recoverable — the request was well formed and only the pool is gone,
+so re-running it without a cursor continues where the user was. A **400** is
+permanent for that cursor: re-issuing the identical pair cannot succeed, so a
+client must retire the cursor rather than let infinite scroll re-fire it behind
+an error banner. The desktop GUI does both, and never states a `sort` on a
+request that carries a cursor — which is what makes the contradicting-sort 400
+unreachable from it rather than merely handled.
 
 Wire `date` on every paginated response (`/v1/messages`, `/v1/search`,
 `/v1/changes`) is `COALESCE(internal_date, date_sent)` — the same key

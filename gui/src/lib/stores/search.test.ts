@@ -123,6 +123,12 @@ describe("search.loadMore", () => {
     vi.restoreAllMocks();
   });
 
+  const row = (id: string) => ({
+    message_id: id, account: { id: "1", name: null }, folder: null,
+    subject: id, from: { address: null, name: null }, to: [], date: null,
+    snippet_html: null, has_attachments: false, score: 1, matched_arms: [],
+  });
+
   it("appends results and advances cursor", async () => {
     const tauri = await import("../tauri");
     const r1 = (id: string) => ({
@@ -182,6 +188,106 @@ describe("search.loadMore", () => {
     await search.loadMore();
     expect(search.snapshot.results.map((r) => r.message_id))
       .toEqual(["1", "2", "3", "4"]);
+  });
+
+  it("omits sort when paging, so the cursor's ordering cannot be contradicted", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch")
+      .mockResolvedValueOnce({
+        results: [row("1")], next_cursor: "tok:2",
+        total_estimate: null, took_ms: 1,
+      })
+      .mockResolvedValueOnce({
+        results: [row("2")], next_cursor: null,
+        total_estimate: null, took_ms: 1,
+      });
+    search.setQuery("hello");
+    search.setSort("date");
+    await search.submit();
+    await search.loadMore();
+    expect(spy.mock.calls[0][0].sort).toBe("date");
+    expect(spy.mock.calls[1][0].cursor).toBe("tok:2");
+    expect(spy.mock.calls[1][0].sort).toBeUndefined();
+  });
+
+  it("does not page while a fresh search is in flight", async () => {
+    // Without this guard the paging response appends the *old* query's rows to
+    // the *new* query's results — both requests share #submitSeq, so neither
+    // discards the other.
+    const tauri = await import("../tauri");
+    let release: ((v: unknown) => void) | undefined;
+    const spy = vi.spyOn(tauri, "runSearch")
+      .mockResolvedValueOnce({
+        results: [row("1")], next_cursor: "tok:2",
+        total_estimate: null, took_ms: 1,
+      })
+      .mockImplementationOnce(
+        () => new Promise((resolve) => { release = resolve as (v: unknown) => void; }),
+      );
+    search.setQuery("hello");
+    await search.submit();
+    const inFlight = search.submit();
+    spy.mockClear();
+
+    await search.loadMore();
+
+    expect(spy).not.toHaveBeenCalled();
+    release?.({ results: [], next_cursor: null, total_estimate: null, took_ms: 1 });
+    await inFlight;
+  });
+
+  it("on 400 stops paging instead of re-issuing a request that cannot succeed", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch")
+      .mockResolvedValueOnce({
+        results: [row("1"), row("2")], next_cursor: "tok:2",
+        total_estimate: null, took_ms: 1,
+      })
+      .mockRejectedValueOnce({
+        kind: "Http",
+        detail: {
+          kind: "HttpStatus",
+          detail: { status: 400, body: '{"type":"/problems/validation-failed"}' },
+        },
+      });
+    search.setQuery("hello");
+    await search.submit();
+
+    await search.loadMore();
+
+    expect(search.snapshot.hasMore).toBe(false);
+    expect(search.snapshot.cursor).toBe(null);
+    expect(search.snapshot.errorMessage).not.toBe(null);
+    // The rows already fetched still answer the user's query — only the
+    // continuation is dead, so they stay on screen.
+    expect(search.snapshot.results.map((r) => r.message_id)).toEqual(["1", "2"]);
+
+    spy.mockClear();
+    await search.loadMore();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("on 409 the recovery re-run states the sort, having no cursor to inherit it from", async () => {
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch")
+      .mockResolvedValueOnce({
+        results: [row("1")], next_cursor: "K|abc",
+        total_estimate: null, took_ms: 1,
+      })
+      .mockRejectedValueOnce(new Error(
+        '{"type":"/problems/search-cursor-expired"}',
+      ))
+      .mockResolvedValueOnce({
+        results: [row("1"), row("2")], next_cursor: null,
+        total_estimate: null, took_ms: 1,
+      });
+    search.setQuery("hello");
+    search.setSort("date");
+    await search.submit();
+    await search.loadMore();
+    const recovery = spy.mock.calls[2][0];
+    expect(recovery.cursor).toBe(null);
+    expect(recovery.sort).toBe("date");
   });
 
   it("on 409 when re-submitted pool is smaller, falls back to full reset", async () => {

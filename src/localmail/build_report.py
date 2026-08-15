@@ -120,8 +120,19 @@ def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
 
     Takes the directory as a parameter rather than reading `__file__` so the
     identity guard is testable against a contrived layout.
+
+    Never raises: every failure maps to a `BuildSource`. The broad catch is
+    justified as `version_report`'s is — this feeds an endpoint that must
+    answer — with one honest difference: not being on the import path, a raise
+    here would not kill `import localmail`, only 500 an unauthenticated route.
     """
-    probe = _run_git(package_dir, "rev-parse", "--show-toplevel", "--short", "HEAD")
+    try:
+        probe = _run_git(package_dir, "rev-parse", "--show-toplevel", "--short", "HEAD")
+    except FileNotFoundError:
+        return BuildInfo(build_hash=None, source=BuildSource.GIT_UNAVAILABLE)
+    except Exception:
+        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+
     if probe.returncode != 0:
         return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
     # `splitlines()`, never `.split()`: the toplevel is a path, and one
@@ -130,12 +141,34 @@ def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
     lines = probe.stdout.strip().splitlines()
     if len(lines) != 2:
         return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
-    # lines[0] is the toplevel; Task 3 is what uses it, for the identity guard.
-    short_sha = lines[1]
+    toplevel, short_sha = Path(lines[0]), lines[1]
 
-    dirty = _run_git(package_dir, "diff", "--quiet", "HEAD")
+    if not _repo_is_ours(toplevel, package_dir):
+        return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
+
+    try:
+        dirty = _run_git(package_dir, "diff", "--quiet", "HEAD")
+    except Exception:
+        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
     # 0 = clean, 1 = tracked changes. Anything else is git failing, not a verdict.
     if dirty.returncode not in (0, 1):
         return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
     suffix = _DIRTY_SUFFIX if dirty.returncode == 1 else ""
     return BuildInfo(build_hash=f"{short_sha}{suffix}", source=BuildSource.GIT_CHECKOUT)
+
+
+def _repo_is_ours(toplevel: Path, package_dir: Path) -> bool:
+    """Does the repository git reported hold *this* package at its own path?
+
+    `git rev-parse` run from inside a `site-packages` that happens to sit under
+    an unrelated repository — a virtualenv inside a dotfiles repo — answers with
+    that project's toplevel. Requiring `<toplevel>/src/localmail/__init__.py` to
+    be the very file we imported is what tells the two apart; mere containment
+    does not, because the installed copy *is* contained.
+    """
+    try:
+        ours = (package_dir / "__init__.py").resolve()
+        candidate = (toplevel / "src" / package_dir.name / "__init__.py").resolve()
+    except OSError:
+        return False
+    return candidate == ours and candidate.exists()

@@ -165,3 +165,87 @@ def test_an_untracked_file_does_not(tmp_path: Path) -> None:
     info = _resolve_from_package_dir(package_dir)
 
     assert not info.build_hash.endswith("-dirty")
+
+
+@requires_git
+def test_a_repo_that_is_not_ours_is_not_our_build(tmp_path: Path) -> None:
+    """The guard that fails silently if it is wrong, so it gets its own test.
+
+    A virtualenv inside an unrelated git repository — a dotfiles repo, say —
+    would otherwise have us report that project's SHA as localmail's build.
+    """
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.invalid")
+    _git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "README.md").write_text("someone else's repo\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "initial")
+    # An installed copy that happens to sit inside that repo.
+    package_dir = tmp_path / ".venv" / "lib" / "site-packages" / "localmail"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("__version__ = '0.3.0'\n")
+
+    info = _resolve_from_package_dir(package_dir)
+
+    assert info.source is BuildSource.NOT_A_REPO
+    assert info.build_hash is None
+
+
+def test_a_missing_git_binary_is_named_not_guessed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr("localmail.build_report.subprocess.run", boom)
+
+    info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is BuildSource.GIT_UNAVAILABLE
+    assert info.build_hash is None
+
+
+def test_a_git_timeout_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def hang(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=2.0)
+
+    monkeypatch.setattr("localmail.build_report.subprocess.run", hang)
+
+    info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is BuildSource.GIT_FAILED
+    assert info.build_hash is None
+
+
+def test_the_probe_strips_inherited_git_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stray GIT_DIR makes `-C` a no-op, pointing us at another repo."""
+    seen: dict[str, str] = {}
+
+    def capture(argv, **kwargs):
+        seen.update(kwargs["env"])
+        return subprocess.CompletedProcess(argv, returncode=128, stdout="", stderr="")
+
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
+    monkeypatch.setattr("localmail.build_report.subprocess.run", capture)
+
+    _resolve_from_package_dir(tmp_path)
+
+    assert "GIT_DIR" not in seen
+    assert "GIT_WORK_TREE" not in seen
+
+
+def test_resolution_never_raises_whatever_git_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The module's first rule: this feeds an endpoint that must answer."""
+    def wild(*_args, **_kwargs):
+        raise RuntimeError("something nobody anticipated")
+
+    monkeypatch.setattr("localmail.build_report.subprocess.run", wild)
+
+    info = _resolve_from_package_dir(tmp_path)
+
+    assert info.source is BuildSource.GIT_FAILED

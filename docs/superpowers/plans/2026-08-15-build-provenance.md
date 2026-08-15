@@ -398,7 +398,8 @@ def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
     lines = probe.stdout.split()
     if len(lines) != 2:
         return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
-    toplevel, short_sha = Path(lines[0]), lines[1]
+    # lines[0] is the toplevel; Task 3 is what uses it, for the identity guard.
+    short_sha = lines[1]
 
     dirty = _run_git(package_dir, "diff", "--quiet", "HEAD")
     # 0 = clean, 1 = tracked changes. Anything else is git failing, not a verdict.

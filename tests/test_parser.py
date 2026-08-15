@@ -271,3 +271,53 @@ def test_two_blank_message_id_messages_have_distinct_sha256():
     b = parse_message(_eml.degenerate_message_id("second"))
     assert a.message_id is None and b.message_id is None
     assert a.raw_sha256 != b.raw_sha256
+
+
+class _MessageIdParseRaises(email.policy.EmailPolicy):
+    """A policy whose `Message-Id` parse raises, as older stdlibs really do.
+
+    CPython's structured-header parser is **not total**. On 3.12.3 an empty
+    angle-addr raises `IndexError` out of `get_obs_local_part`; other malformed
+    forms raise `AttributeError`. 3.13 guards the empty case, so on a current
+    interpreter no real input provokes it -- and a fixture-driven test would
+    silently stop exercising the guard on exactly the stdlib that still needs
+    it. Raising at the policy seam is where the stdlib itself fails, so the pin
+    holds on every interpreter.
+    """
+
+    def header_fetch_parse(self, name, value):  # type: ignore[no-untyped-def]
+        if name.lower() == "message-id":
+            raise IndexError("list index out of range")
+        return super().header_fetch_parse(name, value)
+
+
+def test_an_unparsable_message_id_does_not_poison_the_message(monkeypatch):
+    """An exception escaping the header read cost the whole message (#222B).
+
+    `parse_message` is called under a per-message SAVEPOINT, so a raise here
+    lands the mail in `failed_messages` -- permanently, since the same bytes
+    re-parse the same way on every `retry-failed`. A header the parser cannot
+    read carries no identity, so it must degrade to None and let the
+    `raw_sha256` fallback dedup it.
+    """
+    monkeypatch.setattr(email.policy, "default", _MessageIdParseRaises())
+
+    p = parse_message(_eml.degenerate_message_id("first"))
+
+    assert p.message_id is None
+    assert p.raw_sha256 is not None
+
+
+def test_an_unparsable_header_keeps_its_raw_value_and_leaves_others_intact(monkeypatch):
+    """Degrade only the offending header, never the whole `headers` column.
+
+    The read happens twice -- `msg.get("Message-Id")` and `msg.items()` for the
+    headers dict -- so guarding only the first leaves the message poisoned one
+    line later.
+    """
+    monkeypatch.setattr(email.policy, "default", _MessageIdParseRaises())
+
+    p = parse_message(_eml.degenerate_message_id("first"))
+
+    assert p.headers["Message-Id"] == ["<>"]
+    assert p.headers["From"] == ["alice@example.com"]

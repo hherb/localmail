@@ -617,6 +617,27 @@ Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)
 pick the wrong interpreter. Prefix with `unset VIRTUAL_ENV && …` to be safe.
 
+**Three `uv` footguns met while landing #314.** Each degrades a *running* archive
+without announcing itself; the second and third were reproduced on this host, the
+first is uv's documented resolution behaviour:
+
+- **Every sync must carry `--extra extraction --extra mcp`.** uv installs only
+  the default dependency set and prunes the rest, so omitting them uninstalls
+  `docling`, `mcp` and `rapidocr` — the last arriving transitively via
+  `extraction`, and being the OCR engine `auto` finds on Linux — costing MCP and
+  every scanned-PDF extraction. uv 0.11 has no `default-extras`, so there is no
+  declarative fix.
+- **`uv sync --dry-run` is not read-only.** On uv 0.11.32 it *replaced* the
+  project environment while reporting only what it "would" do, leaving the wrong
+  interpreter **and no extras** — observed with the extra flags present, so the
+  flags are no protection. Do not reach for it to "just check".
+- **`.python-version` (`3.13`) beats `UV_PYTHON`.** Every uv command reads it,
+  including `uv run`, and only an explicit `--python` overrides it. That is why
+  `python-ci.yml` passes `--python ${{ matrix.python }}` to both `uv sync` and
+  `uv run`: without it the 3.12 matrix leg silently syncs and tests 3.13 and the
+  label lies. The matrix carries **both** interpreters because #314's defect is
+  an interpreter difference and `requires-python` still admits 3.12.
+
 ## Layout
 
 ```
@@ -1202,6 +1223,39 @@ whitespace-only header body to `""`, which the old `if message_id` guard caught,
 but `<>` survived as a truthy, non-unique string and collapsed distinct messages
 onto one row (discarding the second's body and attachments). The fix is
 prospective; an already-collapsed pair cannot be recovered.
+
+**The header *read* is guarded too, and that half is interpreter-dependent
+(#314).** `normalize_message_id` never ran on the form it was written for:
+`email.policy.default` parses structured headers on **read**, and that parser is
+**not total** — CPython 3.12.3 raises `IndexError` out of `get_obs_local_part`
+for `<>`, and other malformed forms raise `AttributeError`. The exception
+escaped `parse_message`, which runs under a per-message SAVEPOINT, so one broken
+header sent otherwise-healthy mail to `failed_messages` **permanently**: the same
+bytes re-parse the same way on every `retry-failed`. CPython **3.13 guards the
+empty case**, which is why one archive can behave differently on two hosts.
+
+- The rule is `parser._header_text`, which reports a header the stdlib cannot
+  parse as **absent** — for `Message-Id` that is the same answer `<>` gets on an
+  interpreter that *can* parse it, so the `raw_sha256` fallback engages either
+  way. **The catch is broad because the failure is**: `IndexError`,
+  `AttributeError` and `HeaderParseError` all arrive from different malformed
+  forms, and a narrower tuple lets the next one through as a poison pill.
+- **It is two sites, not one.** `_headers_dict` reads every header through
+  `msg.items()`, which parses each value, so guarding the `Message-Id` read alone
+  left the message poisoned one line later. It iterates `raw_items()` — the same
+  sequence, unparsed — and parses per occurrence, so a failing one falls back to
+  its raw text and degrades **only that header**, never the whole `headers`
+  column.
+- **`In-Reply-To` / `References` need no guard**: the plural `parse_message_ids`
+  already catches `HeaderParseError` per id. Verified against 3.12.3 — do not add
+  one "for symmetry".
+- **The test raises at the policy seam, not from a fixture.** On 3.13 no real
+  input provokes the failure, so a fixture-driven test would silently stop
+  exercising the guard on exactly the stdlib that still needs it. Same shape as
+  `version_report`'s renderer-fallback pin, and for the same reason.
+- **The guard belongs here, not in a pinned interpreter.** A pin is undone by a
+  single `uv sync` (see the uv footguns under Commands) while the archive keeps
+  ingesting.
 
 ## Search subsystem (Phases 1 + 2 shipped)
 

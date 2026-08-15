@@ -265,21 +265,26 @@ git commit -m "feat(build-report): name the build identity and why it may be abs
 
 Append to `tests/test_build_report.py`:
 
+Add `import shutil`, `import subprocess`, `from pathlib import Path` and
+`from localmail.build_report import _resolve_from_package_dir` to the **existing
+import block at the top of the file** — not mid-module, which is `E402`. Then
+append:
+
 ```python
-import shutil
-import subprocess
-from pathlib import Path
-
-from localmail.build_report import _resolve_from_package_dir
-
 requires_git = pytest.mark.skipif(
     shutil.which("git") is None, reason="git binary not installed"
 )
 
 
 def _git(repo: Path, *args: str) -> None:
+    """Run git against the fixture repo, isolated from the developer's config.
+
+    `commit.gpgsign = true` in a global config makes the fixture commit below
+    block on a signing key, so these tests would pass or hang depending on
+    whose machine they run on.
+    """
     subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", *args],
         check=True, capture_output=True, text=True,
     )
 
@@ -395,7 +400,10 @@ def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
     probe = _run_git(package_dir, "rev-parse", "--show-toplevel", "--short", "HEAD")
     if probe.returncode != 0:
         return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
-    lines = probe.stdout.split()
+    # `splitlines()`, never `.split()`: the toplevel is a path, and one
+    # containing a space would otherwise yield 3+ tokens and report a
+    # healthy checkout as GIT_FAILED.
+    lines = probe.stdout.strip().splitlines()
     if len(lines) != 2:
         return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
     # lines[0] is the toplevel; Task 3 is what uses it, for the identity guard.
@@ -552,7 +560,10 @@ def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
 
     if probe.returncode != 0:
         return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
-    lines = probe.stdout.split()
+    # `splitlines()`, never `.split()`: the toplevel is a path, and one
+    # containing a space would otherwise yield 3+ tokens and report a
+    # healthy checkout as GIT_FAILED.
+    lines = probe.stdout.strip().splitlines()
     if len(lines) != 2:
         return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
     toplevel, short_sha = Path(lines[0]), lines[1]

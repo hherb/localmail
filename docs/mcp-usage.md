@@ -260,6 +260,17 @@ accounts the token's user has been granted.
 tool again with that value in `cursor`. The `search` tool transparently grows
 its candidate pool as you page deeper.
 
+Two rules for a `search` cursor, both enforced rather than assumed:
+
+* **Re-send the same `query` and filters.** A cursor carries only the position.
+  A `sort="date"` search walks the archive lexically and rebuilds that walk
+  from the query, so a cursor sent without one is rejected instead of quietly
+  answering from the top.
+* **Leave `sort` unset.** The cursor already carries the ordering it continues.
+  Stating one that disagrees with it is a validation error — the alternative
+  was serving page 1 of a differently ordered search, which is indistinguishable
+  from a continuation until you notice the results repeating.
+
 If a `search` cursor has expired (its underlying result pool was evicted from
 the in-process cache — TTL, LRU, or a `serve` restart), the tool returns a
 cursor-expired error. The recovery is the same as the HTTP API: **re-run the

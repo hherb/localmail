@@ -186,6 +186,6 @@ def test_pool_metadata_is_frozen_dataclass():
     """PoolMetadata is a value object; immutability prevents downstream
     mutation from being mistaken for cache invalidation."""
     meta = PoolMetadata(candidates_per_arm=50, page_size=20,
-                        rerank_pool_size=100, pool_size=80)
+                        rerank_pool_size=100, pool_size=80, sort="rank")
     with pytest.raises(dataclasses.FrozenInstanceError):
         meta.candidates_per_arm = 99  # type: ignore[misc]

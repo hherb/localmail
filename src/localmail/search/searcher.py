@@ -321,6 +321,12 @@ class PoolMetadata:
     page_size: int
     rerank_pool_size: int
     pool_size: int
+    # The sort this pool was built with. ``continue_page`` serves it whatever
+    # a later request asks for, so the api/ layer needs it to tell a caller
+    # their stated sort is not the one they will get (rather than not telling
+    # them). No default: an unstated one here would read as "rank" for a pool
+    # that is not, which is the silence this field exists to end.
+    sort: SortMode
 
 
 class Searcher:
@@ -396,6 +402,7 @@ class Searcher:
             page_size=int(entry["page_size"]),
             rerank_pool_size=int(entry["rerank_pool_size"]),
             pool_size=len(entry["hydrated"]),
+            sort=entry.get("sort", "rank"),
         )
 
     def _maybe_warn_unpopulated_body_lang(
@@ -1013,6 +1020,19 @@ class Searcher:
                 rewrite_status=rewrite_status,
                 rewrite_note=rewrite_note,
                 rewrite_note_code=rewrite_note_code,
+            )
+
+        # The branch above is the only reader of `keyset_cursor` (#308). Reaching
+        # here with one means the caller's (sort, query) selected a different
+        # retrieval mode, whose page 1 would go back as if it continued the
+        # walk — a restart wearing a continuation's clothes. Raise rather
+        # than answer the wrong question quietly. A named error, not an
+        # assert: asserts vanish under `python -O`.
+        if keyset_cursor is not None:
+            shape = "a blank" if not parsed.free_text.strip() else "a non-empty"
+            raise ValueError(
+                "keyset_cursor requires sort='date' and a non-empty query; "
+                f"got sort={sort!r} with {shape} query"
             )
 
         # Empty-query fallback: an empty `free_text` is the canonical

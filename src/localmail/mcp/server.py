@@ -145,14 +145,19 @@ def build_mcp_server(
             "Free-text query matched against message subjects/bodies and "
             "extracted attachment text. An empty string lists recent mail "
             "(date-ordered) — prefer `list_messages` for that intent."))],
-        sort: Annotated[Literal["rank", "date"], Field(description=(
-            'Result ordering: "rank" (hybrid relevance, the default) or '
-            '"date" (strictly newest first).'))] = "rank",
+        sort: Annotated[Literal["rank", "date"] | None, Field(description=(
+            'Result ordering: "rank" (hybrid relevance, the default when '
+            'omitted) or "date" (strictly newest first). Leave it unset when '
+            "paging — a `cursor` already carries the ordering it continues, "
+            "and a sort that contradicts it is rejected."))] = None,
         limit: Annotated[int, Field(ge=1, le=200, description=(
             "Maximum results in this page (1–200)."))] = 50,
         cursor: Annotated[str | None, Field(description=(
             "Opaque pagination cursor — pass back a previous response's "
-            "`next_cursor` to get the next page; omit for the first page."))]
+            "`next_cursor` to get the next page; omit for the first page. "
+            "Send the same `query` and filters with it: a date-ordered "
+            "cursor walks the archive lexically and rebuilds that walk from "
+            "the query."))]
             = None,
         account_ids: Annotated[list[str] | None, Field(description=(
             "Restrict to these account ids (string integers). Omit to search "
@@ -207,10 +212,13 @@ def build_mcp_server(
 
         Results are ACL-scoped: only the accounts you have been granted are
         searched. Rank-ordered by default; pass `sort="date"` for strictly
-        newest-first. Page forward by calling again with the returned
-        `next_cursor` in `cursor`; a `null` next_cursor means there are no
-        more results. If the cursor has expired (the result pool was evicted),
-        re-run the same query without a cursor and skip rows you already hold.
+        newest-first. Page forward by calling again with the same `query` and
+        filters plus the returned `next_cursor` in `cursor`, and leave `sort`
+        unset — the cursor carries the ordering it continues, and stating a
+        different one is an error rather than a silent restart. A `null`
+        next_cursor means there are no more results. If the cursor has expired
+        (the result pool was evicted), re-run the same query without a cursor
+        and skip rows you already hold.
 
         Use `list_messages` when you have no query and just want recent mail;
         use `get_message` to read a full message once a result surfaces its id.

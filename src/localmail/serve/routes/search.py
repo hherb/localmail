@@ -40,11 +40,16 @@ class SearchRequest(BaseModel):
     query: str
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
-    # "rank" (default) orders by rerank relevance; "date" keeps the same
-    # candidate pool but orders the page by COALESCE(internal_date,
-    # date_sent) DESC NULLS LAST. The empty-query branch is already
-    # date-ordered so this is a no-op there.
-    sort: Literal["rank", "date"] = "rank"
+    # "rank" (the default when omitted) orders by rerank relevance; "date"
+    # keeps the same candidate pool but orders the page by
+    # COALESCE(internal_date, date_sent) DESC NULLS LAST. The empty-query
+    # branch is already date-ordered so this is a no-op there.
+    #
+    # Null rather than "rank" so that omitting it is distinguishable from
+    # asking for it: alongside a `cursor` the cursor decides the ordering,
+    # and a *stated* sort it cannot serve is a 400 rather than a silently
+    # dropped cursor.
+    sort: Literal["rank", "date"] | None = None
     cursor: str | None = None
     # Opt-in LLM query rewrite (Phase 4). Ignored gracefully when the server
     # has no rewriter configured — the response's rewrite_skipped reflects it.

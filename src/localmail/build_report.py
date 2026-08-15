@@ -124,7 +124,10 @@ def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
     probe = _run_git(package_dir, "rev-parse", "--show-toplevel", "--short", "HEAD")
     if probe.returncode != 0:
         return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
-    lines = probe.stdout.split()
+    # `splitlines()`, never `.split()`: the toplevel is a path, and one
+    # containing a space would otherwise yield 3+ tokens and report a
+    # healthy checkout as GIT_FAILED.
+    lines = probe.stdout.strip().splitlines()
     if len(lines) != 2:
         return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
     # lines[0] is the toplevel; Task 3 is what uses it, for the identity guard.

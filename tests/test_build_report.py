@@ -11,11 +11,14 @@ version line.
 from __future__ import annotations
 
 import dataclasses
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from localmail.build_report import (
-    UNIDENTIFIED_SOURCES, BuildInfo, BuildSource,
+    UNIDENTIFIED_SOURCES, BuildInfo, BuildSource, _resolve_from_package_dir,
 )
 
 
@@ -76,20 +79,20 @@ def test_build_info_is_frozen() -> None:
         info.build_hash = "other"  # type: ignore[misc]
 
 
-import shutil
-import subprocess
-from pathlib import Path
-
-from localmail.build_report import _resolve_from_package_dir
-
 requires_git = pytest.mark.skipif(
     shutil.which("git") is None, reason="git binary not installed"
 )
 
 
 def _git(repo: Path, *args: str) -> None:
+    """Run git against the fixture repo, isolated from the developer's config.
+
+    `commit.gpgsign = true` in a global config makes the fixture commit below
+    block on a signing key, so these tests would pass or hang depending on
+    whose machine they run on.
+    """
     subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", *args],
         check=True, capture_output=True, text=True,
     )
 
@@ -122,6 +125,19 @@ def test_a_clean_checkout_resolves_to_its_short_sha(tmp_path: Path) -> None:
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     assert info.build_hash == expected
+
+
+@requires_git
+def test_a_repo_path_containing_a_space_still_resolves(tmp_path: Path) -> None:
+    """`.split()` would yield 3+ tokens here and report GIT_FAILED."""
+    spaced = tmp_path / "a directory with spaces"
+    spaced.mkdir()
+    package_dir = _make_repo(spaced)
+
+    info = _resolve_from_package_dir(package_dir)
+
+    assert info.source is BuildSource.GIT_CHECKOUT
+    assert info.build_hash is not None
 
 
 @requires_git

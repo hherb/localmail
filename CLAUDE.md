@@ -622,17 +622,21 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     survived #295 because the test that pinned the schema gate drives the
     `LOCALMAIL_DSN_OVERRIDE` branch, which **skips `load_config` entirely** — a
     reminder that a pin proves only the path it takes.
-  - **`/v1/version` gained no field, deliberately.** The GUI's connect probe
-    decodes `server_version` as a non-optional String — which is *why* the
-    sentinel exists rather than a null — and a new key nothing renders is #278
-    from the other end (the About tab renders a `build_hash` the server has never
-    emitted, with four test files and a Rust `#[cfg(test)]` module mocking it
-    into looking covered). Reversible; removing a shipped wire key is not.
-    **#300 tracks the consequence**: an unresolvable version is now legible to a
-    human on every entry point and to a *machine* on none — `--version` exits 0
-    with a well-formed line and `/v1/version` ships the sentinel unflagged. That
-    issue is also why `__version_source__` is retained despite having no
-    production reader: it is the structured input either fix would need.
+  - **`/v1/version` gained no field in #295, deliberately — and gained three in
+    #278/#300.** The reasoning then: the GUI's connect probe decodes
+    `server_version` as a non-optional String — which is *why* the sentinel
+    exists rather than a null — and a new key nothing renders was #278 from the
+    other end (the About tab declared a `build_hash` the server never emitted,
+    with four test files and a Rust `#[cfg(test)]` module mocking it into
+    looking covered). Reversible; removing a shipped wire key is not. #300
+    tracked the consequence: an unresolvable version was legible to a human on
+    every entry point and to a *machine* on none.
+    **Both are closed now** — see the build-provenance bullet below. What
+    changed is not the objection but the facts it rested on: the new keys have a
+    renderer *and* a machine consumer, which is exactly the test #295 set. The
+    `--version` half of #300 needed no flag: stderr is non-empty iff the version
+    is unresolvable, now stated in README and pinned. And `__version_source__`'s
+    retention paid off as predicted — `version_source` is derived from it.
 - **`__init__.py` exports three attributes, and `__version_diagnostic__` is
   rendered there rather than by each reader.** The exception type behind a
   `METADATA_UNREADABLE` resolution is known only at resolution time, so a reader
@@ -678,6 +682,12 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     `git describe --always --dirty` would halve the subprocess count and was
     **rejected**: the day someone tags a release it silently returns
     `v0.4.0-3-geec8e09-dirty`, changing the field's format under us.
+  - **The probe is parsed with `splitlines()`, never `.split()`.** `git rev-parse
+    --show-toplevel --short HEAD` emits two *lines*, and the first is a path:
+    `.split()` splits on any whitespace, so a checkout under a directory
+    containing a space yielded 3+ tokens and reported a healthy tree as
+    `GIT_FAILED`. Found by review before it shipped, and pinned by
+    `test_a_repo_path_containing_a_space_still_resolves`.
   - **The wire strings are declared, never derived.** `BuildSource`'s value IS
     its wire string; `VersionSource` carries a separate `wire_name`, because its
     own values are hyphenated debugging aids (`"not-installed"`) while this

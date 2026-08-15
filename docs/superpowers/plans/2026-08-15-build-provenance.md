@@ -74,6 +74,8 @@ version line.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from localmail.build_report import (
@@ -134,7 +136,7 @@ def test_the_two_legal_shapes_construct() -> None:
 
 def test_build_info_is_frozen() -> None:
     info = BuildInfo(build_hash="eec8e09", source=BuildSource.GIT_CHECKOUT)
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         info.build_hash = "other"  # type: ignore[misc]
 ```
 
@@ -919,7 +921,9 @@ from localmail.version_report import VersionSource
 
 
 def _client(db_dsn: str) -> TestClient:
-    return TestClient(create_app(dsn=db_dsn, state_signing_key="k" * 32))
+    # Same call as tests/test_serve_app_baseline.py — `create_app` is
+    # keyword-only and takes `db_dsn`, not `dsn`.
+    return TestClient(create_app(db_dsn=db_dsn, searcher=None))
 
 
 def test_the_six_keys_are_present(db_dsn: str) -> None:

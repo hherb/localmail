@@ -274,6 +274,24 @@ def reject_empty_diagnostic(value: str, diagnostic: str | None) -> str | None:
     return diagnostic
 
 
+def reject_empty_wire_name(value: str, wire_name: str) -> str:
+    """Reject a blank `wire_name` at class creation.
+
+    `VersionSource.__new__` is the only caller. A member written
+    `("x", None, "")` supplies every payload element, so the signature is
+    satisfied and no `TypeError` fires — and `/v1/version` would then emit an
+    empty string as a real source, which is #291 one level up.
+
+    Module-level rather than an inline check for the reason
+    `reject_empty_diagnostic` is: enum machinery replaces `__new__` after class
+    creation, so no test can reach the production one to prove the rule fires
+    for a future member.
+    """
+    if not wire_name.strip():
+        raise ValueError(f"VersionSource {value!r} declares an empty wire_name")
+    return wire_name
+
+
 class VersionSource(Enum):
     """Why `__version__` holds the value it does, and what to do about it.
 
@@ -299,15 +317,24 @@ class VersionSource(Enum):
     #: The remedy to print, or None for the one member where nothing is wrong.
     #: Annotation only — a bare annotation declares no enum member.
     diagnostic: str | None
+    #: The string `/v1/version` emits (#300). Declared, never derived from
+    #: `value`: the values below are hyphenated debugging aids, while this
+    #: API's wire enums are underscored (`rewrite_note_code` ships
+    #: `not_configured`), so derivation would break the convention *and* let a
+    #: rename change a parsed contract silently.
+    wire_name: str
 
-    def __new__(cls, value: str, diagnostic: str | None) -> VersionSource:
+    def __new__(
+        cls, value: str, diagnostic: str | None, wire_name: str
+    ) -> VersionSource:
         member = object.__new__(cls)
         member._value_ = value
         member.diagnostic = reject_empty_diagnostic(value, diagnostic)
+        member.wire_name = reject_empty_wire_name(value, wire_name)
         return member
 
     #: The distribution metadata was read; `__version__` is real.
-    INSTALLED = ("installed", None)
+    INSTALLED = ("installed", None, "installed")
     #: No dist-info for this distribution. Note the src layout: a checkout that
     #: was never installed cannot be imported at all (`python -m localmail`
     #: from the repo root is a `ModuleNotFoundError`, so it never reaches this
@@ -316,16 +343,20 @@ class VersionSource(Enum):
     #: triggers are an import of the sources without their metadata
     #: (`PYTHONPATH=src`, a vendored copy) and a dist-info removed from under a
     #: live install by a partial sync.
-    NOT_INSTALLED = ("not-installed", _NEVER_INSTALLED_REMEDY)
+    NOT_INSTALLED = ("not-installed", _NEVER_INSTALLED_REMEDY, "not_installed")
     #: A dist-info exists but its METADATA carries no usable `Version:` header
     #: — a truncated or hand-edited install.
-    METADATA_INCOMPLETE = ("metadata-incomplete", _DAMAGED_INSTALL_REMEDY)
+    METADATA_INCOMPLETE = (
+        "metadata-incomplete", _DAMAGED_INSTALL_REMEDY, "metadata_incomplete",
+    )
     #: The metadata read itself raised (#296) — a METADATA in another encoding
     #: or truncated mid-multibyte, or an `OSError` (EIO, stale NFS handle) from
     #: a network-mounted `site-packages`. Separate from `METADATA_INCOMPLETE`
     #: because the file was never read at all here, and a reinstall is the wrong
     #: first move when the filesystem is what is failing.
-    METADATA_UNREADABLE = ("metadata-unreadable", _UNREADABLE_METADATA_REMEDY)
+    METADATA_UNREADABLE = (
+        "metadata-unreadable", _UNREADABLE_METADATA_REMEDY, "metadata_unreadable",
+    )
 
 
 @dataclass(frozen=True)

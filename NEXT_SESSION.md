@@ -270,9 +270,6 @@ deployed it in between). Verified over SSH.
    - **`git stash drop` the session-22 leftover** if you want it tidy: session 26
      verified its content is already on `main` (`bc5b556`). Left in place because
      dropping is destructive and is your call.
-   - A `/tmp/lm-main` **git worktree** was created this session for the baseline
-     measurement. Remove with `git worktree remove /tmp/lm-main` when done; it
-     costs a synced `.venv` in `/tmp` until then.
 
 ## Open decisions & risks
 
@@ -487,9 +484,6 @@ cd gui && npm run check && npm test && npm run build && cd ..
 # Rust unchanged this session; run these only if you touch src-tauri:
 cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
   && cargo clippy --all-targets -- -D warnings && cd ../..
-
-# Cleanup left from this session's baseline measurement:
-git worktree remove /tmp/lm-main
 ```
 
 `main` tip is **`fb48f23`** (PR #309). This session's work is **`0940f98`** plus

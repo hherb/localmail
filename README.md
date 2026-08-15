@@ -103,6 +103,12 @@ of is not a report; the line's own `error:` prefix is derived from that level,
 so it still carries a severity on the paths that print no level. Nothing is
 logged when the version reads normally, and `/v1/version` is unchanged.
 
+For scripts, the contract is: **stderr is non-empty if and only if the version
+could not be resolved.** stdout stays the single `localmail, version X.Y.Z`
+line and the exit status stays `0` in both cases, so neither is a failure
+signal — check stderr, or read `version_source` from `/v1/version`, which
+reports the same four outcomes as a machine-readable string.
+
 Asking for **help** is the one exception: `localmail <command> --help` stays
 quiet, as bare `localmail` and `localmail --help` already did. Help does no
 archive work and touches neither config nor database, and the line was landing

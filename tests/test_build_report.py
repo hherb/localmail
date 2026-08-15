@@ -19,6 +19,7 @@ import pytest
 
 from localmail.build_report import (
     UNIDENTIFIED_SOURCES, BuildInfo, BuildSource, _resolve_from_package_dir,
+    reset_build_info, resolve_build_info,
 )
 
 
@@ -278,3 +279,64 @@ def test_a_failure_on_the_dirty_probe_is_named_too(
 
     assert info.source is BuildSource.GIT_FAILED
     assert info.build_hash is None
+
+
+def test_resolution_happens_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pinned for the process, which is the semantics the row wants.
+
+    An editable install's tree can move under a running daemon, so a value
+    re-read per request would report the tree rather than what the process is
+    actually running.
+    """
+    calls = []
+
+    def counting(package_dir):
+        calls.append(package_dir)
+        return BuildInfo(build_hash="eec8e09", source=BuildSource.GIT_CHECKOUT)
+
+    monkeypatch.setattr(
+        "localmail.build_report._resolve_from_package_dir", counting
+    )
+    reset_build_info()
+
+    first, second = resolve_build_info(), resolve_build_info()
+
+    assert first is second
+    assert len(calls) == 1
+
+
+def test_it_asks_about_the_directory_the_package_was_imported_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never the process's working directory, which for a daemon is arbitrary."""
+    import localmail
+
+    seen = []
+
+    def capture(package_dir):
+        seen.append(package_dir)
+        return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
+
+    monkeypatch.setattr("localmail.build_report._resolve_from_package_dir", capture)
+    reset_build_info()
+
+    resolve_build_info()
+
+    assert seen == [Path(localmail.__file__).resolve().parent]
+
+
+def test_reset_clears_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    infos = [
+        BuildInfo(build_hash="aaaaaaa", source=BuildSource.GIT_CHECKOUT),
+        BuildInfo(build_hash="bbbbbbb", source=BuildSource.GIT_CHECKOUT),
+    ]
+    monkeypatch.setattr(
+        "localmail.build_report._resolve_from_package_dir",
+        lambda _dir: infos.pop(0),
+    )
+    reset_build_info()
+    assert resolve_build_info().build_hash == "aaaaaaa"
+
+    reset_build_info()
+
+    assert resolve_build_info().build_hash == "bbbbbbb"

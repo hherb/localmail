@@ -26,6 +26,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
+from functools import cache
 from pathlib import Path
 
 
@@ -172,3 +173,26 @@ def _repo_is_ours(toplevel: Path, package_dir: Path) -> bool:
     except OSError:
         return False
     return candidate == ours and candidate.exists()
+
+
+@cache
+def resolve_build_info() -> BuildInfo:
+    """The build identity of the package this process imported.
+
+    **Lazy and cached, never resolved at import.** `import localmail` runs for
+    all 38 CLI commands; a `git` subprocess on that path costs every invocation
+    and can *hang* — a stale network mount is the precise scenario #296 was
+    about, and that module's first rule is that import must not fail.
+
+    Caching also gives the semantics the "Server build" row wants: a value
+    pinned for the life of the process, so it reports what the process is
+    **running** rather than what the tree says now. That distinction is live on
+    an editable install, where a `git pull` moves the tree under a daemon that
+    keeps executing the code it already imported.
+    """
+    return _resolve_from_package_dir(Path(__file__).resolve().parent)
+
+
+def reset_build_info() -> None:
+    """Clear the process-wide cache. For tests; see the autouse conftest fixture."""
+    resolve_build_info.cache_clear()

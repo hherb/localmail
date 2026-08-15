@@ -74,3 +74,78 @@ def test_build_info_is_frozen() -> None:
     info = BuildInfo(build_hash="eec8e09", source=BuildSource.GIT_CHECKOUT)
     with pytest.raises(dataclasses.FrozenInstanceError):
         info.build_hash = "other"  # type: ignore[misc]
+
+
+import shutil
+import subprocess
+from pathlib import Path
+
+from localmail.build_report import _resolve_from_package_dir
+
+requires_git = pytest.mark.skipif(
+    shutil.which("git") is None, reason="git binary not installed"
+)
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True, capture_output=True, text=True,
+    )
+
+
+def _make_repo(tmp_path: Path) -> Path:
+    """A repo laid out like this project: <root>/src/localmail/__init__.py."""
+    package_dir = tmp_path / "src" / "localmail"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("__version__ = '0.0.0'\n")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.invalid")
+    _git(tmp_path, "config", "user.name", "Test")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "initial")
+    return package_dir
+
+
+@requires_git
+def test_a_clean_checkout_resolves_to_its_short_sha(tmp_path: Path) -> None:
+    package_dir = _make_repo(tmp_path)
+
+    info = _resolve_from_package_dir(package_dir)
+
+    assert info.source is BuildSource.GIT_CHECKOUT
+    assert info.build_hash is not None
+    assert not info.build_hash.endswith("-dirty")
+    # The short SHA git itself reports, not a slice we computed.
+    expected = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "--short", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert info.build_hash == expected
+
+
+@requires_git
+def test_a_modified_tracked_file_makes_it_dirty(tmp_path: Path) -> None:
+    package_dir = _make_repo(tmp_path)
+    (package_dir / "__init__.py").write_text("__version__ = '9.9.9'\n")
+
+    info = _resolve_from_package_dir(package_dir)
+
+    assert info.source is BuildSource.GIT_CHECKOUT
+    assert info.build_hash.endswith("-dirty")
+
+
+@requires_git
+def test_an_untracked_file_does_not(tmp_path: Path) -> None:
+    """Tracked files only.
+
+    Every working session leaves scratch files; a marker that is always on
+    carries no information, which would make it decoration rather than the
+    warning it exists to be.
+    """
+    package_dir = _make_repo(tmp_path)
+    (tmp_path / "scratch.txt").write_text("notes\n")
+
+    info = _resolve_from_package_dir(package_dir)
+
+    assert not info.build_hash.endswith("-dirty")

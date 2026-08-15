@@ -22,8 +22,11 @@ Four properties differ from `version_report`, each deliberately:
 """
 from __future__ import annotations
 
+import os
+import subprocess
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 
 class BuildSource(Enum):
@@ -83,3 +86,53 @@ class BuildInfo:
                 f"build_hash must be a non-blank string for "
                 f"{self.source.value!r}, got {self.build_hash!r}"
             )
+
+
+#: Bounds each git call. Worst case is two timeouts, paid once per process on a
+#: path no request blocks behind twice. Generous for `rev-parse` and
+#: `diff --quiet` on a repository of this size (both are milliseconds warm) and
+#: short enough that a wedged mount does not hold the first `/v1/version` open.
+_GIT_TIMEOUT_S = 2.0
+
+#: Stripped from the subprocess environment. A stray one makes `-C` a no-op, so
+#: we would report an unrelated repository's SHA — cheap to prevent, and
+#: invisible if it ever happened.
+_STRIPPED_GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE")
+
+_DIRTY_SUFFIX = "-dirty"
+
+
+def _run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run one git command. `argv` list, never a shell."""
+    env = {k: v for k, v in os.environ.items() if k not in _STRIPPED_GIT_ENV}
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        text=True,
+        timeout=_GIT_TIMEOUT_S,
+        env=env,
+        check=False,
+    )
+
+
+def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
+    """Resolve the build identity for the package installed at `package_dir`.
+
+    Takes the directory as a parameter rather than reading `__file__` so the
+    identity guard is testable against a contrived layout.
+    """
+    probe = _run_git(package_dir, "rev-parse", "--show-toplevel", "--short", "HEAD")
+    if probe.returncode != 0:
+        return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
+    lines = probe.stdout.split()
+    if len(lines) != 2:
+        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+    # lines[0] is the toplevel; Task 3 is what uses it, for the identity guard.
+    short_sha = lines[1]
+
+    dirty = _run_git(package_dir, "diff", "--quiet", "HEAD")
+    # 0 = clean, 1 = tracked changes. Anything else is git failing, not a verdict.
+    if dirty.returncode not in (0, 1):
+        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+    suffix = _DIRTY_SUFFIX if dirty.returncode == 1 else ""
+    return BuildInfo(build_hash=f"{short_sha}{suffix}", source=BuildSource.GIT_CHECKOUT)

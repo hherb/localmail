@@ -8,8 +8,11 @@
    */
   import { version } from "../../lib/stores/version.svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { buildLabel, versionWarning } from "../../lib/build_provenance";
 
   const CLIENT_VERSION = __APP_VERSION__;
+
+  const serverFault = $derived(versionWarning(version.snapshot.info?.version_source));
 
   async function openLogs(): Promise<void> {
     try {
@@ -30,9 +33,14 @@
     <dt>API minor</dt>
     <dd>{version.snapshot.info?.api_minor ?? "?"}</dd>
     <dt>Server</dt>
-    <dd>{version.snapshot.info?.server_version ?? "?"}</dd>
+    <dd>
+      {version.snapshot.info?.server_version ?? "?"}
+      {#if serverFault}
+        <span class="fault">({serverFault})</span>
+      {/if}
+    </dd>
     <dt>Server build</dt>
-    <dd>{version.snapshot.info?.build_hash ?? "?"}</dd>
+    <dd>{buildLabel(version.snapshot.info?.build_hash, version.snapshot.info?.build_source)}</dd>
   </dl>
 
   <h3>Logs</h3>
@@ -54,5 +62,8 @@
   }
   h3 {
     margin-top: 1rem;
+  }
+  .fault {
+    color: #c0392b;
   }
 </style>

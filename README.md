@@ -101,7 +101,33 @@ where its operator actually looks. ERROR rather than warning because `run
 --log-level ERROR` is a supported choice and a report you can be configured out
 of is not a report; the line's own `error:` prefix is derived from that level,
 so it still carries a severity on the paths that print no level. Nothing is
-logged when the version reads normally, and `/v1/version` is unchanged.
+logged when the version reads normally, and `/v1/version` reports the same
+four outcomes as a machine-readable `version_source` (see below).
+
+For scripts, the contract is: **stderr is non-empty if and only if the version
+could not be resolved.** (This holds for what `localmail` itself writes; a
+dependency emitting an import-time warning would also land on stderr, so a
+script that must be certain should read `version_source` from `/v1/version`
+instead.) stdout stays the single `localmail, version X.Y.Z`
+line and the exit status stays `0` in both cases, so neither is a failure
+signal — check stderr, or read `version_source` from `/v1/version`, which
+reports the same four outcomes as a machine-readable string.
+
+`GET /v1/version` (unauthenticated) reports six fields: `api_major`,
+`api_minor`, `server_version`, `build_hash`, `build_source`, `version_source`.
+
+`build_hash` is the short git SHA of the checkout the server is running,
+suffixed `-dirty` when tracked files differ from it — the answer to "did the
+daemon get restarted after my pull?". It is `null` when there is no identity to
+report, and `build_source` says why: `git_checkout`, `not_a_repo`,
+`git_unavailable`, `git_failed` (plus `stamped`, reserved for a future release
+pipeline — no server emits it today).
+
+`version_source` is `installed` on a healthy install, and `not_installed`,
+`metadata_incomplete` or `metadata_unreadable` when `server_version` is the
+`0.0.0+unknown` sentinel — so a monitoring client can alert on a broken install
+rather than displaying the sentinel as though it were a version. Both source
+fields are always present; only `build_hash` is nullable.
 
 Asking for **help** is the one exception: `localmail <command> --help` stays
 quiet, as bare `localmail` and `localmail --help` already did. Help does no

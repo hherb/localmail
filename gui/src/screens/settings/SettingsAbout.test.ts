@@ -43,4 +43,62 @@ describe("SettingsAbout", () => {
     await fireEvent.click(getByRole("button", { name: /open log directory/i }));
     expect(invokeMock).toHaveBeenCalledWith("open_logs_cmd");
   });
+
+  it("explains an absent build rather than showing a bare placeholder", () => {
+    Object.assign(version.snapshot, {
+      info: {
+        api_major: 1,
+        api_minor: 0,
+        server_version: "0.3.0",
+        build_hash: null,
+        build_source: "not_a_repo",
+        version_source: "installed",
+      },
+      compatible: true,
+    });
+
+    const { getByText } = render(SettingsAbout);
+
+    expect(getByText("— not a repository")).toBeTruthy();
+  });
+
+  it("marks the server row when its version could not be resolved", () => {
+    Object.assign(version.snapshot, {
+      info: {
+        api_major: 1,
+        api_minor: 0,
+        server_version: "0.0.0+unknown",
+        build_hash: "eec8e09",
+        build_source: "git_checkout",
+        version_source: "metadata_unreadable",
+      },
+      compatible: true,
+    });
+
+    const { getByText } = render(SettingsAbout);
+
+    // #300: the sentinel used to render as though it were a version.
+    expect(getByText("(metadata unreadable)")).toBeTruthy();
+  });
+
+  it("shows no marker for a healthy install", () => {
+    Object.assign(version.snapshot, {
+      info: {
+        api_major: 1,
+        api_minor: 0,
+        server_version: "0.3.0",
+        build_hash: "eec8e09",
+        build_source: "git_checkout",
+        version_source: "installed",
+      },
+      compatible: true,
+    });
+
+    const { queryByText } = render(SettingsAbout);
+
+    // The positive control for the two above: a rule that always marked the row
+    // would satisfy them both and cry wolf on every healthy install.
+    expect(queryByText(/\(.*unreadable.*\)/)).toBeNull();
+    expect(queryByText("eec8e09")).toBeTruthy();
+  });
 });

@@ -810,3 +810,82 @@ def test_the_sentinel_is_named_not_repeated() -> None:
     other reader compares against. #291's first scope item: the literal was
     written out twice in `__init__.py` and quoted a third time in a comment."""
     assert UNKNOWN_VERSION == "0.0.0+unknown"
+
+
+def test_the_wire_names_are_declared_and_asserted_literally() -> None:
+    """These strings are parsed by clients (#300), so a rename must fail here.
+
+    Note they are NOT the member values, which are hyphenated debugging aids
+    this module's own docstring says are not a wire contract. This API's wire
+    enums are underscored — `rewrite_note_code` ships `not_configured` — so
+    deriving the wire from the value would break the convention *and* let a
+    rename change the contract silently.
+    """
+    assert VersionSource.INSTALLED.wire_name == "installed"
+    assert VersionSource.NOT_INSTALLED.wire_name == "not_installed"
+    assert VersionSource.METADATA_INCOMPLETE.wire_name == "metadata_incomplete"
+    assert VersionSource.METADATA_UNREADABLE.wire_name == "metadata_unreadable"
+
+
+def test_the_wire_name_is_not_the_member_value() -> None:
+    """The concrete demonstration of why it is declared rather than derived."""
+    assert VersionSource.NOT_INSTALLED.value == "not-installed"
+    assert VersionSource.NOT_INSTALLED.wire_name == "not_installed"
+
+
+def test_every_member_has_a_wire_name() -> None:
+    names = [s.wire_name for s in VersionSource]
+    assert all(names)
+    assert len(set(names)) == len(names), "wire names must be unique"
+
+
+@pytest.mark.parametrize("bad", ["", "   "])
+def test_an_empty_wire_name_is_rejected_at_class_creation(bad: str) -> None:
+    """A member written `("x", None, "")` satisfies the signature, so no
+    `TypeError` fires — and the route would then emit an empty string for a
+    real source, which is #291 one level up.
+
+    Module-level rather than inline for the reason `reject_empty_diagnostic` is:
+    enum machinery replaces `__new__` after class creation, so no test can reach
+    the production one to prove the rule fires for a *future* member.
+    """
+    from localmail.version_report import reject_empty_wire_name
+
+    with pytest.raises(ValueError, match="wire_name"):
+        reject_empty_wire_name("some-source", bad)
+
+
+def test_the_wire_name_guard_is_wired_into_the_constructor() -> None:
+    """The guard proven by direct call is worthless if nothing calls it.
+
+    Replacing `member.wire_name = reject_empty_wire_name(...)` with a bare
+    assignment left the suite green: the test above still passed (it calls the
+    function itself) and `test_every_member_has_a_wire_name` passes trivially
+    for the members that exist. Since the production `__new__` is unreachable
+    after class creation, the wiring can only be pinned structurally — the same
+    AST-over-text call `_mentions_version_option` makes, and for the same
+    reason: the docstrings around it name the function in prose.
+    """
+    import ast
+    from pathlib import Path
+
+    import localmail.version_report as vr
+
+    tree = ast.parse(Path(vr.__file__).read_text())
+    (cls,) = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "VersionSource"
+    ]
+    (ctor,) = [
+        n for n in cls.body
+        if isinstance(n, ast.FunctionDef) and n.name == "__new__"
+    ]
+    called = {
+        n.func.id for n in ast.walk(ctor)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+
+    assert "reject_empty_wire_name" in called
+    # Positive control: the walk finds the sibling guard too, so a broken
+    # traversal cannot make the assertion above pass by finding nothing.
+    assert "reject_empty_diagnostic" in called

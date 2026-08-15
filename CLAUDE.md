@@ -622,17 +622,23 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     survived #295 because the test that pinned the schema gate drives the
     `LOCALMAIL_DSN_OVERRIDE` branch, which **skips `load_config` entirely** — a
     reminder that a pin proves only the path it takes.
-  - **`/v1/version` gained no field, deliberately.** The GUI's connect probe
-    decodes `server_version` as a non-optional String — which is *why* the
-    sentinel exists rather than a null — and a new key nothing renders is #278
-    from the other end (the About tab renders a `build_hash` the server has never
-    emitted, with four test files and a Rust `#[cfg(test)]` module mocking it
-    into looking covered). Reversible; removing a shipped wire key is not.
-    **#300 tracks the consequence**: an unresolvable version is now legible to a
-    human on every entry point and to a *machine* on none — `--version` exits 0
-    with a well-formed line and `/v1/version` ships the sentinel unflagged. That
-    issue is also why `__version_source__` is retained despite having no
-    production reader: it is the structured input either fix would need.
+  - **`/v1/version` gained no field in #295, deliberately — and gained three in
+    #278/#300.** The reasoning then: the GUI's connect probe decodes
+    `server_version` as a non-optional String — which is *why* the sentinel
+    exists rather than a null — and a new key nothing renders was #278 from the
+    other end (the About tab declared a `build_hash` the server never emitted,
+    with four test files and a Rust `#[cfg(test)]` module mocking it into
+    looking covered). Reversible; removing a shipped wire key is not. #300
+    tracked the consequence: an unresolvable version was legible to a human on
+    every entry point and to a *machine* on none.
+    **Both are closed now** — see the build-provenance bullet below. What
+    changed is not the objection but the fact it rested on: the new keys have a
+    renderer, which is exactly the test #295 set ("a new key nothing renders").
+    The machine-consumer case is stated in README for external monitoring and
+    has **no in-tree reader** — do not cite it as though it were shipped. The
+    `--version` half of #300 needed no flag: stderr is non-empty iff the version
+    is unresolvable, now stated in README and pinned. And `__version_source__`'s
+    retention paid off as predicted — `version_source` is derived from it.
 - **`__init__.py` exports three attributes, and `__version_diagnostic__` is
   rendered there rather than by each reader.** The exception type behind a
   `METADATA_UNREADABLE` resolution is known only at resolution time, so a reader
@@ -643,6 +649,85 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
   one production call site, which is what makes that free rather than noisy.
   Each reader imports with `from … import`, so a test must rebind the *reader's*
   binding — `localmail.__version_diagnostic__` reaches none of them.
+- **The build identity is resolved from the checkout, not stamped at build time
+  (#278, #300).** `/v1/version` now carries `build_hash`, `build_source` and
+  `version_source`. Design:
+  [docs/superpowers/specs/2026-08-15-build-provenance-design.md](docs/superpowers/specs/2026-08-15-build-provenance-design.md).
+  - **There is no build**, which is why. Both CI workflows are test-only, there
+    are no tags, nothing publishes, and *both* deployments run editable installs
+    from a git checkout — so a hash stamped into a wheel would be absent on the
+    only machines the row is ever read on. `STAMPED` is **reserved and
+    unreachable**: nothing reads a `_build_info.py` and nothing writes one, so
+    do not go hunting for the branch — the member exists only to settle the
+    wire value before a release pipeline does. Implement the hatchling hook
+    when there is one, not before.
+  - **No source carries a remedy, and only `GIT_FAILED` logs** — where it
+    deliberately parts from `version_report`. An unresolvable *version* is
+    always a fault; an unresolvable *build hash* usually is not, since
+    `NOT_A_REPO` is the correct state of an installed artifact, so copying
+    `VersionSource`'s forced-remedy rule across would put an ERROR in front of
+    an operator for a healthy install, i.e. #291 inverted.
+    - **The silence is scoped, not absolute, and the scope is load-bearing.**
+      `GIT_FAILED` is the one member that is a fault by construction, and
+      `capture_output=True` means git's own account of it is already in hand.
+      Discarding it is precisely the silent catch this codebase forbids of
+      `version_report`'s identical broad catch — *"defensible only because it
+      reports what it caught"* — so `_git_failed` logs one WARNING carrying
+      either git's stderr and exit code or the rendered exception chain
+      (`version_report.render_exception_chain`, reused so there is one
+      rendering rule). WARNING, not the sibling's ERROR: a broken *version*
+      breaks the install, while a broken *build hash* degrades one diagnostic
+      field on a server that otherwise works. One line per process, since
+      resolution is cached — no dedup machinery needed. It stays out of the
+      response body for the reason the human diagnostic does: the route is
+      unauthenticated and git's stderr carries filesystem paths.
+    - **`NOT_A_REPO` is exit 128 and nothing else.** `!= 0` routed a
+      signal-killed git (OOM reports `-9`) and a usage error from a future
+      flag change into the *healthy* category — a broken host reported as an
+      installed artifact, which is the collapse this whole feature exists to
+      end, one probe in. The dirty probe's `not in (0, 1)` had the rule right
+      and the two disagreed; they ask the same question now.
+  - **Resolution is lazy and cached, never at import.** `import localmail` runs
+    for all 38 CLI commands and a `git` subprocess there can hang on a stale
+    mount — the #296 scenario. Caching also gives the semantics the row wants:
+    pinned for the life of the process, so it reports what the process is
+    *running*, not what the tree says now. That is live on an editable install,
+    where a `git pull` moves the tree under a daemon that keeps executing the
+    code it already imported. `reset_build_info()` + an autouse conftest
+    fixture, the `reset_version_reports()` shape.
+  - **The repo it finds must be ours**, checked by requiring
+    `<toplevel>/src/localmail/__init__.py` to resolve to the file we imported.
+    Containment is not enough: a virtualenv inside a dotfiles repo *is*
+    contained, and would report that project's SHA as localmail's build. Its
+    own test, because it fails silently.
+  - **`-dirty` measures tracked files only** (`git diff --quiet HEAD`). Scratch
+    files would make every deployment read dirty forever, and a marker that is
+    always on carries no information. A single
+    `git describe --always --dirty` would halve the subprocess count and was
+    **rejected**: the day someone tags a release it silently returns
+    `v0.4.0-3-geec8e09-dirty`, changing the field's format under us.
+  - **The probe is parsed with `splitlines()`, never `.split()`.** `git rev-parse
+    --show-toplevel --short HEAD` emits two *lines*, and the first is a path:
+    `.split()` splits on any whitespace, so a checkout under a directory
+    containing a space yielded 3+ tokens and reported a healthy tree as
+    `GIT_FAILED`. Found by review before it shipped, and pinned by
+    `test_a_repo_path_containing_a_space_still_resolves`.
+  - **The wire strings are declared, never derived.** `BuildSource`'s value IS
+    its wire string; `VersionSource` carries a separate `wire_name`, because its
+    own values are hyphenated debugging aids (`"not-installed"`) while this
+    API's wire enums are underscored (`rewrite_note_code` ships
+    `not_configured`). `reject_empty_wire_name` enforces non-emptiness at class
+    creation, beside `reject_empty_diagnostic` and for the same reason.
+  - **The diagnostic text is deliberately NOT on the wire.** `/v1/version` is
+    unauthenticated and `__version_diagnostic__` embeds rendered exception text
+    carrying errno values and filesystem paths (#303). `version_source` is an
+    identifier; the human line stays in the logs where #295 put it. If a
+    machine-readable *reason* beyond the enum is ever wanted, it belongs on an
+    authenticated endpoint.
+  - **`--version` gained no flag.** stderr is non-empty iff the version is
+    unresolvable — true since #291, now stated in README and pinned by
+    `tests/test_cli_version_stderr_contract.py`. stdout stays the single line
+    and exit stays 0, so neither is a failure signal.
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
 set to some other pyenv venv, which makes `uv run` warn and (with `--active`)
@@ -686,6 +771,7 @@ src/localmail/
   version_report.py # resolve_version + pure unknown_version_diagnostic (#291)
                     #   + METADATA_UNREADABLE (#296) + log_version_diagnostic (#295)
                     #   + pure render_exception_chain (#303) + _SEVERITY_PREFIX (#302)
+  build_report.py   # pure enum + BuildInfo, lazy git resolution (#278, #300)
   attachments.py    # write_attachments(conn, parsed, root) -> JSONB rows (content-addressable)
   blob_temps.py     # writer temp naming (new_temp_path) + its collector (sweep_blob_temps) (#237)
   fetch_retry.py    # bounded BODY[] hold (#222A) + give-up tombstones/rewind planner (#239)

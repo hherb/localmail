@@ -84,6 +84,22 @@ def fresh_version_reports():
 
 
 @pytest.fixture(autouse=True)
+def fresh_build_info():
+    """Clear the process-wide build-identity cache between tests (#278).
+
+    `resolve_build_info` caches for the life of the process — correct in
+    production, where the answer must not change under a running daemon, and
+    wrong across tests, where one test's monkeypatched resolver would otherwise
+    be the answer every later test sees. The `fresh_version_reports` shape.
+    """
+    from localmail.build_report import reset_build_info
+
+    reset_build_info()
+    yield
+    reset_build_info()
+
+
+@pytest.fixture(autouse=True)
 def default_secret_backend():
     """Restore the keyring secret backend after every test.
 

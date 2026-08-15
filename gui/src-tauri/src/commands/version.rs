@@ -20,6 +20,13 @@ pub struct VersionInfo {
     pub api_minor: u32,
     pub server_version: Option<String>,
     pub build_hash: Option<String>,
+    // Added #278/#300. `Option<String>` already decodes from an absent key, so
+    // these are explicit rather than load-bearing — a server predating the
+    // fields deserialises to None either way.
+    #[serde(default)]
+    pub build_source: Option<String>,
+    #[serde(default)]
+    pub version_source: Option<String>,
 }
 
 // Split out so tests can drive a non-TLS reqwest::Client against mockito while
@@ -84,8 +91,40 @@ mod tests {
                 api_minor: 2,
                 server_version: Some("0.7.3".to_string()),
                 build_hash: Some("abc123".to_string()),
+                build_source: None,
+                version_source: None,
             }
         );
+    }
+
+    // The shape the real server ALWAYS sends. Without it both other tests feed
+    // bodies that omit these keys and assert `None`, so the decode of the two
+    // fields #278/#300 added is never exercised — renaming them to camelCase
+    // left all three tests green. That is the #278 defect verbatim: the About
+    // tab declaring a field with a `#[cfg(test)]` module mocking it into
+    // looking covered.
+    #[tokio::test]
+    async fn fetch_version_decodes_build_and_version_source_when_present() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/version")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"api_major":1,"api_minor":3,"server_version":"0.3.0",
+                    "build_hash":"eec8e09-dirty","build_source":"git_checkout",
+                    "version_source":"installed"}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = Client::new();
+        let base = format!("{}/", server.url());
+        let got = fetch_version(&client, &base).await.unwrap();
+
+        assert_eq!(got.build_hash.as_deref(), Some("eec8e09-dirty"));
+        assert_eq!(got.build_source.as_deref(), Some("git_checkout"));
+        assert_eq!(got.version_source.as_deref(), Some("installed"));
     }
 
     #[tokio::test]

@@ -62,6 +62,6 @@
     margin-top: 1rem;
   }
   .fault {
-    color: var(--color-danger, #b3261e);
+    color: #c0392b;
   }
 </style>

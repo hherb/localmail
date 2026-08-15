@@ -286,6 +286,11 @@ def reject_empty_wire_name(value: str, wire_name: str) -> str:
     `reject_empty_diagnostic` is: enum machinery replaces `__new__` after class
     creation, so no test can reach the production one to prove the rule fires
     for a future member.
+
+    Raises `ValueError` where `reject_empty_diagnostic` raises `TypeError`,
+    deliberately: a blank string is the right *type* with the wrong *value*.
+    Both fire during class creation, so either way the failure is a loud import.
+    Do not "align" them — the older one is the odd member of the pair.
     """
     if not wire_name.strip():
         raise ValueError(f"VersionSource {value!r} declares an empty wire_name")

@@ -52,7 +52,7 @@ __version__: str = _resolved.version
 #:
 #: Retained as the *structured* form of that fact even though every production
 #: reader now takes the rendered `__version_diagnostic__` below. It is what a
-#: caller branches on — a future `/v1/version` field, an exit-code policy —
+#: caller branches on — a `/v1/version` field, an exit-code policy —
 #: where matching on prose would be the drift this module exists to prevent.
 __version_source__: _VersionSource = _resolved.source
 
@@ -67,9 +67,11 @@ __version_source__: _VersionSource = _resolved.source
 #: rather than merely discouraged, which is the same call `unknown_version_
 #: diagnostic`'s keyword-only `detail` makes one layer down.
 #:
-#: Deliberately not on the wire: `/v1/version` keeps its three keys. The GUI's
-#: connect probe is why the sentinel exists at all rather than a null, and a new
-#: key nothing renders is #278 from the other end.
+#: Deliberately not on the wire, and the reason changed with #278/#300: it is no
+#: longer "a key nothing renders" (`/v1/version` now carries `version_source`,
+#: which the GUI does render) but that the endpoint is **unauthenticated** and
+#: this string embeds rendered exception text — errno values and filesystem
+#: paths since #303. `version_source` is an identifier and is safe; this is not.
 __version_diagnostic__: str | None = _unknown_version_diagnostic(
     _resolved.source, detail=_resolved.detail
 )

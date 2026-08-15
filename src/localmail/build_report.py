@@ -44,11 +44,16 @@ class BuildSource(Enum):
     STAMPED = "stamped"
     #: Resolved from the working tree the imported package came from.
     GIT_CHECKOUT = "git_checkout"
-    #: An installed artifact, or a repository that is not this project's.
+    #: An installed artifact, or a repository that is not this project's. git
+    #: exits 128 here for several causes we deliberately do not separate: no
+    #: repository (the common one), dubious ownership, a repo with no commits.
+    #: Telling them apart would mean matching git's stderr text, which this
+    #: codebase forbids on principle — match the type, never the message.
     NOT_A_REPO = "not_a_repo"
     #: No `git` binary on PATH.
     GIT_UNAVAILABLE = "git_unavailable"
-    #: git ran and failed, or timed out.
+    #: git raised, timed out, or answered in a shape we could not parse. Note a
+    #: non-zero exit from the first probe routes to NOT_A_REPO, not here.
     GIT_FAILED = "git_failed"
 
 
@@ -144,6 +149,13 @@ def _resolve_from_package_dir(package_dir: Path) -> BuildInfo:
         return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
     toplevel, short_sha = Path(lines[0]), lines[1]
 
+    if not short_sha:
+        # Unreachable through `splitlines()` today, and guarded anyway: what
+        # makes it unreachable is a property of `str.strip`/`str.splitlines`
+        # this module does not own, and the construction below is the one
+        # unguarded call in a function whose contract is that it never raises.
+        return BuildInfo(build_hash=None, source=BuildSource.GIT_FAILED)
+
     if not _repo_is_ours(toplevel, package_dir):
         return BuildInfo(build_hash=None, source=BuildSource.NOT_A_REPO)
 
@@ -189,6 +201,10 @@ def resolve_build_info() -> BuildInfo:
     **running** rather than what the tree says now. That distinction is live on
     an editable install, where a `git pull` moves the tree under a daemon that
     keeps executing the code it already imported.
+
+    `functools.cache` is not atomic, so a burst of concurrent first calls can
+    each resolve once — bounded by the threadpool and by the 2s timeout, after
+    which the cache is warm. Not worth a lock: the window is one cold start.
     """
     return _resolve_from_package_dir(Path(__file__).resolve().parent)
 

@@ -49,9 +49,12 @@ def test_every_source_is_classified_exactly_once() -> None:
 
 
 @pytest.mark.parametrize("source", sorted(UNIDENTIFIED_SOURCES, key=lambda s: s.value))
-def test_an_unidentified_source_may_not_carry_a_hash(source: BuildSource) -> None:
+@pytest.mark.parametrize("hash_value", ["eec8e09", "", "   "])
+def test_an_unidentified_source_may_not_carry_a_hash(
+    source: BuildSource, hash_value: str
+) -> None:
     with pytest.raises(ValueError, match="build_hash"):
-        BuildInfo(build_hash="eec8e09", source=source)
+        BuildInfo(build_hash=hash_value, source=source)
 
 
 @pytest.mark.parametrize("source", [BuildSource.STAMPED, BuildSource.GIT_CHECKOUT])

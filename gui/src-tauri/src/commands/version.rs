@@ -20,8 +20,9 @@ pub struct VersionInfo {
     pub api_minor: u32,
     pub server_version: Option<String>,
     pub build_hash: Option<String>,
-    // Added #278/#300. `#[serde(default)]` so a server predating these keys
-    // still decodes — the same back-compat the `is_admin` field takes.
+    // Added #278/#300. `Option<String>` already decodes from an absent key, so
+    // these are explicit rather than load-bearing — a server predating the
+    // fields deserialises to None either way.
     #[serde(default)]
     pub build_source: Option<String>,
     #[serde(default)]

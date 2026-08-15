@@ -101,10 +101,14 @@ where its operator actually looks. ERROR rather than warning because `run
 --log-level ERROR` is a supported choice and a report you can be configured out
 of is not a report; the line's own `error:` prefix is derived from that level,
 so it still carries a severity on the paths that print no level. Nothing is
-logged when the version reads normally, and `/v1/version` is unchanged.
+logged when the version reads normally, and `/v1/version` reports the same
+four outcomes as a machine-readable `version_source` (see below).
 
 For scripts, the contract is: **stderr is non-empty if and only if the version
-could not be resolved.** stdout stays the single `localmail, version X.Y.Z`
+could not be resolved.** (This holds for what `localmail` itself writes; a
+dependency emitting an import-time warning would also land on stderr, so a
+script that must be certain should read `version_source` from `/v1/version`
+instead.) stdout stays the single `localmail, version X.Y.Z`
 line and the exit status stays `0` in both cases, so neither is a failure
 signal — check stderr, or read `version_source` from `/v1/version`, which
 reports the same four outcomes as a machine-readable string.

@@ -298,3 +298,14 @@ Written in this order:
   Mac, where the editable install means a running process can be older than the
   tree.
 - The About tab's "Server build" row stops being decoration.
+
+### Accepted risk: the SHA is public
+
+`/v1/version` is unauthenticated, so `build_hash` discloses the exact source
+revision and whether the tree carries local modifications. Accepted rather than
+overlooked: the GUI's connect probe reads this endpoint *before* login, so
+gating it would break the version handshake it exists for; the deployments are
+localhost and a WireGuard peer behind TLS; and the repository is public, so the
+SHA identifies a commit anyone can already read. Revisit if localmail is ever
+exposed to an untrusted network, where `/v1/capabilities`'s authenticated shape
+is the precedent to follow.

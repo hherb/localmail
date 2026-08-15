@@ -68,6 +68,19 @@ class _FakeRewriter:
         return self._result
 
 
+def test_tool_search_states_no_sort_of_its_own():
+    """The published schema is pinned elsewhere; this is the function itself.
+
+    `mcp/server.py` always forwards `sort` explicitly, so restoring
+    `= "rank"` here leaves every other MCP test green while silently
+    re-arming the defect for a direct library caller — the layer the schema
+    pin cannot see.
+    """
+    import inspect
+
+    assert inspect.signature(tools.tool_search).parameters["sort"].default is None
+
+
 def test_tool_search_scopes_to_allowed_accounts(db_dsn, db_conn):
     uid = create_user(db_conn, "alice", "hunter2")
     granted = _insert_account(db_conn, "granted")

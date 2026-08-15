@@ -86,6 +86,15 @@ def resolve_cursor_mode(
 ) -> CursorMode:
     """Decide which retrieval mode a request continues — cursor first.
 
+    ``free_text`` must be ``parse_query(...).free_text``, **not** the raw
+    request field. Filter operators (``from:``, ``subject:``, ``lang:``) parse
+    out of the free text, so ``"subject:invoice"`` is non-blank as a request
+    field and blank by the time ``Searcher.search`` tests it — and this
+    function's whole job is to ask the question the Searcher will ask. Handed
+    the raw string it admits that shape as a keyset continuation, the lexical
+    branch declines the cursor, and the Searcher's guard raises where a 400
+    was owed.
+
     ``requested_sort`` is ``None`` when the caller stated no sort. That is
     the documented way to page (send back ``next_cursor``, nothing else), so
     an unstated sort must never out-vote the cursor: the cursor is the only

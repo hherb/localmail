@@ -27,6 +27,7 @@ from localmail.api.search_cursor import (
 )
 from localmail.config import SearchConfig
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
+from localmail.search.query import parse_query
 from localmail.search.rewrite_status import (
     CONTINUATION_PAGE,
     NOT_ATTEMPTED,
@@ -36,7 +37,13 @@ from localmail.search.rewrite_status import (
     note_for_code,
     rewrite_skipped_for_status,
 )
-from localmail.search.searcher import SearchPage, SearchResult, Searcher, SortMode
+from localmail.search.searcher import (
+    KeysetCursorUnusable,
+    SearchPage,
+    SearchResult,
+    Searcher,
+    SortMode,
+)
 
 
 _SUPPORTED_FILTER_KEYS = frozenset({
@@ -175,6 +182,19 @@ def run_search(
     when there is no note). ``rewrite_skipped`` stays True only when a requested
     rewrite did not happen (rewriter unavailable, or the rewrite call failed).
     """
+    # Resolved before the ACL short-circuit below, because that branch answers
+    # with an empty page — indistinguishable from "you have reached the end".
+    # A malformed paging request must be a 400 whatever the caller was granted.
+    # `parse_query(free_text).free_text` is the text `Searcher.search` will
+    # dispatch on: filter operators (`from:`, `subject:`, `lang:`) parse out of
+    # the free text, so a query of nothing but operators is non-blank here and
+    # blank there. Asking the raw string instead let that shape through as a
+    # keyset continuation the lexical branch then declined (#308 follow-up).
+    # Composing the filters first would change nothing — the tokens this adds
+    # are operators, which parse straight back out — so the bare text is asked.
+    mode = resolve_cursor_mode(cursor=cursor, requested_sort=sort,
+                               free_text=parse_query(free_text).free_text)
+
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:
         # total_estimate is "estimate not computed" — uniformly None across
@@ -192,12 +212,15 @@ def run_search(
     # for but unavailable, degrade gracefully and report rewrite_status.
     effective_smart = smart and searcher.smart_available
 
-    mode = resolve_cursor_mode(cursor=cursor, requested_sort=sort,
-                               free_text=free_text)
-    if cursor is None:  # mode == "fresh"
+    # Tested on `cursor` rather than `mode == "fresh"` (the resolver's matching
+    # verdict) because this is what narrows `cursor` to `str` for the two
+    # branches below, which decode it. The two cannot disagree: "fresh" is
+    # returned for `cursor is None` and for nothing else.
+    if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
         page = searcher.search(query, page_size=limit, user_id=user_id,
-                               sort=sort or DEFAULT_SORT, smart=effective_smart,
+                               sort=DEFAULT_SORT if sort is None else sort,
+                               smart=effective_smart,
                                allowed_account_ids=allowed_account_ids)
     elif mode == "keyset":
         # Keyset cursor → lexical-date continuation. The cursor carries
@@ -208,9 +231,19 @@ def run_search(
         # has already rejected a stated sort that disagrees.
         keyset = decode_keyset_cursor(cursor)
         query = build_query_string(free_text=free_text, filters=scoped_filters)
-        page = searcher.search(query, page_size=limit, user_id=user_id,
-                               sort=KEYSET_SORT, keyset_cursor=keyset,
-                               allowed_account_ids=allowed_account_ids)
+        try:
+            page = searcher.search(query, page_size=limit, user_id=user_id,
+                                   sort=KEYSET_SORT, keyset_cursor=keyset,
+                                   allowed_account_ids=allowed_account_ids)
+        except KeysetCursorUnusable as exc:
+            # Belt to the resolver's braces: both now ask `parse_query`, so
+            # reaching here means the two have drifted apart again. That is a
+            # bad request either way, and answering it as a 500 would hide a
+            # caller error behind an operator-facing traceback. Caught by
+            # subclass, never by bare ValueError — psycopg and the embedding
+            # backends raise that, and relabelling an outage as a cursor
+            # problem would send the caller to re-send a blameless query.
+            raise ValidationFailed(f"cursor: {exc}") from exc
     else:
         parsed = decode_search_cursor(cursor)
         _check_pool_sort(searcher, parsed, requested_sort=sort, user_id=user_id)

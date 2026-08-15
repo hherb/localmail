@@ -285,6 +285,17 @@ class KeysetCursor:
     id: int
 
 
+class KeysetCursorUnusable(ValueError):
+    """A ``keyset_cursor`` reached a retrieval branch that will not read it.
+
+    A subclass rather than a bare ``ValueError`` so the api/ layer can map
+    exactly this to a 400 without also catching the ``ValueError`` psycopg,
+    ``datetime`` and the embedding backends raise — which would relabel a
+    real outage as a cursor problem and send the caller to re-send a query
+    that was never the fault.
+    """
+
+
 @dataclass(frozen=True)
 class SearchPage:
     """One page of results plus pagination metadata.
@@ -402,7 +413,7 @@ class Searcher:
             page_size=int(entry["page_size"]),
             rerank_pool_size=int(entry["rerank_pool_size"]),
             pool_size=len(entry["hydrated"]),
-            sort=entry.get("sort", "rank"),
+            sort=entry["sort"],
         )
 
     def _maybe_warn_unpopulated_body_lang(
@@ -809,7 +820,7 @@ class Searcher:
         needs_filename = any(
             item["fused"].best_chunk_table == "attachment_chunks" for item in hydrated
         )
-        sort: SortMode = entry.get("sort", "rank")
+        sort: SortMode = entry["sort"]
         if needs_filename:
             with self._pool.connection() as conn:
                 results = self._build_results(
@@ -843,7 +854,7 @@ class Searcher:
         if user_id is not None and entry.get("user_id") != user_id:
             raise CacheMissError(search_token)
         parsed = entry["parsed"]
-        sort: SortMode = entry.get("sort", "rank")
+        sort: SortMode = entry["sort"]
         self._cache.invalidate(search_token)
         # rerank pool grows proportionally so the larger arm output isn't wasted
         rps = max(candidates_per_arm, entry["rerank_pool_size"])
@@ -1030,9 +1041,11 @@ class Searcher:
         # assert: asserts vanish under `python -O`.
         if keyset_cursor is not None:
             shape = "a blank" if not parsed.free_text.strip() else "a non-empty"
-            raise ValueError(
+            raise KeysetCursorUnusable(
                 "keyset_cursor requires sort='date' and a non-empty query; "
-                f"got sort={sort!r} with {shape} query"
+                f"got sort={sort!r} with {shape} query. Note the query is "
+                "measured after filter operators are parsed out of it, so a "
+                "query of nothing but operators counts as blank"
             )
 
         # Empty-query fallback: an empty `free_text` is the canonical

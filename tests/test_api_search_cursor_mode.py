@@ -105,6 +105,60 @@ def test_keyset_cursor_without_the_original_query_is_rejected() -> None:
     s.search.assert_not_called()
 
 
+def test_keyset_cursor_without_query_or_sort_is_rejected() -> None:
+    """The same rejection on the shape the docs actually prescribe.
+
+    Its sibling above states ``sort="date"``; this states nothing, which is
+    what ``docs/mcp-usage.md`` tells a client to send. Narrowing the guard
+    to ``requested_sort is not None and not free_text.strip()`` leaves that
+    sibling green, so without this the check is pinned only on the path
+    where the caller happened to say something.
+    """
+    s = _searcher()
+    _, cursor = _keyset_cursor()
+    with pytest.raises(ValidationFailed):
+        run_search(searcher=s, free_text="", filters={}, limit=2,
+                   allowed_account_ids=[1], user_id=99, cursor=cursor)
+    s.search.assert_not_called()
+
+
+@pytest.mark.parametrize("query", ["subject:invoice", "from:bob@example.com",
+                                   "lang:en", "has:attachment"])
+def test_a_query_of_only_filter_operators_counts_as_no_query(query: str) -> None:
+    """The gate must measure the text the Searcher will dispatch on.
+
+    ``parse_query`` lifts every filter operator out of the free text, so
+    ``"subject:invoice"`` is non-blank as a request field and blank by the
+    time the lexical branch tests it. Reading the raw string here let the
+    request through as a keyset continuation, the branch declined the
+    cursor, and the Searcher's guard raised a bare ``ValueError`` — a 500
+    for what is a caller error, on the very input class this check exists
+    to catch.
+    """
+    s = _searcher()
+    _, cursor = _keyset_cursor()
+    with pytest.raises(ValidationFailed):
+        run_search(searcher=s, free_text=query, filters={}, limit=2,
+                   allowed_account_ids=[1], user_id=99, cursor=cursor)
+    s.search.assert_not_called()
+
+
+def test_a_malformed_paging_request_is_rejected_even_with_an_empty_acl() -> None:
+    """Validation precedes the grant-nothing short-circuit.
+
+    That branch answers with an empty page, which is byte-identical to
+    "you have reached the end of your results" — so a caller with no grants
+    would be told their contradictory request succeeded and was complete.
+    """
+    s = _searcher()
+    _, cursor = _keyset_cursor()
+    with pytest.raises(ValidationFailed):
+        run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                   allowed_account_ids=[], user_id=99, sort="rank",
+                   cursor=cursor)
+    s.search.assert_not_called()
+
+
 def test_pool_cursor_with_a_sort_the_pool_was_not_built_with_is_rejected() -> None:
     """The mirror image: ``continue_page`` serves the sort the pool was minted
     with, so a stated ``sort="date"`` on a rank pool is silently ignored."""

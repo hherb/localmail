@@ -2653,7 +2653,9 @@ for the full design.
         scroll. Route dispatches on the `K|` prefix.
   - **The cursor decides the continuation mode; a stated `sort` may not
     contradict it (#308).** `sort` defaulted to `"rank"` on the wire and was
-    handed to `Searcher.search` *before* the cursor was read — and the Searcher
+    resolved to that default before the cursor could bear on the ordering —
+    the cursor *was* read (`is_keyset_cursor` dispatched on it and the keyset
+    was decoded and passed), it just lost. The Searcher
     picks its retrieval branch from `(sort, free_text)`, reading
     `keyset_cursor` in the lexical-date branch and nowhere else. So paging a
     `sort=date` search the documented way (`docs/mcp-usage.md`: "call the tool
@@ -2684,6 +2686,34 @@ for the full design.
       its FTS predicate from the re-sent query; with none the Searcher answers
       from its empty-query recent-mail branch instead — the same restart, one
       branch over.
+      - **"No query" is measured on `parse_query(free_text).free_text`, not on
+        the request field** (review follow-up). `parse_query` lifts every
+        filter operator out of the free text, so `subject:invoice` is
+        non-blank as a request field and blank by the time the lexical branch
+        tests it — the api gate admitted it as a keyset continuation, the
+        branch declined the cursor, and the Searcher's guard fired **as a
+        500**: a caller error rendered as an operator traceback, on the exact
+        input class the gate exists to catch, under the adjacent invariant
+        that a cursor problem is "409, never a 500". Two predicates for one
+        rule is what allowed it; they ask the same question now. Composing
+        the filters in first would change nothing — the tokens it adds are
+        operators, which parse straight back out — and that equivalence is
+        pinned, so the cheaper bare-text parse is what runs.
+      - **The guard's exception is `KeysetCursorUnusable`, a named
+        `ValueError` subclass**, and the keyset branch maps it to a 400 as a
+        backstop. A subclass rather than the bare class because catching
+        `ValueError` at that boundary would also catch what psycopg,
+        `datetime` and the embedding backends raise — relabelling a real
+        outage as a cursor problem and sending the caller to re-send a
+        blameless query. With both predicates unified the catch is
+        unreachable; it is there so a future divergence costs a 400 rather
+        than a 500.
+    - **Validation precedes the empty-ACL short-circuit.** That branch answers
+      with an empty page, byte-identical to "you have reached the end of your
+      results" — so a grant-nothing caller was told a contradictory request had
+      succeeded and was complete. `resolve_cursor_mode` is pure and touches no
+      cache, so it runs first; `_check_pool_sort`'s cache probe stays inside
+      the pool branch, after the ACL check.
     - **The pool kind is checked against the pool, not against an invariant.**
       Pool cursors are only minted on the hybrid branch, which is unreachable
       with `sort="date"` — but encoding "pool ⟹ rank" in the route makes a
@@ -2692,6 +2722,20 @@ for the full design.
       `rank` for a pool that is not) and `_check_pool_sort` compares. The probe
       is skipped when the caller stated nothing — nothing to contradict, no
       cache lookup spent.
+      - **The *read* is `entry["sort"]`, not `entry.get("sort", "rank")`**
+        (review follow-up). The defaultless field was undone one line below the
+        comment forbidding it: the fallback made a date-built pool read as
+        rank, which is what `_check_pool_sort` then makes a 400/200 call on —
+        telling a caller who correctly asks for the pool's own sort that it is
+        not the one they will get, and waving through the mismatch that is.
+        A missing key is a bug in whichever `_cache.put` forgot it and belongs
+        as a loud `KeyError` at the boundary that can still see it. All three
+        readers (`get_pool_metadata`, `continue_page`, `grow_pool`) were
+        brought over together, so the reporter cannot disagree with the two
+        that serve the pages. Pinned by
+        `test_pool_metadata_reports_the_sort_the_pool_was_actually_built_with`,
+        which reaches past retrieval and puts a date pool in the cache — every
+        other test of this field mocks it, so nothing exercised the real read.
     - **`Searcher.search` raises on a `keyset_cursor` it will not read**,
       independently of the route: the drop is a property of the Searcher's own
       dispatch, and the CLI and library callers reach it without passing

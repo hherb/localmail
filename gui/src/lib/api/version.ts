@@ -9,6 +9,13 @@ import type { VersionInfo as VersionShape } from "../version_check";
 export interface ServerVersionInfo extends VersionShape {
   server_version: string | null;
   build_hash: string | null;
+  // Optional, not `string | null`: the *server* always sends these, but this
+  // client can be talking to one that predates them. That is the same reason
+  // `buildLabel`/`versionWarning` accept `null | undefined` — and it is why
+  // the ten existing mock sites (MainView, VersionGate, version.test,
+  // SettingsAbout) need no change.
+  build_source?: string | null;
+  version_source?: string | null;
 }
 
 export async function getVersion(): Promise<ServerVersionInfo> {

@@ -8,6 +8,7 @@
    */
   import { version } from "../../lib/stores/version.svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { buildLabel, versionWarning } from "../../lib/build_provenance";
 
   const CLIENT_VERSION = __APP_VERSION__;
 
@@ -30,9 +31,14 @@
     <dt>API minor</dt>
     <dd>{version.snapshot.info?.api_minor ?? "?"}</dd>
     <dt>Server</dt>
-    <dd>{version.snapshot.info?.server_version ?? "?"}</dd>
+    <dd>
+      {version.snapshot.info?.server_version ?? "?"}
+      {#if versionWarning(version.snapshot.info?.version_source)}
+        <span class="fault">({versionWarning(version.snapshot.info?.version_source)})</span>
+      {/if}
+    </dd>
     <dt>Server build</dt>
-    <dd>{version.snapshot.info?.build_hash ?? "?"}</dd>
+    <dd>{buildLabel(version.snapshot.info?.build_hash, version.snapshot.info?.build_source)}</dd>
   </dl>
 
   <h3>Logs</h3>
@@ -54,5 +60,8 @@
   }
   h3 {
     margin-top: 1rem;
+  }
+  .fault {
+    color: var(--color-danger, #b3261e);
   }
 </style>

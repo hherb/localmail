@@ -20,6 +20,12 @@ pub struct VersionInfo {
     pub api_minor: u32,
     pub server_version: Option<String>,
     pub build_hash: Option<String>,
+    // Added #278/#300. `#[serde(default)]` so a server predating these keys
+    // still decodes — the same back-compat the `is_admin` field takes.
+    #[serde(default)]
+    pub build_source: Option<String>,
+    #[serde(default)]
+    pub version_source: Option<String>,
 }
 
 // Split out so tests can drive a non-TLS reqwest::Client against mockito while
@@ -84,6 +90,8 @@ mod tests {
                 api_minor: 2,
                 server_version: Some("0.7.3".to_string()),
                 build_hash: Some("abc123".to_string()),
+                build_source: None,
+                version_source: None,
             }
         );
     }

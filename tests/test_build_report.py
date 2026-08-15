@@ -249,3 +249,32 @@ def test_resolution_never_raises_whatever_git_does(
     info = _resolve_from_package_dir(tmp_path)
 
     assert info.source is BuildSource.GIT_FAILED
+
+
+def test_a_failure_on_the_dirty_probe_is_named_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second git call has its own guard, and it must actually catch.
+
+    Every other injected-failure test fails at the FIRST call and returns
+    before the dirty probe is reached, so this branch shipped unverified.
+    Needs no real git: the layout satisfies `_repo_is_ours`, and the probe
+    is what raises.
+    """
+    package_dir = tmp_path / "src" / "localmail"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("")
+
+    def ok_then_boom(argv, **_kwargs):
+        if "diff" in argv:
+            raise OSError("git died mid-probe")
+        return subprocess.CompletedProcess(
+            argv, returncode=0, stdout=f"{tmp_path}\neec8e09\n", stderr=""
+        )
+
+    monkeypatch.setattr("localmail.build_report.subprocess.run", ok_then_boom)
+
+    info = _resolve_from_package_dir(package_dir)
+
+    assert info.source is BuildSource.GIT_FAILED
+    assert info.build_hash is None

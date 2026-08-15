@@ -85,10 +85,52 @@ def _date_sent(msg: EmailMessage) -> datetime | None:
     return dt
 
 
+def _header_text(msg: EmailMessage, name: str) -> str | None:
+    """Read a structured header, treating one the stdlib cannot parse as absent.
+
+    `email.policy.default` parses structured headers on *read*, and that parser
+    is not total: CPython 3.12.3 raises `IndexError` out of
+    `get_obs_local_part` for an empty angle-addr (`Message-Id: <>`), and other
+    malformed forms raise `AttributeError`. 3.13 guards the empty case, so this
+    is interpreter-dependent -- which is exactly why the guard belongs here
+    rather than in a pinned Python version.
+
+    Unguarded the exception escapes `parse_message`, and since that runs under
+    a per-message SAVEPOINT the mail lands in `failed_messages` **permanently**:
+    the same bytes re-parse the same way on every `retry-failed`.
+
+    A header the parser cannot read carries no usable value, so it is reported
+    absent -- for `Message-Id` that means `normalize_message_id`'s existing
+    "no identity" path (`raw_sha256` dedup, #222B) engages, which is the same
+    answer `<>` gets on an interpreter that can parse it.
+
+    The catch is broad because the failure is: the stdlib raises `IndexError`,
+    `AttributeError` and `HeaderParseError` for different malformed forms, and
+    a narrower tuple would let the next form through as a poison pill.
+    """
+    try:
+        value = msg.get(name)
+    except Exception:
+        return None
+    return str(value) if value else None
+
+
 def _headers_dict(msg: EmailMessage) -> dict[str, list[str]]:
+    """Every header, degrading only the ones the parser chokes on.
+
+    `msg.items()` parses each value through the policy, so a single unparsable
+    header raises for the *whole* dict -- guarding `_header_text` alone would
+    leave the message poisoned one line later. `raw_items()` is the same
+    sequence unparsed, so each occurrence is parsed individually and a failing
+    one falls back to its raw text instead of costing the other headers.
+    """
     out: dict[str, list[str]] = {}
-    for name, value in msg.items():
-        out.setdefault(name, []).append(str(value))
+    for name, raw_value in msg.raw_items():
+        try:
+            value = str(msg.policy.header_fetch_parse(name, raw_value))
+        except Exception:
+            value = raw_value
+        out.setdefault(name, []).append(value)
     return out
 
 
@@ -187,8 +229,7 @@ def parse_message(raw: bytes) -> ParsedMessage:
     from_addr, from_name = _from_pair(msg)
     text, html = _bodies(msg)
 
-    raw_message_id = msg.get("Message-Id")
-    message_id = normalize_message_id(str(raw_message_id) if raw_message_id else None)
+    message_id = normalize_message_id(_header_text(msg, "Message-Id"))
 
     in_reply_to = msg.get("In-Reply-To")
     in_reply_to = str(in_reply_to) if in_reply_to else None

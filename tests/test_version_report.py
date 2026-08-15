@@ -178,7 +178,9 @@ def test_the_catch_is_broad_enough_for_causes_that_are_not_about_the_file(
     assert resolved.detail is not None and type(exc).__name__ in resolved.detail
 
 
-def test_a_rendering_that_raises_degrades_to_the_type_name(metadata_version) -> None:
+def test_a_rendering_that_raises_degrades_to_the_type_name(
+    metadata_version, monkeypatch
+) -> None:
     """The reporting step may not raise either — it runs inside the handler.
 
     `traceback.format_exception_only` is not total: it calls `.rstrip()` on
@@ -188,6 +190,42 @@ def test_a_rendering_that_raises_degrades_to_the_type_name(metadata_version) -> 
     fix; unguarded it killed the interpreter outright ("lost sys.stderr"). The
     fallback is the bounded pre-#296 rendering, so the cause degrades rather
     than being lost.
+
+    **The renderer is made to raise directly rather than via a hostile input.**
+    This used to hand `format_exception_only` a `SyntaxError` whose `.text` was
+    not a `str`, which raises on CPython 3.12 -- but **3.13 hardened that path**,
+    so the renderer succeeds there and the fallback is never reached. The pin
+    silently stopped testing the guard on the newer interpreter and failed
+    outright once CI gained a 3.13 leg. Injecting at the seam keeps it honest on
+    every version, and `MemoryError` is one of the causes `unreadable`'s own
+    docstring names as reaching it.
+    """
+
+    def _renderer_raises(_exc: BaseException) -> str:
+        raise MemoryError
+
+    monkeypatch.setattr(
+        "localmail.version_report.render_exception_chain", _renderer_raises
+    )
+
+    def _raise(_name: str) -> str:
+        raise OSError(5, "Input/output error", "/nfs/site-packages/METADATA")
+
+    metadata_version(_raise)
+    resolved = resolve_version()
+    assert resolved.source is VersionSource.METADATA_UNREADABLE
+    assert resolved.detail == "OSError"
+
+
+def test_a_hostile_exception_never_escapes_the_handler(metadata_version) -> None:
+    """The realistic input, asserted in the one way both interpreters agree on.
+
+    A `SyntaxError` carrying a non-`str` `.text` is what a third-party
+    `sys.meta_path` finder can really hand back. CPython 3.12 raises rendering
+    it and 3.13 renders it, so the *detail* legitimately differs by version --
+    but the contract does not: `import localmail` survives, the source is
+    `METADATA_UNREADABLE`, and a non-blank cause is reported either way. Asserting
+    the exact string here is what tied the previous pin to one interpreter.
     """
     hostile = SyntaxError("bad")
     hostile.text = object()  # type: ignore[assignment]
@@ -200,7 +238,7 @@ def test_a_rendering_that_raises_degrades_to_the_type_name(metadata_version) -> 
     metadata_version(_raise)
     resolved = resolve_version()
     assert resolved.source is VersionSource.METADATA_UNREADABLE
-    assert resolved.detail == "SyntaxError"
+    assert resolved.detail is not None and resolved.detail.strip()
 
 
 def test_a_vast_exception_message_cannot_become_an_unbounded_global(

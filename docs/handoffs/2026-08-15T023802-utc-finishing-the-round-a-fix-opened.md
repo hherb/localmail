@@ -10,7 +10,7 @@
 > is now twice-earned.
 >
 > **This session closed the whole review round #309 generated** — #311, #312 and
-> #307, all filed against the ground #308 moved. **PR #310 is open, base
+> #307, all filed against the ground #308 moved. **PR #313 is open, base
 > `main`, unmerged.**
 >
 > **The one that mattered operationally is #311.** #308 made the server answer a
@@ -40,7 +40,7 @@ in `gui/`). See [CLAUDE.md](CLAUDE.md), [README.md](README.md).
 ## What we shipped this session
 
 Branch `fix/309-review-round`, commit **`0940f98`** (code + docs) plus the
-handoff commit. **Open as PR #310, base `main`, unmerged.** No migration, no
+handoff commit. **Open as PR #313, base `main`, unmerged.** No migration, no
 new dependency, no config change, **no wire change**. Closes **#307, #311,
 #312** — the complete #309 review round.
 
@@ -179,7 +179,7 @@ deployed it in between). Verified over SSH.
 
 ## What's next
 
-### 0. **Merge PR #310** — the only open PR
+### 0. **Merge PR #313** — the only open PR
    **The operator merges** (project convention). Closes #307, #311, #312.
    - **Acceptance:** on `main` afterwards, `uv run pytest --collect-only -q`
      reports **2535** (2518 today), and `localmail sync --help` prints its help
@@ -276,7 +276,7 @@ deployed it in between). Verified over SSH.
 
 ## Open decisions & risks
 
-1. **One PR is open and yours to merge.** `main` is `fb48f23`; **#310**
+1. **One PR is open and yours to merge.** `main` is `fb48f23`; **#313**
    (`fix/309-review-round`) closes #307/#311/#312. **18 open issues**, dropping
    to **15** on merge. **Dependabot: 0 open alerts.**
 2. **Base every branch on `main`; put a session's code and its handoff in ONE
@@ -422,8 +422,8 @@ git diff --stat main origin/<branch>     # EMPTY = landed, not stranded
 
 # ONE PR is open, awaiting your merge (What's next, 0).
 gh pr list
-gh pr checks 310
-gh pr view 310 --json baseRefName --jq .baseRefName   # MUST be "main"
+gh pr checks 313
+gh pr view 313 --json baseRefName --jq .baseRefName   # MUST be "main"
 gh issue list --limit 30                 # 18 open; the merge closes #307/#311/#312
 gh api repos/hherb/localmail/dependabot/alerts \
   --jq '[.[] | select(.state=="open")] | length'          # expect 0
@@ -493,7 +493,7 @@ git worktree remove /tmp/lm-main
 ```
 
 `main` tip is **`fb48f23`** (PR #309). This session's work is **`0940f98`** plus
-this handoff on `fix/309-review-round`, **open as PR #310, base `main`, not
+this handoff on `fix/309-review-round`, **open as PR #313, base `main`, not
 merged**. Latest migration **`0035_messages_body_lang_attempted_at.sql`**; next
 free slot `0036_*.sql` (this session adds none). **Open issues: 18**, dropping to
 **15** on merge (#307, #311, #312). **Dependabot: 0 open alerts.** Both hosts run

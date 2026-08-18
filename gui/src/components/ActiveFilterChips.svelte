@@ -24,6 +24,9 @@
     if (f.hasAttachment === true) out.push({ key: "has", label: "Has attachment", clear() {
       search.setFilters({ ...f, hasAttachment: null });
     }});
+    if (f.language) out.push({ key: "language", label: `Language: ${f.language}`, clear() {
+      search.setFilters({ ...f, language: "" });
+    }});
     return out;
   }
 
@@ -57,9 +60,11 @@
 {/if}
 
 <style>
-  .chips { list-style: none; padding: 4px 12px; margin: 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .chips { list-style: none; padding: 6px 14px; margin: 0; display: flex; gap: 6px; flex-wrap: wrap;
+           background: var(--surface); border-bottom: 1px solid var(--border); }
   .chip { display: inline-flex; align-items: center; gap: 4px;
-          background: #eef3fb; border: 1px solid #c8d6ec; padding: 2px 6px;
-          border-radius: 12px; font-size: 12px; }
-  button { background: transparent; border: none; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; color: #555; }
+          background: var(--accent-soft); border: 1px solid #d4d4f0; padding: 3px 7px;
+          border-radius: 999px; color: var(--accent-strong); font-size: 11px; }
+  button { min-height: 16px; background: transparent; border: none; cursor: pointer; font-size: 14px;
+           line-height: 1; padding: 0 2px; color: var(--accent-strong); }
 </style>

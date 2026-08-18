@@ -54,6 +54,29 @@ def test_get_message(
     assert "<p>hi" in body["body_html"]
 
 
+def test_get_message_external_images_require_explicit_query_opt_in(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    mid = _seed_msg(db_conn)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE messages SET body_html = %s WHERE id = %s",
+            ('<p>newsletter</p><img src="https://images.example/hero.jpg">', mid),
+        )
+    db_conn.commit()
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    headers = {"Authorization": f"Bearer {api_token}"}
+
+    blocked = c.get(f"/v1/messages/{mid}", headers=headers)
+    assert blocked.status_code == 200
+    assert "images.example" not in blocked.json()["body_html"]
+
+    allowed = c.get(f"/v1/messages/{mid}?external_images=true", headers=headers)
+    assert allowed.status_code == 200
+    assert 'src="https://images.example/hero.jpg"' in allowed.json()["body_html"]
+
+
 def test_get_message_attachment_carries_content_type_and_size(
     db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
 ) -> None:

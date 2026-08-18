@@ -71,6 +71,7 @@ pub fn run() {
             quit_app_cmd,
             crate::commands::connect::probe_server_cmd,
             crate::commands::connect::confirm_trust_cmd,
+            crate::commands::connect::get_connection_info_cmd,
             crate::commands::auth::login_cmd,
             crate::commands::auth::logout_cmd,
             crate::commands::auth::refresh_cmd,

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   logoutMock: vi.fn(),
   whoamiMock: vi.fn(),
   getCapabilitiesMock: vi.fn(),
+  getConnectionInfoMock: vi.fn(),
   refreshMock: vi.fn(),
 }));
 
@@ -18,6 +19,7 @@ vi.mock("../tauri", () => ({
   refresh: mocks.refreshMock,
   whoami: mocks.whoamiMock,
   getCapabilities: mocks.getCapabilitiesMock,
+  getConnectionInfo: mocks.getConnectionInfoMock,
 }));
 
 import { auth } from "./auth.svelte";
@@ -31,6 +33,11 @@ describe("auth store", () => {
     mocks.refreshMock.mockReset();
     mocks.whoamiMock.mockReset();
     mocks.getCapabilitiesMock.mockReset();
+    mocks.getConnectionInfoMock.mockReset();
+    mocks.getConnectionInfoMock.mockResolvedValue({
+      server_url: "https://localhost:8443/",
+      cert_sha256_pin: "deadbeef",
+    });
     auth.reset();
   });
 
@@ -56,6 +63,8 @@ describe("auth store", () => {
       expect(auth.snapshot.username).toBe("alice");
       expect(auth.snapshot.capabilities.search).toBe(true);
     }
+    expect(auth.serverUrl).toBe("https://localhost:8443/");
+    expect(auth.certPin).toBe("deadbeef");
   });
 
   it("probe stores result in needs_trust state", async () => {
@@ -118,6 +127,13 @@ describe("auth store", () => {
     await auth.logout();
     expect(mocks.logoutMock).toHaveBeenCalled();
     expect(auth.snapshot.phase).toBe("logged_out");
+  });
+
+  it("changeServer logs out and returns to the connect phase", async () => {
+    mocks.logoutMock.mockResolvedValueOnce(undefined);
+    await auth.changeServer();
+    expect(mocks.logoutMock).toHaveBeenCalled();
+    expect(auth.snapshot.phase).toBe("connecting");
   });
 
   it("carries is_admin from whoami into the logged_in snapshot", async () => {

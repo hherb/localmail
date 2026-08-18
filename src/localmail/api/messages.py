@@ -18,6 +18,7 @@ def get_message(
     *,
     allowed_account_ids: list[int],
     full_headers: bool = False,
+    allow_external_images: bool = False,
 ) -> dict[str, Any]:
     """Return a structured representation of one message.
 
@@ -64,7 +65,14 @@ def get_message(
      account_name, account_address) = row
 
     cid_to_sha = _build_cid_map(attachments or [])
-    sanitized_html = sanitize_html(body_html or "", cid_to_sha=cid_to_sha) if body_html else None
+    sanitized_html = (
+        sanitize_html(
+            body_html or "",
+            cid_to_sha=cid_to_sha,
+            allow_external_images=allow_external_images,
+        )
+        if body_html else None
+    )
     blob_meta = _load_attachment_meta(conn, attachments or [])
 
     msg: dict[str, Any] = {

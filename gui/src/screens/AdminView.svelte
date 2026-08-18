@@ -81,44 +81,51 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(27, 29, 48, 0.48);
+    backdrop-filter: blur(5px);
     display: grid;
     place-items: center;
     z-index: 200;
   }
   .modal {
-    background: white;
+    background: var(--surface);
     width: min(960px, 94vw);
     height: min(680px, 92vh);
     display: flex;
     flex-direction: column;
-    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.7);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
   }
   header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid #ddd;
+    min-height: 64px;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--border);
   }
   header h2 {
     margin: 0;
-    font-size: 1.05rem;
+    font-size: 1.3rem;
+    letter-spacing: -0.025em;
   }
   .close {
     font-size: 1.25rem;
-    background: none;
-    border: none;
+    background: var(--surface-subtle);
+    border: 1px solid var(--border);
     cursor: pointer;
     line-height: 1;
     padding: 0 0.5rem;
+    min-height: 34px;
   }
   .tabs {
     display: flex;
     gap: 0.25rem;
     padding: 0 1rem;
-    border-bottom: 1px solid #ddd;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-subtle);
   }
   .tabs button {
     padding: 0.5rem 0.75rem;
@@ -130,8 +137,8 @@
   }
   .tabs button.active {
     font-weight: 600;
-    border-bottom-color: #1a73e8;
-    color: #1a73e8;
+    border-bottom-color: var(--accent);
+    color: var(--accent-strong);
   }
   .body {
     flex: 1;
@@ -139,7 +146,7 @@
     overflow: auto;
   }
   .placeholder {
-    color: #666;
+    color: var(--fg-muted);
     font-size: 0.9rem;
   }
 </style>

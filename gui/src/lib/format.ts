@@ -5,6 +5,7 @@
  */
 
 import type { MessageAddress } from "./tauri";
+import type { DateFormat } from "./stores/settings.svelte";
 
 const FALLBACK_SENDER = "(unknown sender)";
 const ELLIPSIS = "…";
@@ -55,6 +56,30 @@ export function formatRelativeDate(iso: string | null, now: Date = new Date()): 
     month: "short",
     day: "numeric",
     year: "numeric",
+  });
+}
+
+/**
+ * Format a message timestamp using the user's display preference. Relative
+ * mode keeps the compact mail-list convention above; absolute mode always
+ * includes the year and time so the same preference is useful in both the
+ * list and reading pane.
+ */
+export function formatMessageDate(
+  iso: string | null,
+  mode: DateFormat,
+  now: Date = new Date(),
+): string {
+  if (mode === "relative") return formatRelativeDate(iso, now);
+  if (!iso) return "";
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return "";
+  return dt.toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   });
 }
 

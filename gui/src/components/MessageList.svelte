@@ -153,31 +153,34 @@
   .list {
     height: 100%;
     overflow-y: auto;
-    background: #fff;
-    border-right: 1px solid #e5e5e5;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
   }
   .hint {
     padding: 24px;
     text-align: center;
-    color: #888;
+    color: var(--fg-faint);
     font-size: 13px;
   }
   .caption {
     padding: 4px 12px;
-    color: #666;
+    color: var(--fg-muted);
     font-size: 12px;
+    background: var(--surface-subtle);
+    border-bottom: 1px solid var(--border);
   }
   .error {
     padding: 12px;
-    color: #b00;
+    color: var(--danger);
+    background: var(--danger-soft);
     font-size: 13px;
   }
   .banner {
     display: block;
     width: 100%;
     border: none;
-    background: #e8f0fe;
-    color: #1a73e8;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
     padding: 8px 12px;
     font-size: 13px;
     cursor: pointer;

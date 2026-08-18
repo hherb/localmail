@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 import { mail, MAX_POLL_FAILURES, MAX_PENDING_NEW_MESSAGES } from "./mail.svelte";
 import { POLL_INTERVAL_MS } from "../change_helpers";
 import type { AccountSummary, FolderSummary, MessageDetail, MessageSummary } from "../tauri";
+import { settings } from "./settings.svelte";
 
 const acct = (id: string, name: string): AccountSummary => ({
   id,
@@ -59,6 +60,7 @@ const detail = (id: string, body: string): MessageDetail => ({
 
 beforeEach(() => {
   mail.reset();
+  settings.resetForTest();
   vi.clearAllMocks();
 });
 
@@ -100,6 +102,13 @@ describe("mail store", () => {
     expect(mail.snapshot.messages).toHaveLength(2);
   });
 
+  it("uses the configured page size for browse requests", async () => {
+    settings.setPageSize(75);
+    mocks.listMessages.mockResolvedValue({ messages: [], next_cursor: null });
+    await mail.loadInitialMessages();
+    expect(mocks.listMessages).toHaveBeenCalledWith(expect.objectContaining({ limit: 75 }));
+  });
+
   it("setSelection updates current selection", () => {
     mocks.listMessages.mockResolvedValue({ messages: [], next_cursor: null });
     mail.setSelection({ kind: "account", accountId: "1" });
@@ -111,6 +120,31 @@ describe("mail store", () => {
     await mail.openMessage("42");
     expect(mail.snapshot.selectedMessage?.id).toBe("42");
     expect(mail.snapshot.selectedMessage?.body_text).toBe("plain body");
+    expect(mocks.getMessage).toHaveBeenCalledWith("42", false);
+  });
+
+  it("openMessage requests external image URLs when the allow policy is active", async () => {
+    settings.setImagePolicy("allow");
+    mocks.getMessage.mockResolvedValue(detail("42", "plain body"));
+    await mail.openMessage("42");
+    expect(mocks.getMessage).toHaveBeenCalledWith("42", true);
+    expect(mail.snapshot.externalImagesIncluded).toBe(true);
+  });
+
+  it("refetches the selected message before allowing remote images in ask mode", async () => {
+    const blocked = detail("42", "plain body");
+    blocked.body_html = '<img alt="remote">';
+    const allowed = detail("42", "plain body");
+    allowed.body_html = '<img src="https://images.example/hero.jpg">';
+    mocks.getMessage.mockResolvedValueOnce(blocked).mockResolvedValueOnce(allowed);
+
+    await mail.openMessage("42");
+    await mail.loadExternalImagesForSelectedMessage();
+
+    expect(mocks.getMessage).toHaveBeenNthCalledWith(2, "42", true);
+    expect(mail.snapshot.selectedMessage?.body_html).toContain("images.example");
+    expect(mail.snapshot.externalImagesIncluded).toBe(true);
+    expect(mail.snapshot.externalImagesAllowed).toBe(true);
   });
 
   it("openMessage with same id is a no-op (no extra fetch)", async () => {

@@ -132,11 +132,18 @@
   <div class="app">
     <header class="bar">
       <div class="left">
-        <strong>localmail</strong>
-        <span class="username">{snap.username}</span>
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <div class="brand-copy">
+          <strong>localmail</strong>
+          <span>Private archive</span>
+        </div>
+        <div class="account-badge" title="Connected session">
+          <span class="online" aria-hidden="true"></span>
+          <span class="username">{snap.username}</span>
+        </div>
       </div>
       <div class="right">
-        <ul class="caps">
+        <ul class="caps" aria-label="Server capabilities">
           <li class="cap" class:on={snap.capabilities.search}>search</li>
           <li class="cap" class:on={snap.capabilities.attachments}>attachments</li>
           <li class="cap" class:on={snap.capabilities.attachment_text}>attachment_text</li>
@@ -145,6 +152,7 @@
         </ul>
         {#if snap.isAdmin}
           <button
+            class="toolbar-button"
             aria-label="Admin"
             title="Admin"
             data-testid="open-admin"
@@ -153,14 +161,15 @@
           >Admin</button>
         {/if}
         <button
+          class="toolbar-button"
           aria-label="Settings"
           title="Settings"
           data-testid="open-settings"
           onclick={() => (settingsOpen = true)}
           disabled={pending}
-        >⚙</button>
-        <button onclick={onRefresh} disabled={pending}>Refresh token</button>
-        <button onclick={onLogout} disabled={pending}>Log out</button>
+        >Settings</button>
+        <button class="toolbar-button" onclick={onRefresh} disabled={pending}>Refresh session</button>
+        <button class="logout" onclick={onLogout} disabled={pending}>Log out</button>
       </div>
     </header>
     <SettingsScreen open={settingsOpen} onClose={() => (settingsOpen = false)} />
@@ -185,58 +194,134 @@
     height: 100vh;
     display: grid;
     grid-template-rows: auto auto auto 1fr;
+    background: var(--canvas);
   }
   .bar {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 6px 12px;
-    background: #f4f6f9;
-    border-bottom: 1px solid #e0e3e8;
+    min-height: 58px;
+    padding: 8px 14px;
+    background: rgba(255, 255, 255, 0.96);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
     font-size: 12px;
+    z-index: 20;
   }
   .left {
     display: flex;
-    align-items: baseline;
-    gap: 12px;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .brand-mark {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    border-radius: 10px;
+    background: linear-gradient(145deg, #7272e8, #4b4bc3);
+    box-shadow: 0 6px 14px rgba(74, 74, 194, 0.24);
+  }
+  .brand-mark::before {
+    content: "";
+    width: 17px;
+    height: 12px;
+    border: 1.5px solid white;
+    border-radius: 3px;
+  }
+  .brand-mark::after {
+    content: "";
+    position: absolute;
+    top: 11px;
+    width: 10px;
+    height: 10px;
+    border-left: 1.5px solid white;
+    border-bottom: 1.5px solid white;
+    transform: rotate(-45deg);
+  }
+  .brand-copy {
+    display: grid;
+    min-width: 90px;
+    line-height: 1.15;
+  }
+  .brand-copy strong {
+    font-size: 15px;
+    letter-spacing: -0.02em;
+  }
+  .brand-copy > span {
+    color: var(--fg-muted);
+    font-size: 10px;
+  }
+  .account-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 6px;
+    padding: 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-subtle);
+  }
+  .online {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #43a477;
+    box-shadow: 0 0 0 3px #e3f5eb;
   }
   .username {
-    color: #1a4fc7;
+    color: var(--fg);
     font-weight: 600;
   }
   .right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    min-width: 0;
   }
   .caps {
     list-style: none;
     padding: 0;
-    margin: 0 8px 0 0;
+    margin: 0 6px 0 0;
     display: flex;
     gap: 4px;
   }
   .cap {
-    padding: 2px 8px;
-    border-radius: 10px;
-    background: #ececec;
-    color: #888;
-    font-size: 11px;
+    padding: 3px 7px;
+    border-radius: 999px;
+    background: #f1f2f5;
+    color: var(--fg-faint);
+    font-size: 10px;
     font-family: ui-monospace, SFMono-Regular, monospace;
     text-decoration: line-through;
   }
   .cap.on {
-    background: #e6f5dd;
-    color: #2d6a1a;
+    background: var(--success-soft);
+    color: var(--success);
     text-decoration: none;
   }
   button {
-    padding: 3px 10px;
+    min-height: 32px;
+    padding: 5px 10px;
     font-size: 12px;
-    background: #fff;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    cursor: pointer;
+  }
+  .toolbar-button {
+    background: transparent;
+    border-color: transparent;
+    color: var(--fg-muted);
+  }
+  .toolbar-button:hover:not(:disabled) {
+    background: var(--surface-subtle);
+    border-color: var(--border);
+    color: var(--fg);
+  }
+  .logout {
+    color: var(--accent-strong);
+    border-color: #d8d8ef;
+    background: var(--accent-soft);
   }
   button:disabled {
     opacity: 0.5;
@@ -246,5 +331,16 @@
     display: grid;
     height: 100%;
     min-height: 0;
+    margin: 0 8px 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+  }
+
+  @media (max-width: 1040px) {
+    .caps { display: none; }
+    .brand-copy > span { display: none; }
   }
 </style>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addressLabel, formatRelativeDate, truncate } from "./format";
+import { addressLabel, formatMessageDate, formatRelativeDate, truncate } from "./format";
 import type { MessageAddress } from "./tauri";
 
 describe("addressLabel", () => {
@@ -68,3 +68,20 @@ describe("formatRelativeDate", () => {
   });
 });
 
+describe("formatMessageDate", () => {
+  it("includes a full year and time in absolute mode", () => {
+    const out = formatMessageDate(
+      "2026-03-03T08:14:00Z",
+      "absolute",
+      new Date("2026-05-17T12:00:00Z"),
+    );
+    expect(out).toContain("2026");
+    expect(out).toMatch(/\d+:\d+/);
+  });
+
+  it("delegates to the compact formatter in relative mode", () => {
+    const now = new Date(2026, 4, 17, 15, 0);
+    const earlier = new Date(2026, 4, 17, 9, 30);
+    expect(formatMessageDate(earlier.toISOString(), "relative", now)).not.toContain("2026");
+  });
+});

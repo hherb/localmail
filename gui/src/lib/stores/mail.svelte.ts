@@ -27,6 +27,7 @@
 import { getChanges } from "../api/changes";
 import { formatError } from "../format_error";
 import { POLL_INTERVAL_MS, parseCursor } from "../change_helpers";
+import { settings } from "./settings.svelte";
 import {
   getMessage,
   listAccounts,
@@ -62,6 +63,8 @@ export interface MailState {
   errorMessage: string | null;
   bodyMode: "html" | "plain" | "raw";
   externalImagesAllowed: boolean;
+  externalImagesIncluded: boolean;
+  loadingExternalImages: boolean;
   pendingNewMessages: MessageSummary[];
 }
 
@@ -78,6 +81,8 @@ function initialState(): MailState {
     errorMessage: null,
     bodyMode: "html",
     externalImagesAllowed: false,
+    externalImagesIncluded: false,
+    loadingExternalImages: false,
     pendingNewMessages: [],
   };
 }
@@ -183,7 +188,7 @@ class MailStore {
       const resp = await listMessages({
         account_ids: this.#currentFilterOpts.accountIds,
         folder_ids: this.#currentFilterOpts.folderIds,
-        limit: 50,
+        limit: settings.snapshot.pageSize,
         cursor: null,
       });
       this.#state.messages = resp.messages;
@@ -209,7 +214,7 @@ class MailStore {
         const resp = await listMessages({
           account_ids: this.#currentFilterOpts.accountIds,
           folder_ids: this.#currentFilterOpts.folderIds,
-          limit: 50,
+          limit: settings.snapshot.pageSize,
           cursor,
         });
         this.#state.messages = [...this.#state.messages, ...resp.messages];
@@ -301,14 +306,40 @@ class MailStore {
     this.#state.externalImagesAllowed = v;
   }
 
+  async loadExternalImagesForSelectedMessage(): Promise<void> {
+    const selected = this.#state.selectedMessage;
+    if (selected === null || this.#state.loadingExternalImages) return;
+    if (this.#state.externalImagesIncluded) {
+      this.#state.externalImagesAllowed = true;
+      return;
+    }
+    const messageId = selected.id;
+    this.#state.loadingExternalImages = true;
+    this.#state.errorMessage = null;
+    try {
+      const detail = await getMessage(messageId, true);
+      if (this.#state.selectedMessage?.id !== messageId) return;
+      this.#state.selectedMessage = detail;
+      this.#state.externalImagesIncluded = true;
+      this.#state.externalImagesAllowed = true;
+    } catch (err: unknown) {
+      this.#state.errorMessage = formatError(err);
+    } finally {
+      this.#state.loadingExternalImages = false;
+    }
+  }
+
   async openMessage(messageId: string): Promise<void> {
     if (this.#state.selectedMessage?.id === messageId) return;
     this.#state.loadingDetail = true;
     this.#state.errorMessage = null;
     this.#state.externalImagesAllowed = false;
+    this.#state.externalImagesIncluded = false;
     try {
-      const detail = await getMessage(messageId);
+      const includeExternalImages = settings.snapshot.imagePolicy === "allow";
+      const detail = await getMessage(messageId, includeExternalImages);
       this.#state.selectedMessage = detail;
+      this.#state.externalImagesIncluded = includeExternalImages;
     } catch (err: unknown) {
       this.#state.errorMessage = formatError(err);
     } finally {

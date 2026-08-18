@@ -4,11 +4,28 @@
   import RawBodyView from "./RawBodyView.svelte";
   import HeaderUnfold from "./HeaderUnfold.svelte";
   import DebugChunks from "./DebugChunks.svelte";
-  import { addressLabel, formatRelativeDate } from "../lib/format";
+  import { addressLabel, formatMessageDate } from "../lib/format";
   import { mail } from "../lib/stores/mail.svelte";
   import { settings } from "../lib/stores/settings.svelte";
 
   function setMode(m: "html" | "plain" | "raw") { mail.setBodyMode(m); }
+
+  const externalImagesAllowed = $derived(
+    settings.snapshot.imagePolicy === "allow" ||
+      (settings.snapshot.imagePolicy === "ask" && mail.snapshot.externalImagesAllowed),
+  );
+
+  $effect(() => {
+    if (
+      settings.snapshot.imagePolicy === "allow" &&
+      mail.snapshot.selectedMessage !== null &&
+      !mail.snapshot.loadingDetail &&
+      !mail.snapshot.externalImagesIncluded &&
+      !mail.snapshot.loadingExternalImages
+    ) {
+      void mail.loadExternalImagesForSelectedMessage();
+    }
+  });
 </script>
 
 <article class="pane">
@@ -26,7 +43,7 @@
         {#if m.cc.length}
           <dt>Cc</dt><dd>{m.cc.map(addressLabel).join(", ")}</dd>
         {/if}
-        <dt>Date</dt><dd>{formatRelativeDate(m.date)}</dd>
+        <dt>Date</dt><dd>{formatMessageDate(m.date, settings.snapshot.dateFormat)}</dd>
         <dt>Account</dt>
         <dd>
           {m.account.name ?? m.account.id}
@@ -59,10 +76,20 @@
 
       {#if mail.snapshot.bodyMode === "html"
            && m.body_html
+           && settings.snapshot.imagePolicy === "ask"
            && !mail.snapshot.externalImagesAllowed}
-        <button type="button" class="images" onclick={() => mail.setExternalImagesAllowed(true)}>
-          Load images for this message
+        <button
+          type="button"
+          class="images"
+          onclick={() => void mail.loadExternalImagesForSelectedMessage()}
+          disabled={mail.snapshot.loadingExternalImages}
+        >
+          {mail.snapshot.loadingExternalImages ? "Loading images…" : "Load images for this message"}
         </button>
+      {:else if mail.snapshot.bodyMode === "html"
+           && m.body_html
+           && settings.snapshot.imagePolicy === "block"}
+        <span class="image-status">Remote images blocked</span>
       {/if}
     </nav>
 
@@ -70,7 +97,7 @@
       {#if mail.snapshot.bodyMode === "html" && m.body_html}
         <HtmlBody
           html={m.body_html}
-          allowExternalImages={mail.snapshot.externalImagesAllowed}
+          allowExternalImages={externalImagesAllowed}
         />
       {:else if mail.snapshot.bodyMode === "plain" && m.body_text}
         <pre class="plain">{m.body_text}</pre>
@@ -98,23 +125,28 @@
 <style>
   .pane {
     height: 100%;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    background: #fff;
+    overflow: hidden;
+    background: var(--surface);
   }
   .hint {
     margin: 48px auto;
     text-align: center;
-    color: #888;
+    color: var(--fg-faint);
     font-size: 13px;
   }
   header {
-    border-bottom: 1px solid #eee;
-    padding: 16px 20px 12px;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 20px 24px 15px;
   }
   h2 {
     margin: 0 0 8px 0;
-    font-size: 18px;
+    font-size: 19px;
+    line-height: 1.3;
+    letter-spacing: -0.018em;
   }
   .headers {
     display: grid;
@@ -125,34 +157,37 @@
     font-size: 12px;
   }
   .headers dt {
-    color: #888;
+    color: var(--fg-faint);
   }
   .headers dd {
     margin: 0;
-    color: #222;
+    color: var(--fg);
   }
   .folders {
-    color: #888;
+    color: var(--fg-muted);
   }
   .modes {
     display: flex;
     gap: 4px;
     padding: 6px 12px;
-    border-bottom: 1px solid #eee;
-    background: #fafbfd;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-subtle);
     flex-shrink: 0;
   }
   .modes button {
-    padding: 2px 8px;
+    min-height: 28px;
+    padding: 3px 9px;
     font-size: 12px;
-    background: #fff;
-    border: 1px solid #ccc;
-    border-radius: 3px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
     cursor: pointer;
   }
   .modes button.active {
-    background: #e1edff;
-    border-color: #99b8e0;
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--accent-strong);
+    box-shadow: var(--shadow-sm);
   }
   .modes button:disabled {
     opacity: 0.4;
@@ -160,33 +195,42 @@
   }
   .modes button.images {
     margin-left: auto;
-    color: #2a4d99;
+    border-color: #d3d3ed;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+  }
+  .image-status {
+    margin-left: auto;
+    align-self: center;
+    color: var(--fg-faint);
+    font-size: 10px;
   }
   .body {
     flex: 1;
     min-height: 0;
     overflow: auto;
+    overscroll-behavior: contain;
   }
   .plain {
     white-space: pre-wrap;
     word-break: break-word;
-    padding: 8px 12px;
+    padding: 18px 22px;
     font: 13px/1.5 ui-monospace, SFMono-Regular, monospace;
     margin: 0;
-    color: #222;
+    color: var(--fg);
   }
   .placeholder {
     padding: 16px;
-    color: #888;
+    color: var(--fg-faint);
     font-style: italic;
   }
   .unfold {
     margin-top: 8px;
   }
   .debug {
-    border-top: 1px dashed #ddd;
+    border-top: 1px dashed var(--border-strong);
     padding: 8px 12px;
     flex-shrink: 0;
-    background: #fcfcfd;
+    background: var(--surface-subtle);
   }
 </style>

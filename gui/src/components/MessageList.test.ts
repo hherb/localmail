@@ -138,7 +138,7 @@ describe("MessageList", () => {
     await mail.loadInitialMessages();
     const { getByText } = render(MessageList);
     await fireEvent.click(getByText("click me"));
-    expect(mocks.getMessage).toHaveBeenCalledWith("42");
+    expect(mocks.getMessage).toHaveBeenCalledWith("42", false);
   });
 });
 

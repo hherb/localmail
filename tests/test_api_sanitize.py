@@ -28,6 +28,19 @@ def test_external_image_src_stripped() -> None:
     assert "src=" not in out or "src=\"\"" in out
 
 
+def test_external_image_src_preserved_only_with_explicit_opt_in() -> None:
+    html = '<img src="https://images.example/newsletter.jpg">'
+    out = sanitize_html(html, cid_to_sha={}, allow_external_images=True)
+    assert 'src="https://images.example/newsletter.jpg"' in out
+
+
+def test_external_image_opt_in_still_rejects_non_http_schemes() -> None:
+    html = '<img src="javascript:alert(1)"><img src="//tracker.example/pixel.gif">'
+    out = sanitize_html(html, cid_to_sha={}, allow_external_images=True)
+    assert "javascript:" not in out
+    assert "tracker.example" not in out
+
+
 def test_cid_image_rewritten_to_attachment_url() -> None:
     cid_to_sha = {"image1@example": "deadbeef" * 8}
     html = '<img src="cid:image1@example">'

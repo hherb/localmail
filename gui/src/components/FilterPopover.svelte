@@ -137,19 +137,19 @@
 </form>
 
 <style>
-  .form { display: flex; flex-direction: column; gap: 8px; padding: 12px; min-width: 260px; }
+  .form { display: flex; flex-direction: column; gap: 8px; padding: 15px; min-width: 290px; }
   .header { display: flex; justify-content: space-between; align-items: center;
             margin: -4px -4px 4px -4px; }
-  .title { font-weight: 600; font-size: 13px; color: #333; }
+  .title { font-weight: 650; font-size: 14px; color: var(--fg); }
   .close-x { background: none; border: none; font-size: 18px; line-height: 1;
-             cursor: pointer; color: #666; padding: 2px 6px; border-radius: 3px; }
-  .close-x:hover { background: #f0f0f0; color: #000; }
-  label { font-size: 12px; color: #555; }
-  input:not([type="checkbox"]) { padding: 3px 6px; border: 1px solid #ccc; border-radius: 3px; }
+             cursor: pointer; color: var(--fg-muted); padding: 2px 6px; border-radius: 5px; min-height: 28px; }
+  .close-x:hover { background: var(--surface-subtle); color: var(--fg); }
+  label { font-size: 11px; color: var(--fg-muted); font-weight: 600; }
+  input:not([type="checkbox"]) { min-height: 34px; padding: 5px 8px; }
   .field { display: flex; gap: 4px; align-items: center; }
   .field input { flex: 1; }
-  .clear-x { padding: 0 6px; border: 1px solid #ccc; background: #fff; border-radius: 3px;
-             cursor: pointer; font-size: 14px; line-height: 1.2; color: #555; }
+  .clear-x { min-height: 30px; padding: 0 7px; border: 1px solid var(--border); background: var(--surface);
+             border-radius: 6px; cursor: pointer; font-size: 14px; line-height: 1.2; color: var(--fg-muted); }
   .row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px; }
-  button { padding: 4px 10px; border: 1px solid #ccc; background: #fff; border-radius: 4px; cursor: pointer; }
+  .row button[type="submit"] { border-color: var(--accent); background: var(--accent); color: white; }
 </style>

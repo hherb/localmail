@@ -49,14 +49,18 @@
 <svelte:window onclick={onDocumentClick} onkeydown={onDocumentKey} />
 
 <form class="bar" onsubmit={onSubmit}>
-  <input
-    type="search"
-    placeholder="Search across all accounts"
-    value={search.snapshot.query}
-    oninput={(e) => search.setQuery((e.currentTarget as HTMLInputElement).value)}
-    onkeydown={onKeyDown}
-    disabled={search.snapshot.loading}
-  />
+  <div class="search-field">
+    <span class="search-icon" aria-hidden="true"></span>
+    <input
+      type="search"
+      aria-label="Search mail"
+      placeholder="Search messages, people, or use from: and has:attachment"
+      value={search.snapshot.query}
+      oninput={(e) => search.setQuery((e.currentTarget as HTMLInputElement).value)}
+      onkeydown={onKeyDown}
+      disabled={search.snapshot.loading}
+    />
+  </div>
   <fieldset class="sort" aria-label="Sort results by">
     <label>
       <input
@@ -81,8 +85,12 @@
       Date
     </label>
   </fieldset>
-  <button type="submit" disabled={search.snapshot.loading}>Search</button>
-  <button type="button" bind:this={filterBtnEl} onclick={togglePopover}>🔧 Filters</button>
+  <button class="primary" type="submit" disabled={search.snapshot.loading}>
+    {search.snapshot.loading ? "Searching…" : "Search"}
+  </button>
+  <button class:active={popoverOpen} type="button" bind:this={filterBtnEl} onclick={togglePopover}>
+    Filters
+  </button>
 </form>
 
 {#if popoverOpen}
@@ -96,30 +104,87 @@
 
 <style>
   .bar {
-    display: flex; gap: 6px; padding: 6px 12px;
-    background: #fafbfd; border-bottom: 1px solid #e0e3e8;
+    display: flex; gap: 8px; padding: 10px 14px;
+    background: var(--surface); border-bottom: 1px solid var(--border);
     align-items: center;
   }
+  .search-field {
+    position: relative;
+    flex: 1;
+  }
+  .search-icon {
+    position: absolute;
+    left: 13px;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    border: 1.8px solid var(--fg-faint);
+    border-radius: 50%;
+    transform: translateY(-56%);
+    pointer-events: none;
+  }
+  .search-icon::after {
+    content: "";
+    position: absolute;
+    width: 6px;
+    border-top: 1.8px solid var(--fg-faint);
+    right: -5px;
+    bottom: -3px;
+    transform: rotate(45deg);
+  }
   input[type="search"] {
-    flex: 1; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px;
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 12px 8px 38px;
+    border-color: var(--border);
+    border-radius: 10px;
+    background: var(--surface-subtle);
   }
   fieldset.sort {
-    display: flex; gap: 10px; align-items: center;
-    border: none; padding: 0; margin: 0;
-    font-size: 12px; color: #444;
+    display: flex; gap: 2px; align-items: center;
+    border: 1px solid var(--border); padding: 3px; margin: 0;
+    border-radius: 9px; background: var(--surface-subtle);
+    font-size: 11px; color: var(--fg-muted);
   }
   fieldset.sort label {
+    position: relative;
     display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+    padding: 5px 8px;
+    border-radius: 6px;
   }
-  fieldset.sort input[type="radio"] { margin: 0; }
+  fieldset.sort label:has(input:checked) {
+    background: var(--surface);
+    color: var(--fg);
+    box-shadow: var(--shadow-sm);
+  }
+  fieldset.sort input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
   button {
-    padding: 4px 10px; background: #fff; border: 1px solid #ccc;
-    border-radius: 4px; cursor: pointer;
+    min-height: 38px;
+    padding: 7px 12px;
   }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.primary {
+    min-width: 78px;
+    border-color: var(--accent);
+    background: var(--accent);
+    color: white;
+  }
+  button.primary:hover:not(:disabled) {
+    border-color: var(--accent-hover);
+    background: var(--accent-hover);
+  }
+  button.active {
+    border-color: #bdbdeb;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+  }
   .popover {
-    position: absolute; right: 12px; top: 40px; background: #fff;
-    border: 1px solid #ccc; padding: 12px; border-radius: 4px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    position: absolute; right: 14px; top: 108px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius-md);
+    box-shadow: 0 16px 42px rgba(31, 35, 61, 0.18);
+    z-index: 80;
   }
 </style>

@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { search } from "./search.svelte";
 import { emptyFilters } from "../api/search";
+import { settings } from "./settings.svelte";
 
 vi.mock("../tauri", () => ({
   runSearch: vi.fn(),
 }));
 
 import { runSearch } from "../tauri";
+
+beforeEach(() => {
+  settings.resetForTest();
+});
 
 afterEach(() => {
   search.reset();
@@ -45,6 +50,30 @@ describe("search store", () => {
     expect(search.snapshot.results.length).toBe(1);
     expect(search.snapshot.tookMs).toBe(42.0);
     expect(search.snapshot.loading).toBe(false);
+  });
+
+  it("uses the configured page size and fallback language", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue({ results: [], next_cursor: null, total_estimate: null, took_ms: 1 });
+    settings.setPageSize(25);
+    settings.setDefaultLanguage("DE");
+    search.setQuery("invoice");
+    await search.submit();
+    expect(runSearch).toHaveBeenCalledWith(expect.objectContaining({
+      limit: 25,
+      filters: expect.objectContaining({ lang: "de" }),
+    }));
+  });
+
+  it("lets an explicit search language override the configured default", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue({ results: [], next_cursor: null, total_estimate: null, took_ms: 1 });
+    settings.setDefaultLanguage("de");
+    search.setFilters({ ...emptyFilters(), language: "fr" });
+    await search.submit();
+    expect(runSearch).toHaveBeenCalledWith(expect.objectContaining({
+      filters: expect.objectContaining({ lang: "fr" }),
+    }));
   });
 
   it("submit() failure surfaces errorMessage and clears loading", async () => {

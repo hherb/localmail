@@ -15,7 +15,7 @@
   }>();
 
   function csp(): string {
-    const imgSrc = allowExternalImages ? "*" : "'self' data:";
+    const imgSrc = allowExternalImages ? "* data:" : "'self' data:";
     return [
       "default-src 'none'",
       `img-src ${imgSrc}`,
@@ -30,13 +30,23 @@
     return `<!doctype html><html><head>` +
            `<meta http-equiv="Content-Security-Policy" content="${csp()}">` +
            `<base target="_blank">` +
-           `<style>body{font:14px/1.4 system-ui,sans-serif;margin:8px;color:#222}</style>` +
+           `<style>html{height:100%;overflow-y:auto!important}` +
+           `body{min-height:calc(100% - 40px);overflow:visible!important;font:14px/1.55 system-ui,sans-serif;margin:20px;color:#202335}` +
+           `img{max-width:100%;height:auto}a{color:#4b4bc3}</style>` +
            `</head><body>${html}</body></html>`;
   }
 </script>
 
-<iframe sandbox="" srcdoc={srcdoc()} title="message body"></iframe>
+<iframe sandbox="" srcdoc={srcdoc()} title="message body" scrolling="yes"></iframe>
 
 <style>
-  iframe { width: 100%; height: 100%; border: none; background: #fff; }
+  iframe {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    overflow: auto;
+    border: none;
+    background: #fff;
+  }
 </style>

@@ -11,14 +11,21 @@ vi.mock("../../lib/api/change_password", () => ({
 // Mock the full Tauri bridge so the auth store can be exercised without
 // hitting the real OS keyring or any HTTPS endpoint.
 const logoutRustMock = vi.hoisted(() => vi.fn(async () => undefined));
+const probeServerMock = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/tauri", () => ({
-  probeServer: vi.fn(),
+  probeServer: probeServerMock,
   confirmTrust: vi.fn(),
   login: vi.fn(),
   logout: logoutRustMock,
   refresh: vi.fn(),
   whoami: vi.fn(),
   getCapabilities: vi.fn(),
+  getConnectionInfo: vi.fn(),
+  listAccounts: vi.fn(),
+  listFolders: vi.fn(),
+  listMessages: vi.fn(),
+  getMessage: vi.fn(),
+  runSearch: vi.fn(),
 }));
 
 import SettingsServer from "./SettingsServer.svelte";
@@ -94,20 +101,32 @@ describe("SettingsServer", () => {
     expect(logoutRustMock).toHaveBeenCalledTimes(1);
   });
 
-  it("clicking Re-trust cert reveals the current pin (non-destructive)", async () => {
+  it("re-runs the secure probe when verifying the certificate again", async () => {
+    probeServerMock.mockResolvedValue({
+      api_major: 1,
+      api_minor: 0,
+      server_version: "0.3.0",
+      cert_sha256: "deadbeef",
+    });
+    await auth.probe("https://localhost:8443");
+    await auth.confirmTrust();
     const { container } = render(SettingsServer);
-    // Before click — message should not exist yet.
-    expect(
-      container.querySelector('[data-testid="retrust-message"]'),
-    ).toBeFalsy();
     const btn = container.querySelector(
       '[data-testid="retrust-button"]',
     ) as HTMLButtonElement;
     expect(btn).toBeTruthy();
     await fireEvent.click(btn);
-    const msg = container.querySelector('[data-testid="retrust-message"]');
-    expect(msg).toBeTruthy();
-    expect(msg?.textContent).toContain("Current pin");
+    expect(probeServerMock).toHaveBeenLastCalledWith("https://localhost:8443");
+    expect(auth.snapshot.phase).toBe("needs_trust");
+  });
+
+  it("Change server logs out and returns to connection setup", async () => {
+    const { container } = render(SettingsServer);
+    await fireEvent.click(
+      container.querySelector('[data-testid="change-server-button"]') as HTMLButtonElement,
+    );
+    expect(logoutRustMock).toHaveBeenCalled();
+    expect(auth.snapshot.phase).toBe("connecting");
   });
 
   it("renders fallback strings when not connected / logged out", () => {

@@ -8,6 +8,7 @@ describe("HtmlBody", () => {
     const iframe = container.querySelector("iframe");
     expect(iframe).toBeTruthy();
     expect(iframe?.getAttribute("sandbox")).toBe("");  // empty sandbox = strictest
+    expect(iframe?.getAttribute("scrolling")).toBe("yes");
   });
 
   it("srcdoc embeds a CSP meta tag", () => {
@@ -24,6 +25,13 @@ describe("HtmlBody", () => {
     const srcdoc = container.querySelector("iframe")?.getAttribute("srcdoc") ?? "";
     expect(srcdoc).toContain("img-src *");
     expect(srcdoc).not.toContain("img-src 'self' data:");
+  });
+
+  it("forces the embedded document to remain vertically scrollable", () => {
+    const { container } = render(HtmlBody, { props: { html: "<p>hi</p>", allowExternalImages: false } });
+    const srcdoc = container.querySelector("iframe")?.getAttribute("srcdoc") ?? "";
+    expect(srcdoc).toContain("overflow-y:auto!important");
+    expect(srcdoc).toContain("overflow:visible!important");
   });
 
   it("includes the server-sanitised HTML payload in srcdoc body", () => {

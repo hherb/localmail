@@ -66,6 +66,7 @@
 </script>
 
 <aside class="tree">
+  <div class="rail-heading">Mailbox</div>
   <ul>
     <li>
       <button
@@ -74,7 +75,8 @@
         class:active={isSelected(null, null)}
         onclick={selectAll}
       >
-        📥 All Mail
+        <span class="all-icon" aria-hidden="true"></span>
+        <span>All mail</span>
       </button>
     </li>
     {#each mail.snapshot.accounts as account (account.id)}
@@ -86,7 +88,7 @@
           onclick={() => selectAccount(account.id)}
         >
           <span class="caret">{expanded.has(account.id) ? "▾" : "▸"}</span>
-          <span class="icon">{account.capabilities.is_archive_only ? "📦" : "✉️"}</span>
+          <span class="icon" class:archive={account.capabilities.is_archive_only} aria-hidden="true"></span>
           <span class="label">{account.name}</span>
         </button>
         {#if expanded.has(account.id)}
@@ -115,10 +117,18 @@
   .tree {
     height: 100%;
     overflow-y: auto;
-    background: #fafafa;
-    border-right: 1px solid #e5e5e5;
-    padding: 8px 0;
+    background: var(--surface-subtle);
+    border-right: 1px solid var(--border);
+    padding: 10px 8px;
     font-size: 13px;
+  }
+  .rail-heading {
+    padding: 1px 9px 8px;
+    color: var(--fg-faint);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
   }
   ul {
     list-style: none;
@@ -126,32 +136,64 @@
     margin: 0;
   }
   .row {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 7px;
     width: 100%;
     text-align: left;
-    padding: 6px 12px;
+    min-height: 34px;
+    padding: 6px 9px;
     background: none;
     border: none;
-    color: #222;
+    color: var(--fg-muted);
     font: inherit;
     cursor: pointer;
   }
   .row:hover {
-    background: #eef0f3;
+    background: #eef0f6;
   }
   .row.active {
-    background: #d8e6ff;
-    color: #1a4fc7;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
     font-weight: 600;
   }
   .row.root {
     font-weight: 600;
   }
+  .all-icon, .icon {
+    position: relative;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: var(--surface);
+  }
+  .all-icon::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    top: 6px;
+    height: 4px;
+    border: 1px solid var(--accent);
+    border-top: 0;
+  }
+  .icon::before {
+    content: "";
+    position: absolute;
+    inset: 4px 3px;
+    border: 1px solid #747d94;
+    border-radius: 2px;
+  }
+  .icon.archive::before { border-style: dashed; }
+  .caret { width: 8px; color: var(--fg-faint); font-size: 9px; }
+  .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .folders {
-    padding-left: 14px;
+    padding-left: 22px;
   }
   .folder {
-    padding-left: 24px;
+    padding-left: 14px;
     font-size: 12px;
   }
 </style>

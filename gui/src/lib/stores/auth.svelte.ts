@@ -15,6 +15,7 @@
  */
 import {
   confirmTrust as rustConfirmTrust,
+  getConnectionInfo,
   getCapabilities,
   login as rustLogin,
   logout as rustLogout,
@@ -74,8 +75,13 @@ class AuthStore {
 
   async refreshState(): Promise<void> {
     try {
-      const me = await whoami();
-      const caps = await getCapabilities();
+      const [me, caps, connection] = await Promise.all([
+        whoami(),
+        getCapabilities(),
+        getConnectionInfo(),
+      ]);
+      this.#serverUrl = connection.server_url;
+      this.#certPin = connection.cert_sha256_pin;
       // === true normalises the undefined an older server sends.
       this.#state = {
         phase: "logged_in",
@@ -146,6 +152,19 @@ class AuthStore {
     } catch (err: unknown) {
       this.#state = { phase: "logged_out", errorMessage: formatError(err) };
     }
+  }
+
+  async changeServer(): Promise<void> {
+    try {
+      await rustLogout();
+    } finally {
+      this.reset();
+    }
+  }
+
+  async retrustServer(): Promise<void> {
+    if (!this.#serverUrl) throw new Error("No connected server to re-trust.");
+    await this.probe(this.#serverUrl);
   }
 }
 

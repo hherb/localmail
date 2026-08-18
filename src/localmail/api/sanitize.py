@@ -184,7 +184,12 @@ _DATA_IMAGE_RE = re.compile(
 )
 
 
-def sanitize_html(html: str, *, cid_to_sha: dict[str, str]) -> str:
+def sanitize_html(
+    html: str,
+    *,
+    cid_to_sha: dict[str, str],
+    allow_external_images: bool = False,
+) -> str:
     """Return a sanitized HTML string.
 
     Args:
@@ -206,7 +211,10 @@ def sanitize_html(html: str, *, cid_to_sha: dict[str, str]) -> str:
         html,
         tags=set(_ALLOWED_TAGS),
         attributes=_ALLOWED_ATTRS,
-        attribute_filter=_make_attribute_filter(cid_to_sha),
+        attribute_filter=_make_attribute_filter(
+            cid_to_sha,
+            allow_external_images=allow_external_images,
+        ),
         url_schemes=set(_ALLOWED_URL_SCHEMES),
         clean_content_tags=set(_CLEAN_CONTENT_TAGS),
         filter_style_properties=set(_ALLOWED_STYLE_PROPERTIES),
@@ -216,6 +224,8 @@ def sanitize_html(html: str, *, cid_to_sha: dict[str, str]) -> str:
 
 def _make_attribute_filter(
     cid_to_sha: dict[str, str],
+    *,
+    allow_external_images: bool = False,
 ) -> Callable[[str, str, str], str | None]:
     """Build the per-call ``attribute_filter`` for ``nh3.clean``.
 
@@ -246,7 +256,11 @@ def _make_attribute_filter(
     """
     def _filter(tag: str, attr: str, value: str) -> str | None:
         if tag == "img" and attr == "src":
-            return _rewrite_img_src(value, cid_to_sha)
+            return _rewrite_img_src(
+                value,
+                cid_to_sha,
+                allow_external_images=allow_external_images,
+            )
         if attr == "href":
             normalised = _LEADING_URL_TRIM_RE.sub("", value).lower()
             if normalised.startswith(_HREF_DENY_SCHEMES):
@@ -256,7 +270,12 @@ def _make_attribute_filter(
     return _filter
 
 
-def _rewrite_img_src(value: str, cid_to_sha: dict[str, str]) -> str | None:
+def _rewrite_img_src(
+    value: str,
+    cid_to_sha: dict[str, str],
+    *,
+    allow_external_images: bool = False,
+) -> str | None:
     """Decide what to do with the ``src`` of an ``<img>`` element.
 
     Returns the rewritten value (or ``None`` to drop the attribute):
@@ -267,9 +286,12 @@ def _rewrite_img_src(value: str, cid_to_sha: dict[str, str]) -> str | None:
       stripped before lookup.
     - ``data:image/<mime>;base64,<data>`` passes through iff it matches
       ``_DATA_IMAGE_RE`` end-to-end (no embedded quote/lt/gt).
-    - Anything else (``http(s)://…``, ``//tracker/…``, relative paths,
-      ``javascript:…``, …) returns ``None`` — image trackers are blocked
-      regardless of how the attacker tries to dress them up.
+    - Absolute ``http(s)://`` URLs pass only when the authenticated caller
+      explicitly opts in via ``allow_external_images``. They remain stripped
+      from the default API response, preserving the tracker-safe contract for
+      every other client.
+    - Anything else (``//tracker/…``, relative paths, ``javascript:…``, …)
+      returns ``None``.
     """
     cid_match = _CID_RE.match(value.strip("<>"))
     if cid_match:
@@ -280,4 +302,9 @@ def _rewrite_img_src(value: str, cid_to_sha: dict[str, str]) -> str | None:
         return f"/v1/attachments/{sha}"
     if _DATA_IMAGE_RE.match(value):
         return value
+    if allow_external_images:
+        normalised = _LEADING_URL_TRIM_RE.sub("", value)
+        lowered = normalised.lower()
+        if lowered.startswith(("https://", "http://")):
+            return normalised
     return None

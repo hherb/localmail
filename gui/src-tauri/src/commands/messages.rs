@@ -57,18 +57,25 @@ pub struct MessageDetail {
     pub headers: Option<Value>,
 }
 
-pub async fn get_message(store: &KeyringStore, message_id: &str) -> Result<MessageDetail, AuthError> {
+pub async fn get_message(
+    store: &KeyringStore,
+    message_id: &str,
+    allow_external_images: bool,
+) -> Result<MessageDetail, AuthError> {
     let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
-    let endpoint = format!("{url}v1/messages/{message_id}");
+    let endpoint = format!("{url}v1/messages/{message_id}?external_images={allow_external_images}");
     let detail: MessageDetail = http_get_json(&client, &endpoint, Some(&token)).await?;
     Ok(detail)
 }
 
 #[tauri::command]
-pub async fn get_message_cmd(message_id: String) -> Result<MessageDetail, AuthError> {
+pub async fn get_message_cmd(
+    message_id: String,
+    allow_external_images: bool,
+) -> Result<MessageDetail, AuthError> {
     let store = KeyringStore::new();
-    get_message(&store, &message_id).await
+    get_message(&store, &message_id, allow_external_images).await
 }
 
 #[cfg(test)]
@@ -83,16 +90,18 @@ mod tests {
     #[tokio::test]
     async fn get_message_without_connection_returns_not_connected() {
         let store = fake_store();
-        let err = get_message(&store, "1").await.unwrap_err();
+        let err = get_message(&store, "1", false).await.unwrap_err();
         assert!(matches!(err, AuthError::NotConnected));
     }
 
     #[tokio::test]
     async fn get_message_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
-        let err = get_message(&store, "1").await.unwrap_err();
+        let err = get_message(&store, "1", false).await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
     }
 }

@@ -55,6 +55,11 @@ export interface ProbeResult {
   cert_sha256: string;
 }
 
+export interface ConnectionInfo {
+  server_url: string;
+  cert_sha256_pin: string;
+}
+
 export interface LoginSummary {
   username: string;
   expires_at: string;
@@ -84,6 +89,10 @@ export async function probeServer(url: string): Promise<ProbeResult> {
 
 export async function confirmTrust(url: string, certSha256: string): Promise<void> {
   return invoke<void>("confirm_trust_cmd", { url, certSha256 });
+}
+
+export async function getConnectionInfo(): Promise<ConnectionInfo> {
+  return invoke<ConnectionInfo>("get_connection_info_cmd");
 }
 
 export async function login(username: string, password: string): Promise<LoginSummary> {
@@ -118,8 +127,11 @@ export async function listRecentMessages(): Promise<ChangesResponse> {
   return invoke<ChangesResponse>("list_recent_messages_cmd");
 }
 
-export async function getMessage(messageId: string): Promise<MessageDetail> {
-  return invoke<MessageDetail>("get_message_cmd", { messageId });
+export async function getMessage(
+  messageId: string,
+  allowExternalImages = false,
+): Promise<MessageDetail> {
+  return invoke<MessageDetail>("get_message_cmd", { messageId, allowExternalImages });
 }
 
 export async function runSearch(req: SearchRequest): Promise<SearchResponse> {

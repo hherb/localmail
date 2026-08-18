@@ -23,8 +23,7 @@ import { runSearch } from "../tauri";
 import { formatError } from "../format_error";
 import { isSearchCursorExpired } from "../search_cursor_expired";
 import { isCursorRejected, statedSort } from "../search_paging";
-
-const DEFAULT_LIMIT = 50;
+import { settings } from "./settings.svelte";
 
 export type SortMode = "rank" | "date";
 
@@ -94,8 +93,16 @@ class SearchStore {
     const f = s.filters;
     if (f.accountIds.length > 0 || f.folderIds.length > 0) return false;
     if (f.from || f.to || f.subject || f.after || f.before) return false;
-    if (f.hasAttachment === true) return false;
+    if (f.dateFrom || f.dateTo || f.language || settings.snapshot.defaultLanguage) return false;
+    if (f.hasAttachment !== null) return false;
     return true;
+  }
+
+  #wireFilters() {
+    const filters = this.#state.filters.language || !settings.snapshot.defaultLanguage
+      ? this.#state.filters
+      : { ...this.#state.filters, language: settings.snapshot.defaultLanguage };
+    return filtersUiToWire(filters);
   }
 
   async submit(): Promise<void> {
@@ -105,8 +112,8 @@ class SearchStore {
     try {
       const resp = await runSearch({
         query: this.#state.query,
-        filters: filtersUiToWire(this.#state.filters),
-        limit: DEFAULT_LIMIT,
+        filters: this.#wireFilters(),
+        limit: settings.snapshot.pageSize,
         cursor: null,
         sort: statedSort(null, this.#state.sort),
       });
@@ -145,8 +152,8 @@ class SearchStore {
       try {
         resp = await runSearch({
           query: this.#state.query,
-          filters: filtersUiToWire(this.#state.filters),
-          limit: DEFAULT_LIMIT,
+          filters: this.#wireFilters(),
+          limit: settings.snapshot.pageSize,
           cursor,
           sort: statedSort(cursor, this.#state.sort),
         });
@@ -156,8 +163,8 @@ class SearchStore {
         // the user already has, append the remainder.
         const fresh = await runSearch({
           query: this.#state.query,
-          filters: filtersUiToWire(this.#state.filters),
-          limit: DEFAULT_LIMIT,
+          filters: this.#wireFilters(),
+          limit: settings.snapshot.pageSize,
           cursor: null,
           sort: statedSort(null, this.#state.sort),
         });

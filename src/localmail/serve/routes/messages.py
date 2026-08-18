@@ -64,6 +64,7 @@ def detail(
     message_id: str,
     request: Request,
     headers: str = Query("compact"),
+    external_images: bool = Query(False),
     user=Depends(get_authenticated_user),
 ) -> dict[str, Any]:
     mid = parse_int_id(message_id, field="message_id")
@@ -74,6 +75,7 @@ def detail(
             conn, mid,
             allowed_account_ids=allowed,
             full_headers=(headers == "full"),
+            allow_external_images=external_images,
         )
 
 

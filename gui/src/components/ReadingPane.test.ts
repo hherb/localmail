@@ -81,6 +81,7 @@ describe("ReadingPane body-mode toggle", () => {
   });
 
   it("Load images button visible when bodyMode=html and not yet allowed", async () => {
+    settings.setImagePolicy("ask");
     render(ReadingPane);
     (mail as any).snapshot.selectedMessage = {
       id: "1", subject: null, from: { name: null, address: null },
@@ -91,6 +92,36 @@ describe("ReadingPane body-mode toggle", () => {
     (mail as any).snapshot.bodyMode = "html";
     await Promise.resolve();
     expect(screen.getByRole("button", { name: /load images/i })).toBeTruthy();
+  });
+
+  it("keeps remote images blocked without offering an override in block mode", async () => {
+    settings.setImagePolicy("block");
+    (mail as any).snapshot.selectedMessage = {
+      id: "1", subject: null, from: { name: null, address: null },
+      to: [], cc: [], bcc: [], date: null, body_text: null,
+      body_html: '<img src="https://tracker.example/pixel.png">', attachments: [],
+      account: { id: "1", name: null, address: null }, folders: [],
+    };
+    (mail as any).snapshot.bodyMode = "html";
+    render(ReadingPane);
+    await Promise.resolve();
+    expect(screen.queryByRole("button", { name: /load images/i })).toBeNull();
+    expect(screen.getByText(/remote images blocked/i)).toBeTruthy();
+  });
+
+  it("allows remote images automatically in allow mode", async () => {
+    settings.setImagePolicy("allow");
+    (mail as any).snapshot.selectedMessage = {
+      id: "1", subject: null, from: { name: null, address: null },
+      to: [], cc: [], bcc: [], date: null, body_text: null,
+      body_html: '<img src="https://images.example/photo.jpg">', attachments: [],
+      account: { id: "1", name: null, address: null }, folders: [],
+    };
+    (mail as any).snapshot.bodyMode = "html";
+    const { container } = render(ReadingPane);
+    await Promise.resolve();
+    const srcdoc = container.querySelector("iframe")?.getAttribute("srcdoc") ?? "";
+    expect(srcdoc).toContain("img-src * data:");
   });
 });
 

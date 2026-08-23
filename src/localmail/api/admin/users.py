@@ -52,6 +52,7 @@ class UserSummary:
     username: str
     is_admin: bool
     disabled: bool
+    is_service: bool
     created_at: datetime
 
 
@@ -68,6 +69,7 @@ class UserDetail:
     username: str
     is_admin: bool
     disabled: bool
+    is_service: bool
     created_at: datetime
     account_grants: list[AccountGrant]
 
@@ -77,7 +79,8 @@ def list_users(conn: psycopg.Connection) -> list[UserSummary]:
     with conn.cursor(row_factory=class_row(UserSummary)) as cur:
         cur.execute(
             "SELECT id, username, (is_admin IS TRUE) AS is_admin, "
-            "       (disabled_at IS NOT NULL) AS disabled, created_at "
+            "       (disabled_at IS NOT NULL) AS disabled, "
+            "       (is_service IS TRUE) AS is_service, created_at "
             "  FROM api_users ORDER BY username"
         )
         return cur.fetchall()
@@ -88,7 +91,8 @@ def get_user(conn: psycopg.Connection, user_id: int) -> UserDetail:
     with conn.cursor(row_factory=class_row(UserSummary)) as cur:
         cur.execute(
             "SELECT id, username, (is_admin IS TRUE) AS is_admin, "
-            "       (disabled_at IS NOT NULL) AS disabled, created_at "
+            "       (disabled_at IS NOT NULL) AS disabled, "
+            "       (is_service IS TRUE) AS is_service, created_at "
             "  FROM api_users WHERE id = %s",
             (user_id,),
         )
@@ -110,7 +114,8 @@ def get_user(conn: psycopg.Connection, user_id: int) -> UserDetail:
         ]
     return UserDetail(
         id=user.id, username=user.username, is_admin=user.is_admin,
-        disabled=user.disabled, created_at=user.created_at, account_grants=grants,
+        disabled=user.disabled, is_service=user.is_service,
+        created_at=user.created_at, account_grants=grants,
     )
 
 
@@ -312,12 +317,20 @@ def revoke_sessions(conn: psycopg.Connection, user_id: int) -> None:
 
 def action_flags(
     *, target_is_active_admin: bool, active_admin_count: int, is_self: bool,
+    is_service: bool,
 ) -> dict[str, bool]:
     """Which edit-screen controls to render disabled (UX only; not enforcement).
 
     `block_demote` / `block_delete` fire for the logged-in admin's own row
     (self-action) or when the action would orphan the last admin.
     `block_disable` fires only on the orphan rule (self-disable is permitted).
+    `block_promote` / `block_password` fire on an API-key principal, matching
+    `set_admin`/`set_password`'s own refusals — the two controls that would
+    otherwise dead-end at a 400.
+
+    `is_service` is keyword-only with no default because `False` is the
+    permissive value here: it re-enables both controls, so it must not be
+    reachable by forgetting to write it.
     """
     orphan = would_orphan_last_admin(
         target_is_active_admin=target_is_active_admin,
@@ -327,4 +340,6 @@ def action_flags(
         "block_demote": is_self or orphan,
         "block_disable": orphan,
         "block_delete": is_self or orphan,
+        "block_promote": is_service,
+        "block_password": is_service,
     }

@@ -154,14 +154,26 @@ def test_list_never_carries_the_raw_key(db_conn):
     assert created.raw_key not in rendered
 
 
-def test_the_raw_key_is_stored_nowhere(db_conn):
+def test_the_raw_key_is_stored_in_no_column_of_any_row(db_conn):
+    """Secrecy: the spec's requirement is every column, not the hash column —
+    and `raw_key in token_sha256` cannot be true either way, a 47-byte needle
+    in a 32-byte haystack."""
     created = svc.create_key(db_conn, name="bot", account_ids=[])
     db_conn.commit()
+    needle = created.raw_key
     with db_conn.cursor() as cur:
-        cur.execute("SELECT token_sha256, api_key_name FROM api_tokens")
+        cur.execute("SELECT * FROM api_tokens")
         rows = cur.fetchall()
-    assert created.raw_key.encode() not in bytes(rows[0][0])
-    assert rows[0][1] == "bot"
+        columns = [d.name for d in cur.description or []]
+    assert rows, "expected the minted key's row"
+    assert "token_sha256" in columns
+    for row in rows:
+        for column, value in zip(columns, row):
+            rendered = value.decode("utf-8", "replace") if isinstance(
+                value, (bytes, bytearray, memoryview)
+            ) else str(value)
+            assert needle not in rendered, column
+    assert [r[columns.index("api_key_name")] for r in rows] == ["bot"]
 
 
 def test_set_grant_refuses_a_human_principal(db_conn):

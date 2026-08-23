@@ -18,6 +18,10 @@
       {% else %}
         <p>No accounts configured yet.</p>
       {% endfor %}
+      <p class="field-hint">Re-using an existing bot's name keeps the grants it
+         already has; ticking accounts here only adds to them. To take an
+         account away, revoke the grant with
+         <code>localmail revoke-account NAME ACCOUNT</code>.</p>
     </fieldset>
     <button type="submit">Create key</button>
   </form>

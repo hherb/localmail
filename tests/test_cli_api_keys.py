@@ -80,3 +80,18 @@ def test_remove_deletes_the_principal(runner, db_conn):
 
 def test_revoke_unknown_is_an_error(runner, db_conn):
     assert runner.invoke(main, ["revoke-api-key", "ghost"]).exit_code != 0
+
+
+def test_remove_unknown_is_an_error(runner, db_conn):
+    assert runner.invoke(main, ["remove-api-key", "ghost"]).exit_code != 0
+
+
+def test_list_api_users_marks_a_service_principal(runner, db_conn):
+    """A bot listed among people, with nothing saying which is which, is the
+    same false impression the Users screen carried."""
+    runner.invoke(main, ["add-api-key", "bot"], catch_exceptions=False)
+    runner.invoke(main, ["add-api-user", "amy", "--password", "pw"],
+                  catch_exceptions=False)
+    out = runner.invoke(main, ["list-api-users"], catch_exceptions=False).output
+    assert "bot [service]" in out
+    assert "amy\n" in out

@@ -83,9 +83,13 @@ def test_a_user_may_hold_many_session_tokens(db_conn):
 
 
 def test_is_service_defaults_false(db_conn):
-    uid = _user(db_conn, "human")
+    """Inserted WITHOUT naming the column — naming it tests a round-trip, not
+    the DEFAULT that decides what every pre-0036 row means."""
     with db_conn.cursor() as cur:
-        cur.execute("SELECT is_service FROM api_users WHERE id = %s", (uid,))
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash) "
+            "VALUES ('human', 'x') RETURNING id, is_service"
+        )
         row = cur.fetchone()
     assert row is not None
-    assert row[0] is False
+    assert row[1] is False

@@ -841,7 +841,13 @@ extended `accounts` with `folder_allow`, `folder_deny`, `folder_deny_flags`,
 `sync_enabled`, `updated_at`, lifted the `NOT NULL` constraint from
 `imap_host`/`imap_port`, widened `auth_method` to include `'archive'`, and
 added the `accounts_live_requires_host` check constraint (live accounts must
-have a host). Dedup model:
+have a host). Migration `0036_api_keys.sql` extended `api_tokens` with
+`api_key_name` (NULL = a session token; non-NULL = an API key, and the column
+*is* the credential kind), dropped `NOT NULL` from `api_tokens.expires_at`
+under the `api_tokens_only_keys_are_immortal` CHECK, added the partial unique
+index `api_tokens_one_key_per_service_user`, and extended `api_users` with
+`is_service` (default FALSE — an API key's principal, never a person). Dedup
+model:
 
 - **Messages — per-account, by `Message-Id`**: same Message-Id in INBOX + 3
   Gmail labels produces one `messages` row + four `message_labels` rows. The
@@ -2358,6 +2364,19 @@ for the full design.
     otherwise become a second way to delete a person.
   - **`create_key` runs in one transaction.** A failure after the principal is
     created would leave a row that the operator's retry then collides with.
+  - **A service row is visible as one wherever users are listed.**
+    `UserSummary`/`UserDetail` carry `is_service`, `/admin/users` badges it,
+    and `localmail list-api-users` marks it `[service]`. They stay **listed** —
+    hiding them trades one false impression for another — but the two controls
+    that dead-end at `_reject_service_row`'s 400, Reset password and Promote,
+    render disabled through `action_flags`. Its `is_service` parameter is
+    keyword-only with no default (#234's shape): `False` re-enables both, so
+    it must not be reachable by forgetting to write it.
+  - **The panel's account checklist adds; it never replaces.** Re-keying an
+    existing bot only ever grants (`create_key`'s reuse branch is additive by
+    design, so re-keying cannot silently narrow), while a form of unticked
+    boxes reads as a replacement. The fix is a note under the checklist, not a
+    grants-editing route — take a grant away with `localmail revoke-account`.
 - **Admin session revocation (#113)**: migration
   `0022_api_users_sessions_invalidated_at.sql` adds a nullable
   `sessions_invalidated_at TIMESTAMPTZ` column on `api_users`. The

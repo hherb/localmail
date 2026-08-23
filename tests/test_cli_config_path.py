@@ -28,6 +28,8 @@ DEFAULT_DSN = "postgresql:///localmail_default_config"
 #: Every command whose handler resolves a DSN. The issue named five (the ones
 #: that call `load_config()` *as well*); these four also route through `_dsn()`
 #: and were equally affected.
+# Entries are argv fragments, not bare names: the API-key and API-user commands
+# take a NAME, and click would reject the invocation before the DSN is resolved.
 DSN_CONSUMING_COMMANDS = [
     "extract-backfill",
     "embed-backfill",
@@ -38,6 +40,13 @@ DSN_CONSUMING_COMMANDS = [
     "retry-failed-embeddings",
     "list-failed-extractions",
     "retry-failed-extractions",
+    "add-api-key probe_bot",
+    "list-api-keys",
+    "revoke-api-key probe_bot",
+    "remove-api-key probe_bot",
+    "add-api-user probe_user --password pw",
+    "list-api-users",
+    "remove-api-user probe_user",
 ]
 
 
@@ -90,7 +99,7 @@ def test_config_option_selects_the_database(
     command: str, dsn_probe: list[str], two_configs: Path
 ) -> None:
     """`localmail --config PATH <command>` must reach the DB named by PATH."""
-    result = CliRunner().invoke(main, ["--config", str(two_configs), command])
+    result = CliRunner().invoke(main, ["--config", str(two_configs), *command.split()])
     assert isinstance(result.exception, _ProbeTripped), result.output
     assert dsn_probe == [NAMED_DSN]
 
@@ -101,6 +110,6 @@ def test_without_the_option_the_default_config_is_still_used(
 ) -> None:
     """The counterpart: threading `--config` through must not break the far more
     common invocation that omits it."""
-    result = CliRunner().invoke(main, [command])
+    result = CliRunner().invoke(main, command.split())
     assert isinstance(result.exception, _ProbeTripped), result.output
     assert dsn_probe == [DEFAULT_DSN]

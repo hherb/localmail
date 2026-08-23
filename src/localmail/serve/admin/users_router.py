@@ -52,6 +52,7 @@ def _summary_dict(u: svc.UserSummary) -> dict:
         "username": u.username,
         "is_admin": u.is_admin,
         "disabled": u.disabled,
+        "is_service": u.is_service,
         "created_at": u.created_at.isoformat(),
     }
 
@@ -62,6 +63,7 @@ def _detail_dict(u: svc.UserDetail) -> dict:
         "username": u.username,
         "is_admin": u.is_admin,
         "disabled": u.disabled,
+        "is_service": u.is_service,
         "created_at": u.created_at.isoformat(),
         "account_grants": [
             {"account_id": str(g.account_id), "account_name": g.account_name,

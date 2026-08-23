@@ -243,19 +243,35 @@ def test_revoke_sessions_unknown_user_raises(db_conn):
 
 
 @pytest.mark.parametrize(
-    "is_admin,disabled,count,is_self,expect",
+    "is_admin,disabled,count,is_self,is_service,expect",
     [
-        (True, False, 1, False, {"block_demote": True,  "block_disable": True,  "block_delete": True}),
-        (True, False, 2, False, {"block_demote": False, "block_disable": False, "block_delete": False}),
-        (True, False, 2, True,  {"block_demote": True,  "block_disable": False, "block_delete": True}),
-        (False, False, 5, False, {"block_demote": False, "block_disable": False, "block_delete": False}),
-        (False, False, 5, True,  {"block_demote": True,  "block_disable": False, "block_delete": True}),
+        (True, False, 1, False, False, {"block_demote": True,  "block_disable": True,  "block_delete": True,  "block_promote": False, "block_password": False}),
+        (True, False, 2, False, False, {"block_demote": False, "block_disable": False, "block_delete": False, "block_promote": False, "block_password": False}),
+        (True, False, 2, True,  False, {"block_demote": True,  "block_disable": False, "block_delete": True,  "block_promote": False, "block_password": False}),
+        (False, False, 5, False, False, {"block_demote": False, "block_disable": False, "block_delete": False, "block_promote": False, "block_password": False}),
+        (False, False, 5, True,  False, {"block_demote": True,  "block_disable": False, "block_delete": True,  "block_promote": False, "block_password": False}),
+        (False, False, 5, False, True,  {"block_demote": False, "block_disable": False, "block_delete": False, "block_promote": True,  "block_password": True}),
     ],
 )
-def test_action_flags(is_admin, disabled, count, is_self, expect):
+def test_action_flags(is_admin, disabled, count, is_self, is_service, expect):
     flags = svc.action_flags(
         target_is_active_admin=(is_admin and not disabled),
         active_admin_count=count,
         is_self=is_self,
+        is_service=is_service,
     )
     assert flags == expect
+
+
+def test_list_and_get_report_a_service_principal(db_conn):
+    """A bot must be distinguishable from a person on the Users screen: the two
+    controls it offers — Reset password and Promote — both dead-end at a 400."""
+    from localmail.api.admin import api_keys as keys_svc
+
+    _insert_user(db_conn, "amy")
+    created = keys_svc.create_key(db_conn, name="my_mail_bot", account_ids=[])
+    db_conn.commit()
+    by_name = {u.username: u for u in svc.list_users(db_conn)}
+    assert by_name["amy"].is_service is False
+    assert by_name["my_mail_bot"].is_service is True
+    assert svc.get_user(db_conn, created.user_id).is_service is True

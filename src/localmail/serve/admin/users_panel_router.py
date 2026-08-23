@@ -54,6 +54,7 @@ def _detail_and_flags(
         target_is_active_admin=(detail.is_admin and not detail.disabled),
         active_admin_count=svc.active_admin_count(conn),
         is_self=(user_id == self_id),
+        is_service=detail.is_service,
     )
     return detail, flags
 

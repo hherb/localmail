@@ -8,5 +8,8 @@ document.addEventListener("click", (ev) => {
   field.select();
   navigator.clipboard.writeText(field.value).then(() => {
     button.textContent = "Copied";
+  }).catch(() => {
+    // No clipboard outside a secure context; the field is selected either way.
+    button.textContent = "Press Ctrl/Cmd-C";
   });
 });

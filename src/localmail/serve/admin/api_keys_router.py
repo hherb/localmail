@@ -86,8 +86,8 @@ def revoke_api_key(
     admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
-    check_csrf(request, admin, x_csrf_token, f"/v1/admin/api-keys/{key_id}")
     uid = parse_int_id(key_id, field="key_id")
+    check_csrf(request, admin, x_csrf_token, f"/v1/admin/api-keys/{uid}")
     pool = request.app.state.pool
     with pool.connection() as conn:
         try:
@@ -103,10 +103,10 @@ def delete_api_key_principal(
     admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> Response:
-    check_csrf(
-        request, admin, x_csrf_token, f"/v1/admin/api-keys/{key_id}/principal"
-    )
     uid = parse_int_id(key_id, field="key_id")
+    check_csrf(
+        request, admin, x_csrf_token, f"/v1/admin/api-keys/{uid}/principal"
+    )
     pool = request.app.state.pool
     with pool.connection() as conn:
         try:
@@ -122,8 +122,8 @@ def set_api_key_grant(
     admin: AdminUser = require_admin(),
     x_csrf_token: str = Header("", alias="X-CSRF-Token"),
 ) -> dict:
-    check_csrf(request, admin, x_csrf_token, f"/v1/admin/api-keys/{key_id}/grants")
     uid = parse_int_id(key_id, field="key_id")
+    check_csrf(request, admin, x_csrf_token, f"/v1/admin/api-keys/{uid}/grants")
     account_id = parse_int_id(body.account_id, field="account_id")
     pool = request.app.state.pool
     with pool.connection() as conn:

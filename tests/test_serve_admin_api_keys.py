@@ -8,7 +8,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from localmail.api.auth import hash_password, hash_token, issue_token
+from localmail.api.auth import hash_password, issue_token
 from localmail.config import ServeConfig
 from localmail.serve.app import create_app
 

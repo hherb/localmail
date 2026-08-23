@@ -89,7 +89,10 @@ def test_nav_links_to_the_panel(client):
     assert 'href="/admin/api-keys"' in client.get("/admin/").text
 
 
-def test_create_shows_the_key_exactly_once(client, db_conn, admin_id):
+def test_create_shows_the_key_on_this_response_and_no_later_one(client, db_conn, admin_id):
+    """The create response carries the key twice on purpose — the full value in
+    the copy field, and a truncated echo in the example header line — so this
+    pins that it appears here at all and never again."""
     aid = _account(db_conn, "work")
     resp = client.post(
         "/admin/api-keys",
@@ -98,9 +101,11 @@ def test_create_shows_the_key_exactly_once(client, db_conn, admin_id):
     )
     assert resp.status_code == 200
     keys = re.findall(r"lmk_[A-Za-z0-9_\-]+", resp.text)
-    assert len(keys) >= 1
+    full = [k for k in keys if len(k) > 12]
+    assert len(full) == 1
     listed = client.get("/admin/api-keys").text
-    assert keys[0] not in listed
+    assert full[0] not in listed
+    assert "lmk_" not in listed
 
 
 def test_create_updates_the_table_out_of_band(client, admin_id):

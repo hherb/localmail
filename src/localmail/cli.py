@@ -1674,16 +1674,24 @@ def remove_api_user(ctx: click.Context, username: str) -> None:
               help="Show each user's account grants below their name.")
 @click.pass_context
 def list_api_users(ctx: click.Context, with_grants: bool) -> None:
-    """List configured API users (and whether each is disabled)."""
+    """List configured API users, marking service principals and disabled rows.
+
+    A ``[service]`` row is an API key's principal, not a person — see
+    ``localmail list-api-keys``.
+    """
     from localmail.api.acl import grants_for_user
     with psycopg.connect(_dsn_from_ctx(ctx)) as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, username, disabled_at FROM api_users ORDER BY username")
+        cur.execute(
+            "SELECT id, username, disabled_at, is_service FROM api_users "
+            "ORDER BY username"
+        )
         rows = cur.fetchall()
         if not rows:
             click.echo("(no users)")
             return
-        for uid, username, disabled_at in rows:
-            marker = " [disabled]" if disabled_at else ""
+        for uid, username, disabled_at, is_service in rows:
+            marker = " [service]" if is_service else ""
+            marker += " [disabled]" if disabled_at else ""
             click.echo(f"{username}{marker}")
             if with_grants:
                 grants = grants_for_user(conn, uid)

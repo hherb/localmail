@@ -34,6 +34,7 @@ from localmail.serve.admin import accounts_panel_router as admin_accounts_panel_
 from localmail.serve.admin import users_panel_router as admin_users_panel_router
 from localmail.serve.admin import imports_panel_router as admin_imports_panel_router
 from localmail.serve.admin import accounts_router as admin_accounts_router
+from localmail.serve.admin import api_keys_router as admin_api_keys_router
 from localmail.serve.admin import users_router as admin_users_router
 from localmail.serve.admin import auth_router as admin_auth_router
 from localmail.serve.admin import daemon_panel_router as admin_daemon_panel_router
@@ -364,6 +365,7 @@ def create_app(
         app.include_router(admin_users_panel_router.router, prefix="/admin")
         app.include_router(admin_imports_panel_router.router, prefix="/admin")
         app.include_router(admin_accounts_router.router, prefix="/v1/admin")
+        app.include_router(admin_api_keys_router.router, prefix="/v1/admin")
         app.include_router(admin_users_router.router, prefix="/v1/admin")
         app.include_router(admin_imports_router.router, prefix="/v1/admin")
         app.include_router(admin_daemon_router.router, prefix="/v1/admin")

@@ -511,7 +511,7 @@ def change_password(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT password_hash FROM api_users "
-            "WHERE id = %s AND disabled_at IS NULL",
+            "WHERE id = %s AND " + login_eligible_sql(user="api_users"),
             (user_id,),
         )
         row = cur.fetchone()

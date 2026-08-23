@@ -4,8 +4,10 @@
 """The one SQL fragment deciding whether a principal may present a password.
 
 Pure — string composition only, no IO, no psycopg. A sibling of
-``revocation_sql.credential_valid_sql``, and for the same reason: three separate
-lookups verify a password against ``api_users``, and until this module they
+``revocation_sql.credential_valid_sql``, and for the same reason: four separate
+lookups verify a password against ``api_users`` — ``api.auth.login``,
+``api.admin.auth.authenticate_admin``, ``serve.oauth.consent_router``'s inline
+consent check, and ``api.auth.change_password`` — and until this module they
 carried the ``disabled_at IS NULL`` wording by copy. #241 was exactly a rule
 applied to one site and not its sibling.
 

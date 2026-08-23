@@ -64,12 +64,31 @@ def test_oauth_consent_login_refuses_a_service_user(db_conn):
         )
         assert cur.fetchone() is None
 
-    # A module-attribute check, not a source-text match: #291 established that
-    # matching source text cannot tell prose from code, so a comment naming the
-    # symbol would satisfy a `getsource` assertion. The import must actually bind.
+    # An AST check plus a negative control, not a source-text match (#291) and
+    # not a bare import check: together they prove the module calls the fragment
+    # AND no longer carries the wording the fragment replaced. Driving the real
+    # consent route needs a full PKCE client, so this pins the seam instead.
+    import ast
+    import inspect
+
     from localmail.serve.oauth import consent_router
 
-    assert hasattr(consent_router, "login_eligible_sql")
+    tree = ast.parse(inspect.getsource(consent_router))
+    calls = [
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert "login_eligible_sql" in calls
+
+    literals = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    assert not any("disabled_at IS NULL" in lit for lit in literals), (
+        "consent_router still carries the wording login_eligible_sql replaced"
+    )
 
 
 def test_a_human_still_logs_in(db_conn):
@@ -99,3 +118,14 @@ def test_admin_promotion_is_refused_on_a_service_row(db_conn):
     db_conn.commit()
     with pytest.raises(users_svc.UserFieldError):
         users_svc.set_admin(db_conn, uid, True)
+
+
+def test_change_password_refuses_a_service_user(db_conn):
+    """The fourth site. A service principal that somehow learned its random
+    password must still not be able to set a new one — that would hand it the
+    interactive login Rule 2 exists to deny."""
+    uid = _service_user(db_conn)
+    with pytest.raises(AuthenticationFailed):
+        api_auth.change_password(
+            db_conn, uid, old_password=_PW, new_password="new-password"
+        )

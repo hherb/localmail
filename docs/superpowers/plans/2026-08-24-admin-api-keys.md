@@ -534,11 +534,13 @@ def test_oauth_consent_login_refuses_a_service_user(db_conn):
             ("bot",),
         )
         assert cur.fetchone() is None
-    import inspect
 
+    # A module-attribute check, not a source-text match: #291 established that
+    # matching source text cannot tell prose from code, so a comment naming the
+    # symbol would satisfy a `getsource` assertion. The import must actually bind.
     from localmail.serve.oauth import consent_router
 
-    assert "login_eligible_sql" in inspect.getsource(consent_router)
+    assert hasattr(consent_router, "login_eligible_sql")
 
 
 def test_a_human_still_logs_in(db_conn):
@@ -2022,6 +2024,9 @@ def revoke_api_key(
             svc.revoke_key(conn, uid)
             conn.commit()
         except svc.ApiKeyNotFound:
+            # Already gone IS success for an idempotent delete, and re-rendering
+            # the table shows the operator the current truth. Raising instead
+            # would leave the button inert under htmx, which is the #148 defect.
             conn.rollback()
     return templates.TemplateResponse(
         request=request, name="api_keys/_table.html",
@@ -2042,6 +2047,7 @@ def delete_api_key_principal(
             svc.delete_key_principal(conn, uid)
             conn.commit()
         except svc.ApiKeyNotFound:
+            # Idempotent, for the reason given in revoke_api_key above.
             conn.rollback()
     return templates.TemplateResponse(
         request=request, name="api_keys/_table.html",

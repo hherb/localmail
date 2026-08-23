@@ -37,9 +37,12 @@ def _stray_session_token(conn: psycopg.Connection, user_id: int, raw: str) -> No
 
 
 def test_refresh_refuses_an_api_key(db_conn):
+    """The wording is the point of the guard sitting here as well as at the
+    mint: falling through to `issue_token` also refuses, but tells a bot about
+    minting rather than about refreshing."""
     created = svc.create_key(db_conn, name="bot", account_ids=[])
     db_conn.commit()
-    with pytest.raises(SessionCredentialRefused):
+    with pytest.raises(SessionCredentialRefused, match="must not be refreshed"):
         refresh_token(db_conn, created.raw_key)
     db_conn.rollback()
 
@@ -83,7 +86,7 @@ def test_logout_refuses_an_api_key(db_conn):
     unrecoverable credential."""
     created = svc.create_key(db_conn, name="bot", account_ids=[])
     db_conn.commit()
-    with pytest.raises(SessionCredentialRefused):
+    with pytest.raises(SessionCredentialRefused, match="cannot be logged out"):
         logout(db_conn, created.raw_key)
     db_conn.rollback()
     assert verify_token(db_conn, created.raw_key) is not None

@@ -1694,6 +1694,108 @@ def list_api_users(ctx: click.Context, with_grants: bool) -> None:
                     click.echo(f"  {name} (granted {granted_at.date()})")
 
 
+@main.command("add-api-key")
+@click.argument("name")
+@click.option("--grant", "grants", multiple=True, metavar="ACCOUNT",
+              help="Account name this key may read; repeat for several.")
+@click.pass_context
+def add_api_key(ctx: click.Context, name: str, grants: tuple[str, ...]) -> None:
+    """Create an API key for a machine consumer.
+
+    The key is printed to stdout once and stored only as a SHA-256; it cannot
+    be recovered afterwards. Everything else goes to stderr so a provisioning
+    script can capture stdout verbatim.
+    """
+    from localmail.api.acl import resolve_account_id_by_name
+    from localmail.api.admin import api_keys as svc
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        account_ids = []
+        for account_name in grants:
+            account_id = resolve_account_id_by_name(conn, account_name)
+            if account_id is None:
+                raise click.ClickException(f"no such account: {account_name!r}")
+            account_ids.append(account_id)
+        try:
+            created = svc.create_key(conn, name=name, account_ids=account_ids)
+        except svc.ApiKeyFieldError as e:
+            raise click.ClickException(str(e))
+        conn.commit()
+    click.echo(created.raw_key)
+    click.echo(
+        f"created API key {created.name!r} (id={created.user_id}). "
+        f"It is shown once — store it now.",
+        err=True,
+    )
+    if not grants:
+        click.echo(
+            f"note: no account grants yet. Use "
+            f"`localmail grant-account {created.name} <account-name>` to give "
+            f"this key read access to mail.",
+            err=True,
+        )
+
+
+@main.command("list-api-keys")
+@click.pass_context
+def list_api_keys(ctx: click.Context) -> None:
+    """List API keys, their granted accounts, and when each was last used."""
+    from localmail.api.admin import api_keys as svc
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        rows = svc.list_keys(conn)
+    if not rows:
+        click.echo("(no API keys)")
+        return
+    for row in rows:
+        state = "active" if row.has_key else "no key"
+        if row.disabled:
+            state += ", disabled"
+        last_used = row.last_used_at.strftime("%Y-%m-%d") if row.last_used_at else "never"
+        click.echo(f"{row.name} [{state}] last-used={last_used}")
+        click.echo(f"  accounts: {', '.join(row.account_names) or '(none)'}")
+
+
+@main.command("revoke-api-key")
+@click.argument("name")
+@click.pass_context
+def revoke_api_key(ctx: click.Context, name: str) -> None:
+    """Revoke an API key, keeping its principal and account grants.
+
+    Re-mint under the same name with `localmail add-api-key NAME`; the grants
+    survive.
+    """
+    from localmail.api.acl import resolve_user_id_by_username
+    from localmail.api.admin import api_keys as svc
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        user_id = resolve_user_id_by_username(conn, name)
+        if user_id is None:
+            raise click.ClickException(f"no such API key: {name!r}")
+        try:
+            svc.revoke_key(conn, user_id)
+        except svc.ApiKeyNotFound as e:
+            raise click.ClickException(str(e))
+        conn.commit()
+    click.echo(f"revoked API key {name!r}")
+
+
+@main.command("remove-api-key")
+@click.argument("name")
+@click.pass_context
+def remove_api_key(ctx: click.Context, name: str) -> None:
+    """Delete an API key's principal, its key, and its account grants."""
+    from localmail.api.acl import resolve_user_id_by_username
+    from localmail.api.admin import api_keys as svc
+    with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
+        user_id = resolve_user_id_by_username(conn, name)
+        if user_id is None:
+            raise click.ClickException(f"no such API key: {name!r}")
+        try:
+            svc.delete_key_principal(conn, user_id)
+        except svc.ApiKeyNotFound as e:
+            raise click.ClickException(str(e))
+        conn.commit()
+    click.echo(f"removed API key {name!r}")
+
+
 @main.command("grant-account")
 @click.argument("username")
 @click.argument("account_name")

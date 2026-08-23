@@ -73,6 +73,11 @@ Use the printed value as the bearer token below. A login-issued token still
 works and is what you want for a human-driven client; an API key is for an
 unattended one.
 
+An API key **never expires**: do not send it to `POST /v1/auth/refresh` (or
+`/v1/auth/logout`) — both refuse it with a 400. The refresh dance in step 4
+below is for login-issued tokens only. A key stops working when an admin
+revokes it, when the principal is disabled, or when its sessions are revoked.
+
 ### 4. Obtain a bearer token (opaque-bearer mode)
 
 This is the default mode when the OAuth authorization server is disabled (see
@@ -94,6 +99,7 @@ The response is `{"token": "<bearer>", "expires_at": "<iso8601>"}`. Use that
 separate refresh-token credential** — `POST /v1/auth/refresh` rotates the
 existing bearer: send the current token in `Authorization: Bearer <token>` and
 receive a new `{"token", "expires_at"}` in return; the old token is revoked.
+This applies to **login-issued tokens only**; an API key is refused here.
 **Discovery (RFC 9728):** a spec-strict MCP client can discover that `/mcp` is a
 protected resource. An unauthenticated request to `/mcp` returns `401` with a
 `WWW-Authenticate: Bearer … resource_metadata="…"` challenge pointing at

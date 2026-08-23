@@ -2298,6 +2298,46 @@ for the full design.
     be promoted after its key was minted. `users.set_admin` also refuses to
     promote a service row, but the runtime gate is what carries the invariant —
     its test promotes by direct SQL precisely because the UI will not.
+  - **The point-of-use gate is necessary and not sufficient, because the
+    credential can change kind under it — the mint is where that is closed.**
+    Rule 1 judges the credential in hand. `verify_token` accepts keys, so
+    `refresh_token` handed one back an *ordinary session token* — a different
+    credential, of a different kind, reporting `is_api_key = False` — and
+    deleted the key. Three consequences, and the design asserted none of them
+    could happen because it had reasoned about the *lookup* rather than its
+    callers ("`verify_token` changes in exactly two places, and it is the only
+    place either change is needed"). Revocation stopped being terminal
+    (`revoke_key` and the panel's Revoke button both key on
+    `api_key_name IS NOT NULL`, so the operator saw a keyless bot and was
+    offered nothing to revoke); Rule 1 itself fell for any service row carrying
+    `is_admin`, the laundered token walking through `require_admin()` and able
+    to mint further keys; and a well-behaved bot doing the documented refresh
+    destroyed its own unrecoverable credential.
+    - The guard is therefore in **`auth.issue_token`**, whose INSERT is an
+      `INSERT … SELECT` filtered on `is_service IS FALSE`, raising the named
+      `SessionCredentialRefused` (a `ValidationFailed`, so `/v1` answers 400)
+      when it matches no row — never a bare `assert`, which vanishes under
+      `python -O`. It has exactly two production callers, `login` (already
+      closed by Rule 2) and `refresh_token`, so one guard closes both **by
+      construction** and a third caller cannot rediscover the hole. Adding an
+      `is_api_key` check inside `refresh_token` alone was rejected for that
+      reason. Same one-authority call as `login_eligible_sql`.
+    - `refresh_token` **also** refuses a key up front, so a bot gets "API keys
+      do not expire and must not be refreshed" rather than a message about
+      minting. The mint guard is what makes it safe; this is what makes it kind.
+    - **`logout` refuses a key too.** It deletes the presented row, so a
+      generic client's shutdown-logout silently destroyed an unrecoverable
+      credential — the same class of surprise, and the reason it is a refusal
+      rather than a documented self-revoke path. Retiring a key is an
+      administrator's act (`revoke_key`), which is also the only one that
+      leaves the principal and its grants standing for a re-key.
+    - **`revoke_key` sweeps every token the principal holds**, not just the
+      `api_key_name IS NOT NULL` row. Under the 1:1 model a service user holds
+      zero or one credential and it is always a key, so anything else there is
+      a laundered token — and the lever has to be terminal on an archive that
+      already carries one. Its `is_service` predicate is load-bearing for the
+      same reason `delete_key_principal`'s is: without it, sweeping becomes a
+      second, unguarded way to cut off a *person's* sessions.
   - **Rule 2 — a service user cannot log in.** Four lookups verify a password
     against `api_users` (`api.auth.login`, `api.admin.auth.authenticate_admin`,
     `serve.oauth.consent_router`'s inline consent check, and

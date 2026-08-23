@@ -741,11 +741,18 @@ curl -H "Authorization: Bearer $KEY" https://localhost:8443/v1/messages
 A key reads only the accounts it was granted, and **never** reaches an admin
 route — a leaked key cannot mint another key or change account configuration.
 
+A key **never expires**, so a consumer must not send it to `/v1/auth/refresh`
+or `/v1/auth/logout` — both refuse it with a 400. Refreshing used to hand back
+an ordinary session token and destroy the key, which nothing can recover; a bot
+simply keeps presenting the key it was given.
+
 To rotate: `localmail revoke-api-key my_mail_bot` then `localmail add-api-key
 my_mail_bot`. The account grants survive, so there is nothing to re-tick; the
 old key stops working the moment it is revoked.
 
-Admins can do all of this at **/admin/api-keys** in the web UI instead.
+Admins can do all of this at **/admin/api-keys** in the web UI instead. Ticking
+accounts there when re-keying an existing bot **adds** grants and never removes
+them — take one away with `localmail revoke-account NAME ACCOUNT`.
 
 ### Login rate-limit config
 

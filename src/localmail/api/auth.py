@@ -27,6 +27,7 @@ from localmail.api.errors import (
     RateLimited,
     ValidationFailed,
 )
+from localmail.api.login_eligible_sql import login_eligible_sql
 from localmail.api.revocation_sql import credential_valid_sql
 from localmail.config import AuthConfig
 
@@ -429,7 +430,7 @@ def login(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash FROM api_users "
-            "WHERE username = %s AND disabled_at IS NULL",
+            "WHERE username = %s AND " + login_eligible_sql(user="api_users"),
             (username,),
         )
         row = cur.fetchone()

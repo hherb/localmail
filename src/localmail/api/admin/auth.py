@@ -13,6 +13,7 @@ import psycopg
 
 from localmail.api.auth import DUMMY_PASSWORD_HASH, verify_password
 from localmail.api.errors import AuthenticationFailed
+from localmail.api.login_eligible_sql import login_eligible_sql
 
 
 class UserNotFound(Exception):
@@ -54,7 +55,7 @@ def authenticate_admin(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash, is_admin FROM api_users"
-            " WHERE username = %s AND disabled_at IS NULL",
+            " WHERE username = %s AND " + login_eligible_sql(user="api_users"),
             (username,),
         )
         row = cur.fetchone()

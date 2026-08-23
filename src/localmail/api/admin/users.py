@@ -145,8 +145,22 @@ def create_user(
         return int(row[0])
 
 
+def _reject_service_row(conn: psycopg.Connection, user_id: int, action: str) -> None:
+    """A service user is an API key's principal; it must never gain a password
+    or admin rights. Both are one admin click from turning a machine credential
+    into an interactive one."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT is_service FROM api_users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise UserNotFound(f"no user with id={user_id}")
+    if bool(row[0]):
+        raise UserFieldError(f"cannot {action} an API-key principal")
+
+
 def set_password(conn: psycopg.Connection, user_id: int, new_password: str) -> None:
     """Admin password reset — no old password required. Raises UserNotFound."""
+    _reject_service_row(conn, user_id, "set a password on")
     if not new_password:
         raise UserFieldError("password must not be blank")
     pw_hash = hash_password(new_password)
@@ -230,6 +244,7 @@ def set_admin(conn: psycopg.Connection, user_id: int, is_admin: bool) -> None:
     if not is_admin:
         _guard_not_last_admin(conn, user_id, "demote")
     else:
+        _reject_service_row(conn, user_id, "promote")
         _user_state(conn, user_id)  # existence check → UserNotFound
     with conn.cursor() as cur:
         cur.execute(

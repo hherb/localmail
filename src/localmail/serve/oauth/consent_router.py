@@ -35,6 +35,7 @@ from starlette.templating import Jinja2Templates
 from localmail.api import auth as api_auth
 from localmail.api.client_ip import resolve_client_ip
 from localmail.api.errors import RateLimited
+from localmail.api.login_eligible_sql import login_eligible_sql
 from localmail.config import AuthConfig, McpConfig
 from localmail.mcp.oauth import clients, codes
 from localmail.mcp.oauth.consent_forms import (
@@ -107,7 +108,7 @@ def build_consent_router(
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, password_hash FROM api_users "
-                    "WHERE username = %s AND disabled_at IS NULL",
+                    "WHERE username = %s AND " + login_eligible_sql(user="api_users"),
                     (decision.username,),
                 )
                 row = cur.fetchone()

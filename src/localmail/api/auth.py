@@ -13,7 +13,7 @@ import logging
 import secrets
 import time as _monotonic_time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -296,6 +296,10 @@ class AuthenticatedUser:
     id: int
     username: str
     is_admin: bool = False
+    # Keyword-only with no default: False is the *permissive* value here — it
+    # means "allowed at admin routes" — so it must not be reachable by
+    # forgetting to write it.
+    is_api_key: bool = field(kw_only=True)
 
 
 def generate_token() -> str:
@@ -337,9 +341,10 @@ LAST_USED_REFRESH_SECONDS = 60
 
 
 def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | None:
-    """Look up a bearer token; return the user, or None when the token is
-    invalid, expired, revoked (``sessions_invalidated_at``), or the user is
-    disabled.
+    """Look up a bearer token or an API key; return the user, or None when the
+    credential is invalid, expired, revoked (``sessions_invalidated_at``), or the
+    user is disabled. An API key carries ``expires_at IS NULL`` and never
+    expires.
 
     Updates last_used_at on success, but at most once per
     LAST_USED_REFRESH_SECONDS per token — polling clients (e.g. /v1/changes)
@@ -348,11 +353,13 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
     h = hash_token(token)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT u.id, u.username, u.is_admin "
+            "SELECT u.id, u.username, u.is_admin, (t.api_key_name IS NOT NULL) "
             "FROM api_tokens t "
             "JOIN api_users u ON u.id = t.user_id "
             "WHERE t.token_sha256 = %s "
-            "  AND t.expires_at > now() "
+            # NULL expires_at is an API key, which never expires; the CHECK in
+            # migration 0036 is what keeps a session token from reaching it.
+            "  AND (t.expires_at IS NULL OR t.expires_at > now()) "
             # Session revocation (revoke-sessions / revoke-admin-sessions) bumps
             # sessions_invalidated_at to "now"; every bearer token issued before
             # that moment must stop authenticating, matching the admin-cookie
@@ -371,7 +378,9 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
             "       OR last_used_at < now() - make_interval(secs => %s))",
             (h, LAST_USED_REFRESH_SECONDS),
         )
-    return AuthenticatedUser(id=row[0], username=row[1], is_admin=bool(row[2]))
+    return AuthenticatedUser(
+        id=row[0], username=row[1], is_admin=bool(row[2]), is_api_key=bool(row[3]),
+    )
 
 
 def create_user(conn: psycopg.Connection, username: str, password: str) -> int:

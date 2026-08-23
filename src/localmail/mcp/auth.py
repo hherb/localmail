@@ -13,8 +13,9 @@ from localmail.api.auth import AuthenticatedUser, verify_token as api_verify_tok
 # carried in AccessToken.subject (OAuth `sub`), recovered via
 # user_id_from_access_token. expires_at is left None deliberately: the
 # authoritative expiry check lives in api.auth.verify_token's WHERE clause
-# (AND expires_at > now()), so an expired token already resolves to None
-# before we ever build an AccessToken.
+# (AND (t.expires_at IS NULL OR t.expires_at > now())), so an expired token
+# already resolves to None before we ever build an AccessToken. A NULL
+# expiry is an API key, not an expired row — it never expires.
 CLIENT_ID = "localmail"
 
 

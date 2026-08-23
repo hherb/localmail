@@ -717,6 +717,36 @@ uv run localmail serve \
 `--bind 0.0.0.0` requires TLS (refused otherwise). `--no-tls` is only
 honoured on `127.0.0.1` for local dev.
 
+### Giving another process access (API keys)
+
+An API key lets a bot, a cron job, or an AI agent read the archive without a
+password and without a token that expires.
+
+```bash
+localmail add-api-key my_mail_bot --grant work --grant personal
+# lmk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+The key is printed once, to stdout, and stored only as a SHA-256 — it cannot be
+recovered. Everything else the command says goes to stderr, so
+`KEY=$(localmail add-api-key my_mail_bot --grant work)` captures exactly the key.
+
+The consumer presents it as an ordinary bearer credential, which works for both
+`/v1/*` and `/mcp`:
+
+```bash
+curl -H "Authorization: Bearer $KEY" https://localhost:8443/v1/messages
+```
+
+A key reads only the accounts it was granted, and **never** reaches an admin
+route — a leaked key cannot mint another key or change account configuration.
+
+To rotate: `localmail revoke-api-key my_mail_bot` then `localmail add-api-key
+my_mail_bot`. The account grants survive, so there is nothing to re-tick; the
+old key stops working the moment it is revoked.
+
+Admins can do all of this at **/admin/api-keys** in the web UI instead.
+
 ### Login rate-limit config
 
 ```toml

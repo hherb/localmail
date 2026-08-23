@@ -62,6 +62,17 @@ uv run localmail grant-account agent horst-gmail      # one per account
 uv run localmail grant-account agent work-fastmail
 ```
 
+The simplest way to authenticate an agent is an API key, which an admin issues
+and which never expires:
+
+```bash
+localmail add-api-key my_agent --grant work
+```
+
+Use the printed value as the bearer token below. A login-issued token still
+works and is what you want for a human-driven client; an API key is for an
+unattended one.
+
 ### 4. Obtain a bearer token (opaque-bearer mode)
 
 This is the default mode when the OAuth authorization server is disabled (see

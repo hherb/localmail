@@ -168,6 +168,10 @@ GUI server (Phase: gui-server):
 uv run localmail add-api-user USERNAME       # create an API user (no grants by default)
 uv run localmail list-api-users [--with-grants]
 uv run localmail remove-api-user USERNAME
+uv run localmail add-api-key NAME [--grant ACCOUNT]…  # mint a never-expiring key (stdout = the key)
+uv run localmail list-api-keys                        # keys, grants, last-used
+uv run localmail revoke-api-key NAME                   # kill the credential, keep the bot + grants
+uv run localmail remove-api-key NAME                   # delete the bot entirely
 uv run localmail grant-account USERNAME ACCOUNT_NAME   # per-user ACL (migration 0016)
 uv run localmail revoke-account USERNAME ACCOUNT_NAME
 uv run localmail rotate-tls --cert PATH --key PATH
@@ -809,7 +813,7 @@ src/localmail/
     rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
     rewriter_url.py # pure: base_url_error — the one base-URL rule (#235)
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-migrations/         # 0001_init.sql … 0035_messages_body_lang_attempted_at.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0036_api_keys.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -2268,6 +2272,52 @@ for the full design.
   "revoke, then log in again" work. Login-issued tokens
   (`oauth_refresh_family_id IS NULL`) and OAuth-issued ones are treated
   identically here.
+- **API keys are a fifth credential kind, and deliberately not a fifth code
+  path (migration `0036`).** A key is an `api_tokens` row with `api_key_name`
+  set and `expires_at NULL`, minted against a dedicated **service user**
+  (`api_users.is_service`). Because the principal is an ordinary `api_users`
+  row, the per-account ACL, `disabled_at` and `sessions_invalidated_at` all
+  reach it with no code of their own — which is the whole reason it is not its
+  own table. Design:
+  [docs/superpowers/specs/2026-08-24-admin-api-keys-design.md](docs/superpowers/specs/2026-08-24-admin-api-keys-design.md).
+  - **The CHECK is the load-bearing half of the migration.** Dropping
+    `NOT NULL` from `expires_at` alone would let a *login* token be minted with
+    no expiry — an immortal interactive credential, produced by a one-line bug,
+    with nothing failing. `api_tokens_only_keys_are_immortal` scopes "may live
+    forever" to API keys, in the database.
+  - **The pairing is 1:1**, enforced by the partial unique index
+    `api_tokens_one_key_per_service_user` — keyed on `user_id` alone, because
+    `(user_id, api_key_name)` would permit the many-keys-per-principal model
+    that overlapping-key rotation needs and this design defers. Everything
+    therefore addresses a key by its **principal's id**: `api_tokens`' primary
+    key is `token_sha256`, which is credential material and must never travel
+    in a URL or a log line.
+  - **Rule 1 — a key never reaches an admin route.** `require_admin()`'s bearer
+    branch refuses `user.is_api_key` **before** consulting `is_admin`. The
+    guard sits at the point of use, not at mint time, because a service user can
+    be promoted after its key was minted. `users.set_admin` also refuses to
+    promote a service row, but the runtime gate is what carries the invariant —
+    its test promotes by direct SQL precisely because the UI will not.
+  - **Rule 2 — a service user cannot log in.** Four lookups verify a password
+    against `api_users` (`api.auth.login`, `api.admin.auth.authenticate_admin`,
+    `serve.oauth.consent_router`'s inline consent check, and
+    `api.auth.change_password`), and they carried the `disabled_at IS NULL`
+    wording by copy. The pure
+    [src/localmail/api/login_eligible_sql.py](src/localmail/api/login_eligible_sql.py)
+    is now the one authority, adding `is_service IS FALSE`. The unusable random
+    password hash is *not* the protection — `users.set_password` is one admin
+    click away from making it usable, which is why that too refuses a service
+    row.
+  - **Revoke and delete are separate operations, deliberately.** `revoke_key`
+    drops the token and keeps the principal, so re-minting under the same name
+    restores service with the grants intact — that is the rotation path, and it
+    is why `list_keys` is driven from `api_users` rather than `api_tokens` (a
+    revoked bot holds no token row and must stay visible).
+    `delete_key_principal` removes the bot; its `is_service IS TRUE` predicate
+    is load-bearing, since the route is addressed by user id and would
+    otherwise become a second way to delete a person.
+  - **`create_key` runs in one transaction.** A failure after the principal is
+    created would leave a row that the operator's retry then collides with.
 - **Admin session revocation (#113)**: migration
   `0022_api_users_sessions_invalidated_at.sql` adds a nullable
   `sessions_invalidated_at TIMESTAMPTZ` column on `api_users`. The
@@ -3447,7 +3497,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0035_messages_body_lang_attempted_at.sql`; next free slot `0036_*.sql`.
+  Latest is `0036_api_keys.sql`; next free slot `0037_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

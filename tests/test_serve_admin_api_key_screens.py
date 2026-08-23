@@ -103,6 +103,20 @@ def test_create_shows_the_key_exactly_once(client, db_conn, admin_id):
     assert keys[0] not in listed
 
 
+def test_create_updates_the_table_out_of_band(client, admin_id):
+    resp = client.post(
+        "/admin/api-keys",
+        data={"name": "fresh_bot"},
+        headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
+    )
+    assert resp.status_code == 200
+    assert re.search(r"lmk_[A-Za-z0-9_\-]+", resp.text)
+    assert 'id="api-key-table" hx-swap-oob="true"' in resp.text
+    row = re.search(r'<tr id="api-key-row-(\d+)">.*?</tr>', resp.text, re.DOTALL)
+    assert row and "fresh_bot" in row.group(0)
+    assert "No API keys." not in resp.text
+
+
 def test_create_rejects_a_blank_name_inline(client, admin_id):
     resp = client.post(
         "/admin/api-keys",
@@ -136,3 +150,23 @@ def test_revoke_from_the_panel(client, admin_id):
     )
     assert resp.status_code == 200
     assert "no key" in client.get("/admin/api-keys").text
+
+
+def test_delete_from_the_panel(client, admin_id):
+    client.post(
+        "/admin/api-keys", data={"name": "gone_bot"},
+        headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
+    )
+    listed = client.get("/admin/api-keys").text
+    assert "gone_bot" in listed
+    uid_match = re.search(r'id="api-key-row-(\d+)"', listed)
+    assert uid_match
+    uid = uid_match.group(1)
+    resp = client.post(
+        f"/admin/api-keys/{uid}/delete",
+        headers={
+            "X-CSRF-Token": _csrf(admin_id, "POST", f"/admin/api-keys/{uid}/delete")
+        },
+    )
+    assert resp.status_code == 200
+    assert "gone_bot" not in client.get("/admin/api-keys").text

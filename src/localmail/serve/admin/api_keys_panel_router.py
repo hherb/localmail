@@ -74,35 +74,27 @@ async def create_api_key(
 ) -> HTMLResponse:
     check_csrf(request, admin, x_csrf_token, "/admin/api-keys")
     form = await request.form()
-    try:
-        kwargs = forms.form_to_create_kwargs(
-            form.get("name"), [str(v) for v in form.getlist("account_ids")]
-        )
-    except forms.FormError as e:
-        ctx = _base_context(request, admin)
-        ctx.update({"field_errors": forms.field_errors_from(e), "created": None})
-        return templates.TemplateResponse(
-            request=request, name="api_keys/_created.html", context=ctx,
-            status_code=400,
-        )
     pool = request.app.state.pool
 
-    def _create() -> svc.CreatedKey:
+    def _create(kwargs: dict) -> svc.CreatedKey:
         with pool.connection() as conn:
             created = svc.create_key(conn, **kwargs)
             conn.commit()
             return created
 
     try:
-        created = await run_in_threadpool(_create)
-    except svc.ApiKeyFieldError as e:
+        kwargs = forms.form_to_create_kwargs(
+            form.get("name"), [str(v) for v in form.getlist("account_ids")]
+        )
+        created = await run_in_threadpool(_create, kwargs)
+    except (forms.FormError, svc.ApiKeyFieldError) as e:
         ctx = _base_context(request, admin)
         ctx.update({"field_errors": forms.field_errors_from(e), "created": None})
         return templates.TemplateResponse(
             request=request, name="api_keys/_created.html", context=ctx,
             status_code=400,
         )
-    ctx = _base_context(request, admin)
+    ctx = _list_context(request, admin)
     ctx.update({"created": created, "field_errors": {}})
     return templates.TemplateResponse(
         request=request, name="api_keys/_created.html", context=ctx

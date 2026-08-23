@@ -8,4 +8,7 @@
     <p>Give it to the consumer as
        <code>Authorization: Bearer {{ created.raw_key[:8] }}…</code></p>
   </div>
+  <div id="api-key-table" hx-swap-oob="true">
+    {% include "api_keys/_table.html" %}
+  </div>
 {% endif %}

@@ -93,10 +93,13 @@ def require_admin():
     """Admin via bearer token OR admin session cookie.
 
     Native clients send ``Authorization: Bearer <token>``; the user must be
-    ``is_admin`` (else 403), a bad/expired token is 401. Sets
-    ``request.state.admin_auth_kind = "bearer"`` so ``check_csrf`` skips CSRF —
-    a bearer header carries no ambient cookie credential, so CSRF does not
-    apply. With no bearer header the existing cookie path runs unchanged.
+    ``is_admin`` (else 403), a bad/expired token is 401. An **API key** is 403
+    regardless of its principal's is_admin flag: the check sits at the point of
+    use rather than at mint time because a service user can be promoted after
+    its key was minted. Sets ``request.state.admin_auth_kind = "bearer"`` so
+    ``check_csrf`` skips CSRF — a bearer header carries no ambient cookie
+    credential, so CSRF does not apply. With no bearer header the existing
+    cookie path runs unchanged.
     """
     def _dep(request: Request) -> AdminUser:
         authz = request.headers.get("Authorization", "")

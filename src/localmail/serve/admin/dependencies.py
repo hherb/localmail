@@ -11,8 +11,10 @@ user no longer admin).
 require_admin() additionally accepts ``Authorization: Bearer <token>`` for
 native clients — an admin bearer token is authorized with no CSRF (a bearer
 header carries no ambient cookie credential, so CSRF does not apply); a
-non-admin bearer is 403; a bad/expired bearer is 401. With no bearer header
-it falls back to the cookie path unchanged.
+non-admin bearer is 403; a bad/expired bearer is 401. An **API key** is 403
+regardless of its principal's is_admin flag: the check sits at the point of use
+rather than at mint time because a service user can be promoted after its key
+was minted. With no bearer header it falls back to the cookie path unchanged.
 """
 from __future__ import annotations
 
@@ -106,6 +108,11 @@ def require_admin():
                 conn.commit()
             if user is None:
                 raise InvalidToken("token is invalid, expired, or revoked")
+            if user.is_api_key:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="API keys cannot access admin routes",
+                )
             if not user.is_admin:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN, detail="not an admin"

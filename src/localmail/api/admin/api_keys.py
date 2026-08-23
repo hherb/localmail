@@ -197,11 +197,25 @@ def set_grant(
 
 
 def revoke_key(conn: psycopg.Connection, user_id: int) -> None:
-    """Delete the credential, keeping the principal and its grants. Caller commits."""
+    """Delete every credential the principal holds, keeping the principal and
+    its grants. Caller commits.
+
+    Sweeps rather than deleting only the ``api_key_name IS NOT NULL`` row: under
+    the 1:1 model a service user holds zero or one credential and it is always a
+    key, so anything else there is a session token laundered out of the key
+    before ``issue_token`` refused to mint one — and the lever has to be
+    terminal on an archive that already carries one.
+
+    The ``is_service`` predicate is what keeps the sweep from becoming a second,
+    unguarded way to cut off a *person's* sessions; that belongs to
+    ``users.revoke_sessions``.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM api_tokens "
-            " WHERE user_id = %s AND api_key_name IS NOT NULL",
+            "DELETE FROM api_tokens t "
+            " WHERE t.user_id = %s "
+            "   AND EXISTS (SELECT 1 FROM api_users u "
+            "                WHERE u.id = t.user_id AND u.is_service IS TRUE)",
             (user_id,),
         )
         if cur.rowcount == 0:

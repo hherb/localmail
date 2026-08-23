@@ -1,0 +1,11 @@
+{% if field_errors %}
+  <p class="field-error">{{ field_errors.values() | join(" ") }}</p>
+{% elif created %}
+  <div class="admin-flash admin-flash-success">
+    <p><strong>Copy this key now.</strong> It is not stored and cannot be shown again.</p>
+    <input id="api-key-value" readonly value="{{ created.raw_key }}" size="60">
+    <button type="button" data-copy-target="api-key-value">Copy</button>
+    <p>Give it to the consumer as
+       <code>Authorization: Bearer {{ created.raw_key[:8] }}…</code></p>
+  </div>
+{% endif %}

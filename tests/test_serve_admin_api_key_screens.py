@@ -1,0 +1,138 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Horst Herb
+
+"""HTMX admin screens for API keys."""
+from __future__ import annotations
+
+import re
+
+import psycopg
+import pytest
+from fastapi.testclient import TestClient
+
+from localmail.api.admin.csrf import make_csrf_token
+from localmail.api.auth import hash_password
+from localmail.config import ServeConfig
+from localmail.serve.admin.csrf import csrf_action
+from localmail.serve.app import create_app
+
+_SIGNING_KEY = "x" * 43
+
+
+@pytest.fixture
+def app(db_dsn):
+    cfg = ServeConfig(
+        session_signing_key=_SIGNING_KEY, state_signing_key="y" * 43,
+        cookie_secure=False,
+    )
+    return create_app(db_dsn=db_dsn, serve_config=cfg)
+
+
+@pytest.fixture
+def admin_id(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash, is_admin) "
+            "VALUES ('root', %s, TRUE) RETURNING id",
+            (hash_password("pw"),),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    db_conn.commit()
+    return int(row[0])
+
+
+@pytest.fixture
+def client(app, admin_id):
+    """Cookie-authenticated admin, mirroring tests/test_serve_admin_bearer_auth.py:
+    the login form's own CSRF token must be scraped and posted back."""
+    c = TestClient(app, follow_redirects=False)
+    form = c.get("/admin/login").text
+    m = re.search(r'name="csrf_token"\s+value="([^"]+)"', form)
+    assert m
+    resp = c.post(
+        "/admin/login",
+        data={"username": "root", "password": "pw", "csrf_token": m.group(1)},
+    )
+    assert resp.status_code == 303, resp.text
+    return c
+
+
+def _csrf(admin_id: int, method: str, path: str) -> str:
+    return make_csrf_token(
+        user_id=admin_id, action=csrf_action(method, path),
+        key=_SIGNING_KEY.encode("ascii"),
+    )
+
+
+def _account(conn: psycopg.Connection, name: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (name, email_address, auth_method, "
+            "imap_host, imap_port, config) "
+            "VALUES (%s, %s, 'password', 'imap.example', 993, '{}'::jsonb) RETURNING id",
+            (name, f"{name}@b.test"),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    conn.commit()
+    return int(row[0])
+
+
+def test_list_screen_renders(client):
+    resp = client.get("/admin/api-keys")
+    assert resp.status_code == 200
+    assert "API keys" in resp.text
+
+
+def test_nav_links_to_the_panel(client):
+    assert 'href="/admin/api-keys"' in client.get("/admin/").text
+
+
+def test_create_shows_the_key_exactly_once(client, db_conn, admin_id):
+    aid = _account(db_conn, "work")
+    resp = client.post(
+        "/admin/api-keys",
+        data={"name": "my_mail_bot", "account_ids": [str(aid)]},
+        headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
+    )
+    assert resp.status_code == 200
+    keys = re.findall(r"lmk_[A-Za-z0-9_\-]+", resp.text)
+    assert len(keys) >= 1
+    listed = client.get("/admin/api-keys").text
+    assert keys[0] not in listed
+
+
+def test_create_rejects_a_blank_name_inline(client, admin_id):
+    resp = client.post(
+        "/admin/api-keys",
+        data={"name": "  "},
+        headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
+    )
+    assert resp.status_code == 400
+    assert "blank" in resp.text
+
+
+def test_create_without_csrf_is_400(client):
+    resp = client.post("/admin/api-keys", data={"name": "bot"})
+    assert resp.status_code == 400
+
+
+def test_revoke_from_the_panel(client, admin_id):
+    client.post(
+        "/admin/api-keys", data={"name": "bot"},
+        headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
+    )
+    listed = client.get("/admin/api-keys").text
+    assert "bot" in listed
+    uid_match = re.search(r'id="api-key-row-(\d+)"', listed)
+    assert uid_match
+    uid = uid_match.group(1)
+    resp = client.post(
+        f"/admin/api-keys/{uid}/revoke",
+        headers={
+            "X-CSRF-Token": _csrf(admin_id, "POST", f"/admin/api-keys/{uid}/revoke")
+        },
+    )
+    assert resp.status_code == 200
+    assert "no key" in client.get("/admin/api-keys").text

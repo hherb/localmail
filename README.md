@@ -884,10 +884,20 @@ Poll, process, ack. Semantics:
   on its own continues the order it was minted in.
 
 `sort_order` is `"asc"` or `"desc"` (default `"desc"`), and modifies
-whichever `sort` criterion is in force. It only has an effect on
-`sort=date`; `sort=rank` with `sort_order=asc` is a 400 — the rank path
+whichever `sort` criterion is in force. Ascending therefore requires
+`sort=date`: `sort=rank` with `sort_order=asc` is a 400 — the rank path
 serves a bounded candidate pool, so reversing it would return the least
 relevant of the top hits rather than of the archive.
+
+That refusal is keyed on the `sort` you stated (or defaulted to), **not**
+on the branch that would have served the request. A query with no free
+text — blank, or made only of filter operators such as `subject:invoice`
+— is always answered by the date walk whatever `sort` says, so asking for
+`sort_order=asc` on one is still refused for naming `rank`, a path it
+would never have taken. State `sort=date` explicitly for those. Tracked
+as [#324](https://github.com/hherb/localmail/issues/324), together with
+the matching wart that such a request *is* served on page 1 and its own
+cursor then rejected on page 2.
 
 When paging, send the cursor back with the same `query` and filters and
 **leave `sort` and `sort_order` unset**. The cursor already carries the

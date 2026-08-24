@@ -4,6 +4,7 @@
 """Cursor + transparent pool growth tests for localmail.api.search.run_search."""
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -194,7 +195,7 @@ def test_keyset_cursor_dispatches_to_search_with_keyset_cursor() -> None:
     from localmail.search.searcher import KeysetCursor
 
     s = MagicMock()
-    next_ks = KeysetCursor(ts=datetime(2026, 5, 20, tzinfo=timezone.utc), id=42)
+    next_ks = KeysetCursor(ts=datetime(2026, 5, 20, tzinfo=timezone.utc), id=42, order="desc")
     page = _page(
         results=[_result(7)], token=None, pool_size=1,
         page_size=2, has_more=False, can_grow=False,
@@ -202,8 +203,8 @@ def test_keyset_cursor_dispatches_to_search_with_keyset_cursor() -> None:
     page.next_keyset = next_ks
     s.search.return_value = page
 
-    incoming_ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
-    cursor_in = encode_keyset_cursor(incoming_ks, "desc")
+    incoming_ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc")
+    cursor_in = encode_keyset_cursor(replace(incoming_ks, order="desc"))
     out = run_search(searcher=s, free_text="invoice", filters={},
                      limit=2, allowed_account_ids=[1], user_id=99,
                      sort="date", cursor=cursor_in)

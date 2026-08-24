@@ -13,6 +13,7 @@ ordered search that looked like a continuation.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -29,8 +30,8 @@ from localmail.search.searcher import KeysetCursor, PoolMetadata
 
 
 def _keyset_cursor(day: int = 21) -> tuple[KeysetCursor, str]:
-    ks = KeysetCursor(ts=datetime(2026, 5, day, tzinfo=timezone.utc), id=100)
-    return ks, encode_keyset_cursor(ks, "desc")
+    ks = KeysetCursor(ts=datetime(2026, 5, day, tzinfo=timezone.utc), id=100, order="desc")
+    return ks, encode_keyset_cursor(replace(ks, order="desc"))
 
 
 def _page(*, token: str | None = None, next_keyset: KeysetCursor | None = None) -> MagicMock:

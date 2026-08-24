@@ -54,6 +54,7 @@ def test_a_cached_pool_always_records_sort_rank(db_dsn, db_conn):
     cfg = SearchConfig()
     run_embed_worker_once(db_conn, cfg, _E())
     pool = open_pool(db_dsn)
+    reached = 0
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=None)
         for sort in ("rank", "date", None):
@@ -61,6 +62,7 @@ def test_a_cached_pool_always_records_sort_rank(db_dsn, db_conn):
                             user_id=1, sort=sort)
             if page.search_token is None:
                 continue
+            reached += 1
             meta = s.get_pool_metadata(page.search_token, user_id=1)
             assert meta is not None
             assert meta.sort == "rank", (
@@ -68,5 +70,19 @@ def test_a_cached_pool_always_records_sort_rank(db_dsn, db_conn):
                 f"sort={meta.sort!r}; _build_results' date branch is "
                 "reachable after all and _date_sort_key is not dead code"
             )
+            # The same argument one axis over: a pool is only minted on the
+            # rank branch, and rank + asc is refused before any pool can be
+            # built, so an ascending pool is unreachable too. Asserted
+            # rather than assumed, because `reject_pool_sort_mismatch`'s
+            # order half is dead only for as long as this holds.
+            assert meta.sort_order == "desc", (
+                f"search(sort={sort!r}) cached a pool recording "
+                f"sort_order={meta.sort_order!r}; an ascending pool is "
+                "reachable after all"
+            )
     finally:
         pool.close()
+    # Without this the loop could `continue` on every iteration and the test
+    # would pass having asserted nothing — the vacuity guard
+    # `test_mcp_tools.py` already carries for its own walk.
+    assert reached, "no iteration cached a pool; the test proved nothing"

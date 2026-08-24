@@ -78,6 +78,11 @@ from localmail.search.searcher import KeysetCursor, SortOrder
 # 300-row table is cheap enough to seq-scan whatever the ordering.
 _SEED_DATED = 300
 _SEED_UNDATED = 3
+#: Extra rows sharing the *cursor's own* timestamp (``_EPOCH + 100 days``).
+#: Without a tie there, the row comparison and the tiebreaker-less
+#: ``expr > ts`` select identical rows, so the fair-control assertion below
+#: could not tell them apart — and its docstring claimed it could.
+_SEED_TIED_AT_CURSOR = 5
 _PAGE_SIZE = 50
 _EPOCH = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -136,6 +141,18 @@ def _seed(conn: psycopg.Connection) -> int:
                 (account_id, f"<m{i}@plan.local>", i.to_bytes(32, "big"),
                  f"subj-{i} needle", _EPOCH + timedelta(days=i))
                 for i in range(_SEED_DATED)
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+            " body_text, date_sent, headers, attachments, raw_bytes, size_bytes)"
+            " VALUES (%s, %s, %s, %s, 'needle body', %s, '{}'::jsonb,"
+            " '[]'::jsonb, 'r', 4)",
+            [
+                (account_id, f"<tie{k}@plan.local>",
+                 (20_000 + k).to_bytes(32, "big"), f"tie-{k} needle",
+                 _EPOCH + timedelta(days=100))
+                for k in range(_SEED_TIED_AT_CURSOR)
             ],
         )
         cur.executemany(
@@ -317,7 +334,7 @@ def test_the_ascending_keyset_predicate_keeps_the_backward_scan(
     ``_keyset_clause`` so a rewrite of it lands here.
     """
     account_id = _seed(db_conn)
-    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101)
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101, order="desc")
     clause, clause_params = searcher_mod._keyset_clause(keyset, "asc")
     where = "TRUE " + clause + " AND m.account_id = ANY(%s) "
     params = clause_params + [[account_id], _PAGE_SIZE + 1]
@@ -361,7 +378,7 @@ def test_the_ascending_keyset_predicate_composes_an_index_range_bound(
     depth.
     """
     account_id = _seed(db_conn)
-    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101)
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101, order="desc")
     clause, clause_params = searcher_mod._keyset_clause(keyset, "asc")
     shipped = _explain(
         db_conn,
@@ -390,6 +407,13 @@ def test_the_ascending_keyset_predicate_composes_an_index_range_bound(
     # comparison that composes a beautiful index bound over the wrong rows
     # — transposed operands, a dropped tiebreaker — which is a correctness
     # bug wearing this test's approval.
+    #
+    # The tiebreaker half of that claim only holds because `_seed` puts
+    # `_SEED_TIED_AT_CURSOR` rows at the cursor's own timestamp. With every
+    # date distinct — as every other fixture in this suite has them —
+    # `ROW(expr, id) > ROW(ts, id)` and a tiebreaker-less `expr > ts`
+    # select exactly the same rows, and this assertion is blind to the
+    # difference. The claim was false as originally written.
     def _ids(where: str, params: list) -> list[int]:
         with db_conn.cursor() as cur:
             cur.execute(

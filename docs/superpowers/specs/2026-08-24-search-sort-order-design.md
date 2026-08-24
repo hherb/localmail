@@ -228,20 +228,38 @@ columns are nullable and archive imports can produce such rows.
 
 ### Keyset predicates
 
+> **Correction (review of #322) — the ascending dated predicate below is
+> WRONG, and its stated rationale is wrong twice over. Do not implement it.**
+> The shipped form is a SQL row comparison, `ROW(expr, m.id) > ROW(%s, %s)`;
+> see `searcher._keyset_clause` and the table under "Review round" in #322.
+> The OR-form written here is **not** "the more index-friendly of the two" —
+> it is the one Postgres refuses to decompose into an index range bound, so
+> it plans as a per-tuple `Filter` and every continuation page restarts at
+> the head of `messages_recent_idx`. Measured mid-walk on the live archive
+> at page ~1250: 62.1 ms / 53,789 buffers / 64,001 rows removed by filter,
+> against 0.57 ms / 46 buffers for the row comparison. And #75's cause is
+> **not** the `IS NULL` disjunct alone — the plain two-column OR-form has
+> the same defect, which is exactly why `tests/test_searcher_sort_order_plan.py`
+> keeps it as the `_PRE_FIX_OR_FORM` negative control. What the missing
+> disjunct actually buys ascending is that a row comparison becomes
+> *available*; it is not itself the optimisation.
+
 ```
 desc, dated cursor:  expr < ts OR (expr = ts AND id < %s) OR expr IS NULL
 desc, NULL cursor:   expr IS NULL AND id < %s
 
-asc,  dated cursor:  expr > ts OR (expr = ts AND id > %s)
+asc,  dated cursor:  expr > ts OR (expr = ts AND id > %s)     <-- SUPERSEDED
 asc,  NULL cursor:   (expr IS NULL AND id > %s) OR expr IS NOT NULL
 ```
 
 The ascending dated predicate needs **no** `OR expr IS NULL` disjunct: under
 `NULLS FIRST` the undated block is already behind the cursor, and `NULL > ts` is
-not true, so those rows drop out on their own. It is consequently the more
-index-friendly of the two forms. The descending form's disjunct is the shape
-#75 identified as preventing an index range bound; that is pre-existing on this
-path and out of scope here, but it should not be copied into the new branch.
+not true, so those rows drop out on their own. That absence is what makes the
+row comparison `ROW(expr, m.id) > ROW(%s, %s)` *expressible* on this side —
+descending must admit the undated tail, and `ROW(NULL, id) < ROW(...)` is NULL,
+so it would drop those rows. Descending's disjunct therefore keeps the OR-form
+and the `Filter` plan that comes with it: pre-existing, out of scope here, and
+filed as **#323**.
 
 ## Blank-query pagination
 

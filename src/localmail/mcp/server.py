@@ -147,7 +147,8 @@ def build_mcp_server(
             "(date-ordered) — prefer `list_messages` for that intent."))],
         sort: Annotated[Literal["rank", "date"] | None, Field(description=(
             'Result ordering: "rank" (hybrid relevance, the default when '
-            'omitted) or "date" (strictly newest first). Leave it unset when '
+            'omitted) or "date" (strictly by date — newest first unless '
+            '`sort_order` says otherwise). Leave it unset when '
             "paging — a `cursor` already carries the ordering it continues, "
             "and a sort that contradicts it is rejected."))] = None,
         sort_order: Annotated[Literal["asc", "desc"] | None, Field(description=(
@@ -165,8 +166,9 @@ def build_mcp_server(
             "Opaque pagination cursor — pass back a previous response's "
             "`next_cursor` to get the next page; omit for the first page. "
             "Send the same `query` and filters with it: a date-ordered "
-            "cursor walks the archive lexically and rebuilds that walk from "
-            "the query."))]
+            "cursor walks the archive by date (lexically when the query has "
+            "free text, over every filtered row when it does not) and "
+            "rebuilds that walk from the query."))]
             = None,
         account_ids: Annotated[list[str] | None, Field(description=(
             "Restrict to these account ids (string integers). Omit to search "

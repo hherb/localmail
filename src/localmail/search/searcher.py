@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import MINYEAR, datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import httpx
 import psycopg
@@ -59,10 +59,17 @@ DEFAULT_SORT_ORDER: SortOrder = "desc"
 class SortOrderNotApplicable(ValueError):
     """``sort_order="asc"`` was asked for on a sort that cannot serve it.
 
-    A named subclass rather than a bare ``ValueError`` so the api/ layer
-    can map exactly this to a 400 without also catching what psycopg,
+    A named subclass rather than a bare ``ValueError`` so a boundary can
+    map exactly this to a 400 without also catching what psycopg,
     ``datetime`` and the embedding backends raise — which would relabel a
     real outage as a caller error and send them to fix a blameless query.
+
+    **Its audience is library callers**, not the api/ layer: ``run_search``
+    refuses rank+asc itself before ever reaching ``Searcher.search``, so
+    the catch there is a backstop for a future dispatch change rather than
+    a live path. The CLI and any embedder reach this guard directly — note
+    ``cli.py``'s search command catches ``RuntimeError`` only, so a
+    ``--sort-order`` flag added there must widen that catch (#331).
     """
 
 
@@ -108,17 +115,37 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
 #: "normalise" these to NULLS LAST.
 #:
 #: Keyed on ``SortOrder`` rather than ``str`` so mypy refuses a wrong
-#: literal at the call site. The lookup stays a dict lookup for the value
-#: mypy cannot see — a library caller passing ``"ASC"`` falls through
-#: ``_keyset_clause``'s ``== "desc"`` test into the *ascending* predicate,
-#: and the ``KeyError`` here is what stops that pairing silently serving a
-#: walk in the direction nobody asked for.
+#: literal at the call site. That is the static half only, and CI runs no
+#: mypy step — so the value mypy cannot see (a library caller passing
+#: ``"ASC"``) is caught at runtime instead, by ``_keyset_clause``'s
+#: explicit membership check against *this* table. It used to be caught by
+#: the ``KeyError`` from the lookup below, which worked only because the
+#: lookup happens to be assembled after the predicate: ``"ASC"`` fell
+#: through ``_keyset_clause``'s ``== "desc"`` test into the *ascending*
+#: predicate first, and nothing but statement order stopped that pairing
+#: serving a walk in the direction nobody asked for.
 _DATE_ORDER_BY_SQL: dict[SortOrder, str] = {
     "desc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, "
              "m.id DESC"),
     "asc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) ASC NULLS FIRST, "
             "m.id ASC"),
 }
+
+#: Every direction must have an ORDER BY, checked at import.
+#:
+#: mypy checks the *lookup* against the Literal; nothing checked that the
+#: table covers it, so adding a third direction type-checked, imported, and
+#: failed at runtime on the first query using it. CI runs only ``pytest``
+#: (no mypy step, no ruff step), which makes the static half of that
+#: reasoning unenforced in practice — so the check is a runtime one, in the
+#: ``reject_empty_diagnostic`` / ``reject_empty_wire_name`` shape: a
+#: mistake that cannot reach a query is better than one that reaches it
+#: loudly.
+if set(_DATE_ORDER_BY_SQL) != set(get_args(SortOrder)):
+    raise RuntimeError(
+        "every SortOrder needs an ORDER BY: "
+        f"{sorted(set(get_args(SortOrder)) - set(_DATE_ORDER_BY_SQL))} missing"
+    )
 
 _DATE_EXPR_SQL = "COALESCE(m.internal_date, m.date_sent)"
 
@@ -153,6 +180,20 @@ def _keyset_clause(keyset: KeysetCursor, order: SortOrder) -> tuple[str, list[An
     as #323, and pre-existing here.
     """
     expr = _DATE_EXPR_SQL
+    # Named explicitly rather than left to an ``else``. The two lookups are
+    # a dozen lines apart and independently reachable: an ``order`` that is
+    # not exactly "desc" used to fall through into the *ascending*
+    # predicate here and was only stopped by ``_DATE_ORDER_BY_SQL``'s
+    # KeyError when the SQL string was assembled afterwards. That ordering
+    # is an accident of one function's statement order — hoist the ORDER BY
+    # out of the f-string and the guard is gone — and the KeyError it
+    # raised carried the bare message ``'DESC'``, naming neither the
+    # parameter nor the search.
+    if order not in _DATE_ORDER_BY_SQL:
+        raise ValueError(
+            f"unknown sort_order {order!r}; expected one of "
+            f"{sorted(_DATE_ORDER_BY_SQL)}"
+        )
     if order == "desc":
         if keyset.ts is None:
             # Already in the NULLS-LAST tail: paginate by id alone.
@@ -390,10 +431,49 @@ class KeysetCursor:
 
     Mirrors ``api.browse_cursor.BrowseCursor`` but lives in the search
     layer so that ``Searcher`` does not depend on ``api/``. The api layer
-    converts between this and the wire encoding (base64 of ``ts|id``).
+    converts between this and the wire encoding (base64 of ``ts|id``,
+    behind a prefix that carries ``order``).
     """
     ts: datetime | None
     id: int
+    #: The direction the walk that minted this position was running in.
+    #:
+    #: **No default**, deliberately. The position alone is meaningless
+    #: without it: ``(ts, id)`` says where the previous page stopped, and
+    #: only the direction says which way the next one continues. While this
+    #: field did not exist, ``Searcher.search`` paired a directionless
+    #: cursor with a ``sort_order`` that defaults to ``"desc"``, so an
+    #: ascending walk paged without restating the order silently reversed —
+    #: page 2 re-emitted a row the caller already held, then ran off the
+    #: end.
+    #:
+    #: #322 had guarded only the *writing* half, and only by discipline:
+    #: ``encode_keyset_cursor`` took the direction as a required second
+    #: argument, so the api layer had to supply one — but it supplied it
+    #: from its own resolved plan rather than from the walk, which was
+    #: correct only for as long as the two could not disagree. Carrying it
+    #: as a field closes both halves at once: the encoder now reads it off
+    #: the cursor and has no second argument to get wrong, and a position
+    #: can no longer reach the Searcher without the sense to read it in.
+    #: Minting beside matching, the call ``blob_temps.py`` and
+    #: ``sweep_pacing.py`` already make.
+    order: SortOrder
+
+
+class KeysetOrderMismatch(ValueError):
+    """A stated ``sort_order`` contradicts the direction its cursor carries.
+
+    A named subclass rather than a bare ``ValueError`` for the reason
+    ``SortOrderNotApplicable`` is one: the api/ boundary maps exactly this
+    to a 400, and catching bare ``ValueError`` there would also catch what
+    psycopg, ``datetime`` and the embedding backends raise, relabelling a
+    real outage as a caller error.
+
+    Refused rather than resolved either way, because both resolutions are
+    silent: honouring the stated order walks the cursor's position in a
+    direction it was not minted for, and honouring the cursor ignores a
+    parameter the caller wrote down (#308, #312).
+    """
 
 
 class KeysetCursorUnusable(ValueError):
@@ -677,6 +757,9 @@ class Searcher:
             next_keyset = KeysetCursor(
                 ts=last_internal_date or last_date_sent,
                 id=int(last_id),
+                # Stamped from the walk that actually produced these rows,
+                # never from a caller's argument re-derived a layer up.
+                order=order,
             )
         return results, next_keyset
 
@@ -790,11 +873,19 @@ class Searcher:
         compatibility with callers that hold no live connection at this point.
 
         `sort="rank"` (default) orders by rerank score — the relevance-first
-        behavior. `sort="date"` keeps the same retrieval pool (so "what
-        matches" is unchanged) but orders the page by
-        ``COALESCE(internal_date, date_sent) DESC NULLS LAST`` so callers
-        that want "relevant emails, newest first" don't have to bolt on a
-        separate date-list endpoint.
+        behavior.
+
+        `sort="date"` would keep the same retrieval pool (so "what matches"
+        is unchanged) and order the page by
+        ``COALESCE(internal_date, date_sent) DESC NULLS LAST``. **That
+        branch is unreachable** — every caller of this method resolves to
+        ``sort="rank"``, because ``Searcher.search`` routes both
+        ``sort="date"`` and every blank query to ``_date_keyset_search``
+        before the hybrid pool is built. See ``_date_sort_key``, which is
+        the key it sorts by, and
+        ``tests/test_searcher_pool_sort_unreachable.py``, which pins it. Do
+        **not** add ``sort_order`` handling to that branch "for symmetry":
+        it would be tested against code that never runs.
         """
         terms = parsed.free_text.split()
         if sort == "date":
@@ -934,14 +1025,24 @@ class Searcher:
 
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
                             rerank_pool_size, use_cache, user_id: int | None = None,
-                            sort: SortMode = DEFAULT_SORT,
-                            sort_order: SortOrder = DEFAULT_SORT_ORDER):
+                            sort: SortMode,
+                            sort_order: SortOrder):
         """Variant of search() that takes an already-parsed query.
 
         Connection scope: retrieval + hydrate inside one 'with' block. The
         connection is released before the reranker runs (the ML pass can be
         slow). A second short-lived connection opens only when the page needs
         attachment filename resolution.
+
+        ``sort`` and ``sort_order`` are **keyword-only with no default**,
+        the ``allowed_account_ids`` shape (#234). This method *writes* the
+        cached pool's own record of both axes, and ``PoolMetadata`` reads
+        that record back to decide whether a paging request contradicts the
+        pool — so a caller who omitted either would record the pool as
+        rank/desc regardless of what it actually built, which is #312 one
+        function over and silent. The single caller (``grow_pool``) forwards
+        the values it read off the entry, so nothing is lost by making them
+        unspellable-by-omission.
         """
         t0 = time.monotonic()
         timing: dict[str, float] = {"parse": 0.0}
@@ -1037,10 +1138,20 @@ class Searcher:
         and was then cached as the pool's own sort, which `_check_pool_sort`
         reads back to decide a 400 (#312).
 
-        `sort_order` is orthogonal to `sort` and, like it, resolves an
-        unstated `None` to `DEFAULT_SORT_ORDER` ("desc") once, here, into
+        `sort_order` is orthogonal to `sort` and resolves once, here, into
         `effective_order` — every read below goes through that local, never
-        the raw parameter. `sort_order="asc"` only takes effect on the
+        the raw parameter. **With a `keyset_cursor` in hand the cursor's own
+        direction is what an unstated `sort_order` resolves to**, not
+        `DEFAULT_SORT_ORDER`: the cursor is a statement about ordering that
+        we minted, so paging the documented way (state the order once, then
+        send only the cursor back) continues the walk instead of silently
+        reversing it. A *stated* `sort_order` that contradicts the cursor
+        raises `KeysetOrderMismatch` rather than either side winning
+        quietly. Only the direction is inherited — `sort` is not, because
+        `KeysetCursorUnusable` below is the guard for a keyset cursor
+        reaching the hybrid branch, and inferring the sort would retire it.
+        With no cursor, an unstated `sort_order` is `DEFAULT_SORT_ORDER`
+        ("desc"). `sort_order="asc"` only takes effect on the
         date-ordered keyset branch (`_date_keyset_search`, reached by
         `sort="date"` — with or without free text — or by any blank query),
         where both the ORDER BY and the keyset predicate flip to walk the
@@ -1054,9 +1165,25 @@ class Searcher:
         """
         t0 = time.monotonic()
         effective_sort: SortMode = DEFAULT_SORT if sort is None else sort
-        effective_order: SortOrder = (
-            DEFAULT_SORT_ORDER if sort_order is None else sort_order
-        )
+        # A cursor is a statement about ordering, and it is one we minted, so
+        # it outranks an *unstated* argument — the rule `resolve_cursor_plan`
+        # applies on the wire, applied here so library callers get it too.
+        # Only the direction is inherited: `sort` is not, because a keyset
+        # cursor reaching the hybrid branch is already refused below by
+        # `KeysetCursorUnusable`, and inferring it here would silently retire
+        # that guard.
+        if keyset_cursor is not None:
+            if sort_order is not None and sort_order != keyset_cursor.order:
+                raise KeysetOrderMismatch(
+                    f"sort_order={sort_order!r} contradicts the cursor, which "
+                    f"continues a {keyset_cursor.order}ending walk; pass "
+                    f"sort_order={keyset_cursor.order!r} or omit it"
+                )
+            effective_order: SortOrder = keyset_cursor.order
+        else:
+            effective_order = (
+                DEFAULT_SORT_ORDER if sort_order is None else sort_order
+            )
         # Refused rather than honoured: the rank path serves a bounded
         # candidate pool, so reversing it returns the least relevant of the
         # top hits rather than of the archive — an artifact of where the

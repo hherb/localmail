@@ -648,6 +648,12 @@ def _keyset_clause(keyset: KeysetCursor, order: str) -> tuple[str, list[Any]]:
             f" AND (({expr} IS NULL AND m.id > %s) OR {expr} IS NOT NULL) ",
             [keyset.id],
         )
+    # SUPERSEDED (review of #322) — the OR-form below plans as a per-tuple
+    # Filter, so every continuation page restarts at the head of
+    # messages_recent_idx. The shipped form is a row comparison:
+    #     f" AND ROW({expr}, m.id) > ROW(%s, %s) ", [keyset.ts, keyset.id]
+    # See searcher._keyset_clause and _PRE_FIX_OR_FORM in
+    # tests/test_searcher_sort_order_plan.py.
     return (
         f" AND ({expr} > %s OR ({expr} = %s AND m.id > %s)) ",
         [keyset.ts, keyset.ts, keyset.id],
@@ -1181,6 +1187,11 @@ In `src/localmail/api/search_cursor.py`, replace the prefix constant, `encode_ke
 _KEYSET_PREFIX_DESC = "K|"
 _KEYSET_PREFIX_ASC = "KA|"
 
+#: NOTE (review of #322): the reasoning on the next two lines is WRONG and
+#: was NOT shipped. "KA|…" does not start with "K|" — the "|" terminator is
+#: what keeps the two prefixes disjoint — so no scan order can misclassify a
+#: cursor. See the shipped comment above _KEYSET_PREFIXES in
+#: src/localmail/api/search_cursor.py for the corrected version.
 #: Longest first: "KA|" also starts with "K", so a shortest-first scan
 #: would classify every ascending cursor as descending.
 _KEYSET_PREFIXES: tuple[tuple[str, SortOrder], ...] = (
@@ -1361,7 +1372,9 @@ axis.
 
 K| keeps meaning descending, so no cursor in flight changes meaning and
 api.browse_cursor's shared payload encoding is untouched -- which is why a
-prefix rather than a payload field. Prefixes are matched longest-first:
+prefix rather than a payload field. (NOTE, review of #322: the longest-first
+rationale that followed here was wrong — "KA|" does not start with "K|", so the
+prefixes are disjoint whatever the scan order.) Prefixes are matched longest-first:
 'KA|' also starts with 'K'.
 
 resolve_cursor_mode becomes resolve_cursor_plan, returning the resolved

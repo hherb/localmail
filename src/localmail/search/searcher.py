@@ -131,9 +131,26 @@ def _keyset_clause(keyset: KeysetCursor, order: SortOrder) -> tuple[str, list[An
     the undated tail that follows it. Ascending needs no such disjunct —
     under ``NULLS FIRST`` the undated block is already behind the cursor,
     and ``NULL > ts`` is not true, so those rows drop out on their own.
-    That makes the ascending dated predicate the more index-friendly of
-    the two; the descending disjunct is the shape #75 identified as
-    preventing an index range bound, and is pre-existing here.
+
+    **That absence is what lets the ascending dated predicate be a row
+    comparison**, which is the only spelling Postgres composes into an
+    ``Index Cond`` on ``messages_recent_idx``. The OR-form
+    (``expr > %s OR (expr = %s AND id > %s)``) is semantically identical
+    and plans as a per-tuple ``Filter``: the walk restarts at the head of
+    the index on every page and discards everything before the cursor.
+    Measured mid-walk on the live 128k archive, page ~1250: **62.1 ms and
+    53,789 buffers with 64,001 rows removed by filter, against 0.57 ms and
+    46 buffers** for the row comparison. The cost is linear in scroll
+    depth, so it is invisible on page 1 — where this feature's own
+    "no new index" measurements were taken — and grows without bound on
+    exactly the deep scroll the keyset walk exists to serve. This is the
+    trap #75 documents for the browse path; do **not** "simplify" it back
+    to the OR-form.
+
+    Descending cannot use the row comparison: ``ROW(NULL, id) < ROW(...)``
+    is NULL, so the undated tail it must admit would drop out. Closing
+    that needs ``browse.py``'s two-phase dated-then-top-up query — filed
+    as #323, and pre-existing here.
     """
     expr = _DATE_EXPR_SQL
     if order == "desc":
@@ -152,8 +169,8 @@ def _keyset_clause(keyset: KeysetCursor, order: SortOrder) -> tuple[str, list[An
             [keyset.id],
         )
     return (
-        f" AND ({expr} > %s OR ({expr} = %s AND m.id > %s)) ",
-        [keyset.ts, keyset.ts, keyset.id],
+        f" AND ROW({expr}, m.id) > ROW(%s, %s) ",
+        [keyset.ts, keyset.id],
     )
 
 

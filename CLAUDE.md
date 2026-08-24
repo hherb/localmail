@@ -3260,7 +3260,27 @@ for the full design.
       too, and still full-sorts at 33,372 buffers (30 ms). Only the
       `NULLS FIRST` spelling matches the index. **Do not "normalise" this
       spelling to `NULLS LAST`.** Both directions' ORDER BY are written
-      exactly once, in `searcher._DATE_ORDER_BY_SQL`.
+      exactly once, in `searcher._DATE_ORDER_BY_SQL`, whose key type is
+      `SortOrder` so mypy refuses a wrong literal — the dict lookup stays
+      as the loud failure for the value mypy cannot see, since
+      `_keyset_clause` tests `== "desc"` and would hand `"ASC"` the
+      *ascending* predicate.
+      - **The plan is pinned, not just measured**, by
+        `tests/test_searcher_sort_order_plan.py`: it EXPLAINs the ORDER BY
+        composed from that constant (never a copy) and requires
+        `Index Scan Backward using messages_recent_idx` with no full Sort,
+        across the blank-query, FTS-restricted and mid-keyset shapes,
+        keeping the `NULLS LAST` spelling as the **negative control** — the
+        role `--predicate-form pre75` plays in `run_browse_explain.py`, and
+        what stops the assertion being tautological on the only
+        date-ordered index the table has. The *functional* half was already
+        covered (a `NULLS LAST` slip breaks the undated-first and reversal
+        assertions), but the performance half — the whole basis of "no
+        migration and no new index" — was not, and a slip there returns
+        correct rows while full-sorting the archive on every page. It
+        asserts the planner's **choice**, not merely eligibility: unlike
+        `test_api_browse_plan.py` the ascending spelling wins at 300 rows
+        with nothing hidden and `enable_seqscan` left on.
     - **Undated rows sort first ascending, not last.** Ascending is the
       exact reverse of descending — the undated tail becomes the undated
       head, same rows, reversed — which is what makes `asc ==

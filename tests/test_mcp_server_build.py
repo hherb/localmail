@@ -62,3 +62,25 @@ def test_search_declares_no_sort_default_of_its_own(db_dsn):
         f"search states sort={sort.get('default')!r} for the agent: "
         "a cursor's own ordering can never win against it"
     )
+
+
+def test_search_declares_no_sort_order_default_of_its_own(db_dsn):
+    """The MCP tool must not fill in a direction the agent did not ask for.
+
+    server.py restates every parameter for the agent-facing schema, so a
+    default written here is sent on the agent's behalf — and a "desc" sent
+    that way contradicts every ascending cursor, turning the documented
+    paging call into a 400. Fixing run_search alone would not catch this.
+    """
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    props = (tools["search"].inputSchema or {})["properties"]
+    assert "sort_order" in props, "the search tool does not expose sort_order"
+    assert props["sort_order"].get("default") is None, (
+        f"search states sort_order={props['sort_order'].get('default')!r} "
+        "for the agent: an ascending cursor can never win against it"
+    )

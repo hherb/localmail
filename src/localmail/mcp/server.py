@@ -150,6 +150,15 @@ def build_mcp_server(
             'omitted) or "date" (strictly newest first). Leave it unset when '
             "paging — a `cursor` already carries the ordering it continues, "
             "and a sort that contradicts it is rejected."))] = None,
+        sort_order: Annotated[Literal["asc", "desc"] | None, Field(description=(
+            'Direction for `sort`: "desc" (the default when omitted) or '
+            '"asc". Only applicable to sort="date" — oldest first; '
+            'sort="rank" with sort_order="asc" is rejected, because the '
+            "rank path searches a bounded candidate pool and reversing it "
+            "returns the least relevant of the top hits rather than of the "
+            "archive. Leave it unset when paging — a `cursor` already "
+            "carries the direction it continues, and a direction that "
+            "contradicts it is rejected."))] = None,
         limit: Annotated[int, Field(ge=1, le=200, description=(
             "Maximum results in this page (1–200)."))] = 50,
         cursor: Annotated[str | None, Field(description=(
@@ -212,13 +221,14 @@ def build_mcp_server(
 
         Results are ACL-scoped: only the accounts you have been granted are
         searched. Rank-ordered by default; pass `sort="date"` for strictly
-        newest-first. Page forward by calling again with the same `query` and
-        filters plus the returned `next_cursor` in `cursor`, and leave `sort`
-        unset — the cursor carries the ordering it continues, and stating a
-        different one is an error rather than a silent restart. A `null`
-        next_cursor means there are no more results. If the cursor has expired
-        (the result pool was evicted), re-run the same query without a cursor
-        and skip rows you already hold.
+        newest-first, and `sort_order="asc"` alongside it for oldest-first.
+        Page forward by calling again with the same `query` and filters plus
+        the returned `next_cursor` in `cursor`, and leave `sort` and
+        `sort_order` unset — the cursor carries the ordering it continues,
+        and stating a different one is an error rather than a silent
+        restart. A `null` next_cursor means there are no more results. If the
+        cursor has expired (the result pool was evicted), re-run the same
+        query without a cursor and skip rows you already hold.
 
         Use `list_messages` when you have no query and just want recent mail;
         use `get_message` to read a full message once a result surfaces its id.
@@ -246,6 +256,7 @@ def build_mcp_server(
                 allowed_account_ids=allowed,
                 query=query,
                 sort=sort,
+                sort_order=sort_order,
                 limit=limit,
                 cursor=cursor,
                 filters=filters,

@@ -31,6 +31,7 @@ def tool_search(
     allowed_account_ids: list[int],
     query: str,
     sort: Literal["rank", "date"] | None = None,
+    sort_order: Literal["asc", "desc"] | None = None,
     limit: int = 50,
     cursor: str | None = None,
     filters: dict[str, Any] | None = None,
@@ -61,6 +62,7 @@ def tool_search(
         allowed_account_ids=allowed_account_ids,
         user_id=user_id,
         sort=sort,
+        sort_order=sort_order,
         cursor=cursor,
         smart=smart,
     )

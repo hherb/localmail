@@ -876,12 +876,16 @@ Poll, process, ack. Semantics:
   and `can_grow_pool=true`, the route doubles `candidates_per_arm` up
   to `candidates_per_arm_max` (default 800), then flips
   `next_cursor` to `null`.
-- **Keyset cursor** (`"K|<base64>"` descending, `"KA|<base64>"` ascending)
-  — used for `sort=date` and for any blank-query search, backed by a scan
-  over `COALESCE(internal_date, date_sent)` (lexical when there is free
-  text). Unbounded scroll; no pool cap. Same recall as the lexical
-  retrieval arm. The prefix carries the direction so a cursor paged back
-  on its own continues the order it was minted in.
+- **Keyset cursor** (`"K|"` / `"KT|"` descending, `"KA|"` / `"KAT|"`
+  ascending, each followed by base64) — used for `sort=date` and for any
+  blank-query search, backed by a scan over
+  `COALESCE(internal_date, date_sent)` (lexical when there is free text).
+  Unbounded scroll; no pool cap. Same recall as the lexical retrieval arm.
+  The prefix carries the direction — so a cursor paged back on its own
+  continues the order it was minted in — and the `T` marks a cursor from a
+  text walk, which is what makes the paging rule below enforceable.
+  Treat the whole string as opaque; the prefixes are an internal
+  discriminator, not API.
 
 `sort_order` is `"asc"` or `"desc"` (default `"desc"`), and modifies
 whichever `sort` criterion is in force. Ascending therefore requires
@@ -903,9 +907,17 @@ When paging, send the cursor back with the same `query` and filters and
 **leave `sort` and `sort_order` unset**. The cursor already carries the
 ordering it continues, so a stated value that contradicts it on either
 axis is a 400 rather than a silent restart at page 1 of a differently
-ordered search. The cursor carries a position, not a query: re-sending a
-different `query` or different filters alongside it is undefined, the same
-way it always has been.
+ordered search.
+
+A cursor carries a position, not a query, so re-sending a *different*
+`query` or different filters alongside it is undefined — the same way it
+always has been. **Dropping the query entirely is the one case that is
+caught**: a cursor minted by a text search records that it came from one,
+so paging it with no query is a 400 telling you to re-send it, rather than
+the next slice of your whole archive returned as a continuation. Cursors
+from a blank-query walk have no text walk to continue and page with or
+without a query, which is what keeps that refusal from forbidding
+blank-query pagination.
 
 If a paged cursor's underlying pool was evicted from the in-memory
 cache (TTL expiry, LRU eviction, or `serve` restart) the route

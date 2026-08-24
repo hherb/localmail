@@ -95,3 +95,38 @@ def test_list_api_users_marks_a_service_principal(runner, db_conn):
     out = runner.invoke(main, ["list-api-users"], catch_exceptions=False).output
     assert "bot [service]" in out
     assert "amy\n" in out
+
+
+def test_revoke_refuses_a_persons_username(runner, db_conn):
+    """"ghost" never reaches the service layer -- resolve_user_id_by_username
+    fails first -- so the CLI's ApiKeyNotFound branches were unexercised. A real
+    human username is the way in, and makes this a second id-resolving path onto
+    a person's row, guarded only at the service layer.
+    """
+    runner.invoke(main, ["add-api-user", "amy", "--password", "pw"],
+                  catch_exceptions=False)
+    assert runner.invoke(main, ["revoke-api-key", "amy"]).exit_code != 0
+    assert runner.invoke(main, ["remove-api-key", "amy"]).exit_code != 0
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM api_users WHERE username = 'amy'")
+        row = cur.fetchone()
+    assert row is not None and row[0] == 1
+
+
+def test_a_key_in_use_reports_when_it_was_last_used(runner, db_conn):
+    """last_used_at is the whole signal for "is this bot live or abandoned", and
+    it travels through a LEFT JOIN projection plus verify_token's
+    LAST_USED_REFRESH_SECONDS dedup -- either could break in silence. It was
+    asserted only in its two null states."""
+    from localmail.api.auth import verify_token
+
+    # .stdout, never .output: since click 8.2 output interleaves stderr in
+    # write order, and this command deliberately puts its note there.
+    raw = runner.invoke(
+        main, ["add-api-key", "bot"], catch_exceptions=False
+    ).stdout.strip()
+    assert "never" in runner.invoke(main, ["list-api-keys"]).output
+
+    assert verify_token(db_conn, raw) is not None
+    db_conn.commit()
+    assert "last-used=never" not in runner.invoke(main, ["list-api-keys"]).output

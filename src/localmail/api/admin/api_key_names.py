@@ -6,7 +6,9 @@
 The key's name is its principal's ``api_users.username``, so uniqueness comes
 free from that column's constraint and is not re-stated here. Shaped like
 ``account_names.account_name_error`` — a message, or None — so each caller wraps
-it in its own error type and renders it beside the offending field.
+it in its own error type. The admin panel renders it beside the Name input via
+``api_key_forms.field_errors_from``; the CLI and the JSON route surface it as
+the whole message.
 """
 from __future__ import annotations
 

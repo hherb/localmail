@@ -177,6 +177,10 @@ def revoke_admin_sessions(conn: psycopg.Connection, *, username: str) -> None:
       OAuth-minted access tokens.
     * **OAuth refresh tokens** (``mcp.oauth.refresh.load_refresh``) — so a
       revoked client cannot simply mint a fresh access token and carry on.
+    * **API keys** — the same ``verify_token`` predicate reaches them. For a
+      key this is the one revocation with no undo: it cannot be recovered, so
+      the bot must be re-keyed. ``api_keys.list_keys`` reports the state as
+      ``revoked`` rather than leaving the panel claiming a dead key is active.
 
     Effect is therefore wider than the name suggests: the user is signed out
     of the desktop client and every agent holding a token for them stops

@@ -11,9 +11,11 @@ minted against a dedicated **service user**. That principal is an ordinary
 ``sessions_invalidated_at`` reach the key with no code of their own here.
 
 The pairing is 1:1 — one key per service user — enforced by migration 0036's
-partial unique index. Everything therefore addresses a key by its principal's
-id: ``api_tokens``' primary key is ``token_sha256``, which is credential
-material and must never travel in a URL or a log line.
+partial unique index, which is what makes the principal the natural handle.
+Everything therefore addresses a key by its principal's id: ``api_tokens``'
+primary key is ``token_sha256``, a hash *of* the credential — not presentable
+as a bearer, since verification hashes what is presented and compares, but
+still not something to put in a URL or a log line.
 """
 from __future__ import annotations
 
@@ -34,7 +36,20 @@ API_KEY_PREFIX = "lmk_"
 
 
 class ApiKeyFieldError(ValueError):
-    """Validation rejected a create (blank name, collision, unknown account)."""
+    """Validation rejected a create (blank name, collision, unknown account).
+
+    Carries the field it is about, so the admin panel can render it beside the
+    offending input instead of recovering it from the message. The message is
+    the wrong channel for that: matching ``"name" in msg`` mis-filed the two
+    likeliest operator errors -- reusing a person's username, and re-minting
+    over a live key -- and would mis-file any future wording by accident.
+    ``_form`` is the default because an error about an account id is about the
+    request, not about a field of it.
+    """
+
+    def __init__(self, message: str, *, field: str = "_form") -> None:
+        super().__init__(message)
+        self.field = field
 
 
 class ApiKeyNotFound(Exception):
@@ -123,7 +138,9 @@ def _create_service_user(conn: psycopg.Connection, name: str) -> int:
                 (name, unusable),
             )
         except psycopg.errors.UniqueViolation as e:
-            raise ApiKeyFieldError(f"name {name!r} is already taken") from e
+            raise ApiKeyFieldError(
+                f"name {name!r} is already taken", field="name"
+            ) from e
         row = cur.fetchone()
         assert row is not None
         return int(row[0])
@@ -132,7 +149,8 @@ def _create_service_user(conn: psycopg.Connection, name: str) -> int:
 def _resolve_principal(conn: psycopg.Connection, name: str) -> int:
     """Return the principal to mint against; create one if the name is free.
 
-    Three outcomes, and the middle one is the re-key path: a service user
+    Four branches: mint a new principal, refuse a person's row, refuse a bot
+    that still holds a key, and — last — the re-key path, where a service user
     holding no key is reused with its grants intact.
     """
     with conn.cursor() as cur:
@@ -150,11 +168,12 @@ def _resolve_principal(conn: psycopg.Connection, name: str) -> int:
     user_id, is_service, has_key = int(row[0]), bool(row[1]), bool(row[2])
     if not is_service:
         raise ApiKeyFieldError(
-            f"{name!r} is an existing user account, not an API key"
+            f"{name!r} is an existing user account, not an API key", field="name"
         )
     if has_key:
         raise ApiKeyFieldError(
-            f"API key {name!r} already exists; revoke it before minting a new one"
+            f"API key {name!r} already exists; revoke it before minting a new one",
+            field="name",
         )
     return user_id
 
@@ -170,7 +189,7 @@ def create_key(
     """
     err = api_key_name_error(name)
     if err is not None:
-        raise ApiKeyFieldError(err)
+        raise ApiKeyFieldError(err, field="name")
     name = name.strip()
     user_id = _resolve_principal(conn, name)
     for account_id in account_ids:
@@ -193,7 +212,8 @@ def create_key(
             # and surfaced as a 500, which the panel's 400/422-only swap renders
             # as an inert button. Same mapping as _create_service_user's.
             raise ApiKeyFieldError(
-                f"API key {name!r} already exists; revoke it before minting a new one"
+                f"API key {name!r} already exists; revoke it before minting a new one",
+                field="name",
             ) from e
     return CreatedKey(user_id=user_id, name=name, raw_key=raw_key)
 
@@ -203,9 +223,11 @@ def set_grant(
 ) -> None:
     """Grant or revoke one account on an API-key principal. Caller commits.
 
-    The ``is_service`` check is what keeps this from becoming a second,
-    unguarded way to edit a *person's* ACL — that belongs to
-    ``users.set_grant``, which has its own guards.
+    The ``is_service`` check is what keeps this from becoming a second way to
+    edit a *person's* ACL; that belongs to ``users.set_grant``. Note the two are
+    not symmetric — ``users.set_grant`` carries no matching guard, so it can
+    edit a bot's. Both routes are admin-only, so this is a division of labour
+    rather than a boundary.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -224,14 +246,20 @@ def set_grant(
 
 
 def revoke_key(conn: psycopg.Connection, user_id: int) -> None:
-    """Delete every credential the principal holds, keeping the principal and
-    its grants. Caller commits.
+    """Delete every ``api_tokens`` row the principal holds, keeping the
+    principal and its grants. Caller commits.
+
+    (Every credential, in practice: a service principal can hold no OAuth
+    refresh token or authorization code, because Rule 2 closes the consent
+    login they descend from.)
 
     Sweeps rather than deleting only the ``api_key_name IS NOT NULL`` row: under
     the 1:1 model a service user holds zero or one credential and it is always a
     key, so anything else there is a session token laundered out of the key
-    before ``issue_token`` refused to mint one — and the lever has to be
-    terminal on an archive that already carries one.
+    before ``issue_token`` refused to mint one. Migration 0036 and that guard
+    shipped together, so no upgrading archive can hold such a row and the sweep
+    is defence in depth; note the panel's Revoke button is gated on ``has_key``
+    and so would not offer it in that state — the CLI and the JSON route do.
 
     The ``is_service`` predicate is what keeps the sweep from becoming a second,
     unguarded way to cut off a *person's* sessions; that belongs to

@@ -337,11 +337,16 @@ def issue_token(
 
     Refuses a **service principal** — the row an API key is minted against.
     The guard is here rather than at each caller because ``verify_token``
-    accepts keys and this is the one place a *session* credential comes into
-    existence: a key presented to ``refresh_token`` would otherwise be
+    accepts keys, and a key presented to ``refresh_token`` would otherwise be
     exchanged for an ordinary 30-day token that no longer reports
     ``is_api_key``, walking straight through the point-of-use gate that
     refuses keys at admin routes and surviving the operator's revocation.
+
+    This is one of **two** writers of a session-kind ``api_tokens`` row, not
+    the only one: ``mcp.oauth.access.mint_access`` is the other, and carries
+    the same predicate for the same reason. Guarding only this one left that
+    path closed by Rule 2's consent gate three modules away — defence in
+    depth, not construction, which is what the claim needs to be.
 
     Caller is responsible for committing the transaction.
     """
@@ -432,7 +437,8 @@ def login(
 
     Raises:
       RateLimited (with .cap and .retry_after_s) if any cap is exceeded.
-      AuthenticationFailed for bad credentials or disabled users.
+      AuthenticationFailed for bad credentials, disabled users, or a
+    service principal (which may never present a password — login_eligible_sql).
 
     ``cfg`` defaults to ``AuthConfig()`` so test call sites that don't
     care about thresholds still work. Production callers should pass the
@@ -558,7 +564,8 @@ def change_password(
 
     Raises:
       ValidationFailed if ``new_password`` is empty.
-      AuthenticationFailed if the user does not exist, is disabled, or
+      AuthenticationFailed if the user does not exist, is disabled, is a
+        service principal, or
         ``old_password`` does not match.
     """
     if not new_password:

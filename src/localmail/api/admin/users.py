@@ -313,8 +313,10 @@ def set_grant(
 
 def revoke_sessions(conn: psycopg.Connection, user_id: int) -> None:
     """Invalidate every outstanding credential for the user: admin cookies,
-    bearer tokens (``/v1/*``, ``/mcp``, the desktop GUI), and OAuth refresh
-    tokens. Raises UserNotFound. See ``admin.auth.revoke_admin_sessions``."""
+    bearer tokens (``/v1/*``, ``/mcp``, the desktop GUI), OAuth refresh tokens,
+    and **API keys** — for a key this is the one revocation with no undo, since
+    a key cannot be recovered and the bot must be re-keyed. Raises UserNotFound.
+    See ``admin.auth.revoke_admin_sessions``."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE api_users SET sessions_invalidated_at = now() WHERE id = %s",

@@ -19,10 +19,10 @@
 -- the many-keys model the design defers. Key names are unique globally for
 -- free, via the existing api_users.username unique constraint.
 --
--- Lock cost: all three ALTERs are metadata-only in Postgres 11+ (ADD COLUMN
--- nullable, ADD COLUMN with a constant default, DROP NOT NULL). The CHECK is
--- validated against existing rows, and the index build takes a brief write
--- lock; api_tokens holds one row per live session, so both are trivial.
+-- Lock cost: the three column ALTERs are metadata-only in Postgres 11+ (ADD
+-- COLUMN nullable, ADD COLUMN with a constant default, DROP NOT NULL). The
+-- CHECK is validated against existing rows, and the index build takes a brief
+-- write lock; api_tokens holds one row per live session, so both are trivial.
 
 ALTER TABLE api_tokens
     ADD COLUMN IF NOT EXISTS api_key_name TEXT;

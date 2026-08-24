@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from localmail.api.admin.csrf import make_csrf_token
-from localmail.api.auth import hash_password
+from localmail.api.auth import hash_password, hash_token
 from localmail.config import ServeConfig
 from localmail.serve.admin.csrf import csrf_action
 from localmail.serve.app import create_app
@@ -100,8 +100,15 @@ def test_create_shows_the_key_on_this_response_and_no_later_one(client, db_conn,
         headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
     )
     assert resp.status_code == 200
+    # The actual value, not `len(k) > 12`: a proxy for "this is the whole
+    # secret" passes just as happily against a longer truncation.
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT token_sha256 FROM api_tokens WHERE api_key_name = %s",
+                    ("my_mail_bot",))
+        row = cur.fetchone()
+    assert row is not None
     keys = re.findall(r"lmk_[A-Za-z0-9_\-]+", resp.text)
-    full = [k for k in keys if len(k) > 12]
+    full = [k for k in keys if hash_token(k) == row[0]]
     assert len(full) == 1
     listed = client.get("/admin/api-keys").text
     assert full[0] not in listed
@@ -175,3 +182,50 @@ def test_delete_from_the_panel(client, admin_id):
     )
     assert resp.status_code == 200
     assert "gone_bot" not in client.get("/admin/api-keys").text
+
+
+def test_a_name_collision_renders_beside_the_name_field(client, db_conn, admin_id):
+    """The two likeliest operator errors -- reusing a person's username, and
+    re-minting over a live key -- are about the Name field. They were filed as
+    form-level errors because the router recovered the field by grepping the
+    message for "name", which neither wording contains."""
+    from localmail.api.admin import users as users_svc
+
+    users_svc.create_user(db_conn, username="amy", password="pw12345")
+    db_conn.commit()
+    resp = client.post(
+        "/admin/api-keys",
+        data={"name": "amy"},
+        headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
+    )
+    assert resp.status_code == 400
+    assert 'id="api-key-name-error"' in resp.text
+    slot = re.search(
+        r'id="api-key-name-error"[^>]*>([^<]*)<', resp.text
+    )
+    assert slot and "existing user account" in slot.group(1)
+
+
+def test_an_unknown_account_stays_a_form_level_error(client, admin_id):
+    """An account id is about the request, not about a field of it, so it must
+    not be swapped into the Name slot."""
+    resp = client.post(
+        "/admin/api-keys",
+        data={"name": "bot", "account_ids": ["999999"]},
+        headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
+    )
+    assert resp.status_code == 400
+    slot = re.search(r'id="api-key-name-error"[^>]*>([^<]*)<', resp.text)
+    assert slot and slot.group(1).strip() == ""
+    assert "unknown account" in resp.text
+
+
+def test_a_successful_create_clears_a_previous_name_error(client, admin_id):
+    """The slot swaps out of band on every create response, so a stale error
+    from the previous attempt cannot survive beside a working form."""
+    hdr = {"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")}
+    client.post("/admin/api-keys", data={"name": "  "}, headers=hdr)
+    resp = client.post("/admin/api-keys", data={"name": "bot"}, headers=hdr)
+    assert resp.status_code == 200
+    slot = re.search(r'id="api-key-name-error"[^>]*>([^<]*)<', resp.text)
+    assert slot and slot.group(1).strip() == ""

@@ -8,14 +8,22 @@ from localmail.api.admin.api_keys import ApiKeyFieldError
 
 
 class FormError(ValueError):
-    """Malformed raw form input the service layer wouldn't otherwise see."""
+    """Malformed raw form input the service layer wouldn't otherwise see.
+
+    Carries its field like ``ApiKeyFieldError``, so ``field_errors_from`` reads
+    one attribute rather than discriminating two error types.
+    """
+
+    def __init__(self, message: str, *, field: str = "_form") -> None:
+        super().__init__(message)
+        self.field = field
 
 
 def form_to_create_kwargs(name: object, account_ids: list[str]) -> dict:
     """Map the raw create-form values to create_key(**kwargs)."""
     cleaned = str(name or "").strip()
     if not cleaned:
-        raise FormError("name must not be blank")
+        raise FormError("name must not be blank", field="name")
     parsed: list[int] = []
     for raw in account_ids:
         if not str(raw).isdigit():
@@ -25,8 +33,10 @@ def form_to_create_kwargs(name: object, account_ids: list[str]) -> dict:
 
 
 def field_errors_from(err: ApiKeyFieldError | FormError) -> dict[str, str]:
-    """Map a validation error to {field: message}; fall back to '_form'."""
-    msg = str(err)
-    if "name" in msg:
-        return {"name": msg}
-    return {"_form": msg}
+    """Map a validation error to {field: message}.
+
+    Reads the field the error was raised with. It used to grep the message for
+    ``"name"``, which mis-filed the two likeliest operator errors and would
+    mis-file any future wording by accident.
+    """
+    return {err.field: str(err)}

@@ -29,7 +29,12 @@ class _E:
 
 
 def _seed(conn, *, n=7, undated=2):
-    """n dated messages plus `undated` with no usable date at all."""
+    """n dated messages plus `undated` with no usable date at all.
+
+    Returns the undated rows' ids, ascending — the ordering the ascending
+    walk must reproduce across its undated head.
+    """
+    undated_ids: list[int] = []
     with conn.cursor() as cur:
         cur.execute("INSERT INTO accounts (name,email_address,imap_host,auth_method)"
                     " VALUES ('a','a@x','h','password') RETURNING id")
@@ -46,11 +51,13 @@ def _seed(conn, *, n=7, undated=2):
             cur.execute(
                 "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
                 " body_text, headers, raw_bytes, size_bytes)"
-                " VALUES (%s,%s,%s,%s,%s,'{}'::jsonb,'r',1)",
+                " VALUES (%s,%s,%s,%s,%s,'{}'::jsonb,'r',1) RETURNING id",
                 (acct, f"<u{j}>", bytes([200 + j]) * 32, f"undated {j} needle",
                  "body needle"),
             )
+            undated_ids.append(int(cur.fetchone()[0]))
     conn.commit()
+    return undated_ids
 
 
 def _all_pages(searcher, *, order, query="needle", page_size=3):
@@ -119,3 +126,39 @@ def test_descending_is_unchanged_when_order_is_unstated(db_dsn, db_conn):
     finally:
         pool.close()
     assert [r.message_id for r in unstated_page.results] == stated[:3]
+
+
+def test_an_ascending_page_boundary_inside_the_undated_head_loses_nothing(
+    db_dsn, db_conn,
+):
+    """Three undated rows, pages of two — the boundary lands *inside* the head.
+
+    This is the shape the ascending NULL-cursor predicate exists for, and
+    the only shape that can see it. Page 1 returns two undated rows and
+    mints a cursor whose ``ts`` is NULL; page 2 must return the rest of the
+    undated block *and then* every dated row, which is why that predicate
+    is ``(expr IS NULL AND id > %s) OR expr IS NOT NULL`` rather than
+    ``expr IS NOT NULL`` alone. Drop the first disjunct and the third
+    undated row vanishes from the archive between pages, silently.
+
+    Every sibling here seeds two undated rows against a page size of two or
+    three, so the boundary always falls at the block's *end* — where
+    ``id > max_undated_id`` matches nothing either way and the disjunct is
+    invisible.
+    """
+    undated_ids = _seed(db_conn, n=4, undated=3)
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=None)
+        first = s.search("needle", allowed_account_ids=None, page_size=2,
+                         user_id=1, sort="date", sort_order="asc")
+        walked = _all_pages(s, order="asc", page_size=2)
+    finally:
+        pool.close()
+    assert first.next_keyset is not None
+    assert first.next_keyset.ts is None, (
+        "page 1 did not end inside the undated head, so this test is not "
+        "exercising the NULL-cursor predicate at all"
+    )
+    assert walked[:3] == undated_ids, walked
+    assert len(walked) == len(set(walked)) == 7, walked

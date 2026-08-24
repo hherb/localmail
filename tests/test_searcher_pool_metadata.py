@@ -124,7 +124,7 @@ def test_pool_metadata_reports_the_sort_the_pool_was_actually_built_with(db_dsn)
         s._cache.put("tok-date", {
             "parsed": parse_query("invoice"), "hydrated": [], "scores": {},
             "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
-            "user_id": None, "sort": "date",
+            "user_id": None, "sort": "date", "sort_order": "desc",
         })
         assert s.get_pool_metadata("tok-date").sort == "date"
 
@@ -256,6 +256,7 @@ def test_pool_metadata_is_frozen_dataclass():
     """PoolMetadata is a value object; immutability prevents downstream
     mutation from being mistaken for cache invalidation."""
     meta = PoolMetadata(candidates_per_arm=50, page_size=20,
-                        rerank_pool_size=100, pool_size=80, sort="rank")
+                        rerank_pool_size=100, pool_size=80, sort="rank",
+                        sort_order="desc")
     with pytest.raises(dataclasses.FrozenInstanceError):
         meta.candidates_per_arm = 99  # type: ignore[misc]

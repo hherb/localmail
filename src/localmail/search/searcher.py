@@ -47,6 +47,25 @@ SortMode = Literal["rank", "date"]
 #: able to answer differently (#312).
 DEFAULT_SORT: SortMode = "rank"
 
+SortOrder = Literal["asc", "desc"]
+
+#: The direction a caller gets when it states none. It lives beside
+#: ``DEFAULT_SORT`` for the same reason (#312): ``Searcher.search`` and
+#: ``api.search_cursor`` both resolve an unstated value, and two layers
+#: resolving "unstated" from two literals is the drift itself.
+DEFAULT_SORT_ORDER: SortOrder = "desc"
+
+
+class SortOrderNotApplicable(ValueError):
+    """``sort_order="asc"`` was asked for on a sort that cannot serve it.
+
+    A named subclass rather than a bare ``ValueError`` so the api/ layer
+    can map exactly this to a 400 without also catching what psycopg,
+    ``datetime`` and the embedding backends raise — which would relabel a
+    real outage as a caller error and send them to fix a blameless query.
+    """
+
+
 # Sentinel for "no usable date" — sorts strictly older than any real
 # timestamp so NULLs land at the end of a `sort=date` page under
 # Python's reverse=True ordering.
@@ -355,6 +374,13 @@ class PoolMetadata:
     # them). No default: an unstated one here would read as "rank" for a pool
     # that is not, which is the silence this field exists to end.
     sort: SortMode
+    # The direction this pool was built with, recorded beside ``sort`` and
+    # for the same reason. Pool cursors are only minted on the rank branch,
+    # where "asc" is refused — so a pool carrying "asc" is unreachable
+    # today. Recorded anyway rather than assumed: encoding the invariant in
+    # the reader is what makes a future dispatch change silently wrong.
+    # No default, for the reason ``sort`` has none.
+    sort_order: SortOrder
 
 
 class Searcher:
@@ -431,6 +457,7 @@ class Searcher:
             rerank_pool_size=int(entry["rerank_pool_size"]),
             pool_size=len(entry["hydrated"]),
             sort=entry["sort"],
+            sort_order=entry["sort_order"],
         )
 
     def _maybe_warn_unpopulated_body_lang(
@@ -878,12 +905,14 @@ class Searcher:
         page = self._search_with_parsed(parsed, page_size=entry["page_size"],
                                         candidates_per_arm=candidates_per_arm,
                                         rerank_pool_size=rps, use_cache=True,
-                                        user_id=user_id, sort=sort)
+                                        user_id=user_id, sort=sort,
+                                        sort_order=entry["sort_order"])
         return page
 
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
                             rerank_pool_size, use_cache, user_id: int | None = None,
-                            sort: SortMode = DEFAULT_SORT):
+                            sort: SortMode = DEFAULT_SORT,
+                            sort_order: SortOrder = DEFAULT_SORT_ORDER):
         """Variant of search() that takes an already-parsed query.
 
         Connection scope: retrieval + hydrate inside one 'with' block. The
@@ -934,6 +963,7 @@ class Searcher:
                 "rerank_pool_size": rerank_pool_size, "page_size": page_size,
                 "user_id": user_id,
                 "sort": sort,
+                "sort_order": sort_order,
             })
         return SearchPage(
             results=results, page=1, page_size=page_size, pool_size=len(hydrated),
@@ -955,6 +985,7 @@ class Searcher:
         disable_rerank: bool = False,
         user_id: int | None = None,
         sort: SortMode | None = None,
+        sort_order: SortOrder | None = None,
         keyset_cursor: KeysetCursor | None = None,
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
@@ -984,6 +1015,23 @@ class Searcher:
         """
         t0 = time.monotonic()
         effective_sort: SortMode = DEFAULT_SORT if sort is None else sort
+        effective_order: SortOrder = (
+            DEFAULT_SORT_ORDER if sort_order is None else sort_order
+        )
+        # Refused rather than honoured: the rank path serves a bounded
+        # candidate pool, so reversing it returns the least relevant of the
+        # top hits rather than of the archive — an artifact of where the
+        # pool stopped, wearing the shape of an answer. Refused rather than
+        # ignored because a stated parameter the server will not honour is
+        # reported, never dropped (#308, #312). Before any IO, so a caller
+        # error costs no connection.
+        if effective_sort == "rank" and effective_order == "asc":
+            raise SortOrderNotApplicable(
+                "sort_order='asc' is not applicable to sort='rank' (the "
+                "default); pass sort='date' for oldest-first. The rank path "
+                "serves a bounded candidate pool, so reversing it returns "
+                "the least relevant of the top hits, not of the archive."
+            )
         cfg = self._cfg
         effective_page_size: int = min(page_size or cfg.page_size_default,
                                        cfg.page_size_max)
@@ -1148,6 +1196,7 @@ class Searcher:
                 "page_size": effective_page_size,
                 "user_id": user_id,
                 "sort": effective_sort,
+                "sort_order": effective_order,
             })
         pool_size = len(hydrated)
         return SearchPage(

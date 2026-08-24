@@ -165,7 +165,7 @@ def test_pool_cursor_with_a_sort_the_pool_was_not_built_with_is_rejected() -> No
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
-        sort="rank",
+        sort="rank", sort_order="desc",
     )
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
     with pytest.raises(ValidationFailed):
@@ -180,7 +180,7 @@ def test_pool_cursor_with_the_sort_the_pool_was_built_with_continues() -> None:
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
-        sort="rank",
+        sort="rank", sort_order="desc",
     )
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
     run_search(searcher=s, free_text="invoice", filters={}, limit=2,

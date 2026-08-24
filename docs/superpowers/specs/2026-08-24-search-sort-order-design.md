@@ -268,6 +268,43 @@ writes `sort="date"`, `sort_order="asc"`, which is honest about what it gets.
 Special-casing the blank query out of that rule was rejected: a uniform rule is
 predictable, and the exception would be invisible from the wire.
 
+### Consequence: two existing "keyset needs a query" guards must relax
+
+Both branches now read `keyset_cursor`, which contradicts two guards added in
+the #308 follow-up:
+
+- `resolve_cursor_mode` rejects a keyset cursor presented with a blank query.
+- `Searcher.search` raises `KeysetCursorUnusable` for the same shape.
+
+Both existed because the blank-query branch would have *dropped* the cursor and
+answered with its own page 1 — a restart wearing a continuation's clothes. Once
+that branch honours the cursor, the premise is gone: the cursor is continued, at
+the right position, and the guards would forbid exactly the paging this change
+adds. They relax to fire only for the hybrid pool branch (`sort="rank"` with
+non-blank text), which is still the one branch that does not read the cursor.
+
+**This does not weaken the #308 property**, because the keyset cursor has never
+identified a query — it carries `(ts, id)` and nothing else. Changing
+`folder_ids` or the free text between pages is already undefined and already
+unvalidated; the contract is, and remains, *"send the cursor back with the same
+query and filters"*. Blanking the query is one instance of that, not a new
+class. What #308 forbids is the server silently answering a **differently
+ordered** question, and ordering is exactly what the cursor does carry — now on
+both axes.
+
+The alternative, giving the recent-mail walk its own cursor prefixes so a
+lexical cursor replayed blank is a 400, was rejected: it takes the prefix set
+from two to four to validate one component of a predicate whose other
+components (filters, folder scope) are equally unvalidated and equally capable
+of changing the result set. The keyset cursor is a **position in the date
+ordering**; the predicate comes from the request.
+
+Three tests assert the old behaviour and are rewritten to assert the new:
+`test_api_search_cursor_mode.py::test_keyset_cursor_without_the_original_query_is_rejected`,
+`::test_keyset_cursor_without_query_or_sort_is_rejected`, and
+`test_searcher_keyset_guard.py::test_an_empty_query_rejects_a_keyset_cursor_instead_of_dropping_it`.
+`README.md:888-889` states the old rule in prose and is corrected with them.
+
 ## `_date_sort_key` is unreachable
 
 From the branch analysis above, branch 3 is reached only when `sort` is

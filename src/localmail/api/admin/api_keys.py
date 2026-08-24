@@ -18,7 +18,7 @@ material and must never travel in a URL or a log line.
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import psycopg
@@ -45,7 +45,11 @@ class ApiKeyNotFound(Exception):
 class CreatedKey:
     user_id: int
     name: str
-    raw_key: str
+    #: repr=False because this is the credential's only plaintext existence.
+    #: The default repr renders it in full, so one `logging.info("%s", created)`
+    #: or a frame-locals error reporter leaks it with nothing failing. The four
+    #: call sites are disciplined; this is what makes discipline unnecessary.
+    raw_key: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -55,7 +59,13 @@ class ApiKeySummary:
     has_key: bool
     key_created_at: datetime | None
     last_used_at: datetime | None
+    #: Two distinct reasons a live key stops authenticating, kept apart because
+    #: the remedies differ: re-enable the principal, versus revoke and re-mint
+    #: (a revoked key cannot be recovered). Reported rather than refused --
+    #: both are legitimate operator actions; what was wrong was that the panel
+    #: showed "active" while the bot got a bare 401 with nothing to diagnose.
     disabled: bool
+    revoked: bool
     account_names: list[str]
 
 
@@ -73,6 +83,13 @@ def list_keys(conn: psycopg.Connection) -> list[ApiKeySummary]:
             "       t.created_at AS key_created_at, "
             "       t.last_used_at AS last_used_at, "
             "       (u.disabled_at IS NOT NULL) AS disabled, "
+            # A restatement of credential_valid_sql's second half, not a reuse:
+            # that fragment answers "is this honoured", conflating both causes.
+            # test_reported_state_matches_whether_the_key_verifies is the
+            # differential pin, the ALLOWLISTED_WHERE_SQL arrangement.
+            "       (t.created_at IS NOT NULL "
+            "        AND u.sessions_invalidated_at IS NOT NULL "
+            "        AND t.created_at < u.sessions_invalidated_at) AS revoked, "
             "       COALESCE("
             "         array_agg(a.name ORDER BY a.name) "
             "           FILTER (WHERE a.name IS NOT NULL), "
@@ -85,7 +102,7 @@ def list_keys(conn: psycopg.Connection) -> list[ApiKeySummary]:
             "  LEFT JOIN accounts a ON a.id = ua.account_id "
             " WHERE u.is_service IS TRUE "
             " GROUP BY u.id, u.username, t.api_key_name, t.created_at, "
-            "          t.last_used_at, u.disabled_at "
+            "          t.last_used_at, u.disabled_at, u.sessions_invalidated_at "
             " ORDER BY u.username"
         )
         return cur.fetchall()
@@ -163,11 +180,21 @@ def create_key(
             raise ApiKeyFieldError(f"unknown account {account_id}") from e
     raw_key = API_KEY_PREFIX + generate_token()
     with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO api_tokens (token_sha256, user_id, expires_at, api_key_name) "
-            "VALUES (%s, %s, NULL, %s)",
-            (hash_token(raw_key), user_id, name),
-        )
+        try:
+            cur.execute(
+                "INSERT INTO api_tokens (token_sha256, user_id, expires_at, api_key_name) "
+                "VALUES (%s, %s, NULL, %s)",
+                (hash_token(raw_key), user_id, name),
+            )
+        except psycopg.errors.UniqueViolation as e:
+            # _resolve_principal's has_key check and this INSERT are not atomic,
+            # so a concurrent mint (a double-clicked Create button) loses here.
+            # Uncaught it bypassed the routers' ApiKeyFieldError -> 400 contract
+            # and surfaced as a 500, which the panel's 400/422-only swap renders
+            # as an inert button. Same mapping as _create_service_user's.
+            raise ApiKeyFieldError(
+                f"API key {name!r} already exists; revoke it before minting a new one"
+            ) from e
     return CreatedKey(user_id=user_id, name=name, raw_key=raw_key)
 
 

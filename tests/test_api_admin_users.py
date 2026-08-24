@@ -275,3 +275,46 @@ def test_list_and_get_report_a_service_principal(db_conn):
     assert by_name["amy"].is_service is False
     assert by_name["my_mail_bot"].is_service is True
     assert svc.get_user(db_conn, created.user_id).is_service is True
+
+
+def test_a_service_principal_does_not_count_as_an_active_admin(db_conn):
+    """A promoted bot must not stand in for a human admin.
+
+    Rule 1 refuses its key at every admin route and Rule 2 refuses its login, so
+    a service row carrying is_admin can administer nothing — but while
+    active_admin_count still counted it, the last-admin guard let the only human
+    be demoted, leaving the archive with no usable administrator.
+    """
+    from localmail.api.admin import api_keys as keys_svc
+
+    created = keys_svc.create_key(db_conn, name="mail-bot", account_ids=[])
+    with db_conn.cursor() as cur:  # the UI refuses to promote it; the DB does not
+        cur.execute(
+            "UPDATE api_users SET is_admin = TRUE WHERE id = %s", (created.user_id,)
+        )
+    db_conn.commit()
+
+    assert svc.active_admin_count(db_conn) == 0
+    uid = _insert_user(db_conn, "solo", is_admin=True)
+    with pytest.raises(svc.LastAdminError):
+        svc.set_admin(db_conn, uid, False)
+
+
+def test_grant_admin_refuses_a_service_principal(db_conn):
+    """The CLI's promotion path, guarded like users.set_admin's.
+
+    Contained by Rule 1 either way, but an operator who runs it should be told,
+    not left with a bot that /v1/auth/whoami reports as an admin.
+    """
+    from localmail.api.admin import api_keys as keys_svc
+    from localmail.api.admin.auth import grant_admin
+
+    keys_svc.create_key(db_conn, name="mail-bot", account_ids=[])
+    db_conn.commit()
+
+    with pytest.raises(svc.UserFieldError, match="API-key principal"):
+        grant_admin(db_conn, username="mail-bot")
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT is_admin FROM api_users WHERE username = 'mail-bot'")
+        row = cur.fetchone()
+    assert row is not None and row[0] is False

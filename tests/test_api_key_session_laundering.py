@@ -137,15 +137,66 @@ def test_revoke_key_still_refuses_a_human_principal(db_conn):
     assert verify_token(db_conn, tok) is not None
 
 
-def test_over_http_a_key_cannot_launder_itself(db_conn, db_dsn):
+@pytest.fixture
+def http_client(db_dsn):
+    """A closed-down client. Built inline, this test leaked its pool and its
+    committed rows into whatever file ran next -- observed twice as duplicate-key
+    failures in files that truncate correctly."""
+    with TestClient(create_app(db_dsn=db_dsn, searcher=None)) as client:
+        yield client
+
+
+def test_over_http_a_key_cannot_launder_itself(db_conn, http_client):
     """The reviewer's end-to-end reproduction, as a pin."""
     created = svc.create_key(db_conn, name="bot", account_ids=[])
     db_conn.commit()
-    client = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    client = http_client
     headers = {"Authorization": f"Bearer {created.raw_key}"}
 
     assert client.get("/v1/accounts", headers=headers).status_code == 200
     assert client.post("/v1/auth/refresh", headers=headers).status_code == 400
     assert client.post("/v1/auth/logout", headers=headers).status_code == 400
     assert client.get("/v1/accounts", headers=headers).status_code == 200
+    assert svc.list_keys(db_conn)[0].has_key is True
+
+
+def test_mint_access_refuses_a_service_principal(db_conn):
+    """The second writer of a session-kind api_tokens row.
+
+    issue_token's guard is claimed to close laundering *by construction*; that
+    was true of its own two callers and not of this one, which reaches the same
+    table with a bare user_id. Unreachable for a service principal today only
+    because Rule 2 refuses the consent login it descends from -- a rule three
+    modules away. Guarded here, the claim holds for both writers.
+    """
+    pytest.importorskip("mcp")
+    from localmail.mcp.oauth import access
+
+    created = svc.create_key(db_conn, name="bot", account_ids=[])
+    db_conn.commit()
+    with pytest.raises(SessionCredentialRefused, match="API-key principal"):
+        access.mint_access(
+            db_conn, user_id=created.user_id, client_id="cid", ttl_s=3600
+        )
+    db_conn.rollback()
+    assert verify_token(db_conn, created.raw_key) is not None
+
+
+def test_revoke_access_refuses_an_api_key(db_conn):
+    """The unhardened sibling of logout's refusal.
+
+    verify_token accepts keys, so the OAuth revocation endpoint resolves one
+    through load_access_token and would delete it -- destroying an
+    unrecoverable credential on a machine client's routine shutdown. The SDK's
+    client_id match happens to block it today; that is a coincidence of two
+    constants, not a rule.
+    """
+    pytest.importorskip("mcp")
+    from localmail.mcp.oauth import access
+
+    created = svc.create_key(db_conn, name="bot", account_ids=[])
+    db_conn.commit()
+    assert access.revoke_access(db_conn, created.raw_key) is False
+    db_conn.commit()
+    assert verify_token(db_conn, created.raw_key) is not None
     assert svc.list_keys(db_conn)[0].has_key is True

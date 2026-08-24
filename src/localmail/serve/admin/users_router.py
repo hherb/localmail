@@ -138,6 +138,11 @@ def patch_user(
             raise HTTPException(status_code=404, detail="user not found")
         except svc.LastAdminError as e:
             raise HTTPException(status_code=409, detail=str(e))
+        except svc.UserFieldError as e:
+            # set_admin's service-principal refusal. Without this the guard
+            # escaped as a 500, where the sibling password route already
+            # answered 400 — and action_flags' disabled button is UX only.
+            raise HTTPException(status_code=400, detail=str(e))
     return _detail_dict(detail)
 
 

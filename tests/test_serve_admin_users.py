@@ -229,3 +229,40 @@ def test_revoke_sessions_ok(admin_client, db_conn):
         f"/v1/admin/users/{uid}/revoke-sessions",
         headers={"X-CSRF-Token": admin_client.csrf_for(f"/v1/admin/users/{uid}/revoke-sessions")})
     assert r.status_code == 204
+
+
+def test_patch_promoting_a_service_row_is_400_not_500(admin_client, db_conn):
+    """set_admin's service guard must reach the wire as a refusal.
+
+    action_flags renders the button disabled, but its own docstring says that is
+    "UX only; not enforcement" — so this route is what carries the rule, and it
+    caught only UserNotFound/LastAdminError while its sibling
+    POST /users/{id}/password already mapped UserFieldError to 400.
+    """
+    from localmail.api.admin import api_keys as keys_svc
+
+    created = keys_svc.create_key(db_conn, name="mail-bot", account_ids=[])
+    db_conn.commit()
+    url = f"/v1/admin/users/{created.user_id}"
+    r = admin_client.patch(
+        url, json={"is_admin": True},
+        headers={"X-CSRF-Token": admin_client.csrf_for(url, "PATCH")},
+    )
+    assert r.status_code == 400, r.text
+    assert "API-key principal" in r.json()["detail"]
+
+
+def test_password_reset_on_a_service_row_is_400(admin_client, db_conn):
+    """The sibling that already behaved, pinned beside it so the two routes
+    cannot drift apart again."""
+    from localmail.api.admin import api_keys as keys_svc
+
+    created = keys_svc.create_key(db_conn, name="mail-bot", account_ids=[])
+    db_conn.commit()
+    url = f"/v1/admin/users/{created.user_id}/password"
+    r = admin_client.post(
+        url, json={"password": "pw12345"},
+        headers={"X-CSRF-Token": admin_client.csrf_for(url)},
+    )
+    assert r.status_code == 400, r.text
+    assert "API-key principal" in r.json()["detail"]

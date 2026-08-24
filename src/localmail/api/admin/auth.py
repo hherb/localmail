@@ -130,15 +130,24 @@ def get_admin_user(
 
 
 def grant_admin(conn: psycopg.Connection, *, username: str) -> None:
-    """Set is_admin=TRUE for the named user. Idempotent."""
+    """Set is_admin=TRUE for the named user. Idempotent.
+
+    Refuses a service principal, sharing `users.reject_service_row` with the
+    admin UI's `set_admin` rather than restating the rule — this was the second,
+    unguarded half of the promotion surface. Imported inside the function
+    because `users` imports `UserNotFound` from this module.
+    """
+    from localmail.api.admin.users import reject_service_row
+
     with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE api_users SET is_admin = TRUE WHERE username = %s RETURNING id",
-            (username,),
-        )
+        cur.execute("SELECT id FROM api_users WHERE username = %s", (username,))
         row = cur.fetchone()
     if row is None:
         raise UserNotFound(f"no user named {username!r}")
+    user_id = int(row[0])
+    reject_service_row(conn, user_id, "promote")
+    with conn.cursor() as cur:
+        cur.execute("UPDATE api_users SET is_admin = TRUE WHERE id = %s", (user_id,))
     conn.commit()
 
 

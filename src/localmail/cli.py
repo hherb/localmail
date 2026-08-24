@@ -1757,6 +1757,8 @@ def list_api_keys(ctx: click.Context) -> None:
         state = "active" if row.has_key else "no key"
         if row.disabled:
             state += ", disabled"
+        if row.revoked:
+            state += ", sessions revoked"
         last_used = row.last_used_at.strftime("%Y-%m-%d") if row.last_used_at else "never"
         click.echo(f"{row.name} [{state}] last-used={last_used}")
         click.echo(f"  accounts: {', '.join(row.account_names) or '(none)'}")
@@ -2121,11 +2123,12 @@ def retry_failed_extractions(ctx: click.Context, sha256_hex: str | None) -> None
 def grant_admin_cmd(ctx: click.Context, username: str) -> None:
     """Grant admin privileges to USERNAME (shell-only bootstrap path)."""
     from localmail.api.admin.auth import UserNotFound, grant_admin
+    from localmail.api.admin.users import UserFieldError
 
     with psycopg.connect(_dsn_from_ctx(ctx)) as conn:
         try:
             grant_admin(conn, username=username)
-        except UserNotFound as exc:
+        except (UserNotFound, UserFieldError) as exc:
             raise click.ClickException(str(exc))
     click.echo(f"granted admin to {username!r}")
 

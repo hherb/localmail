@@ -150,7 +150,7 @@ def create_user(
         return int(row[0])
 
 
-def _reject_service_row(conn: psycopg.Connection, user_id: int, action: str) -> None:
+def reject_service_row(conn: psycopg.Connection, user_id: int, action: str) -> None:
     """A service user is an API key's principal; it must never gain a password
     or admin rights. Both are one admin click from turning a machine credential
     into an interactive one."""
@@ -165,7 +165,7 @@ def _reject_service_row(conn: psycopg.Connection, user_id: int, action: str) -> 
 
 def set_password(conn: psycopg.Connection, user_id: int, new_password: str) -> None:
     """Admin password reset — no old password required. Raises UserNotFound."""
-    _reject_service_row(conn, user_id, "set a password on")
+    reject_service_row(conn, user_id, "set a password on")
     if not new_password:
         raise UserFieldError("password must not be blank")
     pw_hash = hash_password(new_password)
@@ -190,10 +190,19 @@ def would_orphan_last_admin(
 
 
 def active_admin_count(conn: psycopg.Connection) -> int:
+    """Humans who can currently administer. Service principals are excluded.
+
+    A promoted bot can administer nothing — Rule 1 refuses its key at every
+    admin route and Rule 2 refuses its login — so counting it here let
+    `would_orphan_last_admin` permit demoting the last human, leaving no usable
+    administrator. `reject_service_row` guards both promotion paths; excluding
+    them from the count is what makes the guard hold by construction, whatever
+    put `is_admin` on the row.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM api_users "
-            "WHERE is_admin IS TRUE AND disabled_at IS NULL"
+            "WHERE is_admin IS TRUE AND disabled_at IS NULL AND is_service IS FALSE"
         )
         row = cur.fetchone()
         assert row is not None
@@ -249,7 +258,7 @@ def set_admin(conn: psycopg.Connection, user_id: int, is_admin: bool) -> None:
     if not is_admin:
         _guard_not_last_admin(conn, user_id, "demote")
     else:
-        _reject_service_row(conn, user_id, "promote")
+        reject_service_row(conn, user_id, "promote")
         _user_state(conn, user_id)  # existence check → UserNotFound
     with conn.cursor() as cur:
         cur.execute(

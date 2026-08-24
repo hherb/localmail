@@ -209,3 +209,21 @@ def test_a_service_principal_is_badged_and_its_dead_end_controls_disabled(
     edit = admin_client.get(f"/admin/users/{created.user_id}").text
     assert 'title="an API-key principal cannot be promoted"' in edit
     assert 'title="an API-key principal cannot be given a password"' in edit
+
+
+def test_the_panel_admin_toggle_refuses_a_service_row_inline(admin_client, db_conn):
+    """A hand-crafted POST reaches past the disabled button, and under HTMX an
+    unhandled 500 leaves the control inert — the #148 defect the api-keys panel
+    comments cite. The refusal has to come back as a rendered message."""
+    from localmail.api.admin import api_keys as keys_svc
+
+    created = keys_svc.create_key(db_conn, name="my_mail_bot", account_ids=[])
+    db_conn.commit()
+    url = f"/admin/users/{created.user_id}/admin-toggle"
+    r = admin_client.post(url, headers={"X-CSRF-Token": admin_client.csrf_for(url)})
+    assert r.status_code == 200, r.text
+    assert "API-key principal" in r.text
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT is_admin FROM api_users WHERE id = %s", (created.user_id,))
+        row = cur.fetchone()
+    assert row is not None and row[0] is False

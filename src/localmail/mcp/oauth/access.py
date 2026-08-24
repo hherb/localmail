@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING
 
 import psycopg
 
-from localmail.api.auth import generate_token, hash_token, verify_token
+from localmail.api.auth import (
+    SessionCredentialRefused,
+    generate_token,
+    hash_token,
+    verify_token,
+)
 from localmail.mcp.oauth.resource_indicator import canonicalize_resource
 
 if TYPE_CHECKING:
@@ -49,9 +54,20 @@ def mint_access(
             "INSERT INTO api_tokens "
             "(token_sha256, user_id, expires_at, oauth_client_id, "
             " oauth_refresh_family_id, oauth_resource) "
-            "VALUES (%s, %s, now() + make_interval(secs => %s), %s, %s, %s)",
-            (hash_token(raw), user_id, ttl_s, client_id, family_id, resource),
+            "SELECT %s, id, now() + make_interval(secs => %s), %s, %s, %s "
+            "  FROM api_users WHERE id = %s AND is_service IS FALSE",
+            (hash_token(raw), ttl_s, client_id, family_id, resource, user_id),
         )
+        if cur.rowcount == 0:
+            # The second writer of a session-kind api_tokens row. Unreachable
+            # for a service principal today only because Rule 2 refuses the
+            # consent login this descends from -- i.e. by a rule three modules
+            # away, not by construction. Guarded here, `issue_token`'s claim to
+            # close laundering by construction is true of both writers.
+            raise SessionCredentialRefused(
+                f"cannot mint an access token for user id={user_id}: "
+                "no such user, or an API-key principal"
+            )
     return raw
 
 
@@ -91,10 +107,19 @@ def load_access(
 
 
 def revoke_access(conn: psycopg.Connection, raw_token: str) -> bool:
-    """Delete an access token row. Returns True if a row was deleted."""
+    """Delete an access token row. Returns True if a row was deleted.
+
+    Never an API key, for the reason `api.auth.logout` refuses one: a key is
+    unrecoverable and its holder is a machine, so a client's routine revocation
+    would destroy it with no way back. `verify_token` now accepts keys, so
+    `load_access_token` resolves one and this endpoint reaches it; today the
+    SDK's `token.client_id == client.client_id` check happens to block it
+    because DCR ids are uuid4 and a key resolves to the `localmail` sentinel --
+    a coincidence of two constants, not a rule. This is the rule.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM api_tokens WHERE token_sha256 = %s",
+            "DELETE FROM api_tokens WHERE token_sha256 = %s AND api_key_name IS NULL",
             (hash_token(raw_token),),
         )
         return cur.rowcount > 0

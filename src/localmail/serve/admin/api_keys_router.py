@@ -45,6 +45,7 @@ def _summary_dict(k: svc.ApiKeySummary) -> dict:
         "key_created_at": k.key_created_at.isoformat() if k.key_created_at else None,
         "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
         "disabled": k.disabled,
+        "revoked": k.revoked,
         "account_names": k.account_names,
     }
 

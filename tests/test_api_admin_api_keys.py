@@ -200,3 +200,96 @@ def test_a_key_reads_only_its_granted_accounts(db_conn):
     created = svc.create_key(db_conn, name="bot", account_ids=[granted])
     db_conn.commit()
     assert allowed_account_ids(db_conn, created.user_id) == [granted]
+
+
+def test_the_raw_key_is_not_in_the_repr(db_conn):
+    """One `logging.info("%s", created)` must not leak the credential."""
+    created = svc.create_key(db_conn, name="bot", account_ids=[])
+    assert created.raw_key not in repr(created)
+    assert "bot" in repr(created)
+
+
+def test_a_stale_no_key_verdict_is_a_field_error_not_a_crash(db_conn, monkeypatch):
+    """The check-then-INSERT race, reproduced by forcing the verdict its loser
+    holds: _resolve_principal reported the name free, and the INSERT then meets
+    the partial unique index. Uncaught that bypassed the routers'
+    ApiKeyFieldError -> 400 contract and surfaced as a 500."""
+    created = svc.create_key(db_conn, name="bot", account_ids=[])
+    db_conn.commit()
+    monkeypatch.setattr(
+        svc, "_resolve_principal", lambda conn, name: created.user_id
+    )
+    with pytest.raises(svc.ApiKeyFieldError, match="already exists"):
+        svc.create_key(db_conn, name="bot", account_ids=[])
+
+
+@pytest.mark.parametrize("name", ["", "   ", "\t\n"])
+def test_a_blank_name_is_refused_at_the_service_layer(db_conn, name):
+    """The JSON route declares `name: str` with no min_length and the CLI passes
+    NAME straight through, so this line is the only thing between either and an
+    unnamed principal. Deleting it left all 44 API-key tests green."""
+    with pytest.raises(svc.ApiKeyFieldError, match="blank"):
+        svc.create_key(db_conn, name=name, account_ids=[])
+
+
+def test_an_overlong_name_is_refused(db_conn):
+    with pytest.raises(svc.ApiKeyFieldError, match="longer than"):
+        svc.create_key(db_conn, name="b" * 129, account_ids=[])
+
+
+def test_the_stored_name_is_stripped(db_conn):
+    """The stripped value feeds both api_users.username and api_tokens
+    .api_key_name, so a surrounding space would make the CLI's name-based
+    lookups miss the row they just created."""
+    created = svc.create_key(db_conn, name="  bot  ", account_ids=[])
+    assert created.name == "bot"
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT u.username, t.api_key_name FROM api_users u "
+            "JOIN api_tokens t ON t.user_id = u.id WHERE u.id = %s",
+            (created.user_id,),
+        )
+        row = cur.fetchone()
+    assert row == ("bot", "bot")
+
+
+def test_reported_state_matches_whether_the_key_verifies(db_conn):
+    """Differential pin: `has_key and not disabled and not revoked` must agree
+    with `verify_token` across every state an operator can put a key in.
+
+    The two causes are a hand-maintained restatement of credential_valid_sql's
+    halves -- the ALLOWLISTED_WHERE_SQL arrangement -- so this is what keeps
+    them from drifting. Before it, the panel said "active" while the bot got a
+    bare 401 with nothing anywhere to diagnose it.
+    """
+    from localmail.api.admin import users as users_svc
+    from localmail.api.auth import verify_token
+
+    def reported_live() -> bool:
+        row = svc.list_keys(db_conn)[0]
+        return row.has_key and not row.disabled and not row.revoked
+
+    created = svc.create_key(db_conn, name="bot", account_ids=[])
+    db_conn.commit()
+    assert reported_live() is True
+    assert verify_token(db_conn, created.raw_key) is not None
+
+    users_svc.set_disabled(db_conn, created.user_id, True)
+    db_conn.commit()
+    assert reported_live() is False
+    assert verify_token(db_conn, created.raw_key) is None
+
+    users_svc.set_disabled(db_conn, created.user_id, False)
+    db_conn.commit()
+    assert reported_live() is True
+    assert verify_token(db_conn, created.raw_key) is not None
+
+    users_svc.revoke_sessions(db_conn, created.user_id)
+    db_conn.commit()
+    assert reported_live() is False
+    assert verify_token(db_conn, created.raw_key) is None
+
+    svc.revoke_key(db_conn, created.user_id)
+    db_conn.commit()
+    assert reported_live() is False
+    assert verify_token(db_conn, created.raw_key) is None

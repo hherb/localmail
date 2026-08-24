@@ -212,3 +212,38 @@ def test_per_ip_cap_still_trips_for_a_repeated_forwarded_client(
             f"failure {i + 1} should be under the cap of 2"
         )
     assert _bad_login(proxied_consent_client, "198.51.100.42").status_code == 429
+
+
+def test_a_service_user_cannot_consent(consent_client, db_conn):
+    """Rule 2's third site, driven rather than inspected.
+
+    test_service_user_cannot_log_in.py pins this site with an AST check that
+    the route *calls* login_eligible_sql. That cannot see whether the result is
+    applied: a mutation calling the fragment and discarding it left all of that
+    file green, while the same mutation on api.auth.login failed. Honouring the
+    consent would mint an authorization code, which exchanges into an access +
+    refresh pair for a principal that must never hold one.
+
+    The password is set by direct SQL because create_key deliberately leaves an
+    unusable hash and users.set_password refuses a service row — the same
+    reasoning as test_api_key_admin_bar.py::_admin_key.
+    """
+    from localmail.api.admin import api_keys as svc
+
+    svc.create_key(db_conn, name="mail-bot", account_ids=[])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE api_users SET password_hash = %s WHERE username = 'mail-bot'",
+            (api_auth.hash_password("secret-pw"),),
+        )
+    db_conn.commit()
+
+    r = consent_client.post("/oauth/consent", data={
+        "req": _blob(), "username": "mail-bot",
+        "password": "secret-pw", "decision": "allow",
+    })
+    assert r.status_code == 401
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM oauth_authorization_codes")
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0

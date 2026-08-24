@@ -178,7 +178,9 @@ def admin_toggle(
                                     error="you cannot revoke your own admin")
         try:
             svc.set_admin(conn, user_id, target)
-        except svc.LastAdminError as e:
+        except (svc.LastAdminError, svc.UserFieldError) as e:
+            # UserFieldError is the service-principal refusal. Unhandled it was
+            # a 500, which under HTMX leaves the button inert (#148).
             return _status_fragment(request, admin, conn, user_id, error=str(e))
         return _status_fragment(request, admin, conn, user_id)
 

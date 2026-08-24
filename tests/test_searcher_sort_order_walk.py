@@ -28,8 +28,21 @@ class _E:
     def health_check(self): pass
 
 
-def _seed(conn, *, n=7, undated=2):
+#: The day the ``tied=`` rows share, chosen to collide with dated row 3 so
+#: the tie group sits *inside* the dated run rather than at either end —
+#: a group at the head or tail can be walked correctly by a predicate that
+#: has no tiebreaker at all.
+_TIE_DAY = datetime(2026, 1, 4, tzinfo=timezone.utc)
+
+
+def _seed(conn, *, n=7, undated=2, tied=0):
     """n dated messages plus `undated` with no usable date at all.
+
+    ``tied`` adds that many further dated rows all carrying ``_TIE_DAY``,
+    which one of the ``n`` already holds — so the archive contains one tie
+    group of ``tied + 1`` rows. Every other fixture in this suite gives its
+    dated rows distinct timestamps, which is what left the ``id`` half of
+    both keyset predicates unexercised (see the tie test below).
 
     Returns the undated rows' ids, ascending — the ordering the ascending
     walk must reproduce across its undated head.
@@ -46,6 +59,14 @@ def _seed(conn, *, n=7, undated=2):
                 " VALUES (%s,%s,%s,%s,%s,'{}'::jsonb,'r',1,%s)",
                 (acct, f"<d{i}>", bytes([i + 1]) * 32, f"dated {i} needle",
                  "body needle", datetime(2026, 1, i + 1, tzinfo=timezone.utc)),
+            )
+        for k in range(tied):
+            cur.execute(
+                "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
+                " body_text, headers, raw_bytes, size_bytes, internal_date)"
+                " VALUES (%s,%s,%s,%s,%s,'{}'::jsonb,'r',1,%s)",
+                (acct, f"<t{k}>", bytes([100 + k]) * 32, f"tied {k} needle",
+                 "body needle", _TIE_DAY),
             )
         for j in range(undated):
             cur.execute(
@@ -162,3 +183,158 @@ def test_an_ascending_page_boundary_inside_the_undated_head_loses_nothing(
     )
     assert walked[:3] == undated_ids, walked
     assert len(walked) == len(set(walked)) == 7, walked
+
+
+def _all_ids_in_sql_order(conn, *, order):
+    """Ground truth straight from the ORDER BY the walk claims to reproduce.
+
+    Composed here rather than imported so a rewrite of
+    ``_DATE_ORDER_BY_SQL`` that broke the ordering could not silently
+    rewrite the expectation with it.
+    """
+    direction = ("ASC NULLS FIRST, m.id ASC" if order == "asc"
+                 else "DESC NULLS LAST, m.id DESC")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT m.id FROM messages m"
+            f" ORDER BY COALESCE(m.internal_date, m.date_sent) {direction}"
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+
+
+def _walk_with_cursors(searcher, *, order, page_size):
+    """Like ``_all_pages`` but also returns each page's outgoing cursor, so
+    a test can assert *where* the boundaries fell rather than trust that
+    the page size put one where it wanted it."""
+    ids: list[int] = []
+    cursors: list = []
+    cursor = None
+    for _ in range(50):
+        page = searcher.search("needle", allowed_account_ids=None,
+                               page_size=page_size, user_id=1, sort="date",
+                               sort_order=order, keyset_cursor=cursor)
+        ids.extend(r.message_id for r in page.results)
+        if page.next_keyset is None:
+            return ids, cursors
+        cursors.append(page.next_keyset)
+        cursor = page.next_keyset
+    raise AssertionError("walk did not terminate")
+
+
+def test_a_tie_group_straddling_a_page_boundary_loses_nothing(db_dsn, db_conn):
+    """The ``id`` tiebreaker in both keyset predicates is what this pins.
+
+    Every other fixture in this suite gives its dated rows distinct
+    timestamps, so ``ROW(expr, m.id) > ROW(%s, %s)`` selects exactly what
+    the tiebreaker-less ``expr > %s`` would, and the descending
+    ``expr = ts AND m.id < %s`` disjunct is equally inert. Dropping either
+    therefore left the whole suite green — 150 and 174 focused tests
+    respectively — while silently truncating any tie group that straddles a
+    page boundary: the walk jumps past the rest of the group and every row
+    in it is lost.
+
+    Ties are ordinary here rather than exotic. Bulk sends share ``date_sent``
+    to the second, and archive imports derive ``internal_date`` from the mbox
+    ``From_`` envelope line or a maildir file mtime, so a large group sharing
+    one timestamp is exactly the shape that loses many rows at once.
+
+    ``page_size=2`` against a 4-row tie group should put a boundary inside
+    it, but that is a property of the seed arithmetic rather than of
+    anything asserted — so both walks check it directly: a cursor whose
+    ``ts`` is ``_TIE_DAY`` means a page really did stop mid-group. Without
+    that check a future change to ``n`` or ``tied`` could slide every
+    boundary clear of the group and this test would keep passing while
+    testing nothing.
+    """
+    _seed(db_conn, n=7, undated=2, tied=3)
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=None)
+        asc, asc_cursors = _walk_with_cursors(s, order="asc", page_size=2)
+        desc, desc_cursors = _walk_with_cursors(s, order="desc", page_size=2)
+        expected_asc = _all_ids_in_sql_order(db_conn, order="asc")
+        expected_desc = _all_ids_in_sql_order(db_conn, order="desc")
+    finally:
+        pool.close()
+    # 7 dated + 3 tied + 2 undated; the tie group is 4 rows at _TIE_DAY.
+    assert len(expected_asc) == 12
+    assert any(c.ts == _TIE_DAY for c in asc_cursors), (
+        "no ascending page ended inside the tie group, so the ascending "
+        "tiebreaker was never exercised"
+    )
+    assert any(c.ts == _TIE_DAY for c in desc_cursors), (
+        "no descending page ended inside the tie group, so the descending "
+        "tiebreaker was never exercised"
+    )
+    assert asc == expected_asc, "ascending walk lost or reordered tied rows"
+    assert desc == expected_desc, "descending walk lost or reordered tied rows"
+    assert asc == list(reversed(desc))
+
+
+def _walk_restating_order_only_on_page_one(searcher, *, order, page_size=2):
+    """Page the way a library caller does: state the order once, then send
+    only the cursor back — the idiom ``tests/test_searcher.py`` itself uses
+    and ``docs/mcp-usage.md`` prescribes for every other client.
+    """
+    page = searcher.search("needle", allowed_account_ids=None,
+                           page_size=page_size, user_id=1, sort="date",
+                           sort_order=order)
+    ids = [r.message_id for r in page.results]
+    for _ in range(50):
+        if page.next_keyset is None:
+            return ids
+        page = searcher.search("needle", allowed_account_ids=None,
+                               page_size=page_size, user_id=1, sort="date",
+                               keyset_cursor=page.next_keyset)
+        ids.extend(r.message_id for r in page.results)
+    raise AssertionError("walk did not terminate")
+
+
+def test_an_ascending_walk_paged_without_restating_the_order_keeps_ascending(
+    db_dsn, db_conn,
+):
+    """A continuation must not silently reverse when ``sort_order`` is omitted.
+
+    ``encode_keyset_cursor`` takes a required ``order`` precisely so a
+    forgotten argument cannot mint a descending cursor for an ascending
+    walk. The reading side carried the symmetric hazard: ``KeysetCursor``
+    held only ``(ts, id)``, so ``Searcher.search`` paired a directionless
+    cursor with a ``sort_order`` that defaults to ``"desc"`` — and page 2
+    re-emitted a row the caller already held, then walked backwards off the
+    end. No exception, no log line: it reads as a data problem, not a
+    call-site one.
+
+    HTTP and MCP were safe only because ``run_search`` happens to pass
+    ``plan.sort_order`` on every hop, which is a property of one call site
+    rather than of the signature. The direction now rides on the cursor, so
+    the pairing cannot be formed.
+    """
+    _seed(db_conn, n=7, undated=2)
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=None)
+        walked = _walk_restating_order_only_on_page_one(s, order="asc")
+        expected = _all_ids_in_sql_order(db_conn, order="asc")
+    finally:
+        pool.close()
+    assert walked == expected, (
+        "the continuation reversed: the cursor's own direction lost to the "
+        "unstated sort_order's default"
+    )
+
+
+def test_a_descending_walk_paged_the_same_way_is_unchanged(db_dsn, db_conn):
+    """The negative control: descending is what the old default silently gave.
+
+    Without this, making the cursor's direction win could serve every walk
+    ascending and the test above would still pass.
+    """
+    _seed(db_conn, n=7, undated=2)
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=None)
+        walked = _walk_restating_order_only_on_page_one(s, order="desc")
+        expected = _all_ids_in_sql_order(db_conn, order="desc")
+    finally:
+        pool.close()
+    assert walked == expected

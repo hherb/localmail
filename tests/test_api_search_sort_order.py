@@ -4,6 +4,7 @@
 """``sort_order`` at the api boundary: threading, refusal, and cursor minting."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -14,7 +15,13 @@ from localmail.api.search import run_search
 from localmail.api.search_cursor import encode_keyset_cursor, keyset_order
 from localmail.search.searcher import KeysetCursor, PoolMetadata
 
-_KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+_KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+                   order="desc")
+#: The same position, ascending. A fake standing in for an ascending walk
+#: has to return *this*: the direction now travels on the cursor the
+#: Searcher produces, so a fake returning the descending one is modelling a
+#: descending walk however the request was phrased.
+_KS_ASC = replace(_KS, order="asc")
 
 
 def _page(*, token=None, next_keyset=None):
@@ -86,7 +93,7 @@ def test_rank_with_ascending_is_refused_even_with_an_empty_acl() -> None:
 
 
 def test_an_ascending_page_mints_an_ascending_cursor() -> None:
-    s = _searcher(_page(next_keyset=_KS))
+    s = _searcher(_page(next_keyset=_KS_ASC))
     out = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                      allowed_account_ids=[1], user_id=99, sort="date",
                      sort_order="asc")
@@ -106,18 +113,18 @@ def test_a_descending_page_mints_a_descending_cursor() -> None:
 def test_an_ascending_cursor_alone_continues_ascending() -> None:
     """The documented round trip, end to end through run_search."""
     s = _searcher()
-    raw = encode_keyset_cursor(_KS, "asc")
+    raw = encode_keyset_cursor(replace(_KS, order="asc"))
     run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                allowed_account_ids=[1], user_id=99, cursor=raw)
     _, kwargs = s.search.call_args
     assert kwargs.get("sort") == "date"
     assert kwargs.get("sort_order") == "asc"
-    assert kwargs.get("keyset_cursor") == _KS
+    assert kwargs.get("keyset_cursor") == _KS_ASC
 
 
 def test_a_stated_order_contradicting_the_cursor_is_a_400() -> None:
     s = _searcher()
-    raw = encode_keyset_cursor(_KS, "asc")
+    raw = encode_keyset_cursor(replace(_KS, order="asc"))
     with pytest.raises(ValidationFailed, match="sort_order"):
         run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                    allowed_account_ids=[1], user_id=99, sort_order="desc",
@@ -208,13 +215,14 @@ def test_an_ascending_search_pages_end_to_end_through_run_search() -> None:
     ``sort_order`` resolved to "desc" and page 2 walked back the way it
     came, which looks like a continuation until the results repeat.
     """
-    s = _searcher(_page(next_keyset=_KS))
+    s = _searcher(_page(next_keyset=_KS_ASC))
     first = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                        allowed_account_ids=[1], user_id=99, sort="date",
                        sort_order="asc")
     assert keyset_order(first["next_cursor"]) == "asc"
 
-    second_ks = KeysetCursor(ts=datetime(2026, 5, 22, tzinfo=timezone.utc), id=200)
+    second_ks = KeysetCursor(ts=datetime(2026, 5, 22, tzinfo=timezone.utc),
+                             id=200, order="asc")
     s.search.return_value = _page(next_keyset=second_ks)
     second = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                         allowed_account_ids=[1], user_id=99,
@@ -226,7 +234,7 @@ def test_an_ascending_search_pages_end_to_end_through_run_search() -> None:
         "the cursor was the only statement about ordering and it was ignored: "
         "page 2 walks back over page 1"
     )
-    assert kwargs.get("keyset_cursor") == _KS
+    assert kwargs.get("keyset_cursor") == _KS_ASC
     assert keyset_order(second["next_cursor"]) == "asc", (
         "the walk continued ascending but minted a descending cursor, so "
         "page 3 would reverse"

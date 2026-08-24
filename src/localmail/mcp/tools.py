@@ -42,9 +42,11 @@ def tool_search(
     `sort` defaults to `rank` and `sort_order` to `desc`; both are best left
     unset when paging, since the cursor already carries the ordering — on
     both axes — it continues. Send back the same `query` and `filters` with
-    it — a `sort=date` cursor walks the archive lexically and rebuilds that
-    walk from the query. A stated `sort` or `sort_order` the cursor cannot
-    serve is a validation error, not a silently restarted search: leaving
+    it — a `sort=date` cursor walks the archive by date (lexically when the
+    query has free text, over every filtered row when it does not) and
+    rebuilds that walk from the query. A stated `sort` or `sort_order` the
+    cursor cannot serve is a validation error, not a silently restarted
+    search: leaving
     `sort_order` unset is exactly what makes an ascending cursor keep
     walking ascending instead of silently reverting to `desc`.
     `sort_order="asc"` only applies to `sort="date"`; pairing it with

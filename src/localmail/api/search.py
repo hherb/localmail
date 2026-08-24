@@ -36,6 +36,7 @@ from localmail.search.rewrite_status import (
 )
 from localmail.search.searcher import (
     KeysetCursorUnusable,
+    KeysetOrderMismatch,
     SearchPage,
     SearchResult,
     Searcher,
@@ -267,7 +268,8 @@ def run_search(
                                    sort=plan.sort, sort_order=plan.sort_order,
                                    keyset_cursor=keyset,
                                    allowed_account_ids=allowed_account_ids)
-        except (KeysetCursorUnusable, SortOrderNotApplicable) as exc:
+        except (KeysetCursorUnusable, SortOrderNotApplicable,
+                KeysetOrderMismatch) as exc:
             # Unreachable today: the plan pins a keyset request to
             # sort="date", so Searcher.search takes the date branch, which
             # reads the cursor and honours either order — neither guard can
@@ -288,7 +290,7 @@ def run_search(
                          requested_sort_order=sort_order, user_id=user_id)
         page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)
 
-    next_cursor = _next_cursor(page, cfg=cfg, order=plan.sort_order)
+    next_cursor = _next_cursor(page, cfg=cfg)
     status: str
     note: str | None
     code: str | None
@@ -367,19 +369,19 @@ def _empty_grown_page(token: str, *, page_size: int) -> Any:
     )
 
 
-def _next_cursor(page: Any, *, cfg: SearchConfig, order: SortOrder) -> str | None:
+def _next_cursor(page: Any, *, cfg: SearchConfig) -> str | None:
     """Compute the cursor for the page after ``page``, or None if exhausted.
 
     Two cursor kinds:
       * keyset (date-ordered) — driven by ``page.next_keyset``; None
-        means the keyset walk hit the end. ``order`` is the direction this
-        page was actually walked in, minted into the cursor so the next
-        request continues the same way without having to restate it.
+        means the keyset walk hit the end. The direction rides on
+        ``next_keyset`` itself, stamped by the walk that produced the
+        rows, so this layer cannot supply one the walk did not use.
       * pool (hybrid) — driven by ``search_token`` + page increment;
         None when both the cached pool and ``grow_pool`` are exhausted.
     """
     if page.next_keyset is not None:
-        return encode_keyset_cursor(page.next_keyset, order)
+        return encode_keyset_cursor(page.next_keyset)
     if page.search_token is None:
         return None
     if page.has_more_in_pool:

@@ -14,6 +14,7 @@ clothes, which looks right until the results repeat.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -30,25 +31,33 @@ from localmail.api.search_cursor import (
 )
 from localmail.search.searcher import KeysetCursor
 
-_KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+_KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc")
 
 
 def test_the_two_directions_mint_different_prefixes() -> None:
-    assert encode_keyset_cursor(_KS, "desc").startswith("K|")
-    assert encode_keyset_cursor(_KS, "asc").startswith("KA|")
+    assert encode_keyset_cursor(replace(_KS, order="desc")).startswith("K|")
+    assert encode_keyset_cursor(replace(_KS, order="asc")).startswith("KA|")
 
 
 def test_both_prefixes_are_keyset_cursors_and_round_trip() -> None:
+    """Position *and* direction survive the round trip.
+
+    The direction used to be dropped on decode — the wire carried it, the
+    ``KeysetCursor`` handed to the Searcher did not, and the Searcher then
+    defaulted it to "desc". Asserting equality against the whole cursor is
+    what makes that loss visible here rather than three layers down.
+    """
     for order in ("asc", "desc"):
-        raw = encode_keyset_cursor(_KS, order)
+        expected = replace(_KS, order=order)
+        raw = encode_keyset_cursor(expected)
         assert is_keyset_cursor(raw)
         assert keyset_order(raw) == order
-        assert decode_keyset_cursor(raw) == _KS
+        assert decode_keyset_cursor(raw) == expected
 
 
 def test_a_legacy_cursor_still_means_descending() -> None:
     """Cursors minted before this change carry no marker and must not flip."""
-    legacy = encode_keyset_cursor(_KS, "desc")
+    legacy = encode_keyset_cursor(replace(_KS, order="desc"))
     assert keyset_order(legacy) == "desc"
     plan = resolve_cursor_plan(cursor=legacy, requested_sort=None,
                                requested_sort_order=None)
@@ -57,21 +66,21 @@ def test_a_legacy_cursor_still_means_descending() -> None:
 
 def test_an_ascending_cursor_alone_continues_ascending() -> None:
     """The documented way to page: send the cursor, state nothing else."""
-    raw = encode_keyset_cursor(_KS, "asc")
+    raw = encode_keyset_cursor(replace(_KS, order="asc"))
     plan = resolve_cursor_plan(cursor=raw, requested_sort=None,
                                requested_sort_order=None)
     assert plan == CursorPlan(mode="keyset", sort="date", sort_order="asc")
 
 
 def test_a_stated_order_contradicting_the_cursor_is_rejected() -> None:
-    raw = encode_keyset_cursor(_KS, "asc")
+    raw = encode_keyset_cursor(replace(_KS, order="asc"))
     with pytest.raises(ValidationFailed, match="sort_order"):
         resolve_cursor_plan(cursor=raw, requested_sort=None,
                             requested_sort_order="desc")
 
 
 def test_a_stated_order_agreeing_with_the_cursor_is_accepted() -> None:
-    raw = encode_keyset_cursor(_KS, "asc")
+    raw = encode_keyset_cursor(replace(_KS, order="asc"))
     plan = resolve_cursor_plan(cursor=raw, requested_sort="date",
                                requested_sort_order="asc")
     assert plan.sort_order == "asc"

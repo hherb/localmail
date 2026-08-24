@@ -44,7 +44,7 @@ def _searcher() -> tuple[Searcher, MagicMock]:
                     reranker=None, rewriter=None), pool
 
 
-_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc")
 
 
 def test_rank_sort_rejects_a_keyset_cursor_instead_of_dropping_it() -> None:

@@ -3130,7 +3130,10 @@ for the full design.
       and rejected. Every read inside the function goes through
       `effective_sort`; a surviving raw read is the defect.
       - **`DEFAULT_SORT` moved to `search/searcher.py`, beside the `SortMode`
-        it ranges over**, and `api/search.py` imports it from there —
+        it ranges over**, and `api/search_cursor.py` imports it from there
+        (**corrected**: this said `api/search.py`, which imports neither
+        default — the module that resolves an unstated axis is the one that
+        needs the constant, and that is `search_cursor.py`) —
         `api/search_cursor.py` can no longer define it, because two layers
         resolving "unstated" from two literals is the drift itself. The api
         layer still resolves it explicitly at its own boundary (pinned by
@@ -3192,12 +3195,22 @@ for the full design.
     scoping mirrors `continue_page` / `grow_pool` exactly. Tests in
     `tests/test_searcher_pool_metadata.py` enforce.
   - **`sort_order` is a second axis, orthogonal to `sort`, not a new
-    `sort` member.** `POST /v1/search` and the MCP `search` tool accept
+    `sort` member.** Design:
+    [docs/superpowers/specs/2026-08-24-search-sort-order-design.md](docs/superpowers/specs/2026-08-24-search-sort-order-design.md);
+    plan:
+    [docs/superpowers/plans/2026-08-24-search-sort-order.md](docs/superpowers/plans/2026-08-24-search-sort-order.md).
+    **Both carry corrections in place** — the spec prescribed the OR-form
+    keyset predicate and called it the more index-friendly of the two, and
+    both restate the refuted longest-first prefix rationale. They were
+    unlinked from here, which is how that survived review; linking them is
+    the house convention every other feature in this file follows.
+    `POST /v1/search` and the MCP `search` tool accept
     `sort_order: "asc"|"desc"`, null-by-default like `sort`, resolved to
     `DEFAULT_SORT_ORDER = "desc"` once at the top of `Searcher.search` —
     the same one-authority-per-axis rule #312 established for `sort`.
     `DEFAULT_SORT_ORDER` lives beside `DEFAULT_SORT` in `search/searcher.py`;
-    `api/search.py` imports it rather than restating `"desc"`. Adding
+    `api/search_cursor.py` imports it rather than restating `"desc"`
+    (**corrected** from `api/search.py`, which imports neither default). Adding
     `date_asc`/`date_descending`-style members to `sort` instead was
     rejected: a third ordering criterion (relevance-then-date, sender,
     size) would double the enum again, and either `"date"` becomes an
@@ -3238,10 +3251,15 @@ for the full design.
       too — no scan order can misclassify a cursor. (The implementation
       plan for this feature claimed the *opposite* — that a shortest-first
       scan would misclassify every ascending cursor as descending — which
-      was simply wrong; do not propagate that reasoning here. The shipped
-      `api/search_cursor.py` module docstring and
-      `tests/test_api_search_cursor_direction.py` carry the corrected
-      version.) `resolve_cursor_mode` is renamed `resolve_cursor_plan`,
+      was simply wrong; do not propagate that reasoning here. The corrected
+      version is the `#:` comment above `_KEYSET_PREFIXES` in
+      `api/search_cursor.py` — **not** that module's docstring, which says
+      nothing about disjointness, and **not**
+      `tests/test_api_search_cursor_direction.py`, which asserts each
+      prefix positively but pins no disjointness property. Both wrong
+      pointers are corrected here; the refuted claim itself survives in
+      the plan document, annotated in place.) `resolve_cursor_mode` is
+      renamed `resolve_cursor_plan`,
       returning `CursorPlan(mode, sort, sort_order)` — one function
       deciding both axes together rather than two functions each
       answering one, for the same reason the #308 follow-up defect
@@ -3379,6 +3397,67 @@ for the full design.
         its own decision. Do **not** "fix" it by having the cursor record
         the sort the caller *stated* rather than the one that ran: a cursor
         claiming an ordering it did not walk is #308 itself.
+        **#324's surface is wider than "a blank query"** (review of #322):
+        the branch predicate is `not parsed.free_text.strip()`, evaluated
+        *after* `parse_query` lifts every filter operator out, so
+        `subject:invoice` — non-empty as a request field — takes the same
+        path. The rank+asc refusal has the inverse face of the same root:
+        it is keyed on the stated-or-defaulted `sort`, not on the branch
+        that will serve the request, so `{"query": "", "sort_order":
+        "asc"}` is refused for naming a `rank` path it would never have
+        taken. Both are recorded on #324; README states the behaviour.
+    - **The keyset cursor carries its own direction, and the Searcher reads
+      it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
+      else, so `Searcher.search` paired a directionless cursor with a
+      `sort_order` that defaults to `"desc"`: an ascending walk paged the
+      documented way — state the order once, then send only the cursor
+      back — **silently reversed**. Page 2 re-emitted a row the caller
+      already held and then ran off the end (`[7, 8]` then `[7]`, 6 of 9
+      rows lost), with no exception and no log line, so it reads as a data
+      problem rather than a call-site one. HTTP and MCP were safe only
+      because `run_search` happens to pass `plan.sort_order` on every hop
+      — a property of one call site, not of the signature — and the repo's
+      own paging idiom (`tests/test_searcher.py`) is exactly the losing
+      shape.
+      - The field is `KeysetCursor.order`, **no default**, stamped in
+        `_date_keyset_search` from the walk that produced the rows. So
+        `encode_keyset_cursor(ks)` lost its second argument and
+        `_next_cursor` its `order=` parameter: the api layer can no longer
+        supply a direction the walk did not use, rather than merely being
+        careful not to. Minting beside matching, the `blob_temps.py` call.
+      - `decode_keyset_cursor` returns the direction the prefix encodes, so
+        the round trip carries position *and* sense. Nothing on the wire
+        changed — the prefixes and payload encoding are untouched.
+      - A **stated** `sort_order` contradicting the cursor raises
+        `KeysetOrderMismatch`, mirroring the wire layer's
+        `_reject_order_mismatch`. Both other answers are silent: honouring
+        the argument walks the position in a direction it was not minted
+        for, honouring the cursor ignores a parameter the caller wrote.
+      - Only the *direction* is inherited from the cursor, **not `sort`**.
+        Inferring the sort would silently retire `KeysetCursorUnusable`,
+        which is the guard for a keyset cursor reaching the hybrid branch.
+        Consequence: `search(q, keyset_cursor=asc_ks)` with no `sort` now
+        raises `SortOrderNotApplicable` (rank+asc) where it used to
+        reverse — loud, with the right remedy, and only reachable by
+        library callers.
+    - **Timestamp ties are pinned now, in both directions (review of
+      #322).** The `id` tiebreaker in `ROW(expr, m.id) > ROW(%s, %s)` and
+      in the descending `expr = ts AND m.id < %s` disjunct was exercised by
+      **no fixture in the suite**: every one gave its dated rows distinct
+      timestamps, so the tiebreaker-less `expr > %s` selected the same rows
+      and dropping either left 150 and 174 focused tests green. The shipped
+      SQL was correct; the *pin* was missing, and a tie group straddling a
+      page boundary silently loses its remainder. Ties are ordinary here —
+      bulk sends share `date_sent` to the second, and archive imports
+      derive `internal_date` from an mbox `From_` line or a maildir mtime.
+      `_seed(tied=)` in `tests/test_searcher_sort_order_walk.py` closes
+      both, mutation-proven each way.
+      - `tests/test_searcher_sort_order_plan.py::_seed` gained
+        `_SEED_TIED_AT_CURSOR` rows **at the cursor's own timestamp**,
+        because its fair-control assertion claimed in a comment to catch "a
+        dropped tiebreaker" and could not: with every date distinct the row
+        comparison and `expr > ts` select identical rows. The claim is true
+        now (mutation-proven) rather than merely written down.
     - **`_date_sort_key` (and the `sort="date"` branch of `_build_results`
       it serves) is unreachable, and stays that way on purpose.** The
       hybrid pool branch — the only caller of `_build_results` with a

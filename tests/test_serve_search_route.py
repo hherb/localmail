@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import psycopg
@@ -333,13 +334,14 @@ def test_search_pages_a_date_cursor_when_sort_is_omitted(
 
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
-    incoming = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+    incoming = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
+                            id=100, order="desc")
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
     r = c.post(
         "/v1/search",
         json={"query": "hello", "filters": {}, "limit": 20,
-              "cursor": encode_keyset_cursor(incoming, "desc")},
+              "cursor": encode_keyset_cursor(replace(incoming, order="desc"))},
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 200
@@ -361,8 +363,8 @@ def test_search_rejects_a_stated_sort_the_cursor_cannot_serve(
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
     cursor = encode_keyset_cursor(
-        KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100),
-        "desc",
+        KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+                     order="desc"),
     )
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
@@ -398,13 +400,14 @@ def test_search_serves_a_cursor_whose_query_is_only_filter_operators(
 
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
-    incoming = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+    incoming = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
+                            id=100, order="desc")
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
     r = c.post(
         "/v1/search",
         json={"query": "subject:invoice", "filters": {}, "limit": 20,
-              "cursor": encode_keyset_cursor(incoming, "desc")},
+              "cursor": encode_keyset_cursor(replace(incoming, order="desc"))},
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 200
@@ -585,8 +588,8 @@ def test_search_rejects_a_stated_order_the_cursor_cannot_serve(
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
     cursor = encode_keyset_cursor(
-        KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100),
-        "asc",
+        KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+                     order="asc"),
     )
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
@@ -621,19 +624,23 @@ def test_search_continues_an_ascending_cursor_over_the_wire(
 
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
-    ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+    ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+                      order="asc")
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
     r = c.post(
         "/v1/search",
         json={"query": "hello", "filters": {}, "limit": 20,
-              "cursor": encode_keyset_cursor(ks, "asc")},
+              "cursor": encode_keyset_cursor(ks)},
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 200
     kwargs = fake.search.call_args.kwargs
     assert kwargs["sort"] == "date"
     assert kwargs["sort_order"] == "asc"
+    # The direction survives the whole round trip on the cursor itself, so
+    # what reaches the Searcher is the position *and* the sense to read it
+    # in — not a position plus a separately-derived argument.
     assert kwargs["keyset_cursor"] == ks
 
 
@@ -649,6 +656,12 @@ def test_an_ascending_search_puts_a_directional_cursor_in_the_response_body(
     stamped into the cursor. A client pages on the response body, so a
     ``K|`` minted for an ascending walk is the silent reversal this feature
     exists to prevent, arriving through the one path nothing watched.
+
+    The fake's ``next_keyset`` now carries ``order="asc"`` because that is
+    what an ascending walk produces: the direction travels on the cursor
+    the Searcher returns, not on an argument this layer re-derives. The
+    route's obligation is to mint from it faithfully, which is what the
+    prefix assertions below check.
     """
     from datetime import datetime, timezone
 
@@ -658,7 +671,7 @@ def test_an_ascending_search_puts_a_directional_cursor_in_the_response_body(
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
     fake.search.return_value.next_keyset = KeysetCursor(
-        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="asc"
     )
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
@@ -691,7 +704,7 @@ def test_a_descending_search_still_mints_the_legacy_prefix(
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
     fake.search.return_value.next_keyset = KeysetCursor(
-        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc"
     )
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)

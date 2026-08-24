@@ -111,15 +111,18 @@ def decode_search_cursor(raw: str) -> SearchCursor:
     return SearchCursor(token=token, page=page)
 
 
-def encode_keyset_cursor(ks: KeysetCursor, order: SortOrder) -> str:
+def encode_keyset_cursor(ks: KeysetCursor) -> str:
     """Mint a keyset cursor that carries the direction it continues.
 
-    ``order`` is required, not defaulted: a forgotten argument would mint
-    a descending cursor for an ascending walk, which is the exact silent
-    reversal this parameter exists to make impossible.
+    The direction is read off ``ks``, where ``_date_keyset_search`` stamped
+    it from the walk that produced the rows. It used to be a second
+    argument, supplied by the api layer from its own resolved plan — which
+    was correct only for as long as that plan and the walk could not
+    disagree. Taking it from the cursor makes minting a descending cursor
+    for an ascending walk unrepresentable rather than merely discouraged.
     """
     payload = encode_browse_cursor(BrowseCursor(ts=ks.ts, id=ks.id))
-    prefix = _KEYSET_PREFIX_ASC if order == "asc" else _KEYSET_PREFIX_DESC
+    prefix = _KEYSET_PREFIX_ASC if ks.order == "asc" else _KEYSET_PREFIX_DESC
     return f"{prefix}{payload}"
 
 
@@ -141,10 +144,16 @@ def keyset_order(raw: str) -> SortOrder:
 
 
 def decode_keyset_cursor(raw: str) -> KeysetCursor:
-    for prefix, _ in _KEYSET_PREFIXES:
+    """Recover the position *and* the direction the prefix encodes.
+
+    The direction travels on the cursor rather than beside it, so the
+    Searcher cannot be handed a position without the sense in which to
+    read it — see ``KeysetCursor.order``.
+    """
+    for prefix, order in _KEYSET_PREFIXES:
         if raw.startswith(prefix):
             bc = decode_browse_cursor(raw[len(prefix):])
-            return KeysetCursor(ts=bc.ts, id=bc.id)
+            return KeysetCursor(ts=bc.ts, id=bc.id, order=order)
     raise ValidationFailed(f"cursor: not a keyset cursor: {raw!r}")
 
 

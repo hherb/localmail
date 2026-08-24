@@ -635,3 +635,72 @@ def test_search_continues_an_ascending_cursor_over_the_wire(
     assert kwargs["sort"] == "date"
     assert kwargs["sort_order"] == "asc"
     assert kwargs["keyset_cursor"] == ks
+
+
+def test_an_ascending_search_puts_a_directional_cursor_in_the_response_body(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """The outbound half of the direction contract, over HTTP.
+
+    Every other route-level ``sort_order`` test asserts what reached
+    ``searcher.search``; none asserted what came back. The shared fake sets
+    ``next_keyset = None``, so ``_next_cursor``'s minting branch never ran
+    at this layer at all — and that branch is where the direction is
+    stamped into the cursor. A client pages on the response body, so a
+    ``K|`` minted for an ascending walk is the silent reversal this feature
+    exists to prevent, arriving through the one path nothing watched.
+    """
+    from datetime import datetime, timezone
+
+    from localmail.api.search_cursor import keyset_order
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    fake.search.return_value.next_keyset = KeysetCursor(
+        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+    )
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "sort": "date", "sort_order": "asc"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    cursor = r.json()["next_cursor"]
+    assert cursor.startswith("KA|"), cursor
+    assert keyset_order(cursor) == "asc"
+
+
+def test_a_descending_search_still_mints_the_legacy_prefix(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """The negative control for the test above.
+
+    Asserting only the ascending prefix passes against a mint hardcoded to
+    ``"KA|"``, which would break every descending client — the far commoner
+    path, and the one the GUI is on.
+    """
+    from datetime import datetime, timezone
+
+    from localmail.api.search_cursor import keyset_order
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    fake.search.return_value.next_keyset = KeysetCursor(
+        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+    )
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20, "sort": "date"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    cursor = r.json()["next_cursor"]
+    assert cursor.startswith("K|"), cursor
+    assert keyset_order(cursor) == "desc"

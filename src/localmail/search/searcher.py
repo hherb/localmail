@@ -106,7 +106,14 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
 #: against 33,372 for the ``ASC NULLS LAST`` spelling, which full-sorts —
 #: and an ``IS NOT NULL`` restriction does not rescue it. Do not
 #: "normalise" these to NULLS LAST.
-_DATE_ORDER_BY_SQL: dict[str, str] = {
+#:
+#: Keyed on ``SortOrder`` rather than ``str`` so mypy refuses a wrong
+#: literal at the call site. The lookup stays a dict lookup for the value
+#: mypy cannot see — a library caller passing ``"ASC"`` falls through
+#: ``_keyset_clause``'s ``== "desc"`` test into the *ascending* predicate,
+#: and the ``KeyError`` here is what stops that pairing silently serving a
+#: walk in the direction nobody asked for.
+_DATE_ORDER_BY_SQL: dict[SortOrder, str] = {
     "desc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, "
              "m.id DESC"),
     "asc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) ASC NULLS FIRST, "
@@ -116,7 +123,7 @@ _DATE_ORDER_BY_SQL: dict[str, str] = {
 _DATE_EXPR_SQL = "COALESCE(m.internal_date, m.date_sent)"
 
 
-def _keyset_clause(keyset: KeysetCursor, order: str) -> tuple[str, list[Any]]:
+def _keyset_clause(keyset: KeysetCursor, order: SortOrder) -> tuple[str, list[Any]]:
     """The ``AND …`` fragment placing the walk strictly after ``keyset``.
 
     The two directions are not mirror images in shape, only in effect.
@@ -564,7 +571,7 @@ class Searcher:
         parsed: ParsedQuery,
         page_size: int,
         keyset: KeysetCursor | None,
-        order: str,
+        order: SortOrder,
     ) -> tuple[list[SearchResult], KeysetCursor | None]:
         """Date-ordered keyset walk, ORDER BY COALESCE(internal_date,
         date_sent) per ``order`` (see ``_DATE_ORDER_BY_SQL``). Returns

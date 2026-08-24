@@ -182,3 +182,38 @@ def test_an_ascending_search_pages_end_to_end_through_run_search() -> None:
         "the walk continued ascending but minted a descending cursor, so "
         "page 3 would reverse"
     )
+
+
+def test_the_fresh_rank_asc_refusal_names_the_remedy_that_works() -> None:
+    """No cursor was sent, so the remedy must not talk about one.
+
+    This is the commonest way to reach the refusal — ``sort_order="asc"``
+    with no ``sort``, which resolves to rank. Telling that caller to "run a
+    fresh search" and that "a cursor cannot be carried over" describes a
+    request they did not make; the fix is one field. The wording is
+    deliberately the same as ``Searcher.search``'s own guard on the same
+    condition: two guards for one condition disagreeing about the remedy is
+    the drift this pins.
+    """
+    s = _searcher()
+    with pytest.raises(ValidationFailed) as exc:
+        run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                   allowed_account_ids=[1], user_id=99, sort_order="asc")
+    message = str(exc.value)
+    assert "pass sort='date' for oldest-first" in message, message
+    assert "cursor" not in message, message
+
+
+def test_the_pool_cursor_rank_asc_refusal_says_the_cursor_cannot_carry_over() -> None:
+    """With a pool cursor in hand the short remedy is actively wrong.
+
+    ``sort='date'`` alongside a rank-built pool cursor is a *different*
+    400, so this caller's fix is to start over rather than to add a field.
+    """
+    s = _searcher()
+    with pytest.raises(ValidationFailed) as exc:
+        run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                   allowed_account_ids=[1], user_id=99, sort_order="asc",
+                   cursor="tok-1:2")
+    message = str(exc.value)
+    assert "cannot be carried over" in message, message

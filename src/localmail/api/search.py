@@ -202,10 +202,27 @@ def run_search(
     # Written out rather than left to `plan.sort == "rank"` to exclude it,
     # which is true only while KEYSET_SORT happens to be "date".
     if plan.mode != "keyset" and plan.sort == "rank" and plan.sort_order == "asc":
+        # The remedy differs by mode, so it is branched rather than written
+        # as one string covering both. On a **fresh** request — no cursor,
+        # which is the commonest way to reach this — "pass sort='date'" is
+        # the whole fix, and is word for word what `Searcher.search`'s guard
+        # on the same condition already says; two guards for one condition
+        # disagreeing about the remedy is the drift. Telling that caller to
+        # "run a fresh search" and explaining that a cursor cannot be carried
+        # over are both non-sequiturs for a request that *is* fresh and
+        # carries no cursor. With a **pool** cursor in hand the shorter
+        # remedy is actively wrong: passing sort='date' then contradicts the
+        # rank-built pool and yields a different 400, so there the fix really
+        # is to start over.
+        remedy = (
+            "start a fresh sort='date' search for oldest-first (a cursor from "
+            "a rank-ordered search cannot be carried over)"
+            if plan.mode == "pool"
+            else "pass sort='date' for oldest-first"
+        )
         raise ValidationFailed(
-            "sort_order='asc' is not applicable to sort='rank' (the default); "
-            "run a fresh sort='date' search for oldest-first (a cursor from a "
-            "rank-ordered search cannot be carried over)"
+            "sort_order='asc' is not applicable to sort='rank' (the "
+            f"default); {remedy}"
         )
 
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)

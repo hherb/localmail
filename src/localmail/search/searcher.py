@@ -99,6 +99,56 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
     return (1, dt)
 
 
+#: The one place either direction's ORDER BY is written. Ascending is
+#: ``ASC NULLS FIRST`` because that is the exact reverse of
+#: ``messages_recent_idx`` (``… DESC NULLS LAST, id DESC``) and is served
+#: by a backward index scan. Measured on the live 128k archive: 44 buffers
+#: against 33,372 for the ``ASC NULLS LAST`` spelling, which full-sorts —
+#: and an ``IS NOT NULL`` restriction does not rescue it. Do not
+#: "normalise" these to NULLS LAST.
+_DATE_ORDER_BY_SQL: dict[str, str] = {
+    "desc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, "
+             "m.id DESC"),
+    "asc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) ASC NULLS FIRST, "
+            "m.id ASC"),
+}
+
+_DATE_EXPR_SQL = "COALESCE(m.internal_date, m.date_sent)"
+
+
+def _keyset_clause(keyset: KeysetCursor, order: str) -> tuple[str, list[Any]]:
+    """The ``AND …`` fragment placing the walk strictly after ``keyset``.
+
+    The two directions are not mirror images in shape, only in effect.
+    Descending needs ``OR <expr> IS NULL`` so a dated cursor still admits
+    the undated tail that follows it. Ascending needs no such disjunct —
+    under ``NULLS FIRST`` the undated block is already behind the cursor,
+    and ``NULL > ts`` is not true, so those rows drop out on their own.
+    That makes the ascending dated predicate the more index-friendly of
+    the two; the descending disjunct is the shape #75 identified as
+    preventing an index range bound, and is pre-existing here.
+    """
+    expr = _DATE_EXPR_SQL
+    if order == "desc":
+        if keyset.ts is None:
+            return f" AND {expr} IS NULL AND m.id < %s ", [keyset.id]
+        return (
+            f" AND ({expr} < %s OR ({expr} = %s AND m.id < %s) "
+            f" OR {expr} IS NULL) ",
+            [keyset.ts, keyset.ts, keyset.id],
+        )
+    if keyset.ts is None:
+        # Still in the undated head: the rest of it, then every dated row.
+        return (
+            f" AND (({expr} IS NULL AND m.id > %s) OR {expr} IS NOT NULL) ",
+            [keyset.id],
+        )
+    return (
+        f" AND ({expr} > %s OR ({expr} = %s AND m.id > %s)) ",
+        [keyset.ts, keyset.ts, keyset.id],
+    )
+
+
 # No account has a non-positive id (serial PKs start at 1), so an
 # `account_id = ANY(ARRAY[_NO_ACCOUNT_SENTINEL])` clause matches nothing.
 # Deliberately a SQL-level sentinel rather than an early "empty page" return:
@@ -572,10 +622,12 @@ class Searcher:
         parsed: ParsedQuery,
         page_size: int,
         keyset: KeysetCursor | None,
+        order: str,
     ) -> tuple[list[SearchResult], KeysetCursor | None]:
         """Gmail-style lexical search: every message whose FTS matches the
-        free text, ORDER BY COALESCE(internal_date, date_sent) DESC, keyset
-        paginated. Returns (results, next_keyset_or_None).
+        free text, ORDER BY COALESCE(internal_date, date_sent) per ``order``
+        (see ``_DATE_ORDER_BY_SQL``), keyset paginated. Returns (results,
+        next_keyset_or_None).
 
         Why this path exists: with the hybrid pipeline a query like
         "e-ticket" returns at most ``rerank_pool_size`` candidates fused
@@ -603,20 +655,8 @@ class Searcher:
         params: list[Any] = [*tsq_params]
         keyset_clause = ""
         if keyset is not None:
-            if keyset.ts is None:
-                # Already in the NULLS-LAST tail: paginate by id alone.
-                keyset_clause = (
-                    " AND COALESCE(m.internal_date, m.date_sent) IS NULL"
-                    " AND m.id < %s "
-                )
-                params.append(keyset.id)
-            else:
-                keyset_clause = (
-                    " AND (COALESCE(m.internal_date, m.date_sent) < %s "
-                    "  OR (COALESCE(m.internal_date, m.date_sent) = %s AND m.id < %s) "
-                    "  OR COALESCE(m.internal_date, m.date_sent) IS NULL) "
-                )
-                params.extend([keyset.ts, keyset.ts, keyset.id])
+            keyset_clause, keyset_params = _keyset_clause(keyset, order)
+            params.extend(keyset_params)
         params.extend(where_params)
         # Fetch one extra row to detect "more pages remain" without a COUNT.
         fetch_limit = page_size + 1
@@ -628,7 +668,7 @@ class Searcher:
              WHERE m.fts_v2 @@ {tsq_sql}
              {keyset_clause}
              {where_extra}
-             ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC
+             {_DATE_ORDER_BY_SQL[order]}
              LIMIT %s
         """
         with conn.cursor() as cur:
@@ -1012,6 +1052,17 @@ class Searcher:
         it fell through the `== "date"` test to the same ordering by accident,
         and was then cached as the pool's own sort, which `_check_pool_sort`
         reads back to decide a 400 (#312).
+
+        `sort_order` is orthogonal to `sort` and, like it, resolves an
+        unstated `None` to `DEFAULT_SORT_ORDER` ("desc") once, here, into
+        `effective_order` — every read below goes through that local, never
+        the raw parameter. `sort_order="asc"` only takes effect on the
+        `sort="date"` lexical-keyset branch, where both the ORDER BY and the
+        keyset predicate flip to walk the archive oldest-first. Pairing it
+        with `sort="rank"` (stated or defaulted) raises
+        `SortOrderNotApplicable`: the rank path serves a bounded candidate
+        pool, so reversing it would surface the least relevant of the top
+        hits rather than the oldest of the archive.
         """
         t0 = time.monotonic()
         effective_sort: SortMode = DEFAULT_SORT if sort is None else sort
@@ -1090,6 +1141,7 @@ class Searcher:
                 self._maybe_warn_unpopulated_body_lang(conn, parsed)
                 results, next_keyset = self._lexical_date_search(
                     conn, parsed, effective_page_size, keyset_cursor,
+                    effective_order,
                 )
             timing["retrieve"] = (time.monotonic() - t) * 1000
             timing["rerank"] = 0.0

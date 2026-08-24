@@ -56,11 +56,22 @@ _DATE_SORT_NULL_SENTINEL = datetime(MINYEAR, 1, 1, tzinfo=timezone.utc)
 def _date_sort_key(item: dict) -> tuple[int, datetime]:
     """Key for ``COALESCE(internal_date, date_sent) DESC NULLS LAST``.
 
+    **Unreachable.** ``Searcher.search``'s date-keyset branch takes
+    ``sort="date"`` with non-blank free text and its blank-query branch
+    takes every blank query, so the hybrid pool branch — the sole caller
+    of ``_build_results`` with a ``sort`` other than the default, and the
+    sole writer of the cached pool's ``sort`` — is reached only as
+    ``rank`` + non-blank text. Pinned by
+    ``tests/test_searcher_pool_sort_unreachable.py``.
+
+    Kept rather than deleted because deleting is not what the sort_order
+    change is for. Do **not** add ``sort_order`` handling here "for
+    symmetry": it would be tested against a branch that never runs.
+
     Returned tuple uses (1, dt) for rows with a usable date and (0,
     sentinel) for NULLs, so Python's default ascending sort puts NULLs
     first; ``sorted(..., reverse=True)`` then reverses to (newest, ...,
-    older, NULLs-last) — matching the canonical ordering in the SQL
-    paths.
+    older, NULLs-last).
     """
     msg = item.get("msg") or {}
     dt = msg.get("internal_date") or msg.get("date_sent")

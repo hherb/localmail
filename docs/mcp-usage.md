@@ -277,18 +277,25 @@ accounts the token's user has been granted.
 tool again with that value in `cursor`. The `search` tool transparently grows
 its candidate pool as you page deeper.
 
-Two rules for a `search` cursor. The second is enforced; the first is mostly
-on you:
+Two rules for a `search` cursor. Both are enforced, the first only partly:
 
 * **Re-send the same `query` and filters.** A cursor carries only the position.
   A `sort="date"` search walks the archive lexically and rebuilds that walk
   from whatever you send with it, so a *changed* query or filter quietly walks
-  a different result set — nothing compares them against the cursor. A blank
-  query pages too, now — it walks the whole archive date-ordered instead of
+  a different result set — nothing compares them against the cursor.
+
+  **Dropping the query entirely is the one case that is caught.** A cursor
+  minted by a text search records that it came from one, so paging it with no
+  query is a validation error telling you to re-send it, rather than handing
+  back the next slice of your whole archive dressed as a continuation.
+
+  A blank query pages too — it walks the whole archive date-ordered instead of
   matching text, the same way `list_messages` does, and used to return exactly
-  one page with no way to continue. (A query of nothing but filter operators —
-  `subject:invoice` alone — counts as blank for this purpose, since those parse
-  out of the text the walk searches.)
+  one page with no way to continue. Its cursors are unaffected by the rule
+  above: there is no text walk to continue, so they page with or without a
+  query. (A query of nothing but filter operators — `subject:invoice` alone —
+  counts as blank throughout, since those parse out of the text the walk
+  searches.)
 * **Leave `sort` and `sort_order` unset.** The cursor already carries the
   ordering it continues, on both axes. Stating a value that disagrees with it
   on either is a validation error — the alternative was serving page 1 of a

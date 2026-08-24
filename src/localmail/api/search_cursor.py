@@ -33,6 +33,7 @@ from localmail.api.browse_cursor import (
     BrowseCursor, decode_browse_cursor, encode_browse_cursor,
 )
 from localmail.api.errors import ValidationFailed
+from localmail.search.keyset_walk import KeysetWalk, keyset_walk_error
 from localmail.search.searcher import (
     DEFAULT_SORT,
     DEFAULT_SORT_ORDER,
@@ -41,17 +42,29 @@ from localmail.search.searcher import (
     SortOrder,
 )
 
-_KEYSET_PREFIX_DESC = "K|"
-_KEYSET_PREFIX_ASC = "KA|"
-
-#: The ``|`` terminator is what keeps the two disjoint — "KA|…" does not
-#: start with "K|", nor the converse — so no scan order can misclassify a
-#: cursor. Longest first is a prefix table's convention, not a correctness
-#: requirement; it becomes one the day a prefix is added that does not end
-#: in the terminator.
-_KEYSET_PREFIXES: tuple[tuple[str, SortOrder], ...] = (
-    (_KEYSET_PREFIX_ASC, "asc"),
-    (_KEYSET_PREFIX_DESC, "desc"),
+#: One prefix per (direction, walk) pair, spelled ``K`` + ``A`` when
+#: ascending + ``T`` when the walk carries free text + the terminator.
+#:
+#: The ``|`` terminator is what keeps them disjoint: every prefix ends in
+#: it and contains no other, so a shorter one can never match inside a
+#: longer one ("KAT|" does not start with "KA|", nor "KT|" with "K|").
+#: No scan order can therefore misclassify a cursor. Longest first is a
+#: prefix table's convention, not a correctness requirement; it becomes one
+#: the day a prefix is added that does not end in the terminator — which is
+#: why ``test_no_keyset_prefix_is_a_prefix_of_another`` asserts the
+#: property rather than leaving it to this comment.
+#:
+#: ``K|`` and ``KA|`` keep the meanings they shipped with, so no cursor in
+#: flight changes direction. They read as ``archive`` — the lenient half of
+#: the #326 rule — because a legacy cursor could have come from either
+#: walk: archive leaves that one paging session un-checked, while text
+#: would manufacture a 400 for a caller correctly paging a blank-query
+#: walk, breaking a feature that shipped the same week.
+_KEYSET_PREFIXES: tuple[tuple[str, SortOrder, KeysetWalk], ...] = (
+    ("KAT|", "asc", "text"),
+    ("KA|", "asc", "archive"),
+    ("KT|", "desc", "text"),
+    ("K|", "desc", "archive"),
 )
 
 #: The only sort a keyset cursor can continue — the date-keyset branch is
@@ -122,12 +135,20 @@ def encode_keyset_cursor(ks: KeysetCursor) -> str:
     for an ascending walk unrepresentable rather than merely discouraged.
     """
     payload = encode_browse_cursor(BrowseCursor(ts=ks.ts, id=ks.id))
-    prefix = _KEYSET_PREFIX_ASC if ks.order == "asc" else _KEYSET_PREFIX_DESC
-    return f"{prefix}{payload}"
+    for prefix, order, walk in _KEYSET_PREFIXES:
+        if order == ks.order and walk == ks.walk:
+            return f"{prefix}{payload}"
+    # Unreachable while the table covers the product of both Literals, and
+    # a raise rather than a fallback so widening either axis without
+    # widening the table cannot mint a cursor that decodes as something
+    # else. Named, not an assert: asserts vanish under ``python -O``.
+    raise ValueError(
+        f"no keyset prefix for order={ks.order!r} walk={ks.walk!r}"
+    )
 
 
 def is_keyset_cursor(raw: str) -> bool:
-    return any(raw.startswith(p) for p, _ in _KEYSET_PREFIXES)
+    return any(raw.startswith(p) for p, _, _ in _KEYSET_PREFIXES)
 
 
 def keyset_order(raw: str) -> SortOrder:
@@ -137,7 +158,7 @@ def keyset_order(raw: str) -> SortOrder:
     is descending, which is what it has always meant — so no cursor in
     flight changes meaning.
     """
-    for prefix, order in _KEYSET_PREFIXES:
+    for prefix, order, _walk in _KEYSET_PREFIXES:
         if raw.startswith(prefix):
             return order
     raise ValidationFailed(f"cursor: not a keyset cursor: {raw!r}")
@@ -150,10 +171,10 @@ def decode_keyset_cursor(raw: str) -> KeysetCursor:
     Searcher cannot be handed a position without the sense in which to
     read it — see ``KeysetCursor.order``.
     """
-    for prefix, order in _KEYSET_PREFIXES:
+    for prefix, order, walk in _KEYSET_PREFIXES:
         if raw.startswith(prefix):
             bc = decode_browse_cursor(raw[len(prefix):])
-            return KeysetCursor(ts=bc.ts, id=bc.id, order=order)
+            return KeysetCursor(ts=bc.ts, id=bc.id, order=order, walk=walk)
     raise ValidationFailed(f"cursor: not a keyset cursor: {raw!r}")
 
 
@@ -162,14 +183,26 @@ def resolve_cursor_plan(
     cursor: str | None,
     requested_sort: SortMode | None,
     requested_sort_order: SortOrder | None,
+    free_text: str,
 ) -> CursorPlan:
     """Decide the retrieval mode and both ordering axes — cursor first.
 
-    The query is not an input. It used to be: a keyset cursor presented
-    with a blank query was refused, because the blank-query branch dropped
-    the cursor and answered with its own page 1. That branch paginates
-    now, so both shapes continue a walk and the plan follows from the
-    cursor alone.
+    ``free_text`` must be ``parse_query(...).free_text``, not the caller's
+    raw query field: the filter operators are lifted out by then, and
+    ``subject:invoice`` leaves no free text behind for an FTS predicate to
+    be rebuilt from. Two predicates for one rule is what produced #308's
+    follow-up defect — the api gate and the retrieval branch disagreeing
+    about what counted as a blank query — so this asks
+    ``keyset_walk.walk_for_text``, exactly as the branch does.
+
+    It is an input again, but for a narrower question than before #322.
+    The old guard refused *any* keyset cursor presented with a blank query,
+    because the blank-query branch dropped the cursor and answered with its
+    own page 1; that branch paginates now, so the premise is gone and the
+    guard would forbid the pagination it gained. What comes back (#326) is
+    the one pair that guard also happened to catch: a cursor from the
+    **text** walk, whose FTS predicate the next page must rebuild from the
+    re-sent query. An archive-walk cursor still continues under any query.
 
     A ``None`` on either axis means the caller stated nothing. That is the
     documented way to page, so an unstated value never out-votes the
@@ -189,10 +222,14 @@ def resolve_cursor_plan(
                         else requested_sort_order),
         )
     if is_keyset_cursor(cursor):
-        order = keyset_order(cursor)
+        ks = decode_keyset_cursor(cursor)
         _reject_sort_mismatch(requested=requested_sort, cursor_sort=KEYSET_SORT)
-        _reject_order_mismatch(requested=requested_sort_order, cursor_order=order)
-        return CursorPlan(mode="keyset", sort=KEYSET_SORT, sort_order=order)
+        _reject_order_mismatch(requested=requested_sort_order,
+                               cursor_order=ks.order)
+        walk_error = keyset_walk_error(cursor_walk=ks.walk, free_text=free_text)
+        if walk_error is not None:
+            raise ValidationFailed(f"cursor: {walk_error}")
+        return CursorPlan(mode="keyset", sort=KEYSET_SORT, sort_order=ks.order)
     return CursorPlan(
         mode="pool",
         sort=DEFAULT_SORT if requested_sort is None else requested_sort,

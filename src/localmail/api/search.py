@@ -24,6 +24,7 @@ from localmail.api.search_cursor import (
     resolve_cursor_plan,
 )
 from localmail.config import SearchConfig
+from localmail.search.query import parse_query
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.rewrite_status import (
     CONTINUATION_PAGE,
@@ -188,8 +189,13 @@ def run_search(
     # Resolved before the ACL short-circuit below, because that branch answers
     # with an empty page — indistinguishable from "you have reached the end".
     # A malformed paging request must be a 400 whatever the caller was granted.
+    # `parse_query(free_text).free_text` is the text `Searcher.search` will
+    # actually build an FTS predicate from — the filter operators are lifted
+    # out by then. Asking the same question the retrieval branch asks is what
+    # keeps the gate and the branch from disagreeing (#308's follow-up, #326).
     plan = resolve_cursor_plan(cursor=cursor, requested_sort=sort,
-                               requested_sort_order=sort_order)
+                               requested_sort_order=sort_order,
+                               free_text=parse_query(free_text).free_text)
     # Refused here as well as in the Searcher so the caller gets a clean 400
     # before any work; the Searcher's own guard is what covers CLI and
     # library callers, who never reach this function. Ahead of the empty-ACL
@@ -361,7 +367,6 @@ def _continue_or_grow(
 
 def _empty_grown_page(token: str, *, page_size: int) -> Any:
     """Synthetic 'pool exhausted at cap' page so callers see next_cursor=null."""
-    from localmail.search.query import parse_query
     return SearchPage(
         results=[], page=1, page_size=page_size, pool_size=0,
         candidates_per_arm=0, has_more_in_pool=False, can_grow_pool=False,

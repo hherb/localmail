@@ -251,6 +251,10 @@ def _account_scoped_fake_searcher(account_to_hits: dict[int, list[dict[str, obje
         page.results = results
         page.search_token = "tok-fake"
         page.timing_ms = {"total": 1.0}
+        # A hybrid-pool page carries no keyset cursor. Left unset, the
+        # auto-MagicMock read as one and was minted into a garbage cursor —
+        # harmless only because nothing here asserts on next_cursor.
+        page.next_keyset = None
         return page
 
     s.search.side_effect = _search

@@ -44,6 +44,11 @@ from localmail.search.sort_axes import (
     SortMode,
     SortOrder,
 )
+from localmail.search.keyset_walk import (
+    KeysetWalk,
+    keyset_walk_error,
+    walk_for_text,
+)
 from localmail.search.date_keyset import (
     DATE_EXPR_SQL,
     DATE_ORDER_BY_SQL,
@@ -358,6 +363,18 @@ class KeysetCursor:
     #: Minting beside matching, the call ``blob_temps.py`` and
     #: ``sweep_pacing.py`` already make.
     order: SortOrder
+    #: Which of the two walks minted this position (#326).
+    #:
+    #: **No default**, for the reason ``order`` has none. The text walk
+    #: rebuilds its FTS predicate from the query the caller re-sends on
+    #: every page; the archive walk has none to rebuild. Without this
+    #: field the two were indistinguishable on the wire, so paging a text
+    #: search with the query left out — the mistake ``docs/mcp-usage.md``
+    #: exists to prevent — was served silently as the next page of the
+    #: whole archive. Stamped in ``_date_keyset_search`` from
+    #: ``keyset_walk.walk_for_text``, the same call that picks the branch,
+    #: so a cursor cannot claim a walk its query did not take.
+    walk: KeysetWalk
 
 
 class KeysetOrderMismatch(ValueError):
@@ -612,7 +629,10 @@ class Searcher:
 
         where_extra, where_params = _filter_sql(parsed.filters)
         match_params: list[Any] = []
-        if parsed.free_text.strip():
+        # One call decides both which branch runs and what the cursor
+        # records, so the two cannot disagree (#326).
+        walk = walk_for_text(parsed.free_text)
+        if walk == "text":
             tsq_sql, tsq_params = build_lexical_tsquery(
                 parsed.free_text, parsed.expansion_terms
             )
@@ -677,6 +697,7 @@ class Searcher:
                 # Stamped from the walk that actually produced these rows,
                 # never from a caller's argument re-derived a layer up.
                 order=order,
+                walk=walk,
             )
         return results, next_keyset
 
@@ -1157,6 +1178,23 @@ class Searcher:
         # continuation pages stay scoped too. None (CLI / local callers) is a
         # no-op inside the helper, so this call is unconditional.
         parsed = _clamp_account_ids_to_acl(parsed, allowed_account_ids)
+
+        # A text-walk cursor needs its query back (#326). The walk that
+        # minted it rebuilds its FTS predicate from the re-sent query; with
+        # none, the branch below would answer from the archive walk and
+        # hand back the next page of everything, presented as a
+        # continuation of the search. Judged on ``parsed.free_text`` rather
+        # than the caller's raw argument, which is where #308's follow-up
+        # defect lived: ``subject:invoice`` is a non-empty request field
+        # that parses down to nothing. Before any connection is opened, so
+        # a caller error costs no IO. An archive-walk cursor is accepted
+        # with any query — refusing it would forbid the blank-query paging
+        # #322 added.
+        if keyset_cursor is not None:
+            walk_error = keyset_walk_error(cursor_walk=keyset_cursor.walk,
+                                           free_text=parsed.free_text)
+            if walk_error is not None:
+                raise KeysetCursorUnusable(walk_error)
 
         # The date-ordered keyset walk serves two intents that are one query.
         #

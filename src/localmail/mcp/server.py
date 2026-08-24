@@ -168,7 +168,9 @@ def build_mcp_server(
             "Send the same `query` and filters with it: a date-ordered "
             "cursor walks the archive by date (lexically when the query has "
             "free text, over every filtered row when it does not) and "
-            "rebuilds that walk from the query."))]
+            "rebuilds that walk from the query. Omitting the query a text "
+            "search's cursor was minted from is an error, not a wider "
+            "search."))]
             = None,
         account_ids: Annotated[list[str] | None, Field(description=(
             "Restrict to these account ids (string integers). Omit to search "
@@ -228,9 +230,13 @@ def build_mcp_server(
         the returned `next_cursor` in `cursor`, and leave `sort` and
         `sort_order` unset — the cursor carries the ordering it continues,
         and stating a different one is an error rather than a silent
-        restart. A `null` next_cursor means there are no more results. If the
-        cursor has expired (the result pool was evicted), re-run the same
-        query without a cursor and skip rows you already hold.
+        restart. Dropping the `query` is an error too when the cursor came
+        from a text search: without it there is no lexical walk to continue,
+        and the alternative was serving the next slice of the whole archive
+        as though it were one. A `null` next_cursor means there are no more
+        results. If the cursor has expired (the result pool was evicted),
+        re-run the same query without a cursor and skip rows you already
+        hold.
 
         Use `list_messages` when you have no query and just want recent mail;
         use `get_message` to read a full message once a result surfaces its id.

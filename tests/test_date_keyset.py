@@ -30,11 +30,11 @@ _TS = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def _dated(order: SortOrder) -> KeysetCursor:
-    return KeysetCursor(ts=_TS, id=42, order=order)
+    return KeysetCursor(ts=_TS, id=42, order=order, walk="text")
 
 
 def _undated(order: SortOrder) -> KeysetCursor:
-    return KeysetCursor(ts=None, id=42, order=order)
+    return KeysetCursor(ts=None, id=42, order=order, walk="text")
 
 
 # ---- The predicate shapes -----------------------------------------------

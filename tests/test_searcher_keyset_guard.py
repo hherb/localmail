@@ -44,7 +44,10 @@ def _searcher() -> tuple[Searcher, MagicMock]:
                     reranker=None, rewriter=None), pool
 
 
-_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc")
+#: An archive-walk position, because one test below pages it with an
+#: empty query — the shape #322 made legal and #326 must keep legal.
+_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+                       order="desc", walk="archive")
 
 
 def test_rank_sort_rejects_a_keyset_cursor_instead_of_dropping_it() -> None:

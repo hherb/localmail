@@ -347,7 +347,8 @@ def test_the_ascending_keyset_predicate_keeps_the_backward_scan(
     ``_keyset_clause`` so a rewrite of it lands here.
     """
     account_id = _seed(db_conn)
-    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101, order="desc")
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101,
+                          order="desc", walk="text")
     clause, clause_params = searcher_mod._keyset_clause(keyset, "asc")
     where = "TRUE " + clause + " AND m.account_id = ANY(%s) "
     params = clause_params + [[account_id], _PAGE_SIZE + 1]
@@ -391,7 +392,8 @@ def test_the_ascending_keyset_predicate_composes_an_index_range_bound(
     depth.
     """
     account_id = _seed(db_conn)
-    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101, order="desc")
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101,
+                          order="desc", walk="text")
     clause, clause_params = searcher_mod._keyset_clause(keyset, "asc")
     shipped = _explain(
         db_conn,
@@ -472,7 +474,8 @@ def test_the_descending_keyset_predicate_composes_an_index_range_bound(
     production depth is the whole defect.
     """
     account_id = _seed(db_conn)
-    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101, order="desc")
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101,
+                          order="desc", walk="text")
     clause, clause_params = searcher_mod._keyset_clause(keyset, "desc")
     shipped = _explain(
         db_conn,
@@ -519,7 +522,8 @@ def test_the_descending_predicate_drops_only_the_undated_tail(
     account_id = _seed(db_conn)
     undated = _undated_ids(db_conn, account_id)
     assert undated, "fixture seeds no undated rows; the assertion is vacuous"
-    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101, order="desc")
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101,
+                          order="desc", walk="text")
     clause, clause_params = searcher_mod._keyset_clause(keyset, "desc")
     # Past every seeded row, so both forms run to exhaustion and the
     # comparison covers the tail rather than stopping short of it.

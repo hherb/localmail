@@ -431,6 +431,8 @@ def test_tool_search_pages_ascending_end_to_end_over_a_real_archive(db_dsn, db_c
     acl = allowed_account_ids(db_conn, uid)
     searcher = _lexical_searcher(db_dsn)
     try:
+        from localmail.api.search_cursor import keyset_order
+
         walked: list[int] = []
         cursor = None
         seen_ascending_prefix = False
@@ -446,7 +448,11 @@ def test_tool_search_pages_ascending_end_to_end_over_a_real_archive(db_dsn, db_c
                 break
             # Paging states nothing but the cursor — the documented call, and
             # the one that used to resolve back to "desc" and reverse.
-            assert cursor.startswith("KA|"), cursor
+            # Asked of `keyset_order` rather than of the prefix spelling:
+            # since #326 the prefix carries the walk too ("KAT|" here, the
+            # query being a text one), and the property under test is the
+            # direction, not the encoding.
+            assert keyset_order(cursor) == "asc", cursor
             seen_ascending_prefix = True
     finally:
         searcher._pool.close()

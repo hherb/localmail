@@ -16,7 +16,7 @@ from localmail.api.search_cursor import encode_keyset_cursor, keyset_order
 from localmail.search.searcher import KeysetCursor, PoolMetadata
 
 _KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
-                   order="desc")
+                   order="desc", walk="text")
 #: The same position, ascending. A fake standing in for an ascending walk
 #: has to return *this*: the direction now travels on the cursor the
 #: Searcher produces, so a fake returning the descending one is modelling a
@@ -48,6 +48,11 @@ def _searcher(page=None):
     s.config.candidates_per_arm_max = 800
     s.smart_available = False
     s.search.return_value = page or _page()
+    # A pool continuation returns a real page shape too. Left unset, the
+    # auto-MagicMock's `next_keyset` read as a live keyset cursor and was
+    # minted into a garbage one — invisible only because the pool tests here
+    # do not assert on `next_cursor`.
+    s.continue_page.return_value = _page(token="tok-1")
     return s
 
 
@@ -222,7 +227,7 @@ def test_an_ascending_search_pages_end_to_end_through_run_search() -> None:
     assert keyset_order(first["next_cursor"]) == "asc"
 
     second_ks = KeysetCursor(ts=datetime(2026, 5, 22, tzinfo=timezone.utc),
-                             id=200, order="asc")
+                             id=200, order="asc", walk="text")
     s.search.return_value = _page(next_keyset=second_ks)
     second = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                         allowed_account_ids=[1], user_id=99,

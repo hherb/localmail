@@ -41,9 +41,9 @@ class SearchRequest(BaseModel):
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
     # "rank" (the default when omitted) orders by rerank relevance; "date"
-    # keeps the same candidate pool but orders the page by
-    # COALESCE(internal_date, date_sent) DESC NULLS LAST. The empty-query
-    # branch is already date-ordered so this is a no-op there.
+    # takes the date-ordered keyset walk directly rather than the hybrid
+    # pool, ordering by COALESCE(internal_date, date_sent) DESC NULLS LAST.
+    # A blank query takes that same walk regardless of `sort`.
     #
     # Null rather than "rank" so that omitting it is distinguishable from
     # asking for it: alongside a `cursor` the cursor decides the ordering,

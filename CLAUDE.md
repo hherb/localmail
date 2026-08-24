@@ -898,10 +898,11 @@ subsystem before touching either column.
 The canonical "show me recent mail" ordering is
 `ORDER BY COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC`,
 backed by the expression index `messages_recent_idx`. Used by the
-`/v1/changes` initial-fetch branch, the `Searcher` empty-query fallback
-(`_list_recent_messages`), the new keyset browse path
-(`api.list_messages` → `/v1/messages`), and the `sort=date` lexical
-keyset path (`Searcher._lexical_date_search`).
+`/v1/changes` initial-fetch branch, the new keyset browse path
+(`api.list_messages` → `/v1/messages`), and `Searcher._date_keyset_search`
+— the one date-ordered keyset walk, which serves `sort=date`, any
+blank-query search, and (see **Browse & search pagination** below) both
+the descending direction above and its exact reverse.
 
 **Planner choice under the per-user ACL filter (#72, resolved)**:
 `messages_recent_idx` does *not* include `account_id`, but the
@@ -3002,17 +3003,28 @@ for the full design.
     The GUI's initial mail-list load goes here, not `/v1/changes`.
   - `GET /v1/search` returns one of **two cursor flavours**, distinguished
     by prefix on the wire:
-      - `"<token>:<page>"` — pool cursor for `sort=rank` (and for
-        `sort=date` with an empty query). Driven by `Searcher.continue_page`
-        / `Searcher.grow_pool`. The route doubles `candidates_per_arm` up to
-        `search.candidates_per_arm_max` (default 800) when the page would
-        advance past the cached pool; once the ceiling is hit `next_cursor`
-        flips to `null`.
-      - `"K|<base64>"` — keyset cursor for `sort=date` with a non-empty
-        query, served by `Searcher._lexical_date_search`. Same FTS column
-        as retrieval Arm 1 (`fts_v2 @@ plainto_tsquery('simple', q)`), so
-        recall is identical to the lexical case. No pool cap; unbounded
-        scroll. Route dispatches on the `K|` prefix.
+      - `"<token>:<page>"` — pool cursor for the hybrid retrieval pool,
+        i.e. `sort=rank` with non-blank free text. Driven by
+        `Searcher.continue_page` / `Searcher.grow_pool`. The route doubles
+        `candidates_per_arm` up to `search.candidates_per_arm_max` (default
+        800) when the page would advance past the cached pool; once the
+        ceiling is hit `next_cursor` flips to `null`. **Correction:** this
+        used to also read "and for `sort=date` with an empty query" — that
+        was already stale when written. An empty query takes the keyset
+        branch below regardless of `sort` and mints no pool cursor; see the
+        `_date_sort_key` bullet under **`sort_order`** below for why that
+        branch structurally cannot build one.
+      - `"K|<base64>"` descending, `"KA|<base64>"` ascending — keyset
+        cursor served by `Searcher._date_keyset_search` (one method now;
+        formerly two near-identical ones, `_lexical_date_search` and the
+        unpaginated `_list_recent_messages` — see **`sort_order`** below).
+        It handles `sort=date` with any query and, regardless of `sort`,
+        any blank query. With free text it matches the same FTS column as
+        retrieval Arm 1 (`fts_v2 @@ plainto_tsquery('simple', q)`), so
+        recall is identical to the lexical case; with none it walks the
+        whole (filtered) archive date-ordered. No pool cap; unbounded
+        scroll. Route dispatches on the prefix, which also carries the
+        walk's direction.
   - **The cursor decides the continuation mode; a stated `sort` may not
     contradict it (#308).** `sort` defaulted to `"rank"` on the wire and was
     resolved to that default before the cursor could bear on the ordering —
@@ -3028,7 +3040,9 @@ for the full design.
     `test_api_search_cursor_mode.py::test_paging_a_date_sorted_search_with_the_cursor_alone_advances`
     (it fails `['1','2','3'] == ['4','5','6']` against the pre-fix source).
     - The rule is the pure
-      [src/localmail/api/search_cursor.py](src/localmail/api/search_cursor.py)`::resolve_cursor_mode`
+      [src/localmail/api/search_cursor.py](src/localmail/api/search_cursor.py)`::resolve_cursor_plan`
+      (renamed from `resolve_cursor_mode` when `sort_order` landed — see
+      below — the rule it names is unchanged)
       — kept in the codec module so minting, matching, and *interpreting* stay
       together, the `blob_temps.py` / `sweep_pacing.py` call.
     - **`sort` is null-by-default on every transport**, so "omitted" is
@@ -3073,7 +3087,7 @@ for the full design.
     - **Validation precedes the empty-ACL short-circuit.** That branch answers
       with an empty page, byte-identical to "you have reached the end of your
       results" — so a grant-nothing caller was told a contradictory request had
-      succeeded and was complete. `resolve_cursor_mode` is pure and touches no
+      succeeded and was complete. `resolve_cursor_plan` is pure and touches no
       cache, so it runs first; `_check_pool_sort`'s cache probe stays inside
       the pool branch, after the ACL check.
     - **The pool kind is checked against the pool, not against an invariant.**
@@ -3177,6 +3191,140 @@ for the full design.
     `searcher._cache` or `searcher._cfg`. The accessor's `user_id`
     scoping mirrors `continue_page` / `grow_pool` exactly. Tests in
     `tests/test_searcher_pool_metadata.py` enforce.
+  - **`sort_order` is a second axis, orthogonal to `sort`, not a new
+    `sort` member.** `POST /v1/search` and the MCP `search` tool accept
+    `sort_order: "asc"|"desc"`, null-by-default like `sort`, resolved to
+    `DEFAULT_SORT_ORDER = "desc"` once at the top of `Searcher.search` —
+    the same one-authority-per-axis rule #312 established for `sort`.
+    `DEFAULT_SORT_ORDER` lives beside `DEFAULT_SORT` in `search/searcher.py`;
+    `api/search.py` imports it rather than restating `"desc"`. Adding
+    `date_asc`/`date_descending`-style members to `sort` instead was
+    rejected: a third ordering criterion (relevance-then-date, sender,
+    size) would double the enum again, and either `"date"` becomes an
+    alias to carry forever or every current client breaks.
+    - **`sort="rank"` + `sort_order="asc"` is a 400 — refused, not
+      honoured, not silently ignored.** The rank path serves a **bounded
+      candidate pool** (the top-K fused across the four arms), so
+      reversing it returns the least relevant *of the top hits*, not the
+      least relevant mail in the archive — a result that looks meaningful
+      and is an artifact of where the pool happened to stop.
+      `sort_order="desc"` on `rank` is accepted (it's exactly what the
+      rank path already serves); only `asc` is refused. Refusing rather
+      than dropping it follows the rule this cluster keeps re-learning
+      (#308, #312): a stated parameter the server will not honour is
+      reported, never silently ignored. The guard fires **twice** —
+      `api/search.py::run_search` raises `ValidationFailed` before any
+      work starts (ahead of the empty-ACL short-circuit, for the same
+      reason the cursor-mode guard is: that branch answers with an empty
+      page, indistinguishable from "you've reached the end"), and
+      `Searcher.search` raises its own named `SortOrderNotApplicable` (a
+      `ValueError` subclass, not bare — so api/ can map exactly this to a
+      400 without also catching what psycopg, `datetime`, and the
+      embedding backends raise) before any connection is opened, since
+      CLI and library callers reach the Searcher without passing through
+      `api/`. Pinned by
+      `tests/test_searcher_sort_order_guard.py::test_rank_with_ascending_order_is_refused_before_any_io`
+      (asserts `pool.connection.assert_not_called()`) and
+      `tests/test_api_search_sort_order.py::test_rank_with_ascending_is_refused_even_with_an_empty_acl`.
+    - **The keyset cursor gained a second prefix, not a field on the
+      payload.** `"K|<base64>"` keeps its existing meaning — descending —
+      so no cursor already in flight changes meaning; `"KA|<base64>"` is
+      ascending. Both share `api.browse_cursor`'s existing payload
+      encoding, which `/v1/messages` also uses; encoding the direction
+      inside that payload instead was rejected because it would have
+      reached an endpoint this feature does not touch. **The two prefixes
+      are disjoint by construction**: both end in the `|` terminator, so
+      `"KA|…".startswith("K|")` is `False` and the converse is `False`
+      too — no scan order can misclassify a cursor. (The implementation
+      plan for this feature claimed the *opposite* — that a shortest-first
+      scan would misclassify every ascending cursor as descending — which
+      was simply wrong; do not propagate that reasoning here. The shipped
+      `api/search_cursor.py` module docstring and
+      `tests/test_api_search_cursor_direction.py` carry the corrected
+      version.) `resolve_cursor_mode` is renamed `resolve_cursor_plan`,
+      returning `CursorPlan(mode, sort, sort_order)` — one function
+      deciding both axes together rather than two functions each
+      answering one, for the same reason the #308 follow-up defect
+      happened in the first place: two predicates for one rule is what let
+      the api gate and the retrieval branch disagree about what counted as
+      a blank query.
+    - **Ascending SQL is `ASC NULLS FIRST, id ASC` — never `NULLS LAST` —
+      and this is measured, not a style choice.** It is the exact reverse
+      of `messages_recent_idx`'s `DESC NULLS LAST, id DESC`, so it is
+      served by a backward index scan. **No migration, no new index.**
+      Measured on the live 128,289-message archive: `ASC NULLS FIRST`
+      plans as `Index Scan Backward` at **44 buffers** (0.83 ms); the
+      `NULLS LAST` spelling of the same ascending order **full-sorts** at
+      **33,372 buffers** (42 ms); and restricting to `IS NOT NULL` does
+      **not** rescue the `NULLS LAST` form — that variant was measured
+      too, and still full-sorts at 33,372 buffers (30 ms). Only the
+      `NULLS FIRST` spelling matches the index. **Do not "normalise" this
+      spelling to `NULLS LAST`.** Both directions' ORDER BY are written
+      exactly once, in `searcher._DATE_ORDER_BY_SQL`.
+    - **Undated rows sort first ascending, not last.** Ascending is the
+      exact reverse of descending — the undated tail becomes the undated
+      head, same rows, reversed — which is what makes `asc ==
+      reversed(desc)` a testable invariant. Undated-last in both
+      directions was rejected: that isn't a reversal, and would need the
+      two-phase dated-then-top-up query `browse.py` carries for #75, plus
+      its own cursor flavour. The live archive has 0 undated rows of
+      128,289, so correctness matters more here than the cosmetics — both
+      date columns are nullable and archive imports can produce such rows.
+      Pinned by
+      `tests/test_searcher_sort_order_walk.py::test_ascending_is_exactly_reversed_descending`
+      and `::test_undated_rows_sort_first_ascending`.
+    - **A blank-query search now paginates, in both directions.** It used
+      to return exactly one page and `next_cursor: null`, always, which
+      made "my oldest mail about nothing in particular" close to useless —
+      there was no way past the first 50 rows. `_list_recent_messages`
+      (unpaginated) and `_lexical_date_search` (the `sort=date` lexical
+      walk) turned out to be the same SELECT list, ORDER BY, and filter
+      composition minus one FTS predicate, so they collapsed into the one
+      `Searcher._date_keyset_search`, and the blank-query branch now mints
+      and honours a keyset cursor exactly like the lexical one. The
+      rank+asc 400 still applies uniformly to a blank query — a caller
+      wanting oldest-first blank browse states `sort="date"`,
+      `sort_order="asc"` explicitly, rather than the blank case being
+      special-cased out of the rule, which would be invisible from the
+      wire.
+      - **Consequence: the two "keyset needs a query" guards added for
+        #308 had to relax.** `resolve_cursor_plan`'s (then still named
+        `resolve_cursor_mode`) rejection of a keyset cursor presented with
+        a blank query, and `Searcher.search`'s
+        `KeysetCursorUnusable` for the same shape, both existed because
+        the blank-query branch used to *drop* the cursor and answer with
+        its own page 1 — a restart wearing a continuation's clothes. Once
+        that branch honours the cursor, the premise is gone: the cursor is
+        continued, at the right position, and the old guards would forbid
+        exactly the paging this change adds. They now fire only for the
+        hybrid pool branch (`sort="rank"` with non-blank text), the one
+        branch that still does not read `keyset_cursor`. **This does not
+        weaken the #308 property** — the keyset cursor has never
+        identified a query, only a `(ts, id)` position; changing
+        `folder_ids` or the free text between pages was already undefined
+        and unvalidated, and blanking the query is one instance of that,
+        not a new class. What #308 forbids is the server silently
+        answering a *differently ordered* question, and ordering is
+        exactly what the cursor still carries — now on both axes. Rewritten:
+        `test_api_search_cursor_mode.py::test_a_keyset_cursor_with_a_blank_query_continues_the_recent_mail_walk`,
+        `::test_a_query_of_only_filter_operators_continues_the_walk_too`,
+        and
+        `test_searcher_keyset_guard.py::test_an_empty_query_now_reads_the_keyset_cursor`.
+    - **`_date_sort_key` (and the `sort="date"` branch of `_build_results`
+      it serves) is unreachable, and stays that way on purpose.** The
+      hybrid pool branch — the only caller of `_build_results` with a
+      `sort` other than the module default, and the only writer of a
+      cached pool's own `sort` — is reached only as `rank` + non-blank
+      text, because the date-keyset branch now claims `sort="date"` *and*
+      every blank query. Kept rather than deleted, and pinned rather than
+      assumed:
+      `tests/test_searcher_pool_sort_unreachable.py::test_a_cached_pool_always_records_sort_rank`
+      asserts every cached pool reports `sort="rank"`. The point of
+      pinning dead code instead of deleting it is to stop a future reader
+      adding `sort_order` handling to `_date_sort_key` "for symmetry" —
+      code that would be tested against a branch that never runs (#278 is
+      this codebase's precedent for a declared-but-unserved surface that
+      four test files made look covered).
 - **Hard ACL clamp inside the Searcher**: the ACL is enforced in **two**
   places, and both are load-bearing. `api/search.py::_scope_filters_by_acl`
   intersects the caller's *structured* `account_ids` filter and

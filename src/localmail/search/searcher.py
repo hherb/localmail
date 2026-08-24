@@ -998,12 +998,13 @@ class Searcher:
         `disable_rerank=True` short-circuits the cross-encoder and ranks by
         RRF score only. Useful for low-latency or debugging paths.
 
-        `sort="date"` keeps the hybrid retrieval pool (same candidates as
-        rank order) but re-sorts the page by
-        ``COALESCE(internal_date, date_sent) DESC NULLS LAST``. The
-        empty-query branch is already date-ordered, so the param has no
-        effect there. ``continue_page`` honors whichever sort was used
-        when the cursor was minted.
+        `sort="date"` takes the date-ordered keyset walk directly
+        (`_date_keyset_search`) rather than the hybrid retrieval pool —
+        true whether or not there is free text, and also true for any
+        blank query regardless of `sort`. The pool is reached only by the
+        remaining branch: `sort="rank"` (stated or defaulted) with
+        non-blank free text. ``continue_page`` honors whichever
+        `(sort, sort_order)` pair was in force when the cursor was minted.
 
         `sort=None` means "unstated" — the spelling every other layer of this
         cluster uses since #308 — and resolves to `DEFAULT_SORT` here, once,

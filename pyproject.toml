@@ -38,7 +38,13 @@ dependencies = [
     "argon2-cffi>=23.1",
     "nh3>=0.2.18",
     "cryptography>=50.0.0",  # floor is security-driven: CVE-2026-69247 (Dependabot #57)
-    "sqlparse>=0.5",
+    # Floor is security-driven: three HIGH ReDoS/quadratic-DoS advisories
+    # and one string-breakout advisory against <= 0.5.5, all fixed in
+    # 0.6.0. Only consumer is db._split_statements over our own migration
+    # files, so nothing attacker-controlled reaches it — the floor is
+    # hygiene, not an incident. Verified splits byte-identically across
+    # every migration on disk before bumping.
+    "sqlparse>=0.6",
     "jinja2>=3.1",
     "python-multipart>=0.0.30",
 ]

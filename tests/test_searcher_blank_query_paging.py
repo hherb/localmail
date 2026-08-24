@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from localmail.config import SearchConfig
 from localmail.db import open_pool
 from localmail.search.searcher import Searcher
@@ -44,11 +46,45 @@ def _seed(conn, n=7):
     conn.commit()
 
 
-def _walk(searcher, *, order, page_size=3):
+def _seed_two_accounts(conn, n=5):
+    """Two accounts whose messages interleave in time.
+
+    Interleaved on purpose: a walk that mixed the filter's parameters with
+    the keyset's would still return `n` rows in date order, just the wrong
+    ones. Returns (account_id, message_ids-oldest-first) for the first.
+    """
+    ids: list[int] = []
+    with conn.cursor() as cur:
+        accts = []
+        for name in ("a", "b"):
+            cur.execute("INSERT INTO accounts (name,email_address,imap_host,"
+                        "auth_method) VALUES (%s,%s,'h','password') RETURNING id",
+                        (name, f"{name}@x"))
+            accts.append(cur.fetchone()[0])
+        for i in range(n):
+            for slot, acct in enumerate(accts):
+                cur.execute(
+                    "INSERT INTO messages (account_id, message_id, raw_sha256,"
+                    " subject, body_text, headers, raw_bytes, size_bytes,"
+                    " internal_date)"
+                    " VALUES (%s,%s,%s,%s,'body','{}'::jsonb,'r',1,%s) RETURNING id",
+                    (acct, f"<m{i}-{slot}>", bytes([i * 2 + slot + 1]) * 32,
+                     f"Subject {i}-{slot}",
+                     datetime(2026, 3, i * 2 + slot + 1, tzinfo=timezone.utc)),
+                )
+                if acct == accts[0]:
+                    ids.append(cur.fetchone()[0])
+                else:
+                    cur.fetchone()
+    conn.commit()
+    return accts[0], ids
+
+
+def _walk(searcher, *, order, page_size=3, query=""):
     ids: list[int] = []
     cursor = None
     for _ in range(50):
-        page = searcher.search("", allowed_account_ids=None, page_size=page_size,
+        page = searcher.search(query, allowed_account_ids=None, page_size=page_size,
                                user_id=1, sort="date", sort_order=order,
                                keyset_cursor=cursor)
         ids.extend(r.message_id for r in page.results)
@@ -109,3 +145,32 @@ def test_the_last_page_reports_no_cursor(db_dsn, db_conn):
         pool.close()
     assert len(page.results) == 4
     assert page.next_keyset is None
+
+
+@pytest.mark.parametrize("order", ["asc", "desc"])
+def test_a_filtered_blank_query_walk_covers_exactly_the_filtered_rows(
+    db_dsn, db_conn, order,
+):
+    """A filtered blank query, walked — the composition nothing else covers.
+
+    The blank branch now composes three parameter groups into one
+    statement: the filter clause, the keyset predicate it gained with
+    pagination, and the LIMIT. Each must be bound in the order the SQL
+    names them, and no sibling here exercises two of them at once — the
+    unfiltered walks bind the keyset half only, the unpaginated cases
+    neither — so a mis-ordered ``params.extend`` shows up on this shape
+    and no other. Correct by inspection today; the point is that it stays
+    that way.
+
+    The two accounts interleave in time, so the walk cannot pass by
+    returning page-sized batches of whatever happens to be next.
+    """
+    acct, ids = _seed_two_accounts(db_conn, n=5)
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=None)
+        walked = _walk(s, order=order, page_size=2, query=f"account_id:{acct}")
+    finally:
+        pool.close()
+    expected = ids if order == "asc" else list(reversed(ids))
+    assert walked == expected

@@ -15,14 +15,13 @@ from typing import Any
 from localmail.api.errors import SearchCursorExpired, ValidationFailed
 from localmail.api.ids import parse_int_id
 from localmail.api.search_cursor import (
-    KEYSET_SORT,
     SearchCursor,
     decode_keyset_cursor,
     decode_search_cursor,
     encode_keyset_cursor,
     encode_search_cursor,
     reject_pool_sort_mismatch,
-    resolve_cursor_mode,
+    resolve_cursor_plan,
 )
 from localmail.config import SearchConfig
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
@@ -37,12 +36,13 @@ from localmail.search.rewrite_status import (
     rewrite_skipped_for_status,
 )
 from localmail.search.searcher import (
-    DEFAULT_SORT,
     KeysetCursorUnusable,
     SearchPage,
     SearchResult,
     Searcher,
     SortMode,
+    SortOrder,
+    SortOrderNotApplicable,
 )
 
 
@@ -150,6 +150,7 @@ def run_search(
     allowed_account_ids: list[int],
     user_id: int,
     sort: SortMode | None = None,
+    sort_order: SortOrder | None = None,
     cursor: str | None = None,
     smart: bool = False,
 ) -> dict[str, Any]:
@@ -169,10 +170,12 @@ def run_search(
     exhausted *and* further growth would exceed
     ``searcher.config.candidates_per_arm_max``.
 
-    ``sort`` is ``None`` when the caller stated none. With no cursor that
-    means ``DEFAULT_SORT``; with one, the cursor decides — see
-    ``search_cursor.resolve_cursor_mode``, which rejects a stated sort the
-    cursor cannot serve instead of dropping either.
+    ``sort`` and ``sort_order`` are ``None`` when the caller stated none.
+    With no cursor that means the module defaults; with one, the cursor
+    decides both — see ``search_cursor.resolve_cursor_plan``, which rejects
+    a stated value the cursor cannot serve instead of dropping either.
+    ``sort_order="asc"`` pairs only with ``sort="date"``; asking for it on
+    the rank path is a 400, not a quietly ignored field.
 
     ``smart`` requests an LLM query rewrite on page 1 (cursor is None) when the
     searcher has a rewriter configured. The response carries ``rewrite_status``
@@ -185,15 +188,27 @@ def run_search(
     # Resolved before the ACL short-circuit below, because that branch answers
     # with an empty page — indistinguishable from "you have reached the end".
     # A malformed paging request must be a 400 whatever the caller was granted.
-    # `parse_query(free_text).free_text` is the text `Searcher.search` will
-    # dispatch on: filter operators (`from:`, `subject:`, `lang:`) parse out of
-    # the free text, so a query of nothing but operators is non-blank here and
-    # blank there. Asking the raw string instead let that shape through as a
-    # keyset continuation the lexical branch then declined (#308 follow-up).
-    # Composing the filters first would change nothing — the tokens this adds
-    # are operators, which parse straight back out — so the bare text is asked.
-    mode = resolve_cursor_mode(cursor=cursor, requested_sort=sort,
+    # `parse_query(free_text).free_text`, never the raw field: filter operators
+    # (`from:`, `subject:`, `lang:`) parse out of the free text, so a query of
+    # nothing but operators is non-blank here and blank by the time
+    # `Searcher.search` dispatches on it — and the plan's job is to ask the
+    # question the Searcher will ask. Composing the filters first would change
+    # nothing: the tokens that adds are operators, which parse straight back
+    # out — so the bare text is what is asked.
+    plan = resolve_cursor_plan(cursor=cursor, requested_sort=sort,
+                               requested_sort_order=sort_order,
                                free_text=parse_query(free_text).free_text)
+    # Refused here as well as in the Searcher so the caller gets a clean 400
+    # before any work; the Searcher's own guard is what covers CLI and
+    # library callers, who never reach this function. Ahead of the empty-ACL
+    # short-circuit below, which answers with an empty page indistinguishable
+    # from "you have reached the end" — a contradictory request must not be
+    # reported as a completed one.
+    if plan.mode != "keyset" and plan.sort == "rank" and plan.sort_order == "asc":
+        raise ValidationFailed(
+            "sort_order='asc' is not applicable to sort='rank' (the default); "
+            "pass sort='date' for oldest-first"
+        )
 
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:
@@ -212,30 +227,32 @@ def run_search(
     # for but unavailable, degrade gracefully and report rewrite_status.
     effective_smart = smart and searcher.smart_available
 
-    # Tested on `cursor` rather than `mode == "fresh"` (the resolver's matching
-    # verdict) because this is what narrows `cursor` to `str` for the two
-    # branches below, which decode it. The two cannot disagree: "fresh" is
+    # Tested on `cursor` rather than `plan.mode == "fresh"` (the resolver's
+    # matching verdict) because this is what narrows `cursor` to `str` for the
+    # two branches below, which decode it. The two cannot disagree: "fresh" is
     # returned for `cursor is None` and for nothing else.
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
         page = searcher.search(query, page_size=limit, user_id=user_id,
-                               sort=DEFAULT_SORT if sort is None else sort,
+                               sort=plan.sort, sort_order=plan.sort_order,
                                smart=effective_smart,
                                allowed_account_ids=allowed_account_ids)
-    elif mode == "keyset":
-        # Keyset cursor → lexical-date continuation. The cursor carries
-        # only (ts, id); the query + filters come from the request body
-        # (the GUI re-sends them on every loadMore). KEYSET_SORT is passed
-        # rather than the caller's sort because the cursor's kind is what
-        # selects the lexical path in Searcher.search — the resolver above
-        # has already rejected a stated sort that disagrees.
+    elif plan.mode == "keyset":
+        # Keyset cursor → date-keyset continuation. The cursor carries only
+        # (ts, id) and the direction it was minted in; the query + filters
+        # come from the request body (the GUI re-sends them on every
+        # loadMore). Both axes come from the plan rather than the caller's
+        # raw arguments because the cursor's kind is what selects the date
+        # path in Searcher.search — the resolver above has already rejected
+        # a stated sort or order that disagrees.
         keyset = decode_keyset_cursor(cursor)
         query = build_query_string(free_text=free_text, filters=scoped_filters)
         try:
             page = searcher.search(query, page_size=limit, user_id=user_id,
-                                   sort=KEYSET_SORT, keyset_cursor=keyset,
+                                   sort=plan.sort, sort_order=plan.sort_order,
+                                   keyset_cursor=keyset,
                                    allowed_account_ids=allowed_account_ids)
-        except KeysetCursorUnusable as exc:
+        except (KeysetCursorUnusable, SortOrderNotApplicable) as exc:
             # Belt to the resolver's braces: both now ask `parse_query`, so
             # reaching here means the two have drifted apart again. That is a
             # bad request either way, and answering it as a 500 would hide a
@@ -246,10 +263,14 @@ def run_search(
             raise ValidationFailed(f"cursor: {exc}") from exc
     else:
         parsed = decode_search_cursor(cursor)
-        _check_pool_sort(searcher, parsed, requested_sort=sort, user_id=user_id)
+        # The **raw** arguments, not the plan's resolved ones: a resolved
+        # default would read as a contradiction against a pool built the
+        # other way, which is #312's defect exactly.
+        _check_pool_sort(searcher, parsed, requested_sort=sort,
+                         requested_sort_order=sort_order, user_id=user_id)
         page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)
 
-    next_cursor = _next_cursor(page, cfg=cfg)
+    next_cursor = _next_cursor(page, cfg=cfg, order=plan.sort_order)
     status: str
     note: str | None
     code: str | None
@@ -281,20 +302,24 @@ def run_search(
 
 def _check_pool_sort(
     searcher: Searcher, parsed: SearchCursor, *,
-    requested_sort: SortMode | None, user_id: int,
+    requested_sort: SortMode | None, requested_sort_order: SortOrder | None,
+    user_id: int,
 ) -> None:
-    """Reject a stated sort the cached pool cannot serve.
+    """Reject a stated ordering the cached pool cannot serve.
 
     Only reached when the caller stated one — with nothing to contradict,
     the pool stays the authority and no cache probe is spent. A miss here is
     the same expired cursor ``continue_page`` would report a moment later.
     """
-    if requested_sort is None:
+    if requested_sort is None and requested_sort_order is None:
         return
     meta = searcher.get_pool_metadata(parsed.token, user_id=user_id)
     if meta is None:
         raise SearchCursorExpired(f"cursor {parsed.token!r} not found")
-    reject_pool_sort_mismatch(requested_sort=requested_sort, pool_sort=meta.sort)
+    reject_pool_sort_mismatch(requested_sort=requested_sort,
+                              requested_sort_order=requested_sort_order,
+                              pool_sort=meta.sort,
+                              pool_sort_order=meta.sort_order)
 
 
 def _continue_or_grow(
@@ -324,17 +349,19 @@ def _empty_grown_page(token: str, *, page_size: int) -> Any:
     )
 
 
-def _next_cursor(page: Any, *, cfg: SearchConfig) -> str | None:
+def _next_cursor(page: Any, *, cfg: SearchConfig, order: SortOrder) -> str | None:
     """Compute the cursor for the page after ``page``, or None if exhausted.
 
     Two cursor kinds:
-      * keyset (lexical-date) — driven by ``page.next_keyset``; None
-        means the keyset walk hit the end.
+      * keyset (date-ordered) — driven by ``page.next_keyset``; None
+        means the keyset walk hit the end. ``order`` is the direction this
+        page was actually walked in, minted into the cursor so the next
+        request continues the same way without having to restate it.
       * pool (hybrid) — driven by ``search_token`` + page increment;
         None when both the cached pool and ``grow_pool`` are exhausted.
     """
     if page.next_keyset is not None:
-        return encode_keyset_cursor(page.next_keyset)
+        return encode_keyset_cursor(page.next_keyset, order)
     if page.search_token is None:
         return None
     if page.has_more_in_pool:

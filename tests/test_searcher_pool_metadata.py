@@ -147,7 +147,7 @@ def test_an_unstated_sort_is_resolved_before_it_reaches_the_pool(db_dsn, db_conn
     """``sort=None`` means "unstated", and must not travel as itself (#312).
 
     Since #308, ``None`` is how every layer of this cluster says "I state no
-    sort; use the default" — the wire field, ``resolve_cursor_mode``,
+    sort; use the default" — the wire field, ``resolve_cursor_plan``,
     ``run_search``, the MCP tool schema. ``Searcher.search`` merely fell
     through its ``sort == "date"`` test into the hybrid branch, which is the
     right *ordering* by accident and the wrong *record*: the raw argument is

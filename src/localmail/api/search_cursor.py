@@ -152,11 +152,17 @@ def is_keyset_cursor(raw: str) -> bool:
 
 
 def keyset_order(raw: str) -> SortOrder:
-    """The direction a keyset cursor continues.
+    """The direction a keyset cursor continues, from its prefix alone.
 
     A cursor minted before the ascending prefix existed carries ``K|`` and
     is descending, which is what it has always meant — so no cursor in
     flight changes meaning.
+
+    Production reads the whole cursor (``decode_keyset_cursor``) because it
+    needs the position and the walk as well. This stays as the cheap
+    payload-free accessor for callers that only want the direction — today
+    the route-level tests, which assert it without caring what a cursor's
+    payload or walk happens to be.
     """
     for prefix, order, _walk in _KEYSET_PREFIXES:
         if raw.startswith(prefix):
@@ -222,6 +228,18 @@ def resolve_cursor_plan(
                         else requested_sort_order),
         )
     if is_keyset_cursor(cursor):
+        # Decoded rather than prefix-scanned because the walk is needed
+        # below. ``run_search`` decodes again for the position it passes on;
+        # the two cannot disagree (pure function, same string), and the
+        # duplicate is a base64 read. Deliberately *not* hoisted onto
+        # ``CursorPlan`` — that type already carries two fields its
+        # pool-mode consumer must ignore (#327), and a third would be one
+        # more.
+        #
+        # Decoding here also moves a malformed *payload* from ``run_search``
+        # to ahead of the empty-ACL short-circuit, which is where this
+        # module says such a request belongs: that branch answers with an
+        # empty page, indistinguishable from "you have reached the end".
         ks = decode_keyset_cursor(cursor)
         _reject_sort_mismatch(requested=requested_sort, cursor_sort=KEYSET_SORT)
         _reject_order_mismatch(requested=requested_sort_order,

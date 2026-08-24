@@ -348,3 +348,32 @@ def test_paging_a_real_text_search_without_the_query_is_refused(
     finally:
         pool.close()
     assert [r["message_id"] for r in second["results"]] == [str(i) for i in ids[3:]]
+
+
+def test_a_malformed_payload_is_a_400_even_with_an_empty_acl() -> None:
+    """Decoding moved ahead of the grant-nothing short-circuit (#326).
+
+    ``resolve_cursor_plan`` reads the whole cursor now, not just its
+    prefix, so a cursor whose *payload* is corrupt is refused where this
+    module says a malformed paging request belongs: before the empty-ACL
+    branch, which answers with an empty page byte-identical to "you have
+    reached the end of your results".
+
+    The positive control matters more than usual here: an empty ACL returns
+    an empty page for every well-formed request, so without it this would
+    pass against a `run_search` that refused *every* cursor.
+    """
+    s = _searcher()
+    with pytest.raises(ValidationFailed):
+        run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                   allowed_account_ids=[], user_id=99,
+                   cursor="K|not-valid-base64-payload")
+    s.search.assert_not_called()
+
+    # Positive control: a well-formed cursor with the same empty ACL is
+    # answered, not refused.
+    _, good = _cursor("archive")
+    out = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                     allowed_account_ids=[], user_id=99, cursor=good)
+    assert out["results"] == []
+    s.search.assert_not_called()

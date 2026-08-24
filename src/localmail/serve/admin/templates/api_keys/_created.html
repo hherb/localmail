@@ -1,0 +1,19 @@
+{# The name error swaps out of band into the slot beside the input, which is
+   what field_errors_from's per-field routing exists for; it renders empty on
+   success, clearing a previous attempt. Anything not about a field -- an
+   unknown account id -- stays here, below the form. #}
+<span id="api-key-name-error" class="field-error" hx-swap-oob="true">{{ field_errors.get("name", "") }}</span>
+{% if field_errors.get("_form") %}
+  <p class="field-error">{{ field_errors["_form"] }}</p>
+{% elif created %}
+  <div class="admin-flash admin-flash-success">
+    <p><strong>Copy this key now.</strong> It is not stored and cannot be shown again.</p>
+    <input id="api-key-value" readonly value="{{ created.raw_key }}" size="60">
+    <button type="button" data-copy-target="api-key-value">Copy</button>
+    <p>Give it to the consumer as
+       <code>Authorization: Bearer {{ created.raw_key[:8] }}…</code></p>
+  </div>
+  <div class="admin-card" id="api-key-table" hx-swap-oob="true">
+    {% include "api_keys/_table.html" %}
+  </div>
+{% endif %}

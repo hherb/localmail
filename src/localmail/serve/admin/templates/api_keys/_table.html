@@ -1,0 +1,12 @@
+<table class="accounts-table">
+  <thead>
+    <tr><th>Name</th><th>Key</th><th>Accounts</th><th>Last used</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for k in keys %}
+      {% include "api_keys/_row.html" %}
+    {% else %}
+    <tr><td colspan="5">No API keys.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

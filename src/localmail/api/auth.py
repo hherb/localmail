@@ -13,7 +13,7 @@ import logging
 import secrets
 import time as _monotonic_time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -27,6 +27,7 @@ from localmail.api.errors import (
     RateLimited,
     ValidationFailed,
 )
+from localmail.api.login_eligible_sql import login_eligible_sql
 from localmail.api.revocation_sql import credential_valid_sql
 from localmail.config import AuthConfig
 
@@ -36,6 +37,7 @@ __all__ = [
     "AuthenticatedUser",
     "DUMMY_PASSWORD_HASH",
     "LAST_USED_REFRESH_SECONDS",
+    "SessionCredentialRefused",
     "TOKEN_TTL_DAYS",
     "change_password",
     "check_login_rate_limits",
@@ -79,6 +81,14 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 TOKEN_TTL_DAYS = 30
+
+
+class SessionCredentialRefused(ValidationFailed):
+    """A session-token operation was attempted with, or for, an API key.
+
+    Subclasses ``ValidationFailed`` so the ``/v1/auth`` routes answer 400
+    through the existing problem+json handler rather than a 500.
+    """
 
 
 def reset_login_rate_limiter(conn: psycopg.Connection) -> None:
@@ -296,6 +306,10 @@ class AuthenticatedUser:
     id: int
     username: str
     is_admin: bool = False
+    # Keyword-only with no default: False is the *permissive* value here — it
+    # means "allowed at admin routes" — so it must not be reachable by
+    # forgetting to write it.
+    is_api_key: bool = field(kw_only=True)
 
 
 def generate_token() -> str:
@@ -319,7 +333,20 @@ def issue_token(
     *,
     ttl_days: int = TOKEN_TTL_DAYS,
 ) -> tuple[str, datetime]:
-    """Mint a token, persist its hash, return (raw_token, expires_at).
+    """Mint a session token, persist its hash, return (raw_token, expires_at).
+
+    Refuses a **service principal** — the row an API key is minted against.
+    The guard is here rather than at each caller because ``verify_token``
+    accepts keys, and a key presented to ``refresh_token`` would otherwise be
+    exchanged for an ordinary 30-day token that no longer reports
+    ``is_api_key``, walking straight through the point-of-use gate that
+    refuses keys at admin routes and surviving the operator's revocation.
+
+    This is one of **two** writers of a session-kind ``api_tokens`` row, not
+    the only one: ``mcp.oauth.access.mint_access`` is the other, and carries
+    the same predicate for the same reason. Guarding only this one left that
+    path closed by Rule 2's consent gate three modules away — defence in
+    depth, not construction, which is what the claim needs to be.
 
     Caller is responsible for committing the transaction.
     """
@@ -327,9 +354,15 @@ def issue_token(
     expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO api_tokens (token_sha256, user_id, expires_at) VALUES (%s, %s, %s)",
-            (hash_token(token), user_id, expires_at),
+            "INSERT INTO api_tokens (token_sha256, user_id, expires_at) "
+            "SELECT %s, id, %s FROM api_users WHERE id = %s AND is_service IS FALSE",
+            (hash_token(token), expires_at, user_id),
         )
+        if cur.rowcount == 0:
+            raise SessionCredentialRefused(
+                f"cannot issue a session token for user id={user_id}: "
+                "no such user, or an API-key principal"
+            )
     return token, expires_at
 
 
@@ -337,9 +370,10 @@ LAST_USED_REFRESH_SECONDS = 60
 
 
 def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | None:
-    """Look up a bearer token; return the user, or None when the token is
-    invalid, expired, revoked (``sessions_invalidated_at``), or the user is
-    disabled.
+    """Look up a bearer token or an API key; return the user, or None when the
+    credential is invalid, expired, revoked (``sessions_invalidated_at``), or the
+    user is disabled. An API key carries ``expires_at IS NULL`` and never
+    expires.
 
     Updates last_used_at on success, but at most once per
     LAST_USED_REFRESH_SECONDS per token — polling clients (e.g. /v1/changes)
@@ -348,11 +382,13 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
     h = hash_token(token)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT u.id, u.username, u.is_admin "
+            "SELECT u.id, u.username, u.is_admin, (t.api_key_name IS NOT NULL) "
             "FROM api_tokens t "
             "JOIN api_users u ON u.id = t.user_id "
             "WHERE t.token_sha256 = %s "
-            "  AND t.expires_at > now() "
+            # NULL expires_at is an API key, which never expires; the CHECK in
+            # migration 0036 is what keeps a session token from reaching it.
+            "  AND (t.expires_at IS NULL OR t.expires_at > now()) "
             # Session revocation (revoke-sessions / revoke-admin-sessions) bumps
             # sessions_invalidated_at to "now"; every bearer token issued before
             # that moment must stop authenticating, matching the admin-cookie
@@ -371,7 +407,9 @@ def verify_token(conn: psycopg.Connection, token: str) -> AuthenticatedUser | No
             "       OR last_used_at < now() - make_interval(secs => %s))",
             (h, LAST_USED_REFRESH_SECONDS),
         )
-    return AuthenticatedUser(id=row[0], username=row[1], is_admin=bool(row[2]))
+    return AuthenticatedUser(
+        id=row[0], username=row[1], is_admin=bool(row[2]), is_api_key=bool(row[3]),
+    )
 
 
 def create_user(conn: psycopg.Connection, username: str, password: str) -> int:
@@ -399,7 +437,8 @@ def login(
 
     Raises:
       RateLimited (with .cap and .retry_after_s) if any cap is exceeded.
-      AuthenticationFailed for bad credentials or disabled users.
+      AuthenticationFailed for bad credentials, disabled users, or a
+    service principal (which may never present a password — login_eligible_sql).
 
     ``cfg`` defaults to ``AuthConfig()`` so test call sites that don't
     care about thresholds still work. Production callers should pass the
@@ -420,7 +459,7 @@ def login(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash FROM api_users "
-            "WHERE username = %s AND disabled_at IS NULL",
+            "WHERE username = %s AND " + login_eligible_sql(user="api_users"),
             (username,),
         )
         row = cur.fetchone()
@@ -454,9 +493,31 @@ def whoami(conn: psycopg.Connection, token: str) -> AuthenticatedUser:
 
 
 def logout(conn: psycopg.Connection, token: str) -> None:
-    """Revoke a single token. Idempotent — bogus tokens do not raise."""
+    """Revoke a single session token. Idempotent — bogus tokens do not raise.
+
+    Refuses an API key. A key is unrecoverable and its holder is a machine, so
+    a generic client's shutdown-logout would destroy the credential with no way
+    back and no record of who did it. Keys are retired by an administrator
+    (``admin.api_keys.revoke_key``), which is also the only path that leaves the
+    principal and its grants in place for a re-key.
+    """
+    h = hash_token(token)
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM api_tokens WHERE token_sha256 = %s", (hash_token(token),))
+        cur.execute(
+            "DELETE FROM api_tokens WHERE token_sha256 = %s AND api_key_name IS NULL",
+            (h,),
+        )
+        if cur.rowcount == 0:
+            cur.execute(
+                "SELECT 1 FROM api_tokens "
+                " WHERE token_sha256 = %s AND api_key_name IS NOT NULL",
+                (h,),
+            )
+            if cur.fetchone() is not None:
+                raise SessionCredentialRefused(
+                    "an API key cannot be logged out; ask an administrator to "
+                    "revoke it"
+                )
 
 
 def refresh_token(conn: psycopg.Connection, token: str) -> tuple[str, datetime]:
@@ -465,10 +526,20 @@ def refresh_token(conn: psycopg.Connection, token: str) -> tuple[str, datetime]:
     The insert and delete happen inside the caller's open transaction. On
     commit failure the new token never becomes valid and the old one is not
     revoked, so the client can simply retry with the same bearer.
+
+    An API key is refused: it never expires, so refreshing it buys nothing, and
+    the old code both laundered it into a session token and deleted the
+    unrecoverable key. ``issue_token``'s mint guard is what makes that safe;
+    this is what tells the bot why.
     """
     user = verify_token(conn, token)
     if user is None:
         raise InvalidToken("token is invalid, expired, or revoked")
+    if user.is_api_key:
+        raise SessionCredentialRefused(
+            "API keys do not expire and must not be refreshed; keep presenting "
+            "the key itself"
+        )
     new_token, expires_at = issue_token(conn, user.id)
     with conn.cursor() as cur:
         cur.execute("DELETE FROM api_tokens WHERE token_sha256 = %s", (hash_token(token),))
@@ -493,7 +564,8 @@ def change_password(
 
     Raises:
       ValidationFailed if ``new_password`` is empty.
-      AuthenticationFailed if the user does not exist, is disabled, or
+      AuthenticationFailed if the user does not exist, is disabled, is a
+        service principal, or
         ``old_password`` does not match.
     """
     if not new_password:
@@ -501,7 +573,7 @@ def change_password(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT password_hash FROM api_users "
-            "WHERE id = %s AND disabled_at IS NULL",
+            "WHERE id = %s AND " + login_eligible_sql(user="api_users"),
             (user_id,),
         )
         row = cur.fetchone()

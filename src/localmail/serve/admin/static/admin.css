@@ -73,6 +73,7 @@ body {
 .link-button { background: none; border: none; color: #2563eb; cursor: pointer; padding: 0 .3rem; }
 .link-button.danger { color: #b91c1c; }
 .field-error { color: #b91c1c; display: block; font-size: .85rem; }
+.field-hint { color: var(--fg-muted); font-size: .85rem; }
 .sync-on { color: #15803d; }
 .sync-off { color: #92400e; }
 .folder-list { margin: .4rem 0; }

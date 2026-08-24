@@ -52,6 +52,7 @@ class UserSummary:
     username: str
     is_admin: bool
     disabled: bool
+    is_service: bool
     created_at: datetime
 
 
@@ -68,6 +69,7 @@ class UserDetail:
     username: str
     is_admin: bool
     disabled: bool
+    is_service: bool
     created_at: datetime
     account_grants: list[AccountGrant]
 
@@ -77,7 +79,8 @@ def list_users(conn: psycopg.Connection) -> list[UserSummary]:
     with conn.cursor(row_factory=class_row(UserSummary)) as cur:
         cur.execute(
             "SELECT id, username, (is_admin IS TRUE) AS is_admin, "
-            "       (disabled_at IS NOT NULL) AS disabled, created_at "
+            "       (disabled_at IS NOT NULL) AS disabled, "
+            "       (is_service IS TRUE) AS is_service, created_at "
             "  FROM api_users ORDER BY username"
         )
         return cur.fetchall()
@@ -88,7 +91,8 @@ def get_user(conn: psycopg.Connection, user_id: int) -> UserDetail:
     with conn.cursor(row_factory=class_row(UserSummary)) as cur:
         cur.execute(
             "SELECT id, username, (is_admin IS TRUE) AS is_admin, "
-            "       (disabled_at IS NOT NULL) AS disabled, created_at "
+            "       (disabled_at IS NOT NULL) AS disabled, "
+            "       (is_service IS TRUE) AS is_service, created_at "
             "  FROM api_users WHERE id = %s",
             (user_id,),
         )
@@ -110,7 +114,8 @@ def get_user(conn: psycopg.Connection, user_id: int) -> UserDetail:
         ]
     return UserDetail(
         id=user.id, username=user.username, is_admin=user.is_admin,
-        disabled=user.disabled, created_at=user.created_at, account_grants=grants,
+        disabled=user.disabled, is_service=user.is_service,
+        created_at=user.created_at, account_grants=grants,
     )
 
 
@@ -145,8 +150,22 @@ def create_user(
         return int(row[0])
 
 
+def reject_service_row(conn: psycopg.Connection, user_id: int, action: str) -> None:
+    """A service user is an API key's principal; it must never gain a password
+    or admin rights. Both are one admin click from turning a machine credential
+    into an interactive one."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT is_service FROM api_users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise UserNotFound(f"no user with id={user_id}")
+    if bool(row[0]):
+        raise UserFieldError(f"cannot {action} an API-key principal")
+
+
 def set_password(conn: psycopg.Connection, user_id: int, new_password: str) -> None:
     """Admin password reset — no old password required. Raises UserNotFound."""
+    reject_service_row(conn, user_id, "set a password on")
     if not new_password:
         raise UserFieldError("password must not be blank")
     pw_hash = hash_password(new_password)
@@ -171,10 +190,19 @@ def would_orphan_last_admin(
 
 
 def active_admin_count(conn: psycopg.Connection) -> int:
+    """Humans who can currently administer. Service principals are excluded.
+
+    A promoted bot can administer nothing — Rule 1 refuses its key at every
+    admin route and Rule 2 refuses its login — so counting it here let
+    `would_orphan_last_admin` permit demoting the last human, leaving no usable
+    administrator. `reject_service_row` guards both promotion paths; excluding
+    them from the count is what makes the guard hold by construction, whatever
+    put `is_admin` on the row.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM api_users "
-            "WHERE is_admin IS TRUE AND disabled_at IS NULL"
+            "WHERE is_admin IS TRUE AND disabled_at IS NULL AND is_service IS FALSE"
         )
         row = cur.fetchone()
         assert row is not None
@@ -230,6 +258,7 @@ def set_admin(conn: psycopg.Connection, user_id: int, is_admin: bool) -> None:
     if not is_admin:
         _guard_not_last_admin(conn, user_id, "demote")
     else:
+        reject_service_row(conn, user_id, "promote")
         _user_state(conn, user_id)  # existence check → UserNotFound
     with conn.cursor() as cur:
         cur.execute(
@@ -284,8 +313,10 @@ def set_grant(
 
 def revoke_sessions(conn: psycopg.Connection, user_id: int) -> None:
     """Invalidate every outstanding credential for the user: admin cookies,
-    bearer tokens (``/v1/*``, ``/mcp``, the desktop GUI), and OAuth refresh
-    tokens. Raises UserNotFound. See ``admin.auth.revoke_admin_sessions``."""
+    bearer tokens (``/v1/*``, ``/mcp``, the desktop GUI), OAuth refresh tokens,
+    and **API keys** — for a key this is the one revocation with no undo, since
+    a key cannot be recovered and the bot must be re-keyed. Raises UserNotFound.
+    See ``admin.auth.revoke_admin_sessions``."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE api_users SET sessions_invalidated_at = now() WHERE id = %s",
@@ -297,12 +328,20 @@ def revoke_sessions(conn: psycopg.Connection, user_id: int) -> None:
 
 def action_flags(
     *, target_is_active_admin: bool, active_admin_count: int, is_self: bool,
+    is_service: bool,
 ) -> dict[str, bool]:
     """Which edit-screen controls to render disabled (UX only; not enforcement).
 
     `block_demote` / `block_delete` fire for the logged-in admin's own row
     (self-action) or when the action would orphan the last admin.
     `block_disable` fires only on the orphan rule (self-disable is permitted).
+    `block_promote` / `block_password` fire on an API-key principal, matching
+    `set_admin`/`set_password`'s own refusals — the two controls that would
+    otherwise dead-end at a 400.
+
+    `is_service` is keyword-only with no default because `False` is the
+    permissive value here: it re-enables both controls, so it must not be
+    reachable by forgetting to write it.
     """
     orphan = would_orphan_last_admin(
         target_is_active_admin=target_is_active_admin,
@@ -312,4 +351,6 @@ def action_flags(
         "block_demote": is_self or orphan,
         "block_disable": orphan,
         "block_delete": is_self or orphan,
+        "block_promote": is_service,
+        "block_password": is_service,
     }

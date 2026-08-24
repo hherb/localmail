@@ -13,6 +13,7 @@ import psycopg
 
 from localmail.api.auth import DUMMY_PASSWORD_HASH, verify_password
 from localmail.api.errors import AuthenticationFailed
+from localmail.api.login_eligible_sql import login_eligible_sql
 
 
 class UserNotFound(Exception):
@@ -54,7 +55,7 @@ def authenticate_admin(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, password_hash, is_admin FROM api_users"
-            " WHERE username = %s AND disabled_at IS NULL",
+            " WHERE username = %s AND " + login_eligible_sql(user="api_users"),
             (username,),
         )
         row = cur.fetchone()
@@ -129,15 +130,24 @@ def get_admin_user(
 
 
 def grant_admin(conn: psycopg.Connection, *, username: str) -> None:
-    """Set is_admin=TRUE for the named user. Idempotent."""
+    """Set is_admin=TRUE for the named user. Idempotent.
+
+    Refuses a service principal, sharing `users.reject_service_row` with the
+    admin UI's `set_admin` rather than restating the rule — this was the second,
+    unguarded half of the promotion surface. Imported inside the function
+    because `users` imports `UserNotFound` from this module.
+    """
+    from localmail.api.admin.users import reject_service_row
+
     with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE api_users SET is_admin = TRUE WHERE username = %s RETURNING id",
-            (username,),
-        )
+        cur.execute("SELECT id FROM api_users WHERE username = %s", (username,))
         row = cur.fetchone()
     if row is None:
         raise UserNotFound(f"no user named {username!r}")
+    user_id = int(row[0])
+    reject_service_row(conn, user_id, "promote")
+    with conn.cursor() as cur:
+        cur.execute("UPDATE api_users SET is_admin = TRUE WHERE id = %s", (user_id,))
     conn.commit()
 
 
@@ -167,6 +177,10 @@ def revoke_admin_sessions(conn: psycopg.Connection, *, username: str) -> None:
       OAuth-minted access tokens.
     * **OAuth refresh tokens** (``mcp.oauth.refresh.load_refresh``) — so a
       revoked client cannot simply mint a fresh access token and carry on.
+    * **API keys** — the same ``verify_token`` predicate reaches them. For a
+      key this is the one revocation with no undo: it cannot be recovered, so
+      the bot must be re-keyed. ``api_keys.list_keys`` reports the state as
+      ``revoked`` rather than leaving the panel claiming a dead key is active.
 
     Effect is therefore wider than the name suggests: the user is signed out
     of the desktop client and every agent holding a token for them stops

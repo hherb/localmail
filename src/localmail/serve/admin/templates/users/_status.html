@@ -1,8 +1,9 @@
 {% if error %}<p class="admin-flash admin-flash-error">{{ error }}</p>{% endif %}
+{% if detail.is_service %}<p>This is an <a href="/admin/api-keys">API key</a> principal, not a person: it cannot log in, be promoted, or be given a password.</p>{% endif %}
 <p>Admin:
   {% if detail.is_admin %}<span class="sync-on">yes</span>{% else %}<span class="sync-off">no</span>{% endif %}
   <button type="button" class="link-button"
-    {% if detail.is_admin and flags.block_demote %}disabled title="cannot demote the last admin / yourself"{% endif %}
+    {% if detail.is_admin and flags.block_demote %}disabled title="cannot demote the last admin / yourself"{% elif not detail.is_admin and flags.block_promote %}disabled title="an API-key principal cannot be promoted"{% endif %}
     hx-post="/admin/users/{{ detail.id }}/admin-toggle"
     hx-target="#user-status" hx-swap="innerHTML"
     hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users/" ~ detail.id ~ "/admin-toggle") }}"}'>

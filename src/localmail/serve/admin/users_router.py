@@ -52,6 +52,7 @@ def _summary_dict(u: svc.UserSummary) -> dict:
         "username": u.username,
         "is_admin": u.is_admin,
         "disabled": u.disabled,
+        "is_service": u.is_service,
         "created_at": u.created_at.isoformat(),
     }
 
@@ -62,6 +63,7 @@ def _detail_dict(u: svc.UserDetail) -> dict:
         "username": u.username,
         "is_admin": u.is_admin,
         "disabled": u.disabled,
+        "is_service": u.is_service,
         "created_at": u.created_at.isoformat(),
         "account_grants": [
             {"account_id": str(g.account_id), "account_name": g.account_name,
@@ -136,6 +138,11 @@ def patch_user(
             raise HTTPException(status_code=404, detail="user not found")
         except svc.LastAdminError as e:
             raise HTTPException(status_code=409, detail=str(e))
+        except svc.UserFieldError as e:
+            # set_admin's service-principal refusal. Without this the guard
+            # escaped as a 500, where the sibling password route already
+            # answered 400 — and action_flags' disabled button is UX only.
+            raise HTTPException(status_code=400, detail=str(e))
     return _detail_dict(detail)
 
 

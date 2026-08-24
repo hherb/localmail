@@ -12,6 +12,7 @@
     <legend>Reset password</legend>
     <input type="password" name="password">
     <button type="button" class="admin-button"
+      {% if flags.block_password %}disabled title="an API-key principal cannot be given a password"{% endif %}
       hx-post="/admin/users/{{ detail.id }}/password"
       hx-include="[name='password']" hx-target="#user-message" hx-swap="innerHTML"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/users/" ~ detail.id ~ "/password") }}"}'>

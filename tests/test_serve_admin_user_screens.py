@@ -189,3 +189,41 @@ def test_set_password_persists(admin_client, db_conn, admin_user_id):
         row = cur.fetchone()
     assert row is not None
     assert verify_password("brand-new-secret-9", row[0])
+
+
+def test_a_service_principal_is_badged_and_its_dead_end_controls_disabled(
+    admin_client, db_conn
+):
+    """I2: a bot listed among people, offering Reset Password and Promote that
+    both 400, is a false impression. Keep it listed — hide it and the operator
+    gets a different false impression."""
+    from localmail.api.admin import api_keys as keys_svc
+
+    created = keys_svc.create_key(db_conn, name="my_mail_bot", account_ids=[])
+    db_conn.commit()
+
+    listed = admin_client.get("/admin/users").text
+    assert "my_mail_bot" in listed
+    assert "API key" in listed
+
+    edit = admin_client.get(f"/admin/users/{created.user_id}").text
+    assert 'title="an API-key principal cannot be promoted"' in edit
+    assert 'title="an API-key principal cannot be given a password"' in edit
+
+
+def test_the_panel_admin_toggle_refuses_a_service_row_inline(admin_client, db_conn):
+    """A hand-crafted POST reaches past the disabled button, and under HTMX an
+    unhandled 500 leaves the control inert — the #148 defect the api-keys panel
+    comments cite. The refusal has to come back as a rendered message."""
+    from localmail.api.admin import api_keys as keys_svc
+
+    created = keys_svc.create_key(db_conn, name="my_mail_bot", account_ids=[])
+    db_conn.commit()
+    url = f"/admin/users/{created.user_id}/admin-toggle"
+    r = admin_client.post(url, headers={"X-CSRF-Token": admin_client.csrf_for(url)})
+    assert r.status_code == 200, r.text
+    assert "API-key principal" in r.text
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT is_admin FROM api_users WHERE id = %s", (created.user_id,))
+        row = cur.fetchone()
+    assert row is not None and row[0] is False

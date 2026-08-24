@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}API keys — localmail admin{% endblock %}
+{% block content %}
+<script src="/admin/static/api-keys-panel.js" defer></script>
+<div class="admin-card">
+  <h1>API keys</h1>
+  <p>An API key lets another process read this archive. It is shown once, when
+     you create it, and cannot be recovered afterwards.</p>
+  <form id="api-key-form" class="account-form"
+        hx-post="/admin/api-keys" hx-target="#api-key-created" hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/api-keys") }}"}'>
+    <label for="api-key-name">Name</label>
+    <input id="api-key-name" name="name" required placeholder="my_mail_bot">
+    <span id="api-key-name-error" class="field-error"></span>
+    <fieldset>
+      <legend>Accounts this key may read</legend>
+      {% for account_id, account_name in accounts %}
+        <label><input type="checkbox" name="account_ids" value="{{ account_id }}"> {{ account_name }}</label>
+      {% else %}
+        <p>No accounts configured yet.</p>
+      {% endfor %}
+      <p class="field-hint">Re-using an existing bot's name keeps the grants it
+         already has; ticking accounts here only adds to them. To take an
+         account away, revoke the grant with
+         <code>localmail revoke-account NAME ACCOUNT</code>.</p>
+    </fieldset>
+    <button type="submit">Create key</button>
+  </form>
+  <div id="api-key-created"></div>
+</div>
+<div class="admin-card" id="api-key-table">
+  {% include "api_keys/_table.html" %}
+</div>
+{% endblock %}

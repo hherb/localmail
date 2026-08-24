@@ -1,0 +1,24 @@
+<tr id="api-key-row-{{ k.user_id }}">
+  <td>{{ k.name }}</td>
+  <td>
+    {%- if not k.has_key %}<span class="sync-off">no key</span>
+    {%- elif k.disabled %}<span class="sync-off" title="the principal is disabled; re-enable it on /admin/users">not authenticating (disabled)</span>
+    {%- elif k.revoked %}<span class="sync-off" title="sessions were revoked after this key was minted; revoke and re-mint">not authenticating (revoked)</span>
+    {%- else %}<span class="sync-on">active</span>{% endif %}
+  </td>
+  <td>{{ k.account_names | join(", ") or "—" }}</td>
+  <td>{{ k.last_used_at.strftime("%Y-%m-%d %H:%M") if k.last_used_at else "never" }}</td>
+  <td class="account-row-actions">
+    {% if k.has_key %}
+      <button type="button"
+              hx-post="/admin/api-keys/{{ k.user_id }}/revoke"
+              hx-target="#api-key-table" hx-swap="innerHTML"
+              hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/api-keys/" ~ k.user_id ~ "/revoke") }}"}'>Revoke key</button>
+    {% endif %}
+    <button type="button"
+            hx-post="/admin/api-keys/{{ k.user_id }}/delete"
+            hx-confirm="Delete {{ k.name }} and its account grants?"
+            hx-target="#api-key-table" hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token_for_method("POST", "/admin/api-keys/" ~ k.user_id ~ "/delete") }}"}'>Delete</button>
+  </td>
+</tr>

@@ -113,7 +113,7 @@ def test_pool_exhausted_with_grow_pool_available_triggers_grow_pool() -> None:
     s.continue_page.side_effect = PageOutOfPoolError("past pool")
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
-        sort="rank",
+        sort="rank", sort_order="desc",
     )
     s.config.candidates_per_arm = 50
     s.config.candidates_per_arm_max = 800
@@ -150,7 +150,7 @@ def test_pool_at_cap_returns_null_cursor_without_calling_grow_pool() -> None:
     s.continue_page.side_effect = PageOutOfPoolError("past pool")
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=800, page_size=2, rerank_pool_size=100, pool_size=100,
-        sort="rank",
+        sort="rank", sort_order="desc",
     )
     s.config.candidates_per_arm = 50
     s.config.candidates_per_arm_max = 800
@@ -203,7 +203,7 @@ def test_keyset_cursor_dispatches_to_search_with_keyset_cursor() -> None:
     s.search.return_value = page
 
     incoming_ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
-    cursor_in = encode_keyset_cursor(incoming_ks)
+    cursor_in = encode_keyset_cursor(incoming_ks, "desc")
     out = run_search(searcher=s, free_text="invoice", filters={},
                      limit=2, allowed_account_ids=[1], user_id=99,
                      sort="date", cursor=cursor_in)

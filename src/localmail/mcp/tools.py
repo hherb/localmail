@@ -31,6 +31,7 @@ def tool_search(
     allowed_account_ids: list[int],
     query: str,
     sort: Literal["rank", "date"] | None = None,
+    sort_order: Literal["asc", "desc"] | None = None,
     limit: int = 50,
     cursor: str | None = None,
     filters: dict[str, Any] | None = None,
@@ -38,11 +39,18 @@ def tool_search(
 ) -> dict[str, Any]:
     """Hybrid search, ACL-scoped. Page forward by passing back `next_cursor`.
 
-    `sort` defaults to `rank` and is best left unset when paging: the cursor
-    already carries the ordering it continues. Send back the same `query` and
-    `filters` with it — a `sort=date` cursor walks the archive lexically and
-    rebuilds that walk from the query. A stated `sort` the cursor cannot serve
-    is a validation error, not a silently restarted search.
+    `sort` defaults to `rank` and `sort_order` to `desc`; both are best left
+    unset when paging, since the cursor already carries the ordering — on
+    both axes — it continues. Send back the same `query` and `filters` with
+    it — a `sort=date` cursor walks the archive lexically and rebuilds that
+    walk from the query. A stated `sort` or `sort_order` the cursor cannot
+    serve is a validation error, not a silently restarted search: leaving
+    `sort_order` unset is exactly what makes an ascending cursor keep
+    walking ascending instead of silently reverting to `desc`.
+    `sort_order="asc"` only applies to `sort="date"`; pairing it with
+    `sort="rank"` (stated or defaulted) is refused, since the rank path
+    searches a bounded candidate pool and reversing it would surface the
+    least relevant of the top hits rather than of the archive.
 
     `smart` opts into an LLM query rewrite (page 1 only). The response carries
     `rewrite_status` (one of `applied`, `unavailable`, `failed`,
@@ -61,6 +69,7 @@ def tool_search(
         allowed_account_ids=allowed_account_ids,
         user_id=user_id,
         sort=sort,
+        sort_order=sort_order,
         cursor=cursor,
         smart=smart,
     )

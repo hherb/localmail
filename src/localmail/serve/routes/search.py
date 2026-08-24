@@ -41,15 +41,26 @@ class SearchRequest(BaseModel):
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
     # "rank" (the default when omitted) orders by rerank relevance; "date"
-    # keeps the same candidate pool but orders the page by
-    # COALESCE(internal_date, date_sent) DESC NULLS LAST. The empty-query
-    # branch is already date-ordered so this is a no-op there.
+    # takes the date-ordered keyset walk directly rather than the hybrid
+    # pool, ordering by COALESCE(internal_date, date_sent) DESC NULLS LAST.
+    # A blank query takes that same walk regardless of `sort`.
     #
     # Null rather than "rank" so that omitting it is distinguishable from
     # asking for it: alongside a `cursor` the cursor decides the ordering,
     # and a *stated* sort it cannot serve is a 400 rather than a silently
     # dropped cursor.
     sort: Literal["rank", "date"] | None = None
+    # Direction for the sort criterion above. Orthogonal to `sort` so a
+    # future criterion inherits it without doubling the `sort` enum.
+    # "asc" is rejected for sort="rank": the rank path serves a bounded
+    # candidate pool, so reversing it returns the least relevant of the top
+    # hits rather than of the archive.
+    #
+    # Null rather than "desc" for the reason `sort` is null: alongside a
+    # `cursor` the cursor decides the direction, and a model default would
+    # be a statement the caller never made — contradicting every ascending
+    # cursor.
+    sort_order: Literal["asc", "desc"] | None = None
     cursor: str | None = None
     # Opt-in LLM query rewrite (Phase 4). Ignored gracefully when the server
     # has no rewriter configured — the response's rewrite_skipped reflects it.
@@ -77,6 +88,7 @@ def search_endpoint(
         allowed_account_ids=allowed,
         user_id=user.id,
         sort=req.sort,
+        sort_order=req.sort_order,
         cursor=req.cursor,
         smart=req.smart,
     )

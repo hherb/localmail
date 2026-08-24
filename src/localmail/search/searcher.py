@@ -47,6 +47,25 @@ SortMode = Literal["rank", "date"]
 #: able to answer differently (#312).
 DEFAULT_SORT: SortMode = "rank"
 
+SortOrder = Literal["asc", "desc"]
+
+#: The direction a caller gets when it states none. It lives beside
+#: ``DEFAULT_SORT`` for the same reason (#312): ``Searcher.search`` and
+#: ``api.search_cursor`` both resolve an unstated value, and two layers
+#: resolving "unstated" from two literals is the drift itself.
+DEFAULT_SORT_ORDER: SortOrder = "desc"
+
+
+class SortOrderNotApplicable(ValueError):
+    """``sort_order="asc"`` was asked for on a sort that cannot serve it.
+
+    A named subclass rather than a bare ``ValueError`` so the api/ layer
+    can map exactly this to a 400 without also catching what psycopg,
+    ``datetime`` and the embedding backends raise — which would relabel a
+    real outage as a caller error and send them to fix a blameless query.
+    """
+
+
 # Sentinel for "no usable date" — sorts strictly older than any real
 # timestamp so NULLs land at the end of a `sort=date` page under
 # Python's reverse=True ordering.
@@ -56,17 +75,103 @@ _DATE_SORT_NULL_SENTINEL = datetime(MINYEAR, 1, 1, tzinfo=timezone.utc)
 def _date_sort_key(item: dict) -> tuple[int, datetime]:
     """Key for ``COALESCE(internal_date, date_sent) DESC NULLS LAST``.
 
+    **Unreachable.** ``Searcher.search``'s date-keyset branch takes
+    ``sort="date"`` with non-blank free text and its blank-query branch
+    takes every blank query, so the hybrid pool branch — the sole caller
+    of ``_build_results`` with a ``sort`` other than the default, and the
+    sole writer of the cached pool's ``sort`` — is reached only as
+    ``rank`` + non-blank text. Pinned by
+    ``tests/test_searcher_pool_sort_unreachable.py``.
+
+    Kept rather than deleted because deleting is not what the sort_order
+    change is for. Do **not** add ``sort_order`` handling here "for
+    symmetry": it would be tested against a branch that never runs.
+
     Returned tuple uses (1, dt) for rows with a usable date and (0,
     sentinel) for NULLs, so Python's default ascending sort puts NULLs
     first; ``sorted(..., reverse=True)`` then reverses to (newest, ...,
-    older, NULLs-last) — matching the canonical ordering in the SQL
-    paths.
+    older, NULLs-last).
     """
     msg = item.get("msg") or {}
     dt = msg.get("internal_date") or msg.get("date_sent")
     if dt is None:
         return (0, _DATE_SORT_NULL_SENTINEL)
     return (1, dt)
+
+
+#: The one place either direction's ORDER BY is written. Ascending is
+#: ``ASC NULLS FIRST`` because that is the exact reverse of
+#: ``messages_recent_idx`` (``… DESC NULLS LAST, id DESC``) and is served
+#: by a backward index scan. Measured on the live 128k archive: 44 buffers
+#: against 33,372 for the ``ASC NULLS LAST`` spelling, which full-sorts —
+#: and an ``IS NOT NULL`` restriction does not rescue it. Do not
+#: "normalise" these to NULLS LAST.
+#:
+#: Keyed on ``SortOrder`` rather than ``str`` so mypy refuses a wrong
+#: literal at the call site. The lookup stays a dict lookup for the value
+#: mypy cannot see — a library caller passing ``"ASC"`` falls through
+#: ``_keyset_clause``'s ``== "desc"`` test into the *ascending* predicate,
+#: and the ``KeyError`` here is what stops that pairing silently serving a
+#: walk in the direction nobody asked for.
+_DATE_ORDER_BY_SQL: dict[SortOrder, str] = {
+    "desc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, "
+             "m.id DESC"),
+    "asc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) ASC NULLS FIRST, "
+            "m.id ASC"),
+}
+
+_DATE_EXPR_SQL = "COALESCE(m.internal_date, m.date_sent)"
+
+
+def _keyset_clause(keyset: KeysetCursor, order: SortOrder) -> tuple[str, list[Any]]:
+    """The ``AND …`` fragment placing the walk strictly after ``keyset``.
+
+    The two directions are not mirror images in shape, only in effect.
+    Descending needs ``OR <expr> IS NULL`` so a dated cursor still admits
+    the undated tail that follows it. Ascending needs no such disjunct —
+    under ``NULLS FIRST`` the undated block is already behind the cursor,
+    and ``NULL > ts`` is not true, so those rows drop out on their own.
+
+    **That absence is what lets the ascending dated predicate be a row
+    comparison**, which is the only spelling Postgres composes into an
+    ``Index Cond`` on ``messages_recent_idx``. The OR-form
+    (``expr > %s OR (expr = %s AND id > %s)``) is semantically identical
+    and plans as a per-tuple ``Filter``: the walk restarts at the head of
+    the index on every page and discards everything before the cursor.
+    Measured mid-walk on the live 128k archive, page ~1250: **62.1 ms and
+    53,789 buffers with 64,001 rows removed by filter, against 0.57 ms and
+    46 buffers** for the row comparison. The cost is linear in scroll
+    depth, so it is invisible on page 1 — where this feature's own
+    "no new index" measurements were taken — and grows without bound on
+    exactly the deep scroll the keyset walk exists to serve. This is the
+    trap #75 documents for the browse path; do **not** "simplify" it back
+    to the OR-form.
+
+    Descending cannot use the row comparison: ``ROW(NULL, id) < ROW(...)``
+    is NULL, so the undated tail it must admit would drop out. Closing
+    that needs ``browse.py``'s two-phase dated-then-top-up query — filed
+    as #323, and pre-existing here.
+    """
+    expr = _DATE_EXPR_SQL
+    if order == "desc":
+        if keyset.ts is None:
+            # Already in the NULLS-LAST tail: paginate by id alone.
+            return f" AND {expr} IS NULL AND m.id < %s ", [keyset.id]
+        return (
+            f" AND ({expr} < %s OR ({expr} = %s AND m.id < %s) "
+            f" OR {expr} IS NULL) ",
+            [keyset.ts, keyset.ts, keyset.id],
+        )
+    if keyset.ts is None:
+        # Still in the undated head: the rest of it, then every dated row.
+        return (
+            f" AND (({expr} IS NULL AND m.id > %s) OR {expr} IS NOT NULL) ",
+            [keyset.id],
+        )
+    return (
+        f" AND ROW({expr}, m.id) > ROW(%s, %s) ",
+        [keyset.ts, keyset.id],
+    )
 
 
 # No account has a non-positive id (serial PKs start at 1), so an
@@ -281,7 +386,7 @@ class SearchResult:
 
 @dataclass(frozen=True)
 class KeysetCursor:
-    """Keyset position for the lexical-date search path.
+    """Keyset position for the date-ordered keyset search path.
 
     Mirrors ``api.browse_cursor.BrowseCursor`` but lives in the search
     layer so that ``Searcher`` does not depend on ``api/``. The api layer
@@ -306,9 +411,10 @@ class KeysetCursorUnusable(ValueError):
 class SearchPage:
     """One page of results plus pagination metadata.
 
-    ``next_keyset`` is set only on the lexical-date path (``sort="date"``
-    with non-empty free text). The hybrid pool path keeps
-    ``next_keyset=None`` and continues to use ``search_token`` + page.
+    ``next_keyset`` is set on the date-ordered keyset walk — ``sort="date"``
+    with free text, or any blank query regardless of ``sort``. The hybrid
+    pool path keeps ``next_keyset=None`` and continues to use
+    ``search_token`` + page.
     """
     results: list[SearchResult]
     page: int
@@ -344,6 +450,13 @@ class PoolMetadata:
     # them). No default: an unstated one here would read as "rank" for a pool
     # that is not, which is the silence this field exists to end.
     sort: SortMode
+    # The direction this pool was built with, recorded beside ``sort`` and
+    # for the same reason. Pool cursors are only minted on the rank branch,
+    # where "asc" is refused — so a pool carrying "asc" is unreachable
+    # today. Recorded anyway rather than assumed: encoding the invariant in
+    # the reader is what makes a future dispatch change silently wrong.
+    # No default, for the reason ``sort`` has none.
+    sort_order: SortOrder
 
 
 class Searcher:
@@ -420,6 +533,7 @@ class Searcher:
             rerank_pool_size=int(entry["rerank_pool_size"]),
             pool_size=len(entry["hydrated"]),
             sort=entry["sort"],
+            sort_order=entry["sort_order"],
         )
 
     def _maybe_warn_unpopulated_body_lang(
@@ -468,85 +582,36 @@ class Searcher:
         ids = list(found.values()) or [_NO_ACCOUNT_SENTINEL]
         return replace(parsed, filters=replace(parsed.filters, accounts=ids))
 
-    def _list_recent_messages(
-        self,
-        conn: psycopg.Connection,
-        parsed: ParsedQuery,
-        limit: int,
-    ) -> list["SearchResult"]:
-        """Empty-query fallback: SELECT messages ORDER BY
-        ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC``.
-
-        ``internal_date`` (migration 0018) holds the IMAP server's
-        INTERNALDATE — when the email actually arrived at the mailbox.
-        sync.py populates it on insert; legacy rows are populated via
-        ``localmail backfill-internal-date``. ``date_sent`` (header
-        ``Date:``) is the fallback for rows not yet backfilled. The
-        expression matches the ``messages_recent_idx`` index so the
-        planner can avoid a full table sort.
-
-        Shares ``_filter_sql`` with the retrieval arms so structured
-        filters (account_id, folder_id, from/to/subject substrings, date
-        ranges, has_attachment, lang) behave identically here and in the
-        full-pipeline path. Returns ``SearchResult`` so the API layer can
-        marshal results uniformly regardless of which branch fired.
-        """
-        from localmail.search.arms import _filter_sql
-        where_extra, where_params = _filter_sql(parsed.filters)
-        sql = f"""
-            SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
-                   m.date_sent, m.internal_date
-              FROM messages m
-             WHERE TRUE
-             {where_extra}
-             ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC
-             LIMIT %s
-        """
-        params: list[Any] = [*where_params, limit]
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-        out: list[SearchResult] = []
-        for rank, (mid, account_id, subject, from_addr, from_name,
-                   date_sent, internal_date) in enumerate(rows, start=1):
-            out.append(SearchResult(
-                message_id=mid,
-                account_id=account_id,
-                rank=rank,
-                score=1.0 / rank,
-                rrf_score=0.0,
-                subject=subject,
-                from_addr=from_addr,
-                from_name=from_name,
-                date_sent=date_sent,
-                internal_date=internal_date,
-                snippet="",
-                snippet_source="header",
-                attachment_filename=None,
-                matched_chunk_id=None,
-                matched_chunk_table="message",
-            ))
-        return out
-
-    def _lexical_date_search(
+    def _date_keyset_search(
         self,
         conn: psycopg.Connection,
         parsed: ParsedQuery,
         page_size: int,
         keyset: KeysetCursor | None,
+        order: SortOrder,
     ) -> tuple[list[SearchResult], KeysetCursor | None]:
-        """Gmail-style lexical search: every message whose FTS matches the
-        free text, ORDER BY COALESCE(internal_date, date_sent) DESC, keyset
-        paginated. Returns (results, next_keyset_or_None).
+        """Date-ordered keyset walk, ORDER BY COALESCE(internal_date,
+        date_sent) per ``order`` (see ``_DATE_ORDER_BY_SQL``). Returns
+        (results, next_keyset_or_None).
 
-        Why this path exists: with the hybrid pipeline a query like
-        "e-ticket" returns at most ``rerank_pool_size`` candidates fused
-        across the four arms, then date-sorted. Users with dozens of
-        recent e-tickets only see a handful — and grow_pool's "load more"
-        re-ranks the same top-K with overlap, so it appears to find
-        nothing new. Lexical+keyset bypasses both bounds: there is no pool
-        cap and the cursor walks the (ts, id) keyspace, so the user can
-        scroll back arbitrarily far.
+        Serves two intents that turned out to be one query. With non-empty
+        free text this is the Gmail-style lexical walk: every message whose
+        FTS matches, keyset paginated. With a blank query it is the
+        "show me my mail" walk: every message, filtered and paginated the
+        same way. The FTS predicate is the *only* difference between them —
+        this used to be two methods (``_lexical_date_search`` and
+        ``_list_recent_messages``, the latter unpaginated) that were
+        otherwise identical in SELECT list, ORDER BY, and filter
+        composition.
+
+        Why the lexical case bypasses the hybrid pool: with the hybrid
+        pipeline a query like "e-ticket" returns at most
+        ``rerank_pool_size`` candidates fused across the four arms, then
+        date-sorted. Users with dozens of recent e-tickets only see a
+        handful — and grow_pool's "load more" re-ranks the same top-K with
+        overlap, so it appears to find nothing new. This walk bypasses both
+        bounds: there is no pool cap and the cursor walks the (ts, id)
+        keyspace, so the user can scroll back arbitrarily far.
 
         Uses the same ``messages.fts_v2`` column and the shared
         ``build_lexical_tsquery`` matcher as ``arm_bm25_messages`` so recall is
@@ -554,31 +619,27 @@ class Searcher:
         which OR into the FTS match here exactly as they do in the hybrid arms.
         Structured filters
         (account_ids, folder_ids, from/to/subject substrings, date
-        ranges, has_attachment, lang) flow through ``_filter_sql``.
+        ranges, has_attachment, lang) flow through ``_filter_sql`` either way.
         """
         from localmail.search.arms import _filter_sql, build_lexical_tsquery
 
         where_extra, where_params = _filter_sql(parsed.filters)
-        tsq_sql, tsq_params = build_lexical_tsquery(
-            parsed.free_text, parsed.expansion_terms
-        )
-        params: list[Any] = [*tsq_params]
+        params: list[Any] = []
+        if parsed.free_text.strip():
+            tsq_sql, tsq_params = build_lexical_tsquery(
+                parsed.free_text, parsed.expansion_terms
+            )
+            match_clause = f"m.fts_v2 @@ {tsq_sql}"
+            params.extend(tsq_params)
+        else:
+            # No free text: the walk is over the whole (filtered) archive.
+            # This is the branch that used to be _list_recent_messages, which
+            # was this query minus the FTS predicate and minus the cursor.
+            match_clause = "TRUE"
         keyset_clause = ""
         if keyset is not None:
-            if keyset.ts is None:
-                # Already in the NULLS-LAST tail: paginate by id alone.
-                keyset_clause = (
-                    " AND COALESCE(m.internal_date, m.date_sent) IS NULL"
-                    " AND m.id < %s "
-                )
-                params.append(keyset.id)
-            else:
-                keyset_clause = (
-                    " AND (COALESCE(m.internal_date, m.date_sent) < %s "
-                    "  OR (COALESCE(m.internal_date, m.date_sent) = %s AND m.id < %s) "
-                    "  OR COALESCE(m.internal_date, m.date_sent) IS NULL) "
-                )
-                params.extend([keyset.ts, keyset.ts, keyset.id])
+            keyset_clause, keyset_params = _keyset_clause(keyset, order)
+            params.extend(keyset_params)
         params.extend(where_params)
         # Fetch one extra row to detect "more pages remain" without a COUNT.
         fetch_limit = page_size + 1
@@ -587,10 +648,10 @@ class Searcher:
             SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
                    m.date_sent, m.internal_date
               FROM messages m
-             WHERE m.fts_v2 @@ {tsq_sql}
+             WHERE {match_clause}
              {keyset_clause}
              {where_extra}
-             ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC
+             {_DATE_ORDER_BY_SQL[order]}
              LIMIT %s
         """
         with conn.cursor() as cur:
@@ -867,12 +928,14 @@ class Searcher:
         page = self._search_with_parsed(parsed, page_size=entry["page_size"],
                                         candidates_per_arm=candidates_per_arm,
                                         rerank_pool_size=rps, use_cache=True,
-                                        user_id=user_id, sort=sort)
+                                        user_id=user_id, sort=sort,
+                                        sort_order=entry["sort_order"])
         return page
 
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
                             rerank_pool_size, use_cache, user_id: int | None = None,
-                            sort: SortMode = DEFAULT_SORT):
+                            sort: SortMode = DEFAULT_SORT,
+                            sort_order: SortOrder = DEFAULT_SORT_ORDER):
         """Variant of search() that takes an already-parsed query.
 
         Connection scope: retrieval + hydrate inside one 'with' block. The
@@ -923,6 +986,7 @@ class Searcher:
                 "rerank_pool_size": rerank_pool_size, "page_size": page_size,
                 "user_id": user_id,
                 "sort": sort,
+                "sort_order": sort_order,
             })
         return SearchPage(
             results=results, page=1, page_size=page_size, pool_size=len(hydrated),
@@ -944,6 +1008,7 @@ class Searcher:
         disable_rerank: bool = False,
         user_id: int | None = None,
         sort: SortMode | None = None,
+        sort_order: SortOrder | None = None,
         keyset_cursor: KeysetCursor | None = None,
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
@@ -957,12 +1022,13 @@ class Searcher:
         `disable_rerank=True` short-circuits the cross-encoder and ranks by
         RRF score only. Useful for low-latency or debugging paths.
 
-        `sort="date"` keeps the hybrid retrieval pool (same candidates as
-        rank order) but re-sorts the page by
-        ``COALESCE(internal_date, date_sent) DESC NULLS LAST``. The
-        empty-query branch is already date-ordered, so the param has no
-        effect there. ``continue_page`` honors whichever sort was used
-        when the cursor was minted.
+        `sort="date"` takes the date-ordered keyset walk directly
+        (`_date_keyset_search`) rather than the hybrid retrieval pool —
+        true whether or not there is free text, and also true for any
+        blank query regardless of `sort`. The pool is reached only by the
+        remaining branch: `sort="rank"` (stated or defaulted) with
+        non-blank free text. ``continue_page`` honors whichever
+        `(sort, sort_order)` pair was in force when the cursor was minted.
 
         `sort=None` means "unstated" — the spelling every other layer of this
         cluster uses since #308 — and resolves to `DEFAULT_SORT` here, once,
@@ -970,9 +1036,41 @@ class Searcher:
         it fell through the `== "date"` test to the same ordering by accident,
         and was then cached as the pool's own sort, which `_check_pool_sort`
         reads back to decide a 400 (#312).
+
+        `sort_order` is orthogonal to `sort` and, like it, resolves an
+        unstated `None` to `DEFAULT_SORT_ORDER` ("desc") once, here, into
+        `effective_order` — every read below goes through that local, never
+        the raw parameter. `sort_order="asc"` only takes effect on the
+        date-ordered keyset branch (`_date_keyset_search`, reached by
+        `sort="date"` — with or without free text — or by any blank query),
+        where both the ORDER BY and the keyset predicate flip to walk the
+        archive oldest-first. Pairing it with `sort="rank"` (stated or
+        defaulted) raises `SortOrderNotApplicable` regardless of the query,
+        blank or not — checked before the query is even parsed: the rank
+        path serves a bounded candidate pool, so reversing it would surface
+        the least relevant of the top hits rather than the oldest of the
+        archive, and a blank query defaulting to `sort="rank"` is no
+        exception — ascending order requires stating `sort="date"`.
         """
         t0 = time.monotonic()
         effective_sort: SortMode = DEFAULT_SORT if sort is None else sort
+        effective_order: SortOrder = (
+            DEFAULT_SORT_ORDER if sort_order is None else sort_order
+        )
+        # Refused rather than honoured: the rank path serves a bounded
+        # candidate pool, so reversing it returns the least relevant of the
+        # top hits rather than of the archive — an artifact of where the
+        # pool stopped, wearing the shape of an answer. Refused rather than
+        # ignored because a stated parameter the server will not honour is
+        # reported, never dropped (#308, #312). Before any IO, so a caller
+        # error costs no connection.
+        if effective_sort == "rank" and effective_order == "asc":
+            raise SortOrderNotApplicable(
+                "sort_order='asc' is not applicable to sort='rank' (the "
+                "default); pass sort='date' for oldest-first. The rank path "
+                "serves a bounded candidate pool, so reversing it returns "
+                "the least relevant of the top hits, not of the archive."
+            )
         cfg = self._cfg
         effective_page_size: int = min(page_size or cfg.page_size_default,
                                        cfg.page_size_max)
@@ -1016,21 +1114,28 @@ class Searcher:
         # no-op inside the helper, so this call is unconditional.
         parsed = _clamp_account_ids_to_acl(parsed, allowed_account_ids)
 
-        # sort=date with free_text: lexical+keyset, unbounded. The hybrid
-        # path caps at ``rerank_pool_size`` candidates fused by RRF, so a
-        # user searching for "e-ticket" (with dozens of matches across
-        # years) sees only the top-K most relevant — even though they
-        # asked for chronological order. Bypass the pool entirely:
-        # ``messages.fts_v2`` (same column Arm 1 uses) gives identical
-        # lexical recall, and the keyset cursor lets them scroll back
-        # arbitrarily far.
-        if effective_sort == "date" and parsed.free_text.strip():
+        # The date-ordered keyset walk serves two intents that are one query.
+        #
+        # sort=date with free text: the hybrid path caps at
+        # ``rerank_pool_size`` candidates fused by RRF, so a user searching
+        # "e-ticket" sees only the top-K even though they asked for
+        # chronological order. ``messages.fts_v2`` gives identical lexical
+        # recall and the keyset cursor scrolls back arbitrarily far.
+        #
+        # A blank query, whatever the sort: the hybrid pipeline degenerates
+        # for it (the BM25 arms early-return with no terms, the vector arms
+        # rank by distance to the embedding of the empty string), so a blank
+        # query has always been answered as a date-ordered list. It now
+        # paginates too — before, it returned one page and no cursor, which
+        # is the branch "show me my oldest mail" lands on.
+        if effective_sort == "date" or not parsed.free_text.strip():
             t = time.monotonic()
             with self._pool.connection() as conn:
                 parsed = self._resolve_account_names(conn, parsed)
                 self._maybe_warn_unpopulated_body_lang(conn, parsed)
-                results, next_keyset = self._lexical_date_search(
+                results, next_keyset = self._date_keyset_search(
                     conn, parsed, effective_page_size, keyset_cursor,
+                    effective_order,
                 )
             timing["retrieve"] = (time.monotonic() - t) * 1000
             timing["rerank"] = 0.0
@@ -1047,46 +1152,21 @@ class Searcher:
                 rewrite_note_code=rewrite_note_code,
             )
 
-        # The branch above is the only reader of `keyset_cursor` (#308). Reaching
-        # here with one means the caller's (sort, query) selected a different
-        # retrieval mode, whose page 1 would go back as if it continued the
-        # walk — a restart wearing a continuation's clothes. Raise rather
-        # than answer the wrong question quietly. A named error, not an
-        # assert: asserts vanish under `python -O`.
+        # The branch above is the only reader of ``keyset_cursor`` (#308).
+        # Reaching here means the caller's (sort, query) selected the hybrid
+        # pool, whose page 1 would go back as if it continued the walk — a
+        # restart wearing a continuation's clothes. Raise rather than answer
+        # the wrong question quietly. A named error, not an assert: asserts
+        # vanish under ``python -O``.
+        #
+        # The blank-query shape used to land here too. It no longer does:
+        # that branch honours the cursor now, so rejecting it would forbid
+        # exactly the paging this reachability change adds.
         if keyset_cursor is not None:
-            shape = "a blank" if not parsed.free_text.strip() else "a non-empty"
             raise KeysetCursorUnusable(
-                "keyset_cursor requires sort='date' and a non-empty query; "
-                f"got sort={effective_sort!r} with {shape} query. Note the query is "
-                "measured after filter operators are parsed out of it, so a "
-                "query of nothing but operators counts as blank"
-            )
-
-        # Empty-query fallback: an empty `free_text` is the canonical
-        # "show me my mail" signal. The hybrid pipeline degenerates badly
-        # for it — BM25 arms early-return [] (no terms to match) and the
-        # vector arms rank by cosine distance to the embedding of the empty
-        # string, producing exactly `rerank_pool_size` (default 20)
-        # arbitrary-looking hits. We short-circuit to a date-sorted list so
-        # callers (GUI, MCP, programmatic API) get a predictable result —
-        # structured filters still apply via `_filter_sql`.
-        if not parsed.free_text.strip():
-            t = time.monotonic()
-            with self._pool.connection() as conn:
-                parsed = self._resolve_account_names(conn, parsed)
-                self._maybe_warn_unpopulated_body_lang(conn, parsed)
-                results = self._list_recent_messages(conn, parsed, effective_page_size)
-            timing["retrieve"] = (time.monotonic() - t) * 1000
-            timing["rerank"] = 0.0
-            timing["total"] = (time.monotonic() - t0) * 1000
-            return SearchPage(
-                results=results, page=1, page_size=effective_page_size,
-                pool_size=len(results), candidates_per_arm=cpa,
-                has_more_in_pool=False, can_grow_pool=False,
-                search_token=None, query=parsed, timing_ms=timing,
-                rewrite_status=rewrite_status,
-                rewrite_note=rewrite_note,
-                rewrite_note_code=rewrite_note_code,
+                "keyset_cursor is not readable by the hybrid pool branch; it "
+                f"requires sort='date' or a blank query, got "
+                f"sort={effective_sort!r} with a non-empty query"
             )
 
         with self._pool.connection() as conn:
@@ -1137,6 +1217,7 @@ class Searcher:
                 "page_size": effective_page_size,
                 "user_id": user_id,
                 "sort": effective_sort,
+                "sort_order": effective_order,
             })
         pool_size = len(hydrated)
         return SearchPage(

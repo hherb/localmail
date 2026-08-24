@@ -265,7 +265,7 @@ accounts the token's user has been granted.
 
 | Tool | Parameters | When to use |
 | --- | --- | --- |
-| `search` | `query`, `sort="rank"\|"date"` (omit when paging), `limit`, `cursor`, `account_ids`, `folder_ids`, `date_from`, `date_to`, `from_addr`, `to`, `subject`, `has_attachment`, `lang`, `smart` | Hybrid lexical + vector search over the archive. The default entry point for "find mail about X". Pass `smart=true` for a local LLM query rewrite (page 1 only). The response carries `rewrite_status` (`applied`, `unavailable`, `failed`, `not_attempted`, or `not_requested`) and an optional curated `rewrite_note` with an actionable detail; `rewrite_skipped` (kept for back-compat) is true only for `unavailable`/`failed`. On a continuation page `smart` is ignored and the status is `not_attempted`. |
+| `search` | `query`, `sort="rank"\|"date"`, `sort_order="asc"\|"desc"` (omit both when paging), `limit`, `cursor`, `account_ids`, `folder_ids`, `date_from`, `date_to`, `from_addr`, `to`, `subject`, `has_attachment`, `lang`, `smart` | Hybrid lexical + vector search over the archive. The default entry point for "find mail about X". Rank-ordered by default; pass `sort="date"` for strictly newest-first, and `sort_order="asc"` alongside it for oldest-first — pairing `sort_order="asc"` with the rank ordering is rejected, since the rank path searches a bounded candidate pool and reversing it would surface the least relevant of the top hits rather than of the archive. Pass `smart=true` for a local LLM query rewrite (page 1 only). The response carries `rewrite_status` (`applied`, `unavailable`, `failed`, `not_attempted`, or `not_requested`) and an optional curated `rewrite_note` with an actionable detail; `rewrite_skipped` (kept for back-compat) is true only for `unavailable`/`failed`. On a continuation page `smart` is ignored and the status is `not_attempted`. |
 | `get_message` | `message_id`, `full_headers=False` | Fetch one message's headers, body, and attachment list once search/browse has surfaced its ID. Each attachment entry carries `filename`, `sha256`, `content_type` (stored MIME type), and `size` (decoded bytes) — enough to decide text-vs-original retrieval and size a download before fetching. |
 | `get_attachment` | `sha256`, `mode="text"\|"metadata"` | Read an attachment's **extracted text** or its metadata. Never returns raw bytes. |
 | `list_messages` | `account_ids`, `folder_ids`, `limit`, `cursor` | Keyset date-ordered browse (newest first) when there's no query — "show me recent mail". |
@@ -283,15 +283,17 @@ on you:
 * **Re-send the same `query` and filters.** A cursor carries only the position.
   A `sort="date"` search walks the archive lexically and rebuilds that walk
   from whatever you send with it, so a *changed* query or filter quietly walks
-  a different result set — nothing compares them against the cursor. Only the
-  degenerate case is caught for you: a cursor sent with no usable query at all
-  is rejected instead of answering from the top. (A query of nothing but filter
-  operators — `subject:invoice` — counts as none, since those parse out of the
-  text the walk searches.)
-* **Leave `sort` unset.** The cursor already carries the ordering it continues.
-  Stating one that disagrees with it is a validation error — the alternative
-  was serving page 1 of a differently ordered search, which is indistinguishable
-  from a continuation until you notice the results repeating.
+  a different result set — nothing compares them against the cursor. A blank
+  query pages too, now — it walks the whole archive date-ordered instead of
+  matching text, the same way `list_messages` does, and used to return exactly
+  one page with no way to continue. (A query of nothing but filter operators —
+  `subject:invoice` alone — counts as blank for this purpose, since those parse
+  out of the text the walk searches.)
+* **Leave `sort` and `sort_order` unset.** The cursor already carries the
+  ordering it continues, on both axes. Stating a value that disagrees with it
+  on either is a validation error — the alternative was serving page 1 of a
+  differently ordered search, which is indistinguishable from a continuation
+  until you notice the results repeating.
 
 If a `search` cursor has expired (its underlying result pool was evicted from
 the in-process cache — TTL, LRU, or a `serve` restart), the tool returns a

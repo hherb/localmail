@@ -30,7 +30,7 @@ from localmail.search.searcher import KeysetCursor, PoolMetadata
 
 def _keyset_cursor(day: int = 21) -> tuple[KeysetCursor, str]:
     ks = KeysetCursor(ts=datetime(2026, 5, day, tzinfo=timezone.utc), id=100)
-    return ks, encode_keyset_cursor(ks)
+    return ks, encode_keyset_cursor(ks, "desc")
 
 
 def _page(*, token: str | None = None, next_keyset: KeysetCursor | None = None) -> MagicMock:
@@ -89,58 +89,41 @@ def test_keyset_cursor_with_an_explicitly_stated_rank_sort_is_rejected() -> None
     s.search.assert_not_called()
 
 
-def test_keyset_cursor_without_the_original_query_is_rejected() -> None:
-    """The keyset walk rebuilds its FTS predicate from the re-sent query.
+def test_a_keyset_cursor_with_a_blank_query_continues_the_recent_mail_walk() -> None:
+    """Both branches read the cursor now, so neither shape is refused.
 
-    Without one there is no walk to continue: the Searcher falls through to
-    the empty-query recent-mail list and answers with page 1 of a different
-    result set.
+    These two used to be rejections, because the blank-query branch dropped
+    the cursor and answered with its own page 1. That branch paginates now,
+    so refusing would forbid exactly the paging it gained. The cursor
+    carries a position, never a query — the "send the same query and
+    filters" contract is unchanged and already governs every filter.
     """
     s = _searcher()
-    _, cursor = _keyset_cursor()
-    with pytest.raises(ValidationFailed):
-        run_search(searcher=s, free_text="", filters={}, limit=2,
-                   allowed_account_ids=[1], user_id=99, sort="date",
-                   cursor=cursor)
-    s.search.assert_not_called()
-
-
-def test_keyset_cursor_without_query_or_sort_is_rejected() -> None:
-    """The same rejection on the shape the docs actually prescribe.
-
-    Its sibling above states ``sort="date"``; this states nothing, which is
-    what ``docs/mcp-usage.md`` tells a client to send. Narrowing the guard
-    to ``requested_sort is not None and not free_text.strip()`` leaves that
-    sibling green, so without this the check is pinned only on the path
-    where the caller happened to say something.
-    """
-    s = _searcher()
-    _, cursor = _keyset_cursor()
-    with pytest.raises(ValidationFailed):
-        run_search(searcher=s, free_text="", filters={}, limit=2,
-                   allowed_account_ids=[1], user_id=99, cursor=cursor)
-    s.search.assert_not_called()
+    incoming, cursor = _keyset_cursor()
+    run_search(searcher=s, free_text="", filters={}, limit=2,
+               allowed_account_ids=[1], user_id=99, cursor=cursor)
+    _, kwargs = s.search.call_args
+    assert kwargs.get("sort") == "date"
+    assert kwargs.get("keyset_cursor") == incoming
 
 
 @pytest.mark.parametrize("query", ["subject:invoice", "from:bob@example.com",
                                    "lang:en", "has:attachment"])
-def test_a_query_of_only_filter_operators_counts_as_no_query(query: str) -> None:
-    """The gate must measure the text the Searcher will dispatch on.
+def test_a_query_of_only_filter_operators_continues_the_walk_too(query: str) -> None:
+    """A query that parses down to no free text is the blank case above.
 
-    ``parse_query`` lifts every filter operator out of the free text, so
-    ``"subject:invoice"`` is non-blank as a request field and blank by the
-    time the lexical branch tests it. Reading the raw string here let the
-    request through as a keyset continuation, the branch declined the
-    cursor, and the Searcher's guard raised a bare ``ValueError`` — a 500
-    for what is a caller error, on the very input class this check exists
-    to catch.
+    It used to be a rejection for the same reason and stops being one for
+    the same reason: the branch that serves it reads the cursor now. What
+    must not come back is the Searcher's own ``KeysetCursorUnusable`` — a
+    caller error surfacing as a 500 — on the input class that shape was
+    hardest to see on.
     """
     s = _searcher()
-    _, cursor = _keyset_cursor()
-    with pytest.raises(ValidationFailed):
-        run_search(searcher=s, free_text=query, filters={}, limit=2,
-                   allowed_account_ids=[1], user_id=99, cursor=cursor)
-    s.search.assert_not_called()
+    incoming, cursor = _keyset_cursor()
+    run_search(searcher=s, free_text=query, filters={}, limit=2,
+               allowed_account_ids=[1], user_id=99, cursor=cursor)
+    _, kwargs = s.search.call_args
+    assert kwargs.get("keyset_cursor") == incoming
 
 
 def test_a_malformed_paging_request_is_rejected_even_with_an_empty_acl() -> None:
@@ -165,7 +148,7 @@ def test_pool_cursor_with_a_sort_the_pool_was_not_built_with_is_rejected() -> No
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
-        sort="rank",
+        sort="rank", sort_order="desc",
     )
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
     with pytest.raises(ValidationFailed):
@@ -180,7 +163,7 @@ def test_pool_cursor_with_the_sort_the_pool_was_built_with_continues() -> None:
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
-        sort="rank",
+        sort="rank", sort_order="desc",
     )
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
     run_search(searcher=s, free_text="invoice", filters={}, limit=2,

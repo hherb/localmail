@@ -151,15 +151,16 @@ def test_searcher_empty_query_returns_messages_by_coalesce_internal_date_date_se
 
 
 def test_searcher_sort_date_orders_results_by_internal_date_desc(db_dsn, db_conn):
-    """`sort="date"` re-orders the hybrid result page by
-    ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC`` while
-    still drawing candidates from the same hybrid retrieval pool — i.e.
-    "find relevant matches, then show them newest first" rather than
-    "by relevance".
+    """`sort="date"` with free text takes the date-ordered keyset walk
+    directly (`_date_keyset_search`) rather than the hybrid retrieval pool,
+    so results come back ordered by
+    ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC`` and the
+    `_Reranker` fixture is never consulted for this call — contrast the
+    `sort="rank"` sibling test below, which does reach it.
 
     The seed gives every message the same query term so all three are
-    eligible; without the sort flag the reranker would pick a different
-    order. The flag must override that.
+    eligible for the walk regardless of what a reranker would have made
+    of them.
     """
     now = datetime.now(timezone.utc)
     mid_oldest, mid_middle, mid_newest = _seed_with_dates(db_conn, [

@@ -876,17 +876,26 @@ Poll, process, ack. Semantics:
   and `can_grow_pool=true`, the route doubles `candidates_per_arm` up
   to `candidates_per_arm_max` (default 800), then flips
   `next_cursor` to `null`.
-- **Keyset cursor** (`"K|<base64>"`) — used for `sort=date` +
-  non-empty query, backed by a lexical FTS scan over
-  `COALESCE(internal_date, date_sent)`. Unbounded scroll; no pool
-  cap. Same recall as the lexical retrieval arm.
+- **Keyset cursor** (`"K|<base64>"` descending, `"KA|<base64>"` ascending)
+  — used for `sort=date` and for any blank-query search, backed by a scan
+  over `COALESCE(internal_date, date_sent)` (lexical when there is free
+  text). Unbounded scroll; no pool cap. Same recall as the lexical
+  retrieval arm. The prefix carries the direction so a cursor paged back
+  on its own continues the order it was minted in.
+
+`sort_order` is `"asc"` or `"desc"` (default `"desc"`), and modifies
+whichever `sort` criterion is in force. It only has an effect on
+`sort=date`; `sort=rank` with `sort_order=asc` is a 400 — the rank path
+serves a bounded candidate pool, so reversing it would return the least
+relevant of the top hits rather than of the archive.
 
 When paging, send the cursor back with the same `query` and filters and
-**leave `sort` unset**. The cursor already carries the ordering it
-continues, so a stated `sort` that contradicts it is a 400 rather than a
-silent restart at page 1 of a differently ordered search. A keyset cursor
-also needs the query re-sent — it rebuilds the lexical walk from it — and
-is rejected without one.
+**leave `sort` and `sort_order` unset**. The cursor already carries the
+ordering it continues, so a stated value that contradicts it on either
+axis is a 400 rather than a silent restart at page 1 of a differently
+ordered search. The cursor carries a position, not a query: re-sending a
+different `query` or different filters alongside it is undefined, the same
+way it always has been.
 
 If a paged cursor's underlying pool was evicted from the in-memory
 cache (TTL expiry, LRU eviction, or `serve` restart) the route

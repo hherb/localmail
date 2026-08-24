@@ -362,3 +362,97 @@ def test_tool_search_smart_with_rewriter_applies_over_the_wire(db_dsn, db_conn):
     assert plain["results"] == []  # "invoice" matches nothing un-rewritten
     assert smart["results"]  # expansion "receipt" surfaces the message
     assert smart["rewrite_skipped"] is False
+
+
+def test_tool_search_forwards_sort_order_to_run_search(monkeypatch):
+    """The `tool_search` → `run_search` hop, which nothing pinned.
+
+    Every other MCP test here drives a real searcher and asserts on rows,
+    so a dropped `sort_order` is invisible to them: the call still 200s and
+    still returns date-ordered results, just in the direction the agent did
+    not ask for. Deleting the forwarding line left this whole file green.
+    """
+    seen: dict = {}
+
+    def _recording_run_search(**kwargs):
+        seen.update(kwargs)
+        return {"results": [], "next_cursor": None}
+
+    monkeypatch.setattr(tools, "run_search", _recording_run_search)
+    tools.tool_search(searcher=object(), user_id=1, allowed_account_ids=[1],
+                      query="invoice", sort="date", sort_order="asc")
+    assert seen.get("sort_order") == "asc"
+
+
+def test_tool_search_states_no_sort_order_of_its_own():
+    """`mcp/server.py` always forwards `sort_order` explicitly, so a
+    `= "desc"` restored here leaves every schema pin green while silently
+    re-arming the defect for a direct library caller — the layer
+    `test_mcp_server_build.py`'s schema assertion cannot see.
+    """
+    import inspect
+
+    param = inspect.signature(tools.tool_search).parameters["sort_order"]
+    assert param.default is None
+
+
+def test_tool_search_pages_ascending_end_to_end_over_a_real_archive(db_dsn, db_conn):
+    """Full stack, no mocks: real Searcher, real DB, real cursor round trip.
+
+    Every other ``sort_order`` test at this layer stubs ``run_search`` and
+    asserts the inbound kwarg, and the route-level ones assert a cursor
+    minted from a canned ``next_keyset``. Nothing drove the whole chain —
+    ORDER BY, the ``_keyset_clause`` predicate, the ``KA|`` mint, and the
+    decode on the way back in — against actual rows.
+
+    That chain is where a direction gets lost silently: each link can be
+    individually correct while the walk still doubles back, and the symptom
+    is duplicate results rather than an error. So this asserts the property
+    a client actually depends on — page 2 continues where page 1 stopped,
+    strictly oldest-first, with nothing repeated and nothing skipped.
+    """
+    uid = create_user(db_conn, "asc-pager", "hunter2")
+    acct = _insert_account(db_conn, "asc-archive")
+    grant_account(db_conn, uid, acct)
+    # Distinct dates, inserted out of order so a walk that merely returns
+    # insertion order cannot pass.
+    ids_by_day = {}
+    for day in (3, 1, 5, 2, 4, 6):
+        mid = _insert_message(db_conn, acct, f"invoice day {day}", "the invoice")
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE messages SET internal_date = %s WHERE id = %s",
+                (datetime(2026, 3, day, tzinfo=timezone.utc), mid),
+            )
+        ids_by_day[day] = mid
+    db_conn.commit()
+    oldest_first = [ids_by_day[d] for d in sorted(ids_by_day)]
+
+    acl = allowed_account_ids(db_conn, uid)
+    searcher = _lexical_searcher(db_dsn)
+    try:
+        walked: list[int] = []
+        cursor = None
+        seen_ascending_prefix = False
+        for _ in range(len(oldest_first) + 2):  # bounded: a loop here is the bug
+            kwargs = {"sort": "date", "sort_order": "asc"} if cursor is None else {}
+            page = tools.tool_search(
+                searcher=searcher, user_id=uid, allowed_account_ids=acl,
+                query="invoice", limit=2, cursor=cursor, filters={}, **kwargs,
+            )
+            walked.extend(int(r["message_id"]) for r in page["results"])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+            # Paging states nothing but the cursor — the documented call, and
+            # the one that used to resolve back to "desc" and reverse.
+            assert cursor.startswith("KA|"), cursor
+            seen_ascending_prefix = True
+    finally:
+        searcher._pool.close()
+
+    assert seen_ascending_prefix, "the walk never paged; the test proved nothing"
+    assert walked == oldest_first, (
+        f"ascending walk did not cover the archive oldest-first: {walked} "
+        f"!= {oldest_first}"
+    )

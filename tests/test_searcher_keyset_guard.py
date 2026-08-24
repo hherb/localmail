@@ -3,10 +3,11 @@
 
 """``Searcher.search`` may not accept a keyset cursor it will not read (#308).
 
-``keyset_cursor`` is consumed by exactly one of the three retrieval
-branches. The other two used to ignore it and answer with their own page 1,
-which reads as a continuation and is a restart. The api/ layer is fixed to
-never send an unusable one; this is the guard that makes the drop
+``keyset_cursor`` is consumed by the date-ordered keyset walk (``sort=
+"date"``, or any blank query). The hybrid pool branch is now the only one
+that does not read it — it used to ignore it and answer with its own page
+1, which reads as a continuation and is a restart. The api/ layer is fixed
+to never send an unusable one; this is the guard that makes the drop
 impossible for every other caller (CLI, library, a future transport).
 """
 from __future__ import annotations
@@ -53,12 +54,19 @@ def test_rank_sort_rejects_a_keyset_cursor_instead_of_dropping_it() -> None:
                         keyset_cursor=_CURSOR)
 
 
-def test_an_empty_query_rejects_a_keyset_cursor_instead_of_dropping_it() -> None:
-    """sort='date' alone is not enough: the lexical branch also needs the text."""
-    searcher, _ = _searcher()
-    with pytest.raises(ValueError, match="keyset_cursor"):
+def test_an_empty_query_now_reads_the_keyset_cursor() -> None:
+    """The blank-query branch honours the cursor, so it must not be refused.
+
+    It used to be refused because that branch dropped the cursor and
+    answered with its own page 1. Now it continues the walk at the right
+    position, and refusing would forbid the paging that change adds. The
+    Searcher's pool raises on touch, so reaching retrieval is the assertion.
+    """
+    searcher, pool = _searcher()
+    with pytest.raises(AssertionError, match="no connection"):
         searcher.search("", allowed_account_ids=None, sort="date",
                         keyset_cursor=_CURSOR)
+    pool.connection.assert_called_once()
 
 
 def test_a_search_without_a_keyset_cursor_is_unaffected() -> None:

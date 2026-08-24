@@ -44,8 +44,11 @@ from localmail.search.searcher import (
 _KEYSET_PREFIX_DESC = "K|"
 _KEYSET_PREFIX_ASC = "KA|"
 
-#: Longest first: "KA|" also starts with "K", so a shortest-first scan
-#: would classify every ascending cursor as descending.
+#: The ``|`` terminator is what keeps the two disjoint — "KA|…" does not
+#: start with "K|", nor the converse — so no scan order can misclassify a
+#: cursor. Longest first is a prefix table's convention, not a correctness
+#: requirement; it becomes one the day a prefix is added that does not end
+#: in the terminator.
 _KEYSET_PREFIXES: tuple[tuple[str, SortOrder], ...] = (
     (_KEYSET_PREFIX_ASC, "asc"),
     (_KEYSET_PREFIX_DESC, "desc"),
@@ -63,9 +66,16 @@ class CursorPlan:
     """Which retrieval mode a request continues, and in what order.
 
     Returned by :func:`resolve_cursor_plan`. ``sort`` and ``sort_order``
-    are the **resolved** values the request will actually run with: the
-    cursor's own when it has one, the caller's when there is no cursor,
-    the module defaults when neither states anything.
+    are what the request was resolved to: the cursor's own for a keyset
+    cursor, otherwise the caller's stated values, otherwise the module
+    defaults.
+
+    For ``mode="pool"`` they are **not** what the request will run with.
+    ``continue_page`` serves whatever ordering the pool was built with, so
+    these carry the caller's statement (or a default) *about* that pool,
+    which is only ever a claim to be checked — and is why
+    ``_check_pool_sort`` compares the raw arguments against the pool's own
+    metadata rather than anything here.
 
     One object rather than one function per axis. Two predicates for one
     rule is what produced the #308 follow-up defect, where the api gate
@@ -143,15 +153,14 @@ def resolve_cursor_plan(
     cursor: str | None,
     requested_sort: SortMode | None,
     requested_sort_order: SortOrder | None,
-    free_text: str,
 ) -> CursorPlan:
     """Decide the retrieval mode and both ordering axes — cursor first.
 
-    ``free_text`` must be ``parse_query(...).free_text``, **not** the raw
-    request field: filter operators parse out of the free text, so
-    ``"subject:invoice"`` is non-blank as a request field and blank by the
-    time ``Searcher.search`` tests it, and this function's job is to ask
-    the question the Searcher will ask.
+    The query is not an input. It used to be: a keyset cursor presented
+    with a blank query was refused, because the blank-query branch dropped
+    the cursor and answered with its own page 1. That branch paginates
+    now, so both shapes continue a walk and the plan follows from the
+    cursor alone.
 
     A ``None`` on either axis means the caller stated nothing. That is the
     documented way to page, so an unstated value never out-votes the
@@ -174,11 +183,6 @@ def resolve_cursor_plan(
         order = keyset_order(cursor)
         _reject_sort_mismatch(requested=requested_sort, cursor_sort=KEYSET_SORT)
         _reject_order_mismatch(requested=requested_sort_order, cursor_order=order)
-        # A blank query is allowed: the blank-query branch reads the cursor
-        # too since it gained pagination, so refusing would forbid exactly
-        # that paging. The cursor carries a position, never a query — the
-        # "send the same query and filters" contract is unchanged, and it
-        # already governs every filter equally.
         return CursorPlan(mode="keyset", sort=KEYSET_SORT, sort_order=order)
     return CursorPlan(
         mode="pool",

@@ -125,7 +125,19 @@ def test_a_stated_order_contradicting_the_cursor_is_a_400() -> None:
     s.search.assert_not_called()
 
 
-def test_a_pool_cursor_rejects_a_contradicting_order() -> None:
+def test_a_pool_cursor_with_an_ascending_order_is_refused() -> None:
+    """A pool cursor cannot be carried into an ascending walk.
+
+    The refusal this exercises is the rank+asc guard, **not** the pool
+    mismatch check: with no ``sort`` stated the plan resolves to rank, so
+    the request is turned away before ``get_pool_metadata`` is called and
+    the metadata below is never read. That shadowing is structural — a
+    stated order of "asc" needs ``sort="date"`` to clear the rank guard,
+    and the pool guard's *sort* half then rejects that against a rank-built
+    pool. ``reject_pool_sort_mismatch``'s order half is therefore
+    unreachable from here and is tested directly in
+    ``test_api_search_cursor_direction.py``.
+    """
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=100, pool_size=10,
@@ -135,3 +147,38 @@ def test_a_pool_cursor_rejects_a_contradicting_order() -> None:
         run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                    allowed_account_ids=[1], user_id=99, sort_order="asc",
                    cursor="tok-1:2")
+    s.get_pool_metadata.assert_not_called()
+
+
+def test_an_ascending_search_pages_end_to_end_through_run_search() -> None:
+    """The headline round trip: fresh ascending page, then its cursor alone.
+
+    Everything else here checks one leg. This is the shape a client
+    actually pages in — take ``next_cursor``, send it back, state nothing
+    else — and the one the missing direction used to break: the unstated
+    ``sort_order`` resolved to "desc" and page 2 walked back the way it
+    came, which looks like a continuation until the results repeat.
+    """
+    s = _searcher(_page(next_keyset=_KS))
+    first = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                       allowed_account_ids=[1], user_id=99, sort="date",
+                       sort_order="asc")
+    assert keyset_order(first["next_cursor"]) == "asc"
+
+    second_ks = KeysetCursor(ts=datetime(2026, 5, 22, tzinfo=timezone.utc), id=200)
+    s.search.return_value = _page(next_keyset=second_ks)
+    second = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                        allowed_account_ids=[1], user_id=99,
+                        cursor=first["next_cursor"])
+
+    _, kwargs = s.search.call_args
+    assert kwargs.get("sort") == "date"
+    assert kwargs.get("sort_order") == "asc", (
+        "the cursor was the only statement about ordering and it was ignored: "
+        "page 2 walks back over page 1"
+    )
+    assert kwargs.get("keyset_cursor") == _KS
+    assert keyset_order(second["next_cursor"]) == "asc", (
+        "the walk continued ascending but minted a descending cursor, so "
+        "page 3 would reverse"
+    )

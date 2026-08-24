@@ -25,7 +25,6 @@ from localmail.api.search_cursor import (
 )
 from localmail.config import SearchConfig
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
-from localmail.search.query import parse_query
 from localmail.search.rewrite_status import (
     CONTINUATION_PAGE,
     NOT_ATTEMPTED,
@@ -188,26 +187,25 @@ def run_search(
     # Resolved before the ACL short-circuit below, because that branch answers
     # with an empty page — indistinguishable from "you have reached the end".
     # A malformed paging request must be a 400 whatever the caller was granted.
-    # `parse_query(free_text).free_text`, never the raw field: filter operators
-    # (`from:`, `subject:`, `lang:`) parse out of the free text, so a query of
-    # nothing but operators is non-blank here and blank by the time
-    # `Searcher.search` dispatches on it — and the plan's job is to ask the
-    # question the Searcher will ask. Composing the filters first would change
-    # nothing: the tokens that adds are operators, which parse straight back
-    # out — so the bare text is what is asked.
     plan = resolve_cursor_plan(cursor=cursor, requested_sort=sort,
-                               requested_sort_order=sort_order,
-                               free_text=parse_query(free_text).free_text)
+                               requested_sort_order=sort_order)
     # Refused here as well as in the Searcher so the caller gets a clean 400
     # before any work; the Searcher's own guard is what covers CLI and
     # library callers, who never reach this function. Ahead of the empty-ACL
     # short-circuit below, which answers with an empty page indistinguishable
     # from "you have reached the end" — a contradictory request must not be
     # reported as a completed one.
+    #
+    # The mode conjunct keeps this judging what the *caller* stated on a fresh
+    # or pool request: a keyset plan's ordering came from the cursor and was
+    # validated against it above, so it is not this refusal's to re-litigate.
+    # Written out rather than left to `plan.sort == "rank"` to exclude it,
+    # which is true only while KEYSET_SORT happens to be "date".
     if plan.mode != "keyset" and plan.sort == "rank" and plan.sort_order == "asc":
         raise ValidationFailed(
             "sort_order='asc' is not applicable to sort='rank' (the default); "
-            "pass sort='date' for oldest-first"
+            "run a fresh sort='date' search for oldest-first (a cursor from a "
+            "rank-ordered search cannot be carried over)"
         )
 
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
@@ -253,12 +251,15 @@ def run_search(
                                    keyset_cursor=keyset,
                                    allowed_account_ids=allowed_account_ids)
         except (KeysetCursorUnusable, SortOrderNotApplicable) as exc:
-            # Belt to the resolver's braces: both now ask `parse_query`, so
-            # reaching here means the two have drifted apart again. That is a
-            # bad request either way, and answering it as a 500 would hide a
-            # caller error behind an operator-facing traceback. Caught by
-            # subclass, never by bare ValueError — psycopg and the embedding
-            # backends raise that, and relabelling an outage as a cursor
+            # Unreachable today: the plan pins a keyset request to
+            # sort="date", so Searcher.search takes the date branch, which
+            # reads the cursor and honours either order — neither guard can
+            # fire. Kept because both are guards on the *dispatch*, so a
+            # future change to which branch serves a keyset cursor would
+            # otherwise surface a caller's bad request as an operator-facing
+            # 500 traceback rather than a 400. Caught by named subclass,
+            # never by bare ValueError — psycopg, datetime and the embedding
+            # backends raise that, and relabelling a real outage as a cursor
             # problem would send the caller to re-send a blameless query.
             raise ValidationFailed(f"cursor: {exc}") from exc
     else:

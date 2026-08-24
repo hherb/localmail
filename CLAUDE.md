@@ -3281,6 +3281,40 @@ for the full design.
         asserts the planner's **choice**, not merely eligibility: unlike
         `test_api_browse_plan.py` the ascending spelling wins at 300 rows
         with nothing hidden and `enable_seqscan` left on.
+    - **The ORDER BY is only half the plan: the ascending keyset predicate
+      is a row comparison, `ROW(expr, m.id) > ROW(%s, %s)`, never the
+      OR-form.** This shipped as the OR-form and was caught in review of
+      #322. The two are semantically identical — same rows, same order,
+      and the OR-form *keeps* `Index Scan Backward` and adds no Sort, so
+      every assertion the plan test then carried passed for it. What it
+      loses is the range bound: the predicate plans as a per-tuple
+      `Filter`, so each continuation page restarts at the head of the index
+      and discards every preceding row. This is #75 exactly, on the search
+      path, in newly written code — the entry #75 left in this file says
+      *"Do NOT rewrite the predicate as the OR-form even though it's
+      semantically equivalent — the planner does not optimize it."*
+      Measured mid-walk on the live 128,306-message archive, page ~1250:
+      **62.1 ms / 53,789 buffers / 64,001 rows removed by filter**, against
+      **0.57 ms / 46 buffers** with `Index Cond` for the row comparison.
+      Cost is linear in scroll depth (offset 1,000 → 1.5 ms; 10,000 → 12.7
+      ms; 40,000 → 49.6 ms), so it is invisible on page 1 — **which is the
+      only page the "no new index" measurements above cover.** Pinned by
+      `test_the_ascending_keyset_predicate_composes_an_index_range_bound`,
+      which requires an `Index Cond` naming the date expression and forbids
+      a `Filter` naming it, with the OR-form kept as a **second** negative
+      control beside the `NULLS LAST` one. Structural, not a timing: at
+      fixture scale both forms are fast, and being invisible until
+      production depth is the whole defect.
+      - **Descending cannot have this**, and that asymmetry is not an
+        oversight. Ascending needs no `OR expr IS NULL` disjunct — under
+        `NULLS FIRST` the undated block is behind the cursor and
+        `ROW(NULL, id) > ROW(…)` is NULL, so those rows drop out on their
+        own. Descending must *admit* the undated tail ahead of the cursor,
+        which a row comparison would silently drop. Closing it needs
+        `browse.py`'s two-phase dated-then-top-up query — **filed as #323**,
+        pre-existing, and measured at the same 62.7 ms / 64,001 filtered
+        rows. Do not "restore symmetry" by putting the OR-form back on the
+        ascending side.
     - **Undated rows sort first ascending, not last.** Ascending is the
       exact reverse of descending — the undated tail becomes the undated
       head, same rows, reversed — which is what makes `asc ==
@@ -3330,6 +3364,21 @@ for the full design.
         `::test_a_query_of_only_filter_operators_continues_the_walk_too`,
         and
         `test_searcher_keyset_guard.py::test_an_empty_query_now_reads_the_keyset_cursor`.
+      - **Known consequence, filed as #324:** a blank query is served by
+        the date branch whatever the `sort`, so a caller stating
+        `sort="rank"` with a blank query gets page 1 *and* a cursor — which
+        records `KEYSET_SORT = "date"`, the ordering that actually ran.
+        Re-stating that same `sort="rank"` on page 2 is then a 400. The
+        request shape is accepted on page 1 and refused on page 2. It is
+        unreachable under the documented contract (omit `sort` when
+        paging, which `gui/src/lib/search_paging.ts::statedSort` enforces
+        by construction) and reachable for any client that echoes its own
+        parameters back. The honest fix is to refuse the stated `rank` on
+        **page 1** — a blank query has always ignored it silently, which is
+        the pre-existing half — but that is a wire-visible change and wants
+        its own decision. Do **not** "fix" it by having the cursor record
+        the sort the caller *stated* rather than the one that ran: a cursor
+        claiming an ordering it did not walk is #308 itself.
     - **`_date_sort_key` (and the `sort="date"` branch of `_build_results`
       it serves) is unreachable, and stays that way on purpose.** The
       hybrid pool branch — the only caller of `_build_results` with a

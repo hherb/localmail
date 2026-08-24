@@ -131,6 +131,7 @@ def _keyset_clause(keyset: KeysetCursor, order: str) -> tuple[str, list[Any]]:
     expr = _DATE_EXPR_SQL
     if order == "desc":
         if keyset.ts is None:
+            # Already in the NULLS-LAST tail: paginate by id alone.
             return f" AND {expr} IS NULL AND m.id < %s ", [keyset.id]
         return (
             f" AND ({expr} < %s OR ({expr} = %s AND m.id < %s) "
@@ -361,7 +362,7 @@ class SearchResult:
 
 @dataclass(frozen=True)
 class KeysetCursor:
-    """Keyset position for the lexical-date search path.
+    """Keyset position for the date-ordered keyset search path.
 
     Mirrors ``api.browse_cursor.BrowseCursor`` but lives in the search
     layer so that ``Searcher`` does not depend on ``api/``. The api layer
@@ -386,9 +387,10 @@ class KeysetCursorUnusable(ValueError):
 class SearchPage:
     """One page of results plus pagination metadata.
 
-    ``next_keyset`` is set only on the lexical-date path (``sort="date"``
-    with non-empty free text). The hybrid pool path keeps
-    ``next_keyset=None`` and continues to use ``search_token`` + page.
+    ``next_keyset`` is set on the date-ordered keyset walk — ``sort="date"``
+    with free text, or any blank query regardless of ``sort``. The hybrid
+    pool path keeps ``next_keyset=None`` and continues to use
+    ``search_token`` + page.
     """
     results: list[SearchResult]
     page: int
@@ -556,67 +558,7 @@ class Searcher:
         ids = list(found.values()) or [_NO_ACCOUNT_SENTINEL]
         return replace(parsed, filters=replace(parsed.filters, accounts=ids))
 
-    def _list_recent_messages(
-        self,
-        conn: psycopg.Connection,
-        parsed: ParsedQuery,
-        limit: int,
-    ) -> list["SearchResult"]:
-        """Empty-query fallback: SELECT messages ORDER BY
-        ``COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC``.
-
-        ``internal_date`` (migration 0018) holds the IMAP server's
-        INTERNALDATE — when the email actually arrived at the mailbox.
-        sync.py populates it on insert; legacy rows are populated via
-        ``localmail backfill-internal-date``. ``date_sent`` (header
-        ``Date:``) is the fallback for rows not yet backfilled. The
-        expression matches the ``messages_recent_idx`` index so the
-        planner can avoid a full table sort.
-
-        Shares ``_filter_sql`` with the retrieval arms so structured
-        filters (account_id, folder_id, from/to/subject substrings, date
-        ranges, has_attachment, lang) behave identically here and in the
-        full-pipeline path. Returns ``SearchResult`` so the API layer can
-        marshal results uniformly regardless of which branch fired.
-        """
-        from localmail.search.arms import _filter_sql
-        where_extra, where_params = _filter_sql(parsed.filters)
-        sql = f"""
-            SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
-                   m.date_sent, m.internal_date
-              FROM messages m
-             WHERE TRUE
-             {where_extra}
-             ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, m.id DESC
-             LIMIT %s
-        """
-        params: list[Any] = [*where_params, limit]
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-        out: list[SearchResult] = []
-        for rank, (mid, account_id, subject, from_addr, from_name,
-                   date_sent, internal_date) in enumerate(rows, start=1):
-            out.append(SearchResult(
-                message_id=mid,
-                account_id=account_id,
-                rank=rank,
-                score=1.0 / rank,
-                rrf_score=0.0,
-                subject=subject,
-                from_addr=from_addr,
-                from_name=from_name,
-                date_sent=date_sent,
-                internal_date=internal_date,
-                snippet="",
-                snippet_source="header",
-                attachment_filename=None,
-                matched_chunk_id=None,
-                matched_chunk_table="message",
-            ))
-        return out
-
-    def _lexical_date_search(
+    def _date_keyset_search(
         self,
         conn: psycopg.Connection,
         parsed: ParsedQuery,
@@ -624,19 +566,28 @@ class Searcher:
         keyset: KeysetCursor | None,
         order: str,
     ) -> tuple[list[SearchResult], KeysetCursor | None]:
-        """Gmail-style lexical search: every message whose FTS matches the
-        free text, ORDER BY COALESCE(internal_date, date_sent) per ``order``
-        (see ``_DATE_ORDER_BY_SQL``), keyset paginated. Returns (results,
-        next_keyset_or_None).
+        """Date-ordered keyset walk, ORDER BY COALESCE(internal_date,
+        date_sent) per ``order`` (see ``_DATE_ORDER_BY_SQL``). Returns
+        (results, next_keyset_or_None).
 
-        Why this path exists: with the hybrid pipeline a query like
-        "e-ticket" returns at most ``rerank_pool_size`` candidates fused
-        across the four arms, then date-sorted. Users with dozens of
-        recent e-tickets only see a handful — and grow_pool's "load more"
-        re-ranks the same top-K with overlap, so it appears to find
-        nothing new. Lexical+keyset bypasses both bounds: there is no pool
-        cap and the cursor walks the (ts, id) keyspace, so the user can
-        scroll back arbitrarily far.
+        Serves two intents that turned out to be one query. With non-empty
+        free text this is the Gmail-style lexical walk: every message whose
+        FTS matches, keyset paginated. With a blank query it is the
+        "show me my mail" walk: every message, filtered and paginated the
+        same way. The FTS predicate is the *only* difference between them —
+        this used to be two methods (``_lexical_date_search`` and
+        ``_list_recent_messages``, the latter unpaginated) that were
+        otherwise identical in SELECT list, ORDER BY, and filter
+        composition.
+
+        Why the lexical case bypasses the hybrid pool: with the hybrid
+        pipeline a query like "e-ticket" returns at most
+        ``rerank_pool_size`` candidates fused across the four arms, then
+        date-sorted. Users with dozens of recent e-tickets only see a
+        handful — and grow_pool's "load more" re-ranks the same top-K with
+        overlap, so it appears to find nothing new. This walk bypasses both
+        bounds: there is no pool cap and the cursor walks the (ts, id)
+        keyspace, so the user can scroll back arbitrarily far.
 
         Uses the same ``messages.fts_v2`` column and the shared
         ``build_lexical_tsquery`` matcher as ``arm_bm25_messages`` so recall is
@@ -644,15 +595,23 @@ class Searcher:
         which OR into the FTS match here exactly as they do in the hybrid arms.
         Structured filters
         (account_ids, folder_ids, from/to/subject substrings, date
-        ranges, has_attachment, lang) flow through ``_filter_sql``.
+        ranges, has_attachment, lang) flow through ``_filter_sql`` either way.
         """
         from localmail.search.arms import _filter_sql, build_lexical_tsquery
 
         where_extra, where_params = _filter_sql(parsed.filters)
-        tsq_sql, tsq_params = build_lexical_tsquery(
-            parsed.free_text, parsed.expansion_terms
-        )
-        params: list[Any] = [*tsq_params]
+        params: list[Any] = []
+        if parsed.free_text.strip():
+            tsq_sql, tsq_params = build_lexical_tsquery(
+                parsed.free_text, parsed.expansion_terms
+            )
+            match_clause = f"m.fts_v2 @@ {tsq_sql}"
+            params.extend(tsq_params)
+        else:
+            # No free text: the walk is over the whole (filtered) archive.
+            # This is the branch that used to be _list_recent_messages, which
+            # was this query minus the FTS predicate and minus the cursor.
+            match_clause = "TRUE"
         keyset_clause = ""
         if keyset is not None:
             keyset_clause, keyset_params = _keyset_clause(keyset, order)
@@ -665,7 +624,7 @@ class Searcher:
             SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
                    m.date_sent, m.internal_date
               FROM messages m
-             WHERE m.fts_v2 @@ {tsq_sql}
+             WHERE {match_clause}
              {keyset_clause}
              {where_extra}
              {_DATE_ORDER_BY_SQL[order]}
@@ -1057,12 +1016,16 @@ class Searcher:
         unstated `None` to `DEFAULT_SORT_ORDER` ("desc") once, here, into
         `effective_order` — every read below goes through that local, never
         the raw parameter. `sort_order="asc"` only takes effect on the
-        `sort="date"` lexical-keyset branch, where both the ORDER BY and the
-        keyset predicate flip to walk the archive oldest-first. Pairing it
-        with `sort="rank"` (stated or defaulted) raises
-        `SortOrderNotApplicable`: the rank path serves a bounded candidate
-        pool, so reversing it would surface the least relevant of the top
-        hits rather than the oldest of the archive.
+        date-ordered keyset branch (`_date_keyset_search`, reached by
+        `sort="date"` — with or without free text — or by any blank query),
+        where both the ORDER BY and the keyset predicate flip to walk the
+        archive oldest-first. Pairing it with `sort="rank"` (stated or
+        defaulted) raises `SortOrderNotApplicable` regardless of the query,
+        blank or not — checked before the query is even parsed: the rank
+        path serves a bounded candidate pool, so reversing it would surface
+        the least relevant of the top hits rather than the oldest of the
+        archive, and a blank query defaulting to `sort="rank"` is no
+        exception — ascending order requires stating `sort="date"`.
         """
         t0 = time.monotonic()
         effective_sort: SortMode = DEFAULT_SORT if sort is None else sort
@@ -1126,20 +1089,26 @@ class Searcher:
         # no-op inside the helper, so this call is unconditional.
         parsed = _clamp_account_ids_to_acl(parsed, allowed_account_ids)
 
-        # sort=date with free_text: lexical+keyset, unbounded. The hybrid
-        # path caps at ``rerank_pool_size`` candidates fused by RRF, so a
-        # user searching for "e-ticket" (with dozens of matches across
-        # years) sees only the top-K most relevant — even though they
-        # asked for chronological order. Bypass the pool entirely:
-        # ``messages.fts_v2`` (same column Arm 1 uses) gives identical
-        # lexical recall, and the keyset cursor lets them scroll back
-        # arbitrarily far.
-        if effective_sort == "date" and parsed.free_text.strip():
+        # The date-ordered keyset walk serves two intents that are one query.
+        #
+        # sort=date with free text: the hybrid path caps at
+        # ``rerank_pool_size`` candidates fused by RRF, so a user searching
+        # "e-ticket" sees only the top-K even though they asked for
+        # chronological order. ``messages.fts_v2`` gives identical lexical
+        # recall and the keyset cursor scrolls back arbitrarily far.
+        #
+        # A blank query, whatever the sort: the hybrid pipeline degenerates
+        # for it (the BM25 arms early-return with no terms, the vector arms
+        # rank by distance to the embedding of the empty string), so a blank
+        # query has always been answered as a date-ordered list. It now
+        # paginates too — before, it returned one page and no cursor, which
+        # is the branch "show me my oldest mail" lands on.
+        if effective_sort == "date" or not parsed.free_text.strip():
             t = time.monotonic()
             with self._pool.connection() as conn:
                 parsed = self._resolve_account_names(conn, parsed)
                 self._maybe_warn_unpopulated_body_lang(conn, parsed)
-                results, next_keyset = self._lexical_date_search(
+                results, next_keyset = self._date_keyset_search(
                     conn, parsed, effective_page_size, keyset_cursor,
                     effective_order,
                 )
@@ -1158,46 +1127,21 @@ class Searcher:
                 rewrite_note_code=rewrite_note_code,
             )
 
-        # The branch above is the only reader of `keyset_cursor` (#308). Reaching
-        # here with one means the caller's (sort, query) selected a different
-        # retrieval mode, whose page 1 would go back as if it continued the
-        # walk — a restart wearing a continuation's clothes. Raise rather
-        # than answer the wrong question quietly. A named error, not an
-        # assert: asserts vanish under `python -O`.
+        # The branch above is the only reader of ``keyset_cursor`` (#308).
+        # Reaching here means the caller's (sort, query) selected the hybrid
+        # pool, whose page 1 would go back as if it continued the walk — a
+        # restart wearing a continuation's clothes. Raise rather than answer
+        # the wrong question quietly. A named error, not an assert: asserts
+        # vanish under ``python -O``.
+        #
+        # The blank-query shape used to land here too. It no longer does:
+        # that branch honours the cursor now, so rejecting it would forbid
+        # exactly the paging this reachability change adds.
         if keyset_cursor is not None:
-            shape = "a blank" if not parsed.free_text.strip() else "a non-empty"
             raise KeysetCursorUnusable(
-                "keyset_cursor requires sort='date' and a non-empty query; "
-                f"got sort={effective_sort!r} with {shape} query. Note the query is "
-                "measured after filter operators are parsed out of it, so a "
-                "query of nothing but operators counts as blank"
-            )
-
-        # Empty-query fallback: an empty `free_text` is the canonical
-        # "show me my mail" signal. The hybrid pipeline degenerates badly
-        # for it — BM25 arms early-return [] (no terms to match) and the
-        # vector arms rank by cosine distance to the embedding of the empty
-        # string, producing exactly `rerank_pool_size` (default 20)
-        # arbitrary-looking hits. We short-circuit to a date-sorted list so
-        # callers (GUI, MCP, programmatic API) get a predictable result —
-        # structured filters still apply via `_filter_sql`.
-        if not parsed.free_text.strip():
-            t = time.monotonic()
-            with self._pool.connection() as conn:
-                parsed = self._resolve_account_names(conn, parsed)
-                self._maybe_warn_unpopulated_body_lang(conn, parsed)
-                results = self._list_recent_messages(conn, parsed, effective_page_size)
-            timing["retrieve"] = (time.monotonic() - t) * 1000
-            timing["rerank"] = 0.0
-            timing["total"] = (time.monotonic() - t0) * 1000
-            return SearchPage(
-                results=results, page=1, page_size=effective_page_size,
-                pool_size=len(results), candidates_per_arm=cpa,
-                has_more_in_pool=False, can_grow_pool=False,
-                search_token=None, query=parsed, timing_ms=timing,
-                rewrite_status=rewrite_status,
-                rewrite_note=rewrite_note,
-                rewrite_note_code=rewrite_note_code,
+                "keyset_cursor is not readable by the hybrid pool branch; it "
+                f"requires sort='date' or a blank query, got "
+                f"sort={effective_sort!r} with a non-empty query"
             )
 
         with self._pool.connection() as conn:

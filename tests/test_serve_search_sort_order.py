@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
-"""``sort_order`` on the HTTP wire: accepted, defaulted, and null-by-default."""
+"""``sort_order`` on the request *model*: accepted, and null-by-default.
+
+Schema-level only — nothing here issues a request. The behaviour that
+needs the wire (the field reaching ``searcher.search``, and the
+``sort="rank"`` + ``sort_order="asc"`` 400) is pinned in
+``test_serve_search_route.py``, beside the identical pins its sibling
+``sort`` already had.
+"""
 from __future__ import annotations
 
 from localmail.serve.routes.search import SearchRequest

@@ -362,3 +362,35 @@ def test_tool_search_smart_with_rewriter_applies_over_the_wire(db_dsn, db_conn):
     assert plain["results"] == []  # "invoice" matches nothing un-rewritten
     assert smart["results"]  # expansion "receipt" surfaces the message
     assert smart["rewrite_skipped"] is False
+
+
+def test_tool_search_forwards_sort_order_to_run_search(monkeypatch):
+    """The `tool_search` → `run_search` hop, which nothing pinned.
+
+    Every other MCP test here drives a real searcher and asserts on rows,
+    so a dropped `sort_order` is invisible to them: the call still 200s and
+    still returns date-ordered results, just in the direction the agent did
+    not ask for. Deleting the forwarding line left this whole file green.
+    """
+    seen: dict = {}
+
+    def _recording_run_search(**kwargs):
+        seen.update(kwargs)
+        return {"results": [], "next_cursor": None}
+
+    monkeypatch.setattr(tools, "run_search", _recording_run_search)
+    tools.tool_search(searcher=object(), user_id=1, allowed_account_ids=[1],
+                      query="invoice", sort="date", sort_order="asc")
+    assert seen.get("sort_order") == "asc"
+
+
+def test_tool_search_states_no_sort_order_of_its_own():
+    """`mcp/server.py` always forwards `sort_order` explicitly, so a
+    `= "desc"` restored here leaves every schema pin green while silently
+    re-arming the defect for a direct library caller — the layer
+    `test_mcp_server_build.py`'s schema assertion cannot see.
+    """
+    import inspect
+
+    param = inspect.signature(tools.tool_search).parameters["sort_order"]
+    assert param.default is None

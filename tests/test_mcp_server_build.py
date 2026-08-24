@@ -84,3 +84,75 @@ def test_search_declares_no_sort_order_default_of_its_own(db_dsn):
         f"search states sort_order={props['sort_order'].get('default')!r} "
         "for the agent: an ascending cursor can never win against it"
     )
+
+
+def _search_tool_fn(server):
+    """The registered `search` tool's underlying function.
+
+    Reached through the tool manager rather than through a transport
+    because the hop under test is inside the tool body — the schema
+    assertions above see the parameter list and nothing of what the body
+    does with it.
+    """
+    return server._tool_manager.get_tool("search").fn
+
+
+def test_search_forwards_sort_order_to_the_tool_body(db_dsn, monkeypatch):
+    """The `server.py` → `tools.tool_search` hop, which nothing pinned.
+
+    `server.py` restates every parameter for the agent-facing schema and
+    then forwards each one by hand, so the schema can declare `sort_order`
+    while the body drops it: the agent asks for oldest-first, gets a 200,
+    and is handed newest-first. Deleting that one forwarding line left
+    every MCP test green.
+    """
+    import localmail.mcp.server as server_mod
+
+    seen: dict = {}
+
+    def _recording_tool_search(**kwargs):
+        seen.update(kwargs)
+        return {"results": [], "next_cursor": None}
+
+    monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
+    monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
+
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=object(),
+                                  config=McpConfig(enabled=True))
+        _search_tool_fn(server)(query="invoice", sort="date", sort_order="asc")
+    finally:
+        pool.close()
+    assert seen.get("sort_order") == "asc"
+    assert seen.get("sort") == "date"
+
+
+def test_search_forwards_an_unstated_sort_order_as_none(db_dsn, monkeypatch):
+    """Unstated must arrive as None, not as a direction the body invents.
+
+    `run_search` is what resolves an omitted value, and it is also what
+    lets a cursor decide instead — so a "desc" manufactured anywhere on
+    this path contradicts every ascending cursor and turns the documented
+    paging call into a 400.
+    """
+    import localmail.mcp.server as server_mod
+
+    seen: dict = {}
+
+    def _recording_tool_search(**kwargs):
+        seen.update(kwargs)
+        return {"results": [], "next_cursor": None}
+
+    monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
+    monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
+
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=object(),
+                                  config=McpConfig(enabled=True))
+        _search_tool_fn(server)(query="invoice")
+    finally:
+        pool.close()
+    assert "sort_order" in seen
+    assert seen["sort_order"] is None

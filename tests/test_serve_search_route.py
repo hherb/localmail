@@ -473,3 +473,165 @@ def test_search_smart_without_rewriter_degrades(
     assert body["rewrite_note"] == "smart search is not configured on this server"
     assert body["rewrite_note_code"] == "not_configured"
     assert body["rewrite_skipped"] is True
+
+
+def test_search_sort_order_param_is_forwarded_to_searcher(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """The route must pass `sort_order` through to `searcher.search()`.
+
+    Its sibling `sort` has had this pin since the field shipped; the new
+    axis had none, so deleting the one forwarding line left the whole
+    suite green. A dropped direction is the worst shape of that bug: the
+    caller asks for oldest-first, gets a 200, and is handed newest-first —
+    the silent-parameter-drop class #308/#312 exist to end.
+    """
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake_searcher = _fake_searcher_returning_one_hit()
+    app = create_app(db_dsn=db_dsn, searcher=fake_searcher)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "sort": "date", "sort_order": "asc"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert fake_searcher.search.call_args.kwargs["sort_order"] == "asc"
+
+
+def test_search_sort_order_defaults_to_desc_when_omitted(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """Omitting it must reproduce today's behaviour byte for byte — the GUI
+    never sends the field."""
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake_searcher = _fake_searcher_returning_one_hit()
+    app = create_app(db_dsn=db_dsn, searcher=fake_searcher)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20, "sort": "date"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert fake_searcher.search.call_args.kwargs["sort_order"] == "desc"
+
+
+def test_search_rejects_ascending_rank_at_the_http_boundary(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """`sort="rank"` + `sort_order="asc"` is a 400 over the wire, not just
+    inside `run_search`.
+
+    The rank path serves a bounded candidate pool, so reversing it returns
+    the least relevant *of the top hits* rather than of the archive — a
+    result that looks meaningful and is an artifact of where the pool
+    stopped. The refusal is the whole reason the axis is orthogonal rather
+    than two new `sort` members, so it has to hold where clients meet it.
+    """
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "sort": "rank", "sort_order": "asc"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["type"] == "/problems/validation-failed"
+    assert "sort_order" in body["detail"]
+    fake.search.assert_not_called()
+
+
+def test_search_rejects_ascending_with_no_sort_stated_at_all(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """The commonest way to hit the refusal: `sort_order="asc"` alone.
+
+    An unstated `sort` resolves to "rank", so this is the same 400 — and
+    it must not be reached by the alternative the design rejected, where
+    `sort_order="asc"` silently *implies* `sort="date"` and the parameter
+    stops being a direction.
+    """
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20, "sort_order": "asc"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.json()["type"] == "/problems/validation-failed"
+    fake.search.assert_not_called()
+
+
+def test_search_rejects_a_stated_order_the_cursor_cannot_serve(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """A descending statement against an ascending cursor is a 400 on the
+    wire, the sibling of the `sort` contradiction above."""
+    from datetime import datetime, timezone
+
+    from localmail.api.search_cursor import encode_keyset_cursor
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    cursor = encode_keyset_cursor(
+        KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100),
+        "asc",
+    )
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "sort_order": "desc", "cursor": cursor},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.json()["type"] == "/problems/validation-failed"
+    fake.search.assert_not_called()
+
+
+def test_search_continues_an_ascending_cursor_over_the_wire(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """The documented paging call over HTTP: send the cursor back, state
+    nothing, and keep walking ascending.
+
+    This one survives deleting the route's `sort_order` forwarding, and
+    deliberately so — with a cursor in hand the *cursor* is the authority
+    on both axes, which is the whole point of `KA|`. It is here as the
+    positive control for the refusals above: a rule that turned away every
+    ascending request would satisfy all three of them and break the only
+    call the docs tell a client to make.
+    """
+    from datetime import datetime, timezone
+
+    from localmail.api.search_cursor import encode_keyset_cursor
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100)
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20,
+              "cursor": encode_keyset_cursor(ks, "asc")},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    kwargs = fake.search.call_args.kwargs
+    assert kwargs["sort"] == "date"
+    assert kwargs["sort_order"] == "asc"
+    assert kwargs["keyset_cursor"] == ks

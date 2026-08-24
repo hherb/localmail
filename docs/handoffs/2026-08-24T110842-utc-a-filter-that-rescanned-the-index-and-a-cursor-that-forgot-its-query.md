@@ -12,8 +12,10 @@
 > this file. **Risk 3 is now three-times earned: read `git` and `gh` first,
 > always.**
 >
-> **The DGX is now SEVEN merges behind** (`fb48f23`). Not deployed this session
-> — see "What's next", item 0.
+> **The DGX was seven merges behind and is now deployed to `b612f00`** —
+> migration `0036` applied, all extras verified, `/v1/version` reporting
+> `build_hash b612f00`. It needs **one more `git pull` + restart** once #333
+> merges; no migration in that one.
 
 ## Project context (1-minute version)
 
@@ -159,26 +161,39 @@ Daemon restarted, pid 88824.
 `search-status` **0.92 s**; partition holds:
 `blobs_eligible 9530 = 9242 + 106 + 182 + 0`, `claimable 0`. 128,324 messages,
 all chunks embedded, `body_lang_pending 0`.
-**DGX** — all three units `active`, still at **`fb48f23`** — **seven merges
-behind**.
+**DGX** — **deployed this session** from `fb48f23` to **`b612f00`** (seven
+merges: #313, #314, #315, #316, #317, #322, #332). `~/.local/bin/uv sync
+--extra mcp --extra extraction`; docling / mcp / rapidocr all import;
+`localmail init-db` applied the one pending migration (**`0036_api_keys`**);
+both units restarted and `active`, plus `localmail-wgprobe`. Verified:
+`/v1/version` → `{"build_hash": "b612f00", "build_source": "git_checkout",
+"version_source": "installed"}` — #315's provenance live and matching the
+checkout, no `-dirty`. 4 heartbeats, poll actively syncing.
+`list-api-keys` answers (0036's surface). `search-status` **0.799 s**,
+partition holds: `4392 = 4174 + 91 + 127 + 0`, claimable 0.
+**Note it binds `10.0.0.3:8443`, not localhost** — a `curl https://localhost:8443`
+returns nothing and is not a fault.
 
 **Dependabot: 0 open alerts** once this merges (was 4). **Open issues: 25**,
 dropping to **23**.
 
 ## What's next
 
-### 0. **Merge the PR, then deploy — the DGX is seven merges behind**
-   **You merge** (project convention). Closes #323 and #326.
+### 0. **Merge PR #333, then top both hosts up**
+   **You merge** (project convention). Closes #323 and #326 and clears all four
+   Dependabot alerts. CI green on both interpreter legs.
    - **Acceptance after merge:** on the live archive, a mid-walk descending
      keyset page EXPLAINs as `Index Cond`, not `Filter` (recipe in the resume
      block); and `search`ing over MCP with a cursor but no `query` returns a
      400 naming `query` rather than unrelated mail.
-   - **DGX deploy is the bigger half.** It has missed build provenance (#315),
-     the GUI modernisation (#316), API keys (#317, **migration 0036**),
-     sort_order (#322/#332) and this PR. It therefore **needs `init-db`**.
-     Recipe in the resume block. **Never a bare `uv sync`** — risk 13.
+   - **The DGX heavy lift is already done** — it is at `b612f00` with migration
+     0036 applied. After merging it needs only
+     `git pull && ~/.local/bin/uv sync --extra mcp --extra extraction &&
+     systemctl --user restart localmail-daemon localmail-serve`. **No
+     migration** in #333, but the `sqlparse` bump means the `uv sync` is not
+     optional. **Never a bare `uv sync`** — risk 13.
    - The Mac tree is on `fix/keyset-index-cond-and-walk-kind` and its launchd
-     daemon runs an editable install (risk 12), so `git checkout main` after
+     daemon runs an editable install (risk 14), so `git checkout main` after
      merging.
 
 ### 1. **#324 — the blank-query/`sort="rank"` cursor wart** *(carried, and now the closest neighbour)*
@@ -269,9 +284,11 @@ dropping to **23**.
      is non-empty for **every** squash-merged branch (18 of them right now).
      Signal = non-empty on a branch whose PR merged *recently*, confirmed by a
      **content** diff (`git diff --stat main origin/<b>` empty ⇒ it landed).
-4. **Verify host revisions; do not infer them** *(carried)*. The DGX is at
-   `fb48f23`, seven merges back, and one of those adds **migration 0036** — so
-   its deploy needs `init-db`, not just a restart.
+4. **Verify host revisions; do not infer them** *(carried)*. The DGX moved
+   itself between handoffs once before, with no session doing it. It is at
+   **`b612f00`** as of this session, verified through `/v1/version`'s
+   `build_hash` rather than inferred — which is what that field is for.
+   One `ssh 10.0.0.3 'cd ~/src/localmail && git log --oneline -1'` settles it.
 5. **Test-count baselines: measure both refs IN THE SAME SESSION** *(carried)*.
    `main` **2806**, branch **2850**. A number quoted from a previous handoff is
    not a baseline. A fresh worktree needs `uv sync --all-extras` first.
@@ -398,11 +415,14 @@ gh api repos/hherb/localmail/dependabot/alerts \
 
 # AFTER MERGING — the tree is on fix/keyset-index-cond-and-walk-kind (risk 14):
 #   Mac:  git checkout main && git pull && unset VIRTUAL_ENV && uv sync --all-extras
-#   DGX (SEVEN merges behind; migration 0036 landed, so init-db is REQUIRED):
+#   DGX (already at b612f00 with 0036 applied; #333 adds no migration, but the
+#        sqlparse bump makes the sync mandatory):
 #     ssh 10.0.0.3 'cd ~/src/localmail && git pull \
 #       && ~/.local/bin/uv sync --extra mcp --extra extraction \
-#       && ~/.local/bin/uv run localmail init-db \
 #       && systemctl --user restart localmail-daemon localmail-serve'
+#   Verify by asking the host what it is running, never by inferring:
+#     ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'   # NOT localhost
+#     # build_hash must equal `git rev-parse --short HEAD` there, with no -dirty
 
 # ACCEPTANCE for #323 — a deep descending page must be an Index Cond, not a
 # Filter. Substitute a real (ts, id) from the OFFSET probe into the second query.
@@ -448,9 +468,12 @@ unset VIRTUAL_ENV && uv run localmail search-status    # UNDER A SECOND (risk 15
 #   blobs_eligible, and claimable must equal pending.
 #   Mac 9530 = 9242 + 106 + 182 + 0, claimable 0
 
-# The DGX — seven merges behind as of this session (risk 4):
+# The DGX — deployed to b612f00 this session (risk 4):
 ssh 10.0.0.3 'systemctl --user is-active localmail-daemon localmail-serve localmail-wgprobe'
 ssh 10.0.0.3 'cd ~/src/localmail && git log --oneline -1'
+ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'   # binds 10.0.0.3, NOT localhost
+ssh 10.0.0.3 'cd ~/src/localmail && ~/.local/bin/uv run localmail search-status'
+#   expect under a second; 4392 = 4174 + 91 + 127 + 0, claimable 0
 tail -5 ~/localmail-probe/tunnel-probe.log   # expect lan=ok(3/3)@<addr>
 
 # Frontend — REQUIRED only if you touch gui/ (MUST run from gui/ — risk 23):

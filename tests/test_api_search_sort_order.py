@@ -150,6 +150,55 @@ def test_a_pool_cursor_with_an_ascending_order_is_refused() -> None:
     s.get_pool_metadata.assert_not_called()
 
 
+def test_a_stated_order_reaches_the_pool_guard_and_is_checked_against_it() -> None:
+    """``run_search`` must hand the caller's stated order to the pool guard.
+
+    The test above proves only that the *ascending* case never gets there,
+    so nothing drove ``_check_pool_sort``'s ``requested_sort_order``
+    argument end to end: every other pool-cursor test states no order at
+    all, which makes ``_reject_order_mismatch`` a no-op by construction.
+    Dropping that argument — passing ``None`` where the caller's value
+    belongs — therefore left the whole suite green while silently
+    un-checking one half of the pool guard.
+
+    ``sort_order="desc"`` is the only stated order that reaches the guard
+    (``"asc"`` is shadowed by the rank+asc refusal), so the pool it is
+    checked against has to be an ascending one for the comparison to have
+    an answer. Such a pool cannot arise in production — which is the point:
+    a mocked one is the only way to observe that the argument arrived.
+    """
+    s = _searcher()
+    s.get_pool_metadata.return_value = PoolMetadata(
+        candidates_per_arm=50, page_size=2, rerank_pool_size=100, pool_size=10,
+        sort="rank", sort_order="asc",
+    )
+    with pytest.raises(ValidationFailed, match="sort_order"):
+        run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                   allowed_account_ids=[1], user_id=99, sort_order="desc",
+                   cursor="tok-1:2")
+    s.get_pool_metadata.assert_called_once()
+
+
+def test_an_order_matching_the_pool_continues_instead_of_refusing() -> None:
+    """The other half: agreeing with the pool is not an error.
+
+    Guards are only as trustworthy as their negative case. Without this,
+    ``_check_pool_sort`` could reject every stated order and the test above
+    would still pass.
+    """
+    s = _searcher()
+    s.get_pool_metadata.return_value = PoolMetadata(
+        candidates_per_arm=50, page_size=2, rerank_pool_size=100, pool_size=10,
+        sort="rank", sort_order="desc",
+    )
+    out = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                     allowed_account_ids=[1], user_id=99, sort_order="desc",
+                     cursor="tok-1:2")
+    s.get_pool_metadata.assert_called_once()
+    s.continue_page.assert_called_once()
+    assert out["results"] == []
+
+
 def test_an_ascending_search_pages_end_to_end_through_run_search() -> None:
     """The headline round trip: fresh ascending page, then its cursor alone.
 

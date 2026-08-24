@@ -143,6 +143,48 @@ def test_pool_metadata_reports_the_sort_the_pool_was_actually_built_with(db_dsn)
         pool.close()
 
 
+def test_pool_metadata_reports_the_order_the_pool_was_actually_built_with(db_dsn):
+    """The same read, on the second axis — and it had no pin at all.
+
+    ``sort_order`` shipped as a defaultless sibling of ``sort`` with the
+    same "a wrong read decides a 400" rationale in its comment, and nothing
+    ever asserted it. Every api-level test constructs ``PoolMetadata`` as a
+    mock fixture, passing ``sort_order="desc"`` to satisfy the constructor
+    and never reading it back, so hardcoding the field to ``"desc"`` — or
+    transposing it with ``sort`` — left the whole suite green.
+
+    A pool built ``sort_order="asc"`` cannot arise in production (the
+    rank+asc guard fires before any pool is cached), which is exactly why
+    the read must be exercised past retrieval: it is the only value that
+    can tell a truthful read from a hardcoded one.
+    """
+    cfg = SearchConfig()
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
+        s._cache.put("tok-asc", {
+            "parsed": parse_query("invoice"), "hydrated": [], "scores": {},
+            "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
+            "user_id": None, "sort": "rank", "sort_order": "asc",
+        })
+        meta = s.get_pool_metadata("tok-asc")
+        # The entry's two values differ, so each field is pinned to its own
+        # key: swapping the two reads makes *both* lines wrong rather than
+        # leaving one to pass on a coincidence.
+        assert meta.sort_order == "asc"
+        assert meta.sort == "rank"
+
+        # And the defaultless field's own failure shape, as for ``sort``:
+        # a writer that forgot the key must be loud, not silently "desc".
+        entry = dict(s._cache.get("tok-asc"))
+        del entry["sort_order"]
+        s._cache.put("tok-no-order", entry)
+        with pytest.raises(KeyError):
+            s.get_pool_metadata("tok-no-order")
+    finally:
+        pool.close()
+
+
 def test_an_unstated_sort_is_resolved_before_it_reaches_the_pool(db_dsn, db_conn):
     """``sort=None`` means "unstated", and must not travel as itself (#312).
 

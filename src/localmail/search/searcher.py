@@ -38,22 +38,25 @@ from localmail.search.rewrite_status import (
     note_for_code,
 )
 from localmail.search.rewriter import QueryRewriter, RewriteParseError, apply_rewrite
+from localmail.search.sort_axes import (
+    DEFAULT_SORT,
+    DEFAULT_SORT_ORDER,
+    SortMode,
+    SortOrder,
+)
+from localmail.search.keyset_walk import (
+    KeysetWalk,
+    keyset_walk_error,
+    walk_for_text,
+)
+from localmail.search.date_keyset import (
+    DATE_ORDER_BY_SQL,
+    UNDATED_TAIL_ONLY_SQL,
+    compose_date_keyset_sql,
+    keyset_clause,
+    needs_undated_top_up,
+)
 
-SortMode = Literal["rank", "date"]
-
-#: The sort a caller gets when it states none. It lives here, beside the
-#: type it ranges over, because ``Searcher.search`` and
-#: ``api.search_cursor`` both resolve an unstated sort and must not be
-#: able to answer differently (#312).
-DEFAULT_SORT: SortMode = "rank"
-
-SortOrder = Literal["asc", "desc"]
-
-#: The direction a caller gets when it states none. It lives beside
-#: ``DEFAULT_SORT`` for the same reason (#312): ``Searcher.search`` and
-#: ``api.search_cursor`` both resolve an unstated value, and two layers
-#: resolving "unstated" from two literals is the drift itself.
-DEFAULT_SORT_ORDER: SortOrder = "desc"
 
 
 class SortOrderNotApplicable(ValueError):
@@ -106,113 +109,15 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
     return (1, dt)
 
 
-#: The one place either direction's ORDER BY is written. Ascending is
-#: ``ASC NULLS FIRST`` because that is the exact reverse of
-#: ``messages_recent_idx`` (``… DESC NULLS LAST, id DESC``) and is served
-#: by a backward index scan. Measured on the live 128k archive: 44 buffers
-#: against 33,372 for the ``ASC NULLS LAST`` spelling, which full-sorts —
-#: and an ``IS NOT NULL`` restriction does not rescue it. Do not
-#: "normalise" these to NULLS LAST.
-#:
-#: Keyed on ``SortOrder`` rather than ``str`` so mypy refuses a wrong
-#: literal at the call site. That is the static half only, and CI runs no
-#: mypy step — so the value mypy cannot see (a library caller passing
-#: ``"ASC"``) is caught at runtime instead, by ``_keyset_clause``'s
-#: explicit membership check against *this* table. It used to be caught by
-#: the ``KeyError`` from the lookup below, which worked only because the
-#: lookup happens to be assembled after the predicate: ``"ASC"`` fell
-#: through ``_keyset_clause``'s ``== "desc"`` test into the *ascending*
-#: predicate first, and nothing but statement order stopped that pairing
-#: serving a walk in the direction nobody asked for.
-_DATE_ORDER_BY_SQL: dict[SortOrder, str] = {
-    "desc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) DESC NULLS LAST, "
-             "m.id DESC"),
-    "asc": ("ORDER BY COALESCE(m.internal_date, m.date_sent) ASC NULLS FIRST, "
-            "m.id ASC"),
-}
-
-#: Every direction must have an ORDER BY, checked at import.
-#:
-#: mypy checks the *lookup* against the Literal; nothing checked that the
-#: table covers it, so adding a third direction type-checked, imported, and
-#: failed at runtime on the first query using it. CI runs only ``pytest``
-#: (no mypy step, no ruff step), which makes the static half of that
-#: reasoning unenforced in practice — so the check is a runtime one, in the
-#: ``reject_empty_diagnostic`` / ``reject_empty_wire_name`` shape: a
-#: mistake that cannot reach a query is better than one that reaches it
-#: loudly.
-if set(_DATE_ORDER_BY_SQL) != set(get_args(SortOrder)):
-    raise RuntimeError(
-        "every SortOrder needs an ORDER BY: "
-        f"{sorted(set(get_args(SortOrder)) - set(_DATE_ORDER_BY_SQL))} missing"
-    )
-
-_DATE_EXPR_SQL = "COALESCE(m.internal_date, m.date_sent)"
-
-
-def _keyset_clause(keyset: KeysetCursor, order: SortOrder) -> tuple[str, list[Any]]:
-    """The ``AND …`` fragment placing the walk strictly after ``keyset``.
-
-    The two directions are not mirror images in shape, only in effect.
-    Descending needs ``OR <expr> IS NULL`` so a dated cursor still admits
-    the undated tail that follows it. Ascending needs no such disjunct —
-    under ``NULLS FIRST`` the undated block is already behind the cursor,
-    and ``NULL > ts`` is not true, so those rows drop out on their own.
-
-    **That absence is what lets the ascending dated predicate be a row
-    comparison**, which is the only spelling Postgres composes into an
-    ``Index Cond`` on ``messages_recent_idx``. The OR-form
-    (``expr > %s OR (expr = %s AND id > %s)``) is semantically identical
-    and plans as a per-tuple ``Filter``: the walk restarts at the head of
-    the index on every page and discards everything before the cursor.
-    Measured mid-walk on the live 128k archive, page ~1250: **62.1 ms and
-    53,789 buffers with 64,001 rows removed by filter, against 0.57 ms and
-    46 buffers** for the row comparison. The cost is linear in scroll
-    depth, so it is invisible on page 1 — where this feature's own
-    "no new index" measurements were taken — and grows without bound on
-    exactly the deep scroll the keyset walk exists to serve. This is the
-    trap #75 documents for the browse path; do **not** "simplify" it back
-    to the OR-form.
-
-    Descending cannot use the row comparison: ``ROW(NULL, id) < ROW(...)``
-    is NULL, so the undated tail it must admit would drop out. Closing
-    that needs ``browse.py``'s two-phase dated-then-top-up query — filed
-    as #323, and pre-existing here.
-    """
-    expr = _DATE_EXPR_SQL
-    # Named explicitly rather than left to an ``else``. The two lookups are
-    # a dozen lines apart and independently reachable: an ``order`` that is
-    # not exactly "desc" used to fall through into the *ascending*
-    # predicate here and was only stopped by ``_DATE_ORDER_BY_SQL``'s
-    # KeyError when the SQL string was assembled afterwards. That ordering
-    # is an accident of one function's statement order — hoist the ORDER BY
-    # out of the f-string and the guard is gone — and the KeyError it
-    # raised carried the bare message ``'DESC'``, naming neither the
-    # parameter nor the search.
-    if order not in _DATE_ORDER_BY_SQL:
-        raise ValueError(
-            f"unknown sort_order {order!r}; expected one of "
-            f"{sorted(_DATE_ORDER_BY_SQL)}"
-        )
-    if order == "desc":
-        if keyset.ts is None:
-            # Already in the NULLS-LAST tail: paginate by id alone.
-            return f" AND {expr} IS NULL AND m.id < %s ", [keyset.id]
-        return (
-            f" AND ({expr} < %s OR ({expr} = %s AND m.id < %s) "
-            f" OR {expr} IS NULL) ",
-            [keyset.ts, keyset.ts, keyset.id],
-        )
-    if keyset.ts is None:
-        # Still in the undated head: the rest of it, then every dated row.
-        return (
-            f" AND (({expr} IS NULL AND m.id > %s) OR {expr} IS NOT NULL) ",
-            [keyset.id],
-        )
-    return (
-        f" AND ROW({expr}, m.id) > ROW(%s, %s) ",
-        [keyset.ts, keyset.id],
-    )
+# The date-ordered walk's SQL rules moved to ``search/date_keyset.py``
+# when #323 made the walk a two-query operation — see that module. These
+# two names stay bound here because they are what this file (``_keyset_clause``)
+# and the plan-regression tests reach for; they are the same objects, not a
+# second authority. A third alias, ``_DATE_EXPR_SQL``, was bound here with no
+# reader anywhere and is gone — tests import ``DATE_EXPR_SQL`` from
+# ``date_keyset`` directly, which is where an alias-free name belongs.
+_DATE_ORDER_BY_SQL = DATE_ORDER_BY_SQL
+_keyset_clause = keyset_clause
 
 
 # No account has a non-positive id (serial PKs start at 1), so an
@@ -458,6 +363,18 @@ class KeysetCursor:
     #: Minting beside matching, the call ``blob_temps.py`` and
     #: ``sweep_pacing.py`` already make.
     order: SortOrder
+    #: Which of the two walks minted this position (#326).
+    #:
+    #: **No default**, for the reason ``order`` has none. The text walk
+    #: rebuilds its FTS predicate from the query the caller re-sends on
+    #: every page; the archive walk has none to rebuild. Without this
+    #: field the two were indistinguishable on the wire, so paging a text
+    #: search with the query left out — the mistake ``docs/mcp-usage.md``
+    #: exists to prevent — was served silently as the next page of the
+    #: whole archive. Stamped in ``_date_keyset_search`` from
+    #: ``keyset_walk.walk_for_text``, the same call that picks the branch,
+    #: so a cursor cannot claim a walk its query did not take.
+    walk: KeysetWalk
 
 
 class KeysetOrderMismatch(ValueError):
@@ -671,8 +588,15 @@ class Searcher:
         order: SortOrder,
     ) -> tuple[list[SearchResult], KeysetCursor | None]:
         """Date-ordered keyset walk, ORDER BY COALESCE(internal_date,
-        date_sent) per ``order`` (see ``_DATE_ORDER_BY_SQL``). Returns
-        (results, next_keyset_or_None).
+        date_sent) per ``order`` (see ``date_keyset.DATE_ORDER_BY_SQL``).
+        Returns (results, next_keyset_or_None).
+
+        **Two queries, not one, on a descending continuation** (#323).
+        The dated predicate is a row comparison so Postgres composes it
+        as an ``Index Cond``; that spelling cannot carry the undated
+        block, which is topped up by a second statement when the first
+        comes back short. Both are composed from the same emitter, so
+        there is no second SQL shape to drift against.
 
         Serves two intents that turned out to be one query. With non-empty
         free text this is the Gmail-style lexical walk: every message whose
@@ -704,39 +628,51 @@ class Searcher:
         from localmail.search.arms import _filter_sql, build_lexical_tsquery
 
         where_extra, where_params = _filter_sql(parsed.filters)
-        params: list[Any] = []
-        if parsed.free_text.strip():
+        match_params: list[Any] = []
+        # One call decides both which branch runs and what the cursor
+        # records, so the two cannot disagree (#326).
+        walk = walk_for_text(parsed.free_text)
+        if walk == "text":
             tsq_sql, tsq_params = build_lexical_tsquery(
                 parsed.free_text, parsed.expansion_terms
             )
             match_clause = f"m.fts_v2 @@ {tsq_sql}"
-            params.extend(tsq_params)
+            match_params.extend(tsq_params)
         else:
             # No free text: the walk is over the whole (filtered) archive.
             # This is the branch that used to be _list_recent_messages, which
             # was this query minus the FTS predicate and minus the cursor.
             match_clause = "TRUE"
-        keyset_clause = ""
-        if keyset is not None:
-            keyset_clause, keyset_params = _keyset_clause(keyset, order)
-            params.extend(keyset_params)
-        params.extend(where_params)
         # Fetch one extra row to detect "more pages remain" without a COUNT.
         fetch_limit = page_size + 1
-        params.append(fetch_limit)
-        sql = f"""
-            SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
-                   m.date_sent, m.internal_date
-              FROM messages m
-             WHERE {match_clause}
-             {keyset_clause}
-             {where_extra}
-             {_DATE_ORDER_BY_SQL[order]}
-             LIMIT %s
-        """
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
+
+        def fetch(cursor_sql: str, cursor_params: list[Any],
+                  limit: int) -> list[tuple[Any, ...]]:
+            """One page-fetching round trip, composed from the one emitter."""
+            sql = compose_date_keyset_sql(
+                where=f"{match_clause} {cursor_sql} {where_extra}", order=order,
+            )
+            with conn.cursor() as cur:
+                cur.execute(sql, [*match_params, *cursor_params,
+                                  *where_params, limit])
+                return list(cur.fetchall())
+
+        cursor_sql: str = ""
+        cursor_params: list[Any] = []
+        if keyset is not None:
+            cursor_sql, cursor_params = _keyset_clause(keyset)
+        rows = fetch(cursor_sql, cursor_params, fetch_limit)
+
+        # #323: the descending dated predicate is a row comparison, which
+        # cannot admit the undated block — ``ROW(NULL, id) < ROW(…)`` is
+        # NULL. Those rows are reached here instead, in the same response,
+        # so the caller never sees a short page while a full one was
+        # available and the dated→undated transition costs no extra round
+        # trip. Exactly what ``api.browse.list_messages`` does for #75.
+        if needs_undated_top_up(keyset=keyset, rows_returned=len(rows),
+                                fetch_limit=fetch_limit):
+            rows += fetch(UNDATED_TAIL_ONLY_SQL, [], fetch_limit - len(rows))
+
         has_more = len(rows) > page_size
         page_rows = rows[:page_size]
         results: list[SearchResult] = []
@@ -760,6 +696,7 @@ class Searcher:
                 # Stamped from the walk that actually produced these rows,
                 # never from a caller's argument re-derived a layer up.
                 order=order,
+                walk=walk,
             )
         return results, next_keyset
 
@@ -1184,6 +1121,32 @@ class Searcher:
             effective_order = (
                 DEFAULT_SORT_ORDER if sort_order is None else sort_order
             )
+        # Both axes are membership-checked here, once, before either is read.
+        #
+        # `date_keyset` already reasons that CI runs no mypy step, so a wrong
+        # literal from a library caller has to be caught at runtime — but its
+        # checks are only reachable on the date branch, so the rank branch
+        # validated neither axis, and `sort` was never validated at all.
+        # Both silences were live: `sort="Date"` fell through the `== "date"`
+        # test below into the hybrid branch, serving rank ordering *and*
+        # `next_keyset=None` so the walk ended after one page; and
+        # `sort_order="ASC"` missed the exact-match refusal just below, so
+        # the rank path neither honoured, validated, nor reported it.
+        #
+        # A plain `ValueError`, not a named subclass: HTTP and MCP both
+        # declare these as `Literal`s, so this cannot arrive from the wire
+        # and there is no api/ mapping for it to be caught by. Worded like
+        # `date_keyset`'s sibling checks so the two cannot drift.
+        if effective_sort not in get_args(SortMode):
+            raise ValueError(
+                f"unknown sort {effective_sort!r}; expected one of "
+                f"{sorted(get_args(SortMode))}"
+            )
+        if effective_order not in get_args(SortOrder):
+            raise ValueError(
+                f"unknown sort_order {effective_order!r}; expected one of "
+                f"{sorted(get_args(SortOrder))}"
+            )
         # Refused rather than honoured: the rank path serves a bounded
         # candidate pool, so reversing it returns the least relevant of the
         # top hits rather than of the archive — an artifact of where the
@@ -1241,6 +1204,23 @@ class Searcher:
         # no-op inside the helper, so this call is unconditional.
         parsed = _clamp_account_ids_to_acl(parsed, allowed_account_ids)
 
+        # A text-walk cursor needs its query back (#326). The walk that
+        # minted it rebuilds its FTS predicate from the re-sent query; with
+        # none, the branch below would answer from the archive walk and
+        # hand back the next page of everything, presented as a
+        # continuation of the search. Judged on ``parsed.free_text`` rather
+        # than the caller's raw argument, which is where #308's follow-up
+        # defect lived: ``subject:invoice`` is a non-empty request field
+        # that parses down to nothing. Before any connection is opened, so
+        # a caller error costs no IO. An archive-walk cursor is accepted
+        # with any query — refusing it would forbid the blank-query paging
+        # #322 added.
+        if keyset_cursor is not None:
+            walk_error = keyset_walk_error(cursor_walk=keyset_cursor.walk,
+                                           free_text=parsed.free_text)
+            if walk_error is not None:
+                raise KeysetCursorUnusable(walk_error)
+
         # The date-ordered keyset walk serves two intents that are one query.
         #
         # sort=date with free text: the hybrid path caps at
@@ -1255,7 +1235,8 @@ class Searcher:
         # query has always been answered as a date-ordered list. It now
         # paginates too — before, it returned one page and no cursor, which
         # is the branch "show me my oldest mail" lands on.
-        if effective_sort == "date" or not parsed.free_text.strip():
+        if (effective_sort == "date"
+                or walk_for_text(parsed.free_text) == "archive"):
             t = time.monotonic()
             with self._pool.connection() as conn:
                 parsed = self._resolve_account_names(conn, parsed)

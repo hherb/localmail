@@ -59,10 +59,16 @@ The ORDER BY under test is composed from the production
 ``searcher._DATE_ORDER_BY_SQL`` and the keyset predicate from the
 production ``searcher._keyset_clause``, so a rewrite of either lands here
 automatically — the #77 convention. The SELECT/FROM around them is the one
-hand-written part: ``_date_keyset_search`` builds its statement inline and
-exposes no emitter, and extracting one is a source change this test is not
-the occasion for. It mirrors that method's projection so the plan shape
-(heap fetch, not an index-only scan) is the shipped one.
+hand-written part, and it is **deliberately** hand-written rather than
+composed from ``date_keyset.ROW_SQL_TEMPLATE``: it mirrors the shipped
+projection so the plan shape is the real one (heap fetch, not an index-only
+scan a narrower SELECT would let the planner consider), and keeping it a
+literal is what stops the mirror tracking a change to the thing it mirrors.
+
+(Before #323 this paragraph said no emitter existed and that extracting one
+was "a source change this test is not the occasion for". #323 extracted it —
+``date_keyset.compose_date_keyset_sql`` — so that reason is gone; the
+paragraph now gives the reason that still holds.)
 """
 
 from __future__ import annotations
@@ -71,6 +77,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
+from localmail.search import date_keyset
 from localmail.search import searcher as searcher_mod
 from localmail.search.searcher import KeysetCursor, SortOrder
 
@@ -102,6 +109,19 @@ _NULLS_LAST_ORDER_BY = (
 _PRE_FIX_OR_FORM = (
     " AND (COALESCE(m.internal_date, m.date_sent) > %s"
     " OR (COALESCE(m.internal_date, m.date_sent) = %s AND m.id > %s)) "
+)
+
+#: The pre-#323 *descending* keyset predicate, kept verbatim as this
+#: file's third negative control. It carries a third disjunct the ascending
+#: form never needed — ``OR expr IS NULL``, admitting the NULLS-LAST undated
+#: tail that sits *ahead* of a descending cursor — and that disjunct is why
+#: the descending half could not simply copy #322's row comparison. The
+#: shipped fix drops it and reaches the tail through a second top-up query
+#: instead, exactly as ``browse.py`` does for #75.
+_PRE323_DESC_OR_FORM = (
+    " AND (COALESCE(m.internal_date, m.date_sent) < %s"
+    " OR (COALESCE(m.internal_date, m.date_sent) = %s AND m.id < %s)"
+    " OR COALESCE(m.internal_date, m.date_sent) IS NULL) "
 )
 
 #: ``_date_keyset_search``'s projection. Kept faithful so the plan is the
@@ -334,8 +354,9 @@ def test_the_ascending_keyset_predicate_keeps_the_backward_scan(
     ``_keyset_clause`` so a rewrite of it lands here.
     """
     account_id = _seed(db_conn)
-    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101, order="desc")
-    clause, clause_params = searcher_mod._keyset_clause(keyset, "asc")
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101,
+                          order="asc", walk="text")
+    clause, clause_params = searcher_mod._keyset_clause(keyset)
     where = "TRUE " + clause + " AND m.account_id = ANY(%s) "
     params = clause_params + [[account_id], _PAGE_SIZE + 1]
     plan = _explain(db_conn, _PROJECTION + where + _order_by("asc") + " LIMIT %s",
@@ -378,8 +399,9 @@ def test_the_ascending_keyset_predicate_composes_an_index_range_bound(
     depth.
     """
     account_id = _seed(db_conn)
-    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101, order="desc")
-    clause, clause_params = searcher_mod._keyset_clause(keyset, "asc")
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101,
+                          order="asc", walk="text")
+    clause, clause_params = searcher_mod._keyset_clause(keyset)
     shipped = _explain(
         db_conn,
         _PROJECTION + "TRUE " + clause + " AND m.account_id = ANY(%s) "
@@ -427,6 +449,122 @@ def test_the_ascending_keyset_predicate_composes_an_index_range_bound(
              [keyset.ts, keyset.ts, keyset.id, [account_id], _PAGE_SIZE + 1])
 
 
+def _undated_ids(conn: psycopg.Connection, account_id: int) -> set[int]:
+    """The seeded rows with no usable date, which the two forms disagree about."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM messages WHERE account_id = %s"
+            " AND COALESCE(internal_date, date_sent) IS NULL",
+            [account_id],
+        )
+        return {int(r[0]) for r in cur.fetchall()}
+
+
+def test_the_descending_keyset_predicate_composes_an_index_range_bound(
+    db_conn: psycopg.Connection,
+) -> None:
+    """#323: the descending half must be an ``Index Cond`` too.
+
+    #322 fixed the ascending predicate and left this one as the OR-form,
+    which is precisely the trap CLAUDE.md's #75 entry documents for the
+    browse path — *"Do NOT rewrite the predicate as the OR-form even though
+    it's semantically equivalent"* — reintroduced on the search path in
+    newly written code. Measured mid-walk on the live 128,324-message
+    archive at offset 64,000: **70.383 ms / 54,230 buffers / 64,001 rows
+    removed by filter**, against 0.040 ms / 48 buffers for the row
+    comparison.
+
+    (These are #323's own descending figures. This docstring used to carry
+    ``62.7 ms / 53,789 buffers / 0.57 ms / 46 buffers`` on a 128,306-message
+    archive — verbatim #322's *ascending* run, in the test that exists to
+    pin the descending one.)
+
+    Linear in scroll depth, so it is invisible on page 1 and unbounded on
+    exactly the deep scroll ``_date_keyset_search``'s own docstring offers
+    as the reason the branch exists.
+
+    Structural rather than a timing, for the reason the ascending twin is:
+    at fixture scale both forms are fast, and being invisible until
+    production depth is the whole defect.
+    """
+    account_id = _seed(db_conn)
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101,
+                          order="desc", walk="text")
+    clause, clause_params = searcher_mod._keyset_clause(keyset)
+    shipped = _explain(
+        db_conn,
+        _PROJECTION + "TRUE " + clause + " AND m.account_id = ANY(%s) "
+        + _order_by("desc") + " LIMIT %s",
+        [*clause_params, [account_id], _PAGE_SIZE + 1],
+    )
+    control = _explain(
+        db_conn,
+        _PROJECTION + "TRUE " + _PRE323_DESC_OR_FORM
+        + " AND m.account_id = ANY(%s) " + _order_by("desc") + " LIMIT %s",
+        [keyset.ts, keyset.ts, keyset.id, [account_id], _PAGE_SIZE + 1],
+    )
+    assert _index_cond_mentions_the_date_expr(shipped), shipped
+    assert not _filter_mentions_the_date_expr(shipped), (
+        "the descending keyset predicate degraded to a per-tuple Filter: "
+        "every continuation page now rescans the index from the head\n"
+        + shipped
+    )
+    # The control proves the assertion above can fail.
+    assert not _index_cond_mentions_the_date_expr(control), control
+    assert _filter_mentions_the_date_expr(control), control
+
+
+def test_the_descending_predicate_drops_only_the_undated_tail(
+    db_conn: psycopg.Connection,
+) -> None:
+    """The fairness half: it must lose the undated rows and nothing else.
+
+    Without this, the plan test above would also pass for a row comparison
+    that composes a beautiful index bound over the *wrong* rows —
+    transposed operands, or a dropped ``id`` tiebreaker — which is a
+    correctness bug wearing that test's approval. The tiebreaker half only
+    bites because ``_seed`` puts ``_SEED_TIED_AT_CURSOR`` rows at the
+    cursor's own timestamp.
+
+    The undated rows are subtracted explicitly rather than relying on the
+    ``LIMIT`` never reaching the NULLS-LAST tail. It does not reach it at
+    this fixture size, but that is an accident of the row count, and a
+    fairness assertion resting on an accident is not one. Those rows are
+    reached by ``_date_keyset_search``'s top-up query instead — pinned
+    behaviourally in ``test_searcher_sort_order_walk.py``.
+    """
+    account_id = _seed(db_conn)
+    undated = _undated_ids(db_conn, account_id)
+    assert undated, "fixture seeds no undated rows; the assertion is vacuous"
+    keyset = KeysetCursor(ts=_EPOCH + timedelta(days=100), id=101,
+                          order="desc", walk="text")
+    clause, clause_params = searcher_mod._keyset_clause(keyset)
+    # Past every seeded row, so both forms run to exhaustion and the
+    # comparison covers the tail rather than stopping short of it.
+    unbounded = _SEED_DATED + _SEED_TIED_AT_CURSOR + _SEED_UNDATED + 1
+
+    def _ids(where: str, params: list) -> list[int]:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                _PROJECTION + where + _order_by("desc") + " LIMIT %s", params,
+            )
+            return [int(r[0]) for r in cur.fetchall()]
+
+    shipped_ids = _ids(
+        "TRUE " + clause + " AND m.account_id = ANY(%s) ",
+        [*clause_params, [account_id], unbounded],
+    )
+    control_ids = _ids(
+        "TRUE " + _PRE323_DESC_OR_FORM + " AND m.account_id = ANY(%s) ",
+        [keyset.ts, keyset.ts, keyset.id, [account_id], unbounded],
+    )
+    assert set(control_ids) & undated, (
+        "the pre-fix form no longer admits the undated tail; the "
+        "subtraction below has nothing to subtract"
+    )
+    assert shipped_ids == [i for i in control_ids if i not in undated]
+
+
 # ---- The index the whole arrangement depends on -------------------------
 
 
@@ -460,3 +598,52 @@ def test_messages_recent_idx_is_the_exact_reverse_of_the_ascending_order_by(
         "the ascending ORDER BY was normalised to NULLS LAST: it no longer "
         "reverses messages_recent_idx and every page full-sorts the archive"
     )
+
+
+def test_the_undated_top_up_statement_is_index_bounded(
+    db_conn: psycopg.Connection,
+) -> None:
+    """#323's *second* statement, which nothing else in this file covers.
+
+    Plan quality is the whole subject of the descending half of #323, and
+    the fix added a query that was never checked. It is correct today — the
+    undated block is reached by an ``Index Cond`` on the date expression, so
+    the Sort above it orders that block alone rather than the archive — but
+    ``UNDATED_TAIL_ONLY_SQL`` is one edit from losing it: ``IS NOT DISTINCT
+    FROM NULL``, a cast, or any divergence from ``DATE_EXPR_SQL`` keeps the
+    same rows and drops the bound, and every dated→undated transition page
+    would then pay a full scan.
+
+    The predicate comes from the production constant, so a rewrite of it
+    lands here. The negative control selects **exactly the same rows** by a
+    spelling the index cannot serve: ``COALESCE(date_sent, internal_date)
+    IS NULL`` is true iff both columns are NULL, i.e. iff the shipped
+    spelling is — but the arguments are the other way round, so it does not
+    match the indexed expression. That is verbatim the slip
+    ``DATE_EXPR_SQL``'s own comment warns about ("a swapped argument order
+    ... costs the index"), which makes it the right control rather than
+    merely a failing one.
+
+    (``IS NOT DISTINCT FROM NULL`` does **not** work as a control: Postgres
+    rewrites it to ``IS NULL`` and keeps the bound.)
+    """
+    account_id = _seed(db_conn)
+    shipped = _explain(
+        db_conn,
+        _PROJECTION + "TRUE " + date_keyset.UNDATED_TAIL_ONLY_SQL
+        + " AND m.account_id = ANY(%s) " + _order_by("desc") + " LIMIT %s",
+        [[account_id], _PAGE_SIZE + 1],
+    )
+    control = _explain(
+        db_conn,
+        _PROJECTION + "TRUE AND COALESCE(m.date_sent, m.internal_date)"
+        " IS NULL AND m.account_id = ANY(%s) "
+        + _order_by("desc") + " LIMIT %s",
+        [[account_id], _PAGE_SIZE + 1],
+    )
+    assert _index_cond_mentions_the_date_expr(shipped), (
+        "the undated top-up lost its index bound: every dated→undated "
+        "transition page now scans the archive\n" + shipped
+    )
+    # The control proves the assertion above can fail.
+    assert not _index_cond_mentions_the_date_expr(control), control

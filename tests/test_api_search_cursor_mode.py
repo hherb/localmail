@@ -29,9 +29,18 @@ from localmail.api.search_cursor import (
 from localmail.search.searcher import KeysetCursor, PoolMetadata
 
 
-def _keyset_cursor(day: int = 21) -> tuple[KeysetCursor, str]:
-    ks = KeysetCursor(ts=datetime(2026, 5, day, tzinfo=timezone.utc), id=100, order="desc")
-    return ks, encode_keyset_cursor(replace(ks, order="desc"))
+def _keyset_cursor(day: int = 21, walk: str = "archive") -> tuple[KeysetCursor, str]:
+    """A keyset position and its wire form.
+
+    ``walk`` defaults to ``"archive"`` — the flavour that continues under
+    any query — so the tests here stay about the *sort* axes they were
+    written for. Whether a text-walk cursor may be paged with a blank query
+    is #326's question and lives in
+    ``tests/test_api_search_cursor_walk.py``.
+    """
+    ks = KeysetCursor(ts=datetime(2026, 5, day, tzinfo=timezone.utc), id=100,
+                      order="desc", walk=walk)
+    return ks, encode_keyset_cursor(ks)
 
 
 def _page(*, token: str | None = None, next_keyset: KeysetCursor | None = None) -> MagicMock:

@@ -12,13 +12,14 @@ impossible for every other caller (CLI, library, a future transport).
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
 from localmail.config import SearchConfig
-from localmail.search.searcher import KeysetCursor, Searcher
+from localmail.search.searcher import KeysetCursor, KeysetCursorUnusable, Searcher
 
 
 class _Embeddings:
@@ -44,7 +45,10 @@ def _searcher() -> tuple[Searcher, MagicMock]:
                     reranker=None, rewriter=None), pool
 
 
-_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc")
+#: An archive-walk position, because one test below pages it with an
+#: empty query — the shape #322 made legal and #326 must keep legal.
+_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+                       order="desc", walk="archive")
 
 
 def test_rank_sort_rejects_a_keyset_cursor_instead_of_dropping_it() -> None:
@@ -67,6 +71,51 @@ def test_an_empty_query_now_reads_the_keyset_cursor() -> None:
         searcher.search("", allowed_account_ids=None, sort="date",
                         keyset_cursor=_CURSOR)
     pool.connection.assert_called_once()
+
+
+def test_a_text_walk_cursor_with_a_blank_query_is_refused_before_any_io() -> None:
+    """#326's guard, for the callers ``api.run_search`` cannot reach.
+
+    The api gate refuses this pair on the wire, so every HTTP and MCP test
+    exercises *that* copy — and this one, which is the whole of the
+    protection for CLI and library callers, could be deleted with the suite
+    staying green. It is not belt-and-braces: ``keyset_walk.py``'s docstring
+    names the two boundaries separately for exactly this reason, and its two
+    siblings above each have a test here.
+
+    The refusal must precede all IO, so the pool raising is the assertion.
+    """
+    searcher, pool = _searcher()
+    text_cursor = replace(_CURSOR, walk="text")
+    with pytest.raises(KeysetCursorUnusable, match="query"):
+        searcher.search("", allowed_account_ids=None, sort="date",
+                        keyset_cursor=text_cursor)
+    pool.connection.assert_not_called()
+
+
+def test_a_text_walk_cursor_with_a_query_still_reaches_retrieval() -> None:
+    """The positive control: a guard keyed on the cursor alone rather than on
+    the pair would refuse every text continuation, and every assertion in the
+    test above would still pass."""
+    searcher, pool = _searcher()
+    text_cursor = replace(_CURSOR, walk="text")
+    with pytest.raises(AssertionError, match="no connection"):
+        searcher.search("invoice", allowed_account_ids=None, sort="date",
+                        keyset_cursor=text_cursor)
+    pool.connection.assert_called_once()
+
+
+def test_a_query_of_only_filter_operators_refuses_a_text_walk_cursor() -> None:
+    """``subject:invoice`` is a non-empty request field that parses down to
+    no free text, so there is nothing for the FTS predicate to be rebuilt
+    from. This is the shape #308's follow-up defect lived in, and the reason
+    the guard measures ``parsed.free_text`` rather than the argument."""
+    searcher, pool = _searcher()
+    text_cursor = replace(_CURSOR, walk="text")
+    with pytest.raises(KeysetCursorUnusable, match="query"):
+        searcher.search("subject:invoice", allowed_account_ids=None,
+                        sort="date", keyset_cursor=text_cursor)
+    pool.connection.assert_not_called()
 
 
 def test_a_search_without_a_keyset_cursor_is_unaffected() -> None:

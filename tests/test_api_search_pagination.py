@@ -185,17 +185,27 @@ def test_pool_exhausted_but_cache_evicted_raises_cursor_expired() -> None:
 
 
 def test_keyset_cursor_dispatches_to_search_with_keyset_cursor() -> None:
-    """A ``K|…``-prefixed cursor is the sort=date "Load more" path. The
-    route must decode it, call ``searcher.search(..., keyset_cursor=...)``
-    (not ``continue_page``), and re-encode ``page.next_keyset`` back into
-    a ``K|…`` cursor on the response.
+    """A keyset cursor is the sort=date "Load more" path. The route must
+    decode it, call ``searcher.search(..., keyset_cursor=...)`` (not
+    ``continue_page``), and re-encode ``page.next_keyset`` back into a
+    keyset cursor on the response.
+
+    Both cursors here are **text**-walk ones, matching the ``"invoice"``
+    query, so they carry ``KT|`` — the descending text prefix #326 added
+    beside the legacy ``K|``. Asserted via ``is_keyset_cursor`` rather than
+    a literal: the property is the *kind*, and pinning the spelling here
+    would duplicate ``test_api_search_cursor_walk.py`` and have to be
+    edited again the next time the prefix table grows.
     """
     from datetime import datetime, timezone
-    from localmail.api.search_cursor import encode_keyset_cursor
+    from localmail.api.search_cursor import (
+        decode_keyset_cursor, encode_keyset_cursor, is_keyset_cursor,
+    )
     from localmail.search.searcher import KeysetCursor
 
     s = MagicMock()
-    next_ks = KeysetCursor(ts=datetime(2026, 5, 20, tzinfo=timezone.utc), id=42, order="desc")
+    next_ks = KeysetCursor(ts=datetime(2026, 5, 20, tzinfo=timezone.utc), id=42,
+                           order="desc", walk="text")
     page = _page(
         results=[_result(7)], token=None, pool_size=1,
         page_size=2, has_more=False, can_grow=False,
@@ -203,8 +213,9 @@ def test_keyset_cursor_dispatches_to_search_with_keyset_cursor() -> None:
     page.next_keyset = next_ks
     s.search.return_value = page
 
-    incoming_ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc")
-    cursor_in = encode_keyset_cursor(replace(incoming_ks, order="desc"))
+    incoming_ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+                               order="desc", walk="text")
+    cursor_in = encode_keyset_cursor(incoming_ks)
     out = run_search(searcher=s, free_text="invoice", filters={},
                      limit=2, allowed_account_ids=[1], user_id=99,
                      sort="date", cursor=cursor_in)
@@ -216,7 +227,8 @@ def test_keyset_cursor_dispatches_to_search_with_keyset_cursor() -> None:
     assert kwargs.get("keyset_cursor") == incoming_ks
     assert kwargs.get("sort") == "date"
     assert out["next_cursor"] is not None
-    assert out["next_cursor"].startswith("K|")
+    assert is_keyset_cursor(out["next_cursor"])
+    assert decode_keyset_cursor(out["next_cursor"]) == next_ks
 
 
 def test_malformed_cursor_raises_validation_failed() -> None:

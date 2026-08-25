@@ -813,6 +813,11 @@ src/localmail/
     rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
     rewriter_url.py # pure: base_url_error — the one base-URL rule (#235)
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
+    sort_axes.py    # pure: SortMode/SortOrder + their defaults — one authority (#312)
+    date_keyset.py  # pure: the date walk's ORDER BY, keyset predicates,
+                    #   undated top-up and the one SQL emitter (#323)
+    keyset_walk.py  # pure: walk_for_text / keyset_walk_error — a text cursor
+                    #   needs its query back (#326)
 migrations/         # 0001_init.sql … 0036_api_keys.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses (run_recall_eval.py,
@@ -2108,6 +2113,15 @@ single-quoted string literals, and `--` / `/* */` comments don't trip the
 splitter on embedded semicolons. Pure-comment fragments after the final
 statement are dropped; comments attached to a real statement are preserved.
 
+`pyproject.toml` floors `sqlparse>=0.6`, and that floor is **security-driven**
+rather than functional: three HIGH advisories (dollar-quote ReDoS,
+`TokenList.__init__` CPU DoS, quadratic `group_comments`) and one medium
+string-breakout advisory all land on `<= 0.5.5`. Nothing attacker-controlled
+reaches the parser — this function is its only consumer and it reads our own
+numbered migration files — so the bump is hygiene, not incident response,
+which is why it was **verified rather than assumed**: splitting every
+migration on disk yields byte-identical statement lists under 0.5.5 and 0.6.0.
+
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
 MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for
@@ -3014,7 +3028,12 @@ for the full design.
         branch below regardless of `sort` and mints no pool cursor; see the
         `_date_sort_key` bullet under **`sort_order`** below for why that
         branch structurally cannot build one.
-      - `"K|<base64>"` descending, `"KA|<base64>"` ascending — keyset
+      - `"K|<base64>"` descending, `"KA|<base64>"` ascending — **and, since
+        #326, `"KT|"` / `"KAT|"` for the same two directions when the walk
+        carries free text**; the four are the `(direction, walk)` product
+        and `api/search_cursor.py::_KEYSET_PREFIXES` is the table (annotated
+        here in place, per the house convention, because this is the entry a
+        reader hits first). Keyset
         cursor served by `Searcher._date_keyset_search` (one method now;
         formerly two near-identical ones, `_lexical_date_search` and the
         unpaginated `_list_recent_messages` — see **`sort_order`** below).
@@ -3129,11 +3148,19 @@ for the full design.
       actually be served was told the cursor continues a `None`-sorted search
       and rejected. Every read inside the function goes through
       `effective_sort`; a surviving raw read is the defect.
-      - **`DEFAULT_SORT` moved to `search/searcher.py`, beside the `SortMode`
-        it ranges over**, and `api/search_cursor.py` imports it from there
+      - **`DEFAULT_SORT` lives beside the `SortMode` it ranges over**, and
+        `api/search_cursor.py` imports it from there
         (**corrected**: this said `api/search.py`, which imports neither
         default — the module that resolves an unstated axis is the one that
         needs the constant, and that is `search_cursor.py`) —
+        (**address corrected again by #323**: both moved out of
+        `search/searcher.py` into
+        [src/localmail/search/sort_axes.py](src/localmail/search/sort_axes.py),
+        because `date_keyset.py` needs `SortOrder` at runtime and defining
+        it twice is this same drift one level down. Co-location is
+        unchanged — the two axes and their two defaults sit together — and
+        `searcher.py` imports them, so `from localmail.search.searcher
+        import SortMode` still resolves.)
         `api/search_cursor.py` can no longer define it, because two layers
         resolving "unstated" from two literals is the drift itself. The api
         layer still resolves it explicitly at its own boundary (pinned by
@@ -3208,7 +3235,9 @@ for the full design.
     `sort_order: "asc"|"desc"`, null-by-default like `sort`, resolved to
     `DEFAULT_SORT_ORDER = "desc"` once at the top of `Searcher.search` —
     the same one-authority-per-axis rule #312 established for `sort`.
-    `DEFAULT_SORT_ORDER` lives beside `DEFAULT_SORT` in `search/searcher.py`;
+    `DEFAULT_SORT_ORDER` lives beside `DEFAULT_SORT` in
+    `search/sort_axes.py` (moved there from `search/searcher.py` by #323 —
+    see the corrected note above);
     `api/search_cursor.py` imports it rather than restating `"desc"`
     (**corrected** from `api/search.py`, which imports neither default). Adding
     `date_asc`/`date_descending`-style members to `sort` instead was
@@ -3258,7 +3287,11 @@ for the full design.
       `tests/test_api_search_cursor_direction.py`, which asserts each
       prefix positively but pins no disjointness property. Both wrong
       pointers are corrected here; the refuted claim itself survives in
-      the plan document, annotated in place.) `resolve_cursor_mode` is
+      the plan document, annotated in place. **Since #326 the property is
+      asserted rather than only argued** —
+      `test_api_search_cursor_walk.py::test_no_keyset_prefix_is_a_prefix_of_another`
+      — so the comment is no longer the only record, though it remains the
+      one that says *why*.) `resolve_cursor_mode` is
       renamed `resolve_cursor_plan`,
       returning `CursorPlan(mode, sort, sort_order)` — one function
       deciding both axes together rather than two functions each
@@ -3323,16 +3356,89 @@ for the full design.
       control beside the `NULLS LAST` one. Structural, not a timing: at
       fixture scale both forms are fast, and being invisible until
       production depth is the whole defect.
-      - **Descending cannot have this**, and that asymmetry is not an
-        oversight. Ascending needs no `OR expr IS NULL` disjunct — under
-        `NULLS FIRST` the undated block is behind the cursor and
+      - **Descending has it too now (#323, resolved).** The asymmetry was
+        never in the *predicate* — both directions are row comparisons —
+        but in the undated block. Ascending needs no `OR expr IS NULL`
+        disjunct: under `NULLS FIRST` that block is behind the cursor and
         `ROW(NULL, id) > ROW(…)` is NULL, so those rows drop out on their
         own. Descending must *admit* the undated tail ahead of the cursor,
-        which a row comparison would silently drop. Closing it needs
-        `browse.py`'s two-phase dated-then-top-up query — **filed as #323**,
-        pre-existing, and measured at the same 62.7 ms / 64,001 filtered
-        rows. Do not "restore symmetry" by putting the OR-form back on the
-        ascending side.
+        which is what its `OR expr IS NULL` was for and what denied it the
+        range bound. Re-measured on the live 128,324-message archive at the
+        same depth: **70.383 ms / 54,230 buffers / 64,001 rows removed by
+        filter** for the OR-form, against **0.040 ms / 48 buffers** with an
+        `Index Cond`. The disjunct is gone; those rows arrive from a second
+        **top-up statement in the same response**, which is the shape
+        `api.browse.list_messages` has used for #75 since before this walk
+        existed. Do not "restore symmetry" by putting the OR-form back on
+        either side, and do not "fix" a short page by restoring the
+        disjunct — that is the one edit both directions' tests are built to
+        catch.
+        - **The `ts is None` branches keep their shapes**, in both
+          directions — but **they are not the same shape and do not plan
+          alike**, and an earlier wording here claimed one mechanism for
+          both. Measured, both halves of that were wrong. **Descending**
+          (`expr IS NULL AND id < %s`) puts *both* conjuncts in the `Index
+          Cond`; the `id` comparison is not residual, it is the index's
+          second column. **Ascending** (`(expr IS NULL AND id > %s) OR expr
+          IS NOT NULL`) must admit every dated row and so gets **no index
+          bound at all** — it plans as a `Filter` over a backward index
+          scan. That is still fine, and for the reason the old wording gave
+          as a conclusion: what it discards is the undated rows already
+          behind the cursor, so the residual is bounded by the size of the
+          undated block rather than by archive size, and is only paid while
+          the walk is inside that block. Splitting it into two phases would
+          buy nothing and add a second transition to get right. Neither
+          branch has a plan test — `test_searcher_sort_order_plan.py` covers
+          dated cursors only — so `keyset_clause`'s docstring is their only
+          record, which is why it now states the mechanism per direction.
+        - **The rules moved to
+          [src/localmail/search/date_keyset.py](src/localmail/search/date_keyset.py)**
+          — ordering per direction, both keyset predicates,
+          `UNDATED_TAIL_ONLY_SQL`, `needs_undated_top_up`, and the one
+          `compose_date_keyset_sql` emitter both phases go through. Pure,
+          no IO, unit-tested without a database in
+          `tests/test_date_keyset.py`. That is the #77 convention one module
+          over: a hand-written second statement is exactly the duplicate
+          `compose_browse_sql` exists to prevent. `searcher.py` shrank
+          from 1360 lines to 1315 — 147 lines of SQL rules moved out, and
+          #326's walk field and guards added some back. (An earlier wording
+          here said "lost 146 lines", which was the raw deletion count read
+          as a size change.) `SortMode`/`SortOrder` and their defaults moved with them
+          to [src/localmail/search/sort_axes.py](src/localmail/search/sort_axes.py),
+          because `date_keyset` needs `SortOrder` at runtime for its ORDER
+          BY completeness check and defining it twice is #312's drift one
+          level down; `searcher.py` imports both modules, so every existing
+          import path still resolves.
+        - **The top-up's own plan is pinned** (review of #333). Plan quality
+          is the whole subject of #323's descending half, and the statement
+          it *added* was the one place unchecked.
+          `test_the_undated_top_up_statement_is_index_bounded` requires an
+          `Index Cond` naming the date expression, with
+          `COALESCE(date_sent, internal_date) IS NULL` — the same rows,
+          arguments swapped, so no index match — as the negative control.
+          That is verbatim the slip `DATE_EXPR_SQL`'s comment warns about.
+          Note `IS NOT DISTINCT FROM NULL` does **not** work as a control:
+          Postgres rewrites it to `IS NULL` and keeps the bound.
+        - **`keyset_clause` and `needs_undated_top_up` take no `order`
+          parameter** (review of #333). Both read `keyset.order`. Passing it
+          beside the cursor re-admitted the exact pairing that putting
+          `order` *on* the cursor was meant to make unrepresentable — a
+          descending position walked with the ascending predicate — and
+          production was correct only because `Searcher.search` sets
+          `effective_order = keyset_cursor.order` whenever a cursor exists,
+          i.e. by one caller's discipline, which is the standard
+          `encode_keyset_cursor` had already been raised above. The
+          redundancy was total: neither function is reachable without a
+          cursor in hand. Removing it immediately exposed two plan tests
+          that had been building `order="desc"` cursors and passing `"asc"`
+          alongside them.
+        - **The top-up must land in the same response, not the next page.**
+          Deferring it leaves every row count correct while costing one
+          wasted round trip per walk, at exactly the boundary the cursor was
+          minted for — so
+          `test_a_descending_page_straddling_the_undated_tail_is_topped_up`
+          asserts the straddling page is **full**, which is the only
+          assertion that separates the two failure modes.
     - **Undated rows sort first ascending, not last.** Ascending is the
       exact reverse of descending — the undated tail becomes the undated
       head, same rows, reversed — which is what makes `asc ==
@@ -3382,6 +3488,142 @@ for the full design.
         `::test_a_query_of_only_filter_operators_continues_the_walk_too`,
         and
         `test_searcher_keyset_guard.py::test_an_empty_query_now_reads_the_keyset_cursor`.
+        - **That relaxation was wider than the feature needed, and #326
+          narrowed it back.** The paragraph above is still right about the
+          *general* case — a cursor is a position, and a changed query or
+          `folder_ids` between pages was undefined before #322 and is
+          undefined now. What it did not weigh is that one instance of it
+          had been caught by construction, and is the **single most likely
+          client mistake**: `docs/mcp-usage.md` tells agents to "re-send
+          the same `query` and filters", so paging a text search with the
+          query left out was being served as the next `limit` messages of
+          the whole archive, dressed as a continuation. Silently.
+          - The distinction now rides on the cursor. `KeysetCursor.walk`
+            (`"text"` | `"archive"`, **no default**, for the reason `order`
+            has none) records which walk minted the position, and the rule
+            is the pure
+            [src/localmail/search/keyset_walk.py](src/localmail/search/keyset_walk.py)
+            — `walk_for_text` and `keyset_walk_error`, shaped like
+            `account_names.py::account_name_error`: a message, or `None`,
+            with the caller deciding what an error *is*
+            (`ValidationFailed` at the api boundary, the named
+            `KeysetCursorUnusable` inside the Searcher, which is what
+            covers CLI and library callers).
+          - **`_date_keyset_search` derives the branch and the stamp from
+            one `walk_for_text` call**, so a cursor cannot claim a walk its
+            query did not take. That derivation was the *unpinned* part —
+            replacing `walk=walk` with a constant left every mocked test
+            green — which is why the end-to-end tests against a seeded
+            archive exist. Mutation-proven in both flavours.
+          - **The Searcher-side guard is pinned too, and was not.** Deleting
+            `Searcher.search`'s `keyset_walk_error` block left **127 tests
+            green**: every HTTP and MCP test exercises the *api* gate, and
+            `test_searcher_keyset_guard.py`'s shared `_CURSOR` is
+            deliberately `walk="archive"`, so nothing anywhere handed a
+            text-walk cursor to the Searcher with a blank query. That guard
+            is the whole of the protection for CLI and library callers —
+            the callers `run_search` by definition does not serve — and its
+            two siblings in that file each had a test.
+            `test_a_text_walk_cursor_with_a_blank_query_is_refused_before_any_io`
+            closes it, with a positive control beside it so a guard that
+            fires too broadly also fails.
+          - **Both readings measure `parse_query(...).free_text`**, never
+            the raw request field. Two predicates for one rule is what
+            produced #308's own follow-up defect. **They do not, however,
+            measure the same string**, and an earlier wording here said
+            they "ask the same question", which is wrong in a way worth
+            keeping written down: the api gate parses the raw `free_text`,
+            while `Searcher.search` parses
+            `build_query_string(free_text, scoped_filters)` — the composed
+            query, which `_scope_filters_by_acl` has already appended
+            `account_id:` ACL tokens to. They agree because
+            `build_query_string` is **free-text-neutral**, which is a
+            property of the composer and of neither guard, and is therefore
+            pinned on the composer by
+            `test_api_search.py::test_build_query_string_is_free_text_neutral`
+            (70 combinations of query shape × filter shape). CLAUDE.md
+            claimed that equivalence for #308 and nothing pinned it.
+            **The branch guard is the authority** — it sees the string the
+            FTS predicate is actually built from; the gate exists to answer
+            before any work is done, and before the empty-ACL branch can
+            report a contradictory request as a completed one. The
+            divergence is reachable with an unbalanced quote (`from:"`),
+            which is why `run_search`'s catch of `KeysetCursorUnusable` is
+            **not** the dead backstop its comment used to claim.
+          - **Only the text-cursor-plus-blank-query pair is refused.** An
+            archive cursor continues under any query, because it has no FTS
+            predicate to rebuild — so #322's blank-query pagination is
+            untouched, pinned by its own positive control rather than left
+            to argument. A rule broadened to every keyset cursor fails 8
+            tests, including #322's.
+          - **Wire:** two prefixes join the table, spelled `K` + `A` when
+            ascending + `T` when the walk carries text (`K|`, `KA|`, `KT|`,
+            `KAT|`). Disjointness still comes from the `|` terminator and
+            is now **asserted**, not argued. `K|` and `KA|` keep their
+            meanings and read as `archive` — the lenient half: a legacy
+            cursor could have come from either walk, and the strict reading
+            would manufacture a 400 for a caller correctly paging a
+            blank-query walk. `encode_keyset_cursor` **raises** on an
+            unmapped `(order, walk)` pair rather than falling through to a
+            default; that is what surfaced two long-standing test fakes
+            whose auto-`MagicMock` `next_keyset` was being minted into a
+            garbage cursor.
+            - **That raise's premise is now checked at import.** It calls
+              itself unreachable "while the table covers the product of both
+              Literals", and nothing verified the table did: widening either
+              `Literal` without widening `_KEYSET_PREFIXES` type-checked,
+              imported, and then failed on the **response** path — the
+              cursor is minted last, and only `APIError` reaches the
+              problem+json handler, so it surfaced as a 500 on a search that
+              had already succeeded. `search_cursor.py` now carries the same
+              `get_args` completeness check `date_keyset.DATE_ORDER_BY_SQL`
+              carries for its one-axis table, plus a duplicate-pair check;
+              the raise stays as the backstop for a value in *neither*
+              `Literal`, which construction cannot catch, and is pinned by
+              `test_an_unmappable_pair_is_refused_rather_than_mislabelled`.
+          - `resolve_cursor_plan` takes `free_text` again and now decodes
+            the whole cursor rather than scanning its prefix, which also
+            moves a malformed **payload** ahead of the empty-ACL
+            short-circuit — where this module already said such a request
+            belongs. `run_search` decodes a second time for the position it
+            forwards; deliberate, since hoisting the cursor onto
+            `CursorPlan` would add a third field its pool-mode consumer
+            must ignore (#327).
+          - **That gate's `parse_query` was a 500 on two paths that used to
+            answer 200** (review of #333). `QueryParseError` — raised for a
+            malformed `after:`/`before:` date and an empty `lang:` — is a
+            bare `ValueError`, caught nowhere in `src/`, and `serve.app`
+            registers a handler for `APIError` only. Moving the parse above
+            the empty-ACL short-circuit and onto the pool-cursor branch
+            widened a pre-existing fresh-path defect to two branches that
+            never parsed `free_text` at all, and it reached MCP as an
+            exception no `ToolError` mapping covers.
+            `query="invoice after:last-week"` is exactly what an LLM agent
+            emits. The rule is `api.search._gate_free_text`, which
+            translates it to `ValidationFailed`; **one call, unconditional,
+            at the top of `run_search`**, so it covers the fresh path too
+            rather than needing a second catch. Pinned by
+            `tests/test_api_search_malformed_query.py` across all four
+            branches, with a positive control.
+      - **Both sort axes are membership-checked at runtime** (review of
+        #333). `date_keyset` reasons explicitly that CI runs no mypy step so
+        a wrong literal must be caught at runtime, and applied that to
+        `sort_order` twice plus an import-time check — but both its checks
+        are on the date branch only, so the rank branch validated neither
+        axis, and `sort` was never validated anywhere. Both were silent, and
+        `sort` twice over: `sort="Date"` fell through the `== "date"` test
+        into the hybrid branch, serving **rank ordering** *and*
+        `next_keyset=None`, so the walk ended after one page; and
+        `sort_order="ASC"` missed the exact-match rank+asc refusal, so the
+        rank path neither honoured, validated, nor reported it —
+        contradicting that guard's own docstring. Resolved once, at the top
+        of `Searcher.search`, right after both axes are resolved and before
+        either is read. A plain `ValueError` rather than a named subclass:
+        HTTP and MCP both declare these as `Literal`s, so it cannot arrive
+        from the wire and there is no api/ mapping to be caught by; worded
+        like `date_keyset`'s sibling checks so the two cannot drift.
+        Reachable from CLI and library callers only. Pinned by
+        `tests/test_searcher_sort_axis_validation.py`.
       - **Known consequence, filed as #324:** a blank query is served by
         the date branch whatever the `sort`, so a caller stating
         `sort="rank"` with a blank query gets page 1 *and* a cursor — which

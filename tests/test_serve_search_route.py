@@ -335,7 +335,7 @@ def test_search_pages_a_date_cursor_when_sort_is_omitted(
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
     incoming = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
-                            id=100, order="desc")
+                            id=100, order="desc", walk="text")
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
     r = c.post(
@@ -364,7 +364,7 @@ def test_search_rejects_a_stated_sort_the_cursor_cannot_serve(
     fake = _fake_searcher_returning_one_hit()
     cursor = encode_keyset_cursor(
         KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
-                     order="desc"),
+                     order="desc", walk="text"),
     )
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
@@ -393,6 +393,12 @@ def test_search_serves_a_cursor_whose_query_is_only_filter_operators(
     Internal Server Error`` with no problem+json body. Only the transport
     shows that, which is why this test is here and not beside its
     api-level sibling.
+
+    The cursor is an **archive**-walk one (#326), which is what such a
+    query actually mints: the operators are lifted out by ``parse_query``,
+    so no FTS predicate is built and there is none to rebuild on the next
+    page. A text-walk cursor arriving with this same query is the pair
+    #326 refuses — ``test_api_search_cursor_walk.py`` owns that half.
     """
     from datetime import datetime, timezone
     from localmail.api.search_cursor import encode_keyset_cursor
@@ -401,17 +407,58 @@ def test_search_serves_a_cursor_whose_query_is_only_filter_operators(
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
     incoming = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
-                            id=100, order="desc")
+                            id=100, order="desc", walk="archive")
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
     r = c.post(
         "/v1/search",
         json={"query": "subject:invoice", "filters": {}, "limit": 20,
-              "cursor": encode_keyset_cursor(replace(incoming, order="desc"))},
+              "cursor": encode_keyset_cursor(incoming)},
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 200
     assert fake.search.call_args.kwargs["keyset_cursor"] == incoming
+
+
+def test_a_text_cursor_without_its_query_is_a_400_not_a_500(
+    db_dsn, db_conn, api_user, api_token,
+):
+    """#326's refusal, seen from the transport — the other half of the pair.
+
+    The sibling above proves an *archive* cursor is served; this proves a
+    *text* one with no free text is refused, and refused as a clean 400
+    with a problem+json body rather than as the bare ``ValueError`` the
+    Searcher's own guard raises. ``ValidationFailed`` is an ``APIError`` so
+    the mapping is generic — which is exactly the argument the sibling's
+    docstring rejects for itself ("only the transport shows that"), and it
+    applies unchanged to a refusal added later.
+
+    ``subject:invoice`` rather than ``""`` so the test also covers the
+    request field that is non-blank and still leaves no free text — the
+    shape #308's follow-up defect lived in.
+    """
+    from datetime import datetime, timezone
+    from localmail.api.search_cursor import encode_keyset_cursor
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    text_cursor = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
+                               id=100, order="desc", walk="text")
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    for query in ("subject:invoice", ""):
+        r = c.post(
+            "/v1/search",
+            json={"query": query, "filters": {}, "limit": 20,
+                  "cursor": encode_keyset_cursor(text_cursor)},
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+        assert r.status_code == 400, (query, r.status_code, r.text)
+        body = r.json()
+        assert body["type"] == "/problems/validation-failed", body
+        assert "query" in body["detail"], body
+    fake.search.assert_not_called()
 
 
 def test_search_smart_param_is_forwarded_to_searcher(
@@ -589,7 +636,7 @@ def test_search_rejects_a_stated_order_the_cursor_cannot_serve(
     fake = _fake_searcher_returning_one_hit()
     cursor = encode_keyset_cursor(
         KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
-                     order="asc"),
+                     order="asc", walk="text"),
     )
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
@@ -625,7 +672,7 @@ def test_search_continues_an_ascending_cursor_over_the_wire(
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
     ks = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
-                      order="asc")
+                      order="asc", walk="text")
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
     r = c.post(
@@ -661,18 +708,27 @@ def test_an_ascending_search_puts_a_directional_cursor_in_the_response_body(
     what an ascending walk produces: the direction travels on the cursor
     the Searcher returns, not on an argument this layer re-derives. The
     route's obligation is to mint from it faithfully, which is what the
-    prefix assertions below check.
+    round-trip assertion below checks.
+
+    Asserted by decoding rather than by ``startswith``: since #326 the
+    prefix carries the *walk* as well as the direction, so a literal here
+    would pin an encoding detail this test does not care about — and would
+    have to be edited again the next time the table grows. The prefix
+    spellings themselves are pinned in
+    ``tests/test_api_search_cursor_walk.py``, once.
     """
     from datetime import datetime, timezone
 
-    from localmail.api.search_cursor import keyset_order
+    from localmail.api.search_cursor import decode_keyset_cursor, keyset_order
     from localmail.search.searcher import KeysetCursor
 
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
-    fake.search.return_value.next_keyset = KeysetCursor(
-        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="asc"
+    minted = KeysetCursor(
+        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="asc",
+        walk="text",
     )
+    fake.search.return_value.next_keyset = minted
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
     r = c.post(
@@ -683,29 +739,39 @@ def test_an_ascending_search_puts_a_directional_cursor_in_the_response_body(
     )
     assert r.status_code == 200
     cursor = r.json()["next_cursor"]
-    assert cursor.startswith("KA|"), cursor
+    assert decode_keyset_cursor(cursor) == minted, cursor
     assert keyset_order(cursor) == "asc"
 
 
-def test_a_descending_search_still_mints_the_legacy_prefix(
+def test_a_descending_search_mints_a_descending_cursor(
     db_dsn: str, api_token: str, db_conn, api_user,
 ) -> None:
     """The negative control for the test above.
 
-    Asserting only the ascending prefix passes against a mint hardcoded to
-    ``"KA|"``, which would break every descending client — the far commoner
+    Asserting only the ascending case passes against a mint hardcoded to
+    ascending, which would break every descending client — the far commoner
     path, and the one the GUI is on.
+
+    Renamed from ``…_still_mints_the_legacy_prefix``: since #326 the legacy
+    ``K|`` is what a descending **archive** walk mints, while a descending
+    text walk like this one mints ``KT|``. The name asserted something that
+    is no longer true of this request, and the property the pair is really
+    for — the direction survives into the response body — never depended on
+    the spelling. That ``K|`` and ``KA|`` keep their meanings is pinned by
+    ``test_a_legacy_cursor_reads_as_an_archive_walk``.
     """
     from datetime import datetime, timezone
 
-    from localmail.api.search_cursor import keyset_order
+    from localmail.api.search_cursor import decode_keyset_cursor, keyset_order
     from localmail.search.searcher import KeysetCursor
 
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
-    fake.search.return_value.next_keyset = KeysetCursor(
-        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc"
+    minted = KeysetCursor(
+        ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc",
+        walk="text",
     )
+    fake.search.return_value.next_keyset = minted
     app = create_app(db_dsn=db_dsn, searcher=fake)
     c = TestClient(app)
     r = c.post(
@@ -715,5 +781,5 @@ def test_a_descending_search_still_mints_the_legacy_prefix(
     )
     assert r.status_code == 200
     cursor = r.json()["next_cursor"]
-    assert cursor.startswith("K|"), cursor
+    assert decode_keyset_cursor(cursor) == minted, cursor
     assert keyset_order(cursor) == "desc"

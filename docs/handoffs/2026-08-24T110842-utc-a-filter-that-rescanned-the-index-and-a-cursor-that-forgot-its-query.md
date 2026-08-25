@@ -84,7 +84,7 @@ was inlined in:
   and both defaults, because `date_keyset` needs `SortOrder` at runtime for its
   ORDER BY completeness check and defining it twice is #312's drift one level
   down. `searcher.py` imports both, so every existing import path resolves.
-- `searcher.py` shrank **1360 → 1315 lines** (147 deleted, 102 added back).
+- `searcher.py` lost **146 lines** (1360 → 1277).
 
 ### `63719ea` + `50f0bb2` — #326: a text-walk cursor needs its query back
 

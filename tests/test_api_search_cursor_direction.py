@@ -31,7 +31,10 @@ from localmail.api.search_cursor import (
 )
 from localmail.search.searcher import KeysetCursor
 
-_KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100, order="desc")
+#: An archive-walk position: these tests send no query, and an
+#: archive cursor is the flavour that continues under any query (#326).
+_KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
+                   order="desc", walk="archive")
 
 
 def test_the_two_directions_mint_different_prefixes() -> None:
@@ -60,7 +63,7 @@ def test_a_legacy_cursor_still_means_descending() -> None:
     legacy = encode_keyset_cursor(replace(_KS, order="desc"))
     assert keyset_order(legacy) == "desc"
     plan = resolve_cursor_plan(cursor=legacy, requested_sort=None,
-                               requested_sort_order=None)
+                               requested_sort_order=None, free_text="")
     assert plan == CursorPlan(mode="keyset", sort="date", sort_order="desc")
 
 
@@ -68,7 +71,7 @@ def test_an_ascending_cursor_alone_continues_ascending() -> None:
     """The documented way to page: send the cursor, state nothing else."""
     raw = encode_keyset_cursor(replace(_KS, order="asc"))
     plan = resolve_cursor_plan(cursor=raw, requested_sort=None,
-                               requested_sort_order=None)
+                               requested_sort_order=None, free_text="")
     assert plan == CursorPlan(mode="keyset", sort="date", sort_order="asc")
 
 
@@ -76,31 +79,31 @@ def test_a_stated_order_contradicting_the_cursor_is_rejected() -> None:
     raw = encode_keyset_cursor(replace(_KS, order="asc"))
     with pytest.raises(ValidationFailed, match="sort_order"):
         resolve_cursor_plan(cursor=raw, requested_sort=None,
-                            requested_sort_order="desc")
+                            requested_sort_order="desc", free_text="")
 
 
 def test_a_stated_order_agreeing_with_the_cursor_is_accepted() -> None:
     raw = encode_keyset_cursor(replace(_KS, order="asc"))
     plan = resolve_cursor_plan(cursor=raw, requested_sort="date",
-                               requested_sort_order="asc")
+                               requested_sort_order="asc", free_text="")
     assert plan.sort_order == "asc"
 
 
 def test_a_fresh_request_resolves_both_defaults() -> None:
     plan = resolve_cursor_plan(cursor=None, requested_sort=None,
-                               requested_sort_order=None)
+                               requested_sort_order=None, free_text="")
     assert plan == CursorPlan(mode="fresh", sort="rank", sort_order="desc")
 
 
 def test_a_fresh_request_keeps_what_the_caller_stated() -> None:
     plan = resolve_cursor_plan(cursor=None, requested_sort="date",
-                               requested_sort_order="asc")
+                               requested_sort_order="asc", free_text="")
     assert plan == CursorPlan(mode="fresh", sort="date", sort_order="asc")
 
 
 def test_a_pool_cursor_reports_the_pool_mode() -> None:
     plan = resolve_cursor_plan(cursor="tok-1:2", requested_sort=None,
-                               requested_sort_order=None)
+                               requested_sort_order=None, free_text="")
     assert plan.mode == "pool"
 
 

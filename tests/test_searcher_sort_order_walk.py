@@ -185,6 +185,103 @@ def test_an_ascending_page_boundary_inside_the_undated_head_loses_nothing(
     assert len(walked) == len(set(walked)) == 7, walked
 
 
+def test_a_descending_page_straddling_the_undated_tail_is_topped_up(
+    db_dsn, db_conn,
+):
+    """#323: the dated→undated transition happens *within* one response.
+
+    The descending dated predicate is a row comparison, so it cannot admit
+    the NULLS-LAST undated tail — ``ROW(NULL, id) < ROW(…)`` is NULL. Those
+    rows come from a second top-up statement issued in the same call, which
+    is what ``api.browse.list_messages`` has done for #75 since before this
+    walk existed.
+
+    Two failure modes, and this is the only test in the file that separates
+    them. Drop the top-up entirely and the undated rows vanish from the
+    archive between pages — caught by the sibling walk tests' row counts.
+    Defer it to the *next* page instead and every count still holds, while
+    the caller gets a short page followed by a stub one: correct, and one
+    wasted round trip per walk at exactly the boundary the cursor was
+    minted for. Asserting the page is full is what tells the two apart.
+
+    Seven dated rows and two undated, pages of three, puts the boundary
+    strictly inside page three: one dated row left, two undated to fill it.
+    """
+    undated_ids = _seed(db_conn, n=7, undated=2)
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=None)
+        pages = []
+        cursor = None
+        for _ in range(5):
+            page = s.search("needle", allowed_account_ids=None, page_size=3,
+                            user_id=1, sort="date", sort_order="desc",
+                            keyset_cursor=cursor)
+            pages.append(page)
+            if page.next_keyset is None:
+                break
+            cursor = page.next_keyset
+    finally:
+        pool.close()
+    assert len(pages) == 3, [len(p_.results) for p_ in pages]
+    straddling = pages[-1]
+    assert len(straddling.results) == 3, (
+        "the page straddling the undated tail came back short: the top-up "
+        "either did not run or ran on the following page instead"
+    )
+    ids = [r.message_id for r in straddling.results]
+    assert ids[1:] == list(reversed(undated_ids)), ids
+    assert straddling.next_keyset is None, (
+        "the walk did not end at the undated tail"
+    )
+
+
+def test_a_descending_page_wholly_inside_the_undated_tail_is_topped_up(
+    db_dsn, db_conn,
+):
+    """The sibling shape: the dated query returns **nothing** at all.
+
+    Six dated rows and two undated, pages of three, exhausts the dated run
+    exactly on a page boundary — so page three's cursor query matches zero
+    rows and the whole page has to come from the top-up. The straddling
+    test above cannot reach this: it is built so one dated row survives
+    into the final page, which is the case where the top-up merely *fills*
+    a page rather than *being* it.
+
+    Covered only by accident before this: mutating ``needs_undated_top_up``
+    to bail out when ``rows_returned == 0`` failed exactly one test in the
+    suite — ``test_a_tie_group_straddling_a_page_boundary_loses_nothing``,
+    which is written for the ``id`` tiebreaker and reaches this shape purely
+    because its seed arithmetic happens to land that way. That test guards
+    its own property against seed drift and cannot guard this one; change
+    its ``n``, ``tied`` or page size and the only pin on a whole-page
+    top-up disappears with nothing failing.
+    """
+    undated_ids = _seed(db_conn, n=6, undated=2)
+    pool = open_pool(db_dsn)
+    try:
+        s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(), reranker=None)
+        pages = []
+        cursor = None
+        for _ in range(6):
+            page = s.search("needle", allowed_account_ids=None, page_size=3,
+                            user_id=1, sort="date", sort_order="desc",
+                            keyset_cursor=cursor)
+            pages.append(page)
+            if page.next_keyset is None:
+                break
+            cursor = page.next_keyset
+    finally:
+        pool.close()
+    final = pages[-1]
+    assert [r.message_id for r in final.results] == list(reversed(undated_ids)), (
+        "the final page is not exactly the undated tail, newest id first"
+    )
+    assert final.next_keyset is None, "the walk did not end at the undated tail"
+    walked = [r.message_id for p_ in pages for r in p_.results]
+    assert len(walked) == len(set(walked)) == 8, walked
+
+
 def _all_ids_in_sql_order(conn, *, order):
     """Ground truth straight from the ORDER BY the walk claims to reproduce.
 

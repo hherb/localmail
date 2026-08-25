@@ -278,12 +278,20 @@ def test_sort_date_lexical_paginates_across_dated_then_null_tail(db_dsn, db_conn
     NULLS-LAST tail of un-backfilled rows, with no duplicates across the
     boundary.
 
-    Why: the keyset WHERE clause includes
-    ``OR COALESCE(internal_date, date_sent) IS NULL`` so the planner can
-    transition from "still in dated portion" to "in NULLS tail" mid-walk
-    without a separate query. The risk is double-emitting NULL rows on the
-    transition page; ORDER BY ... DESC NULLS LAST + LIMIT keeps them out
-    until dated is exhausted, but only an end-to-end walk proves it.
+    Why: the descending keyset predicate is a **row comparison**, which
+    cannot admit the NULLS-LAST tail at all — ``ROW(NULL, id) < ROW(…)`` is
+    NULL — so the transition is made by a **second top-up statement** issued
+    in the same response (#323). The risk is double-emitting NULL rows on
+    the transition page, or losing them; ORDER BY ... DESC NULLS LAST +
+    LIMIT keeps them out until dated is exhausted, but only an end-to-end
+    walk proves it.
+
+    This docstring used to say the clause carried ``OR COALESCE(...) IS
+    NULL`` "so the planner can transition ... without a separate query".
+    #323 deleted that disjunct precisely because it denied the predicate its
+    index range bound, and added the separate query. Left as written it told
+    a maintainer the disjunct was load-bearing — the one edit both
+    directions' tests are now built to catch.
     """
     now = datetime.now(timezone.utc)
     rows: list[tuple[str, str, object, object]] = []

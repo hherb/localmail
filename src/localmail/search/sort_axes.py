@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
-# ruff: noqa: E501
 
 """The two ordering axes a search request states, and their defaults.
 

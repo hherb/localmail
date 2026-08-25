@@ -26,6 +26,52 @@ def test_build_query_string_validates_date_format() -> None:
         build_query_string(free_text="x", filters={"after": "not-a-date"})
 
 
+@pytest.mark.parametrize("free_text", [
+    "invoice",
+    "",
+    "   ",
+    "subject:invoice",
+    'quoted "phrase" here',
+    "multi word text",
+    "trailing ",
+])
+@pytest.mark.parametrize("filters", [
+    {},
+    {"account_ids": [1, 2]},
+    {"folder_ids": [7]},
+    {"from": "alice@example.com"},
+    {"from": "alice OR account:other"},
+    {"subject": "  "},
+    {"after": "2026-01-01", "before": "2026-02-01"},
+    {"has_attachment": True},
+    {"lang": "en"},
+    {"to": 'bob "the" builder'},
+])
+def test_build_query_string_is_free_text_neutral(
+    free_text: str, filters: dict,
+) -> None:
+    """Composing filters in must not change what counts as the free text.
+
+    #326's two guards both apply ``parse_query`` and both read
+    ``.free_text``, but not to the same string: ``api.run_search``'s gate
+    parses the **raw** request field, while ``Searcher.search`` parses
+    ``build_query_string(free_text, scoped_filters)`` — the composed query,
+    which ``_scope_filters_by_acl`` has already appended ``account_id:``
+    tokens to. They agree only because this composer is free-text-neutral,
+    which is a property of the composer and of neither guard.
+
+    Unpinned, that is a third reading of one rule in a cluster whose own
+    history is two predicates disagreeing about what counts as a blank
+    query (#308's follow-up). CLAUDE.md asserted the equivalence for #308;
+    this is what makes it true rather than written down.
+    """
+    from localmail.search.query import parse_query
+
+    composed = parse_query(build_query_string(free_text=free_text,
+                                              filters=filters)).free_text
+    assert composed.strip() == parse_query(free_text).free_text.strip()
+
+
 def test_filter_value_with_dsl_injection_is_quoted() -> None:
     """Regression: a filter value containing `account:other` must not break
     out into an additional operator. Quoting forces the parser to treat the

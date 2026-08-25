@@ -45,8 +45,12 @@ DATE_EXPR_SQL = "COALESCE(m.internal_date, m.date_sent)"
 #: Keyed on ``SortOrder`` rather than ``str`` so mypy refuses a wrong
 #: literal at the call site. That is the static half only, and CI runs no
 #: mypy step — so the value mypy cannot see (a library caller passing
-#: ``"ASC"``) is caught at runtime instead, by ``keyset_clause``'s explicit
-#: membership check against *this* table. It used to be caught by the
+#: ``"ASC"``) is caught at runtime instead, by the explicit membership check
+#: against *this* table in **both** ``compose_date_keyset_sql`` and
+#: ``keyset_clause``. Each is independently reachable — page 1 has no cursor
+#: and so never calls ``keyset_clause`` — which is why the check is written
+#: twice rather than being a duplicate one of them could drop. It used to be
+#: caught by the
 #: ``KeyError`` from the lookup, which worked only because the lookup
 #: happened to be assembled after the predicate: ``"ASC"`` fell through the
 #: ``== "desc"`` test into the *ascending* predicate first, and nothing but
@@ -67,11 +71,22 @@ DATE_ORDER_BY_SQL: dict[SortOrder, str] = {
 #: ``reject_empty_diagnostic`` / ``reject_empty_wire_name`` shape: a
 #: mistake that cannot reach a query is better than one that reaches it
 #: loudly.
+#: Both differences are reported. ``!=`` also fires when the table carries an
+#: *extra* key — a typo, or a row left behind by a rename — and a message
+#: naming only what is missing printed an empty list under the word
+#: "missing" for exactly that case.
 if set(DATE_ORDER_BY_SQL) != set(get_args(SortOrder)):
     raise RuntimeError(
-        "every SortOrder needs an ORDER BY: "
-        f"{sorted(set(get_args(SortOrder)) - set(DATE_ORDER_BY_SQL))} missing"
+        "every SortOrder needs an ORDER BY: missing="
+        f"{sorted(set(get_args(SortOrder)) - set(DATE_ORDER_BY_SQL))} "
+        f"unexpected={sorted(set(DATE_ORDER_BY_SQL) - set(get_args(SortOrder)))}"
     )
+#: Coverage is not content: a copy-paste giving both directions the same
+#: ORDER BY passes the check above, and the emitter's own test cannot catch
+#: it (it asserts ``DATE_ORDER_BY_SQL[order] in sql``, derived from this
+#: table). The plan test would, at the cost of a database.
+if len(set(DATE_ORDER_BY_SQL.values())) != len(DATE_ORDER_BY_SQL):
+    raise RuntimeError("two SortOrders share one ORDER BY")
 
 #: The top-up predicate: the undated block, with no cursor bound (#323).
 #:
@@ -118,20 +133,34 @@ def compose_date_keyset_sql(*, where: str, order: SortOrder) -> str:
     return ROW_SQL_TEMPLATE.format(where=where, order_by=DATE_ORDER_BY_SQL[order])
 
 
-def keyset_clause(
-    keyset: KeysetCursor, order: SortOrder,
-) -> tuple[str, list[Any]]:
+def keyset_clause(keyset: KeysetCursor) -> tuple[str, list[Any]]:
     """The ``AND …`` fragment placing the walk strictly after ``keyset``.
+
+    The direction is read off ``keyset``, never passed beside it. It used to
+    be a second parameter, which re-admitted the exact pairing that putting
+    ``order`` on the cursor was meant to make unrepresentable — a descending
+    position walked with the ascending predicate. Production was correct only
+    because ``Searcher.search`` sets ``effective_order = keyset_cursor.order``
+    whenever a cursor exists, i.e. by one caller's discipline, which is the
+    standard ``encode_keyset_cursor`` was already raised above. The redundancy
+    was total: this is only ever reached with a cursor in hand, and that
+    cursor is the only thing that can say which way its position runs.
 
     Both directions' dated predicates are SQL **row comparisons**, which is
     the only spelling Postgres composes into an ``Index Cond`` on
     ``messages_recent_idx``. The OR-form (``expr < %s OR (expr = %s AND
     id < %s)``) is semantically identical and plans as a per-tuple
     ``Filter``: the walk restarts at the head of the index on every page
-    and discards everything before the cursor. Measured mid-walk on the
-    live 128k archive, page ~1250: **62 ms and ~54,000 buffers with 64,001
-    rows removed by filter, against 0.57 ms and 46 buffers** for the row
-    comparison. The cost is linear in scroll depth, so it is invisible on
+    and discards everything before the cursor. Measured **descending**
+    mid-walk on the live 128,324-message archive at offset 64,000:
+    **70.383 ms and 54,230 buffers with 64,001 rows removed by filter,
+    against 0.040 ms and 48 buffers** for the row comparison. (Ascending's
+    own #322 run, on a 128,306-message archive, was 62.1 ms / 53,789
+    buffers against 0.57 ms / 46 — quoted separately because it is a
+    separate run. This docstring used to blend the two, taking the
+    milliseconds and buffers from different measurements, in the comment
+    whose job is to stop a revert to the OR-form.) The cost is linear in
+    scroll depth, so it is invisible on
     page 1 — where this feature's "no new index" measurements were taken —
     and grows without bound on exactly the deep scroll the keyset walk
     exists to serve. This is the trap #75 documents for the browse path; do
@@ -150,12 +179,30 @@ def keyset_clause(
     is the shape ``api.browse.list_messages`` has used for #75 since before
     this walk existed.
 
-    The ``ts is None`` branches need no such treatment in either
-    direction: the cursor is already inside the undated block, so
-    ``expr IS NULL`` is a leading-column condition the index can bound on
-    and the ``id`` comparison beside it is residual over that block alone.
+    The ``ts is None`` branches need no top-up in either direction, but
+    **they are not the same shape and do not plan alike** — an earlier
+    wording claimed one mechanism for both, and the planner contradicts it
+    on each half:
+
+    * **Descending** is ``expr IS NULL AND m.id < %s``, and both conjuncts
+      land in the ``Index Cond``. The ``id`` comparison is *not* residual —
+      it is the index's second column, bounded like the first.
+    * **Ascending** is the OR-form ``(expr IS NULL AND id > %s) OR expr IS
+      NOT NULL``, which must admit every dated row and therefore gets **no
+      index bound at all**: it plans as a ``Filter`` over a backward index
+      scan. That is deliberate and does not carry #323's cost — the rows it
+      discards are the undated ones already behind the cursor, so its
+      residual is bounded by the size of the undated block rather than by
+      archive size, and it is only paid while the walk is still inside that
+      block. Splitting it into two phases the way descending is split would
+      buy nothing and add a second transition to get right.
+
+    Neither branch has a plan test (``test_searcher_sort_order_plan.py``
+    covers dated cursors only), so this paragraph is their only record —
+    which is why the mechanism is stated per direction rather than shared.
     """
     expr = DATE_EXPR_SQL
+    order = keyset.order
     # Named explicitly rather than left to an ``else``. The two lookups are
     # independently reachable: an ``order`` that is not exactly "desc" used
     # to fall through into the *ascending* predicate here and was only
@@ -163,7 +210,10 @@ def keyset_clause(
     # assembled afterwards. That ordering is an accident of one function's
     # statement order — hoist the ORDER BY out and the guard is gone — and
     # the KeyError it raised carried the bare message ``'DESC'``, naming
-    # neither the parameter nor the search.
+    # neither the field nor the search. Still reachable now that the value
+    # comes off the cursor: ``KeysetCursor.order`` is a ``Literal`` mypy
+    # checks and CI runs no mypy step, so a library caller can construct one
+    # carrying ``"DESC"``.
     if order not in DATE_ORDER_BY_SQL:
         raise ValueError(
             f"unknown sort_order {order!r}; expected one of "
@@ -197,7 +247,6 @@ def keyset_clause(
 def needs_undated_top_up(
     *,
     keyset: KeysetCursor | None,
-    order: SortOrder,
     rows_returned: int,
     fetch_limit: int,
 ) -> bool:
@@ -206,10 +255,14 @@ def needs_undated_top_up(
     True only for a **descending dated** continuation that came back short.
     Each conjunct earns its place:
 
-    * ``order == "desc"`` — ascending puts the undated block at the head of
-      the walk, where ``keyset_clause``'s own predicate already reaches it.
     * ``keyset is not None`` — page 1 carries no cursor predicate at all,
       so the index walk streams into the undated tail by itself.
+    * ``keyset.order == "desc"`` — ascending puts the undated block at the
+      head of the walk, where ``keyset_clause``'s own predicate already
+      reaches it. Read off the cursor rather than taken beside it, like
+      ``keyset_clause``'s: the direction is only ever consulted once a
+      cursor is in hand to supply it, so a second source for it could only
+      ever disagree.
     * ``keyset.ts is not None`` — a cursor already inside the undated block
       is being paginated by id within it; topping up would re-emit rows the
       caller has seen.
@@ -219,10 +272,17 @@ def needs_undated_top_up(
     Separated from the query so the rule is testable without a database,
     and so the reasoning above sits with the condition rather than inside
     a method that is mostly SQL assembly.
+
+    **The two statements are two snapshots.** Under READ COMMITTED the dated
+    page and its top-up are read separately, so a row inserted into the
+    undated block between them can be missed or repeated at that one
+    boundary. ``api.browse.list_messages`` has had exactly this property
+    since #75; it is noted rather than fixed because closing it means a
+    repeatable-read transaction around every page.
     """
     return (
-        order == "desc"
-        and keyset is not None
+        keyset is not None
+        and keyset.order == "desc"
         and keyset.ts is not None
         and rows_returned < fetch_limit
     )

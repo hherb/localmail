@@ -420,6 +420,47 @@ def test_search_serves_a_cursor_whose_query_is_only_filter_operators(
     assert fake.search.call_args.kwargs["keyset_cursor"] == incoming
 
 
+def test_a_text_cursor_without_its_query_is_a_400_not_a_500(
+    db_dsn, db_conn, api_user, api_token,
+):
+    """#326's refusal, seen from the transport — the other half of the pair.
+
+    The sibling above proves an *archive* cursor is served; this proves a
+    *text* one with no free text is refused, and refused as a clean 400
+    with a problem+json body rather than as the bare ``ValueError`` the
+    Searcher's own guard raises. ``ValidationFailed`` is an ``APIError`` so
+    the mapping is generic — which is exactly the argument the sibling's
+    docstring rejects for itself ("only the transport shows that"), and it
+    applies unchanged to a refusal added later.
+
+    ``subject:invoice`` rather than ``""`` so the test also covers the
+    request field that is non-blank and still leaves no free text — the
+    shape #308's follow-up defect lived in.
+    """
+    from datetime import datetime, timezone
+    from localmail.api.search_cursor import encode_keyset_cursor
+    from localmail.search.searcher import KeysetCursor
+
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    text_cursor = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
+                               id=100, order="desc", walk="text")
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    for query in ("subject:invoice", ""):
+        r = c.post(
+            "/v1/search",
+            json={"query": query, "filters": {}, "limit": 20,
+                  "cursor": encode_keyset_cursor(text_cursor)},
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+        assert r.status_code == 400, (query, r.status_code, r.text)
+        body = r.json()
+        assert body["type"] == "/problems/validation-failed", body
+        assert "query" in body["detail"], body
+    fake.search.assert_not_called()
+
+
 def test_search_smart_param_is_forwarded_to_searcher(
     db_dsn: str, api_token: str, db_conn, api_user,
 ) -> None:

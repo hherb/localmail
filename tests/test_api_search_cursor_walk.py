@@ -147,9 +147,9 @@ def test_no_keyset_prefix_is_a_prefix_of_another() -> None:
     """What lets the scan classify a cursor whatever order it runs in.
 
     Every prefix ends in the ``|`` terminator and contains no other, so a
-    shorter one can never match inside a longer one. Adding a fourth
-    without that property would silently reclassify cursors, so the
-    property is asserted rather than left to the comment beside the table.
+    shorter one can never match inside a longer one. Adding a fifth without
+    that property would silently reclassify cursors, so the property is
+    asserted rather than left to the comment beside the table.
     """
     from localmail.api.search_cursor import _KEYSET_PREFIXES
 
@@ -160,6 +160,45 @@ def test_no_keyset_prefix_is_a_prefix_of_another() -> None:
         for b in prefixes:
             if a is not b:
                 assert not b.startswith(a), (a, b)
+
+
+def test_the_prefix_table_covers_the_whole_product_of_both_axes() -> None:
+    """Totality, asserted rather than assumed by ``encode_keyset_cursor``.
+
+    That function raises on an unmapped pair and calls it unreachable "while
+    the table covers the product of both Literals". This is what makes that
+    premise true: widening either ``Literal`` without widening the table
+    would otherwise type-check, import, and fail on the *response* path as a
+    500 on a search that had already succeeded.
+
+    Derived from ``get_args`` on both types, so it tracks a widening
+    automatically — a hardcoded list of the four pairs would stay green
+    through exactly the change it exists to catch.
+    """
+    from itertools import product
+    from typing import get_args
+
+    from localmail.api.search_cursor import _KEYSET_PREFIXES
+    from localmail.search.keyset_walk import KeysetWalk
+    from localmail.search.sort_axes import SortOrder
+
+    assert {(o, w) for _p, o, w in _KEYSET_PREFIXES} == set(
+        product(get_args(SortOrder), get_args(KeysetWalk))
+    )
+
+
+def test_an_unmappable_pair_is_refused_rather_than_mislabelled() -> None:
+    """The raise is a backstop for the one thing the import check cannot see.
+
+    A member added to either ``Literal`` is caught at import; a cursor built
+    with a value that is in *neither* ``Literal`` — a library caller, since
+    CI runs no mypy — reaches the encoder. It must not fall through to a
+    default prefix: that mints a cursor which decodes as a *different* walk,
+    which is #326 reintroduced through its own encoder.
+    """
+    ks = KeysetCursor(ts=None, id=1, order="desc", walk="video")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="no keyset prefix"):
+        encode_keyset_cursor(ks)
 
 
 # ---- End to end through run_search --------------------------------------

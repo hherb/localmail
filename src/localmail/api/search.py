@@ -24,7 +24,7 @@ from localmail.api.search_cursor import (
     resolve_cursor_plan,
 )
 from localmail.config import SearchConfig
-from localmail.search.query import parse_query
+from localmail.search.query import QueryParseError, parse_query
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.rewrite_status import (
     CONTINUATION_PAGE,
@@ -142,6 +142,32 @@ def _validate_date(value: str, key: str) -> None:
         raise ValidationFailed(f"{key}: expected YYYY-MM-DD, got {value!r}") from exc
 
 
+def _gate_free_text(free_text: str) -> str:
+    """The text ``Searcher.search`` will build an FTS predicate from.
+
+    ``parse_query`` raises ``QueryParseError`` for a malformed ``after:``/
+    ``before:`` date and for an empty ``lang:`` value. It is a bare
+    ``ValueError``, and ``serve.app`` registers a handler for ``APIError``
+    only — so it escaped ``run_search`` as an **unhandled 500 with no
+    problem+json body**, and reached the MCP tool as an exception no
+    ``ToolError`` mapping covers.
+
+    Translating it here rather than at each call site is what makes the fix
+    total: this runs once, unconditionally, at the top of ``run_search``,
+    ahead of the empty-ACL short-circuit and of every retrieval branch. The
+    gate's own parse is what #326 added; the *fresh* path has raised the
+    same bare error since long before, from ``Searcher.search``'s parse, and
+    is covered now by the same translation running first.
+
+    ``query="invoice after:last-week"`` is exactly the shape an LLM agent
+    emits, which is the audience this cursor cluster is written for.
+    """
+    try:
+        return parse_query(free_text).free_text
+    except QueryParseError as exc:
+        raise ValidationFailed(str(exc)) from exc
+
+
 def run_search(
     *,
     searcher: Searcher,
@@ -189,13 +215,23 @@ def run_search(
     # Resolved before the ACL short-circuit below, because that branch answers
     # with an empty page — indistinguishable from "you have reached the end".
     # A malformed paging request must be a 400 whatever the caller was granted.
-    # `parse_query(free_text).free_text` is the text `Searcher.search` will
-    # actually build an FTS predicate from — the filter operators are lifted
-    # out by then. Asking the same question the retrieval branch asks is what
-    # keeps the gate and the branch from disagreeing (#308's follow-up, #326).
+    #
+    # This gate and `Searcher.search`'s #326 guard both apply `parse_query`
+    # and both read `.free_text`, but **not to the same string**: the gate
+    # parses the raw request field, while the branch parses
+    # `build_query_string(free_text, scoped_filters)` — the composed query,
+    # which `_scope_filters_by_acl` has already appended `account_id:` tokens
+    # to. They agree because `build_query_string` is free-text-neutral, which
+    # is a property of the composer rather than of either guard, and is
+    # therefore pinned separately by
+    # `test_api_search.py::test_build_query_string_is_free_text_neutral`.
+    # The **branch guard is the authority** — it sees the string the FTS
+    # predicate is actually built from; this one exists to answer before any
+    # work is done, and before the empty-ACL branch can report a
+    # contradictory request as a completed one.
     plan = resolve_cursor_plan(cursor=cursor, requested_sort=sort,
                                requested_sort_order=sort_order,
-                               free_text=parse_query(free_text).free_text)
+                               free_text=_gate_free_text(free_text))
     # Refused here as well as in the Searcher so the caller gets a clean 400
     # before any work; the Searcher's own guard is what covers CLI and
     # library callers, who never reach this function. Ahead of the empty-ACL
@@ -276,16 +312,27 @@ def run_search(
                                    allowed_account_ids=allowed_account_ids)
         except (KeysetCursorUnusable, SortOrderNotApplicable,
                 KeysetOrderMismatch) as exc:
-            # Unreachable today: the plan pins a keyset request to
-            # sort="date", so Searcher.search takes the date branch, which
-            # reads the cursor and honours either order — neither guard can
-            # fire. Kept because both are guards on the *dispatch*, so a
-            # future change to which branch serves a keyset cursor would
-            # otherwise surface a caller's bad request as an operator-facing
-            # 500 traceback rather than a 400. Caught by named subclass,
-            # never by bare ValueError — psycopg, datetime and the embedding
-            # backends raise that, and relabelling a real outage as a cursor
-            # problem would send the caller to re-send a blameless query.
+            # `SortOrderNotApplicable` and `KeysetOrderMismatch` are the
+            # *dispatch* guards, and those two really are unreachable here:
+            # the plan pins a keyset request to sort="date", so
+            # Searcher.search takes the date branch, which reads the cursor
+            # and honours either order.
+            #
+            # `KeysetCursorUnusable` is **not** in that group and **is**
+            # reachable — this comment used to say "neither guard can fire"
+            # and cover all three. It is #326's walk guard, and it asks its
+            # question of a *different string* than the gate above does
+            # (raw request field there, composed query here — see that
+            # gate's comment). The two agree only because
+            # `build_query_string` is free-text-neutral; an unbalanced quote
+            # (`from:"`) is enough to separate them, and then this catch is
+            # what keeps a caller error a 400 instead of an operator-facing
+            # 500 traceback.
+            #
+            # Caught by named subclass, never by bare ValueError — psycopg,
+            # datetime and the embedding backends raise that, and
+            # relabelling a real outage as a cursor problem would send the
+            # caller to re-send a blameless query.
             raise ValidationFailed(f"cursor: {exc}") from exc
     else:
         parsed = decode_search_cursor(cursor)

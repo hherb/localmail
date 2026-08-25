@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import MINYEAR, datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import httpx
 import psycopg
@@ -50,7 +50,6 @@ from localmail.search.keyset_walk import (
     walk_for_text,
 )
 from localmail.search.date_keyset import (
-    DATE_EXPR_SQL,
     DATE_ORDER_BY_SQL,
     UNDATED_TAIL_ONLY_SQL,
     compose_date_keyset_sql,
@@ -112,11 +111,12 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
 
 # The date-ordered walk's SQL rules moved to ``search/date_keyset.py``
 # when #323 made the walk a two-query operation — see that module. These
-# names stay bound here because they are what this file's callers and the
-# plan-regression tests already reach for; they are the same objects, not
-# a second authority.
+# two names stay bound here because they are what this file (``_keyset_clause``)
+# and the plan-regression tests reach for; they are the same objects, not a
+# second authority. A third alias, ``_DATE_EXPR_SQL``, was bound here with no
+# reader anywhere and is gone — tests import ``DATE_EXPR_SQL`` from
+# ``date_keyset`` directly, which is where an alias-free name belongs.
 _DATE_ORDER_BY_SQL = DATE_ORDER_BY_SQL
-_DATE_EXPR_SQL = DATE_EXPR_SQL
 _keyset_clause = keyset_clause
 
 
@@ -660,7 +660,7 @@ class Searcher:
         cursor_sql: str = ""
         cursor_params: list[Any] = []
         if keyset is not None:
-            cursor_sql, cursor_params = _keyset_clause(keyset, order)
+            cursor_sql, cursor_params = _keyset_clause(keyset)
         rows = fetch(cursor_sql, cursor_params, fetch_limit)
 
         # #323: the descending dated predicate is a row comparison, which
@@ -669,8 +669,7 @@ class Searcher:
         # so the caller never sees a short page while a full one was
         # available and the dated→undated transition costs no extra round
         # trip. Exactly what ``api.browse.list_messages`` does for #75.
-        if needs_undated_top_up(keyset=keyset, order=order,
-                                rows_returned=len(rows),
+        if needs_undated_top_up(keyset=keyset, rows_returned=len(rows),
                                 fetch_limit=fetch_limit):
             rows += fetch(UNDATED_TAIL_ONLY_SQL, [], fetch_limit - len(rows))
 
@@ -1122,6 +1121,32 @@ class Searcher:
             effective_order = (
                 DEFAULT_SORT_ORDER if sort_order is None else sort_order
             )
+        # Both axes are membership-checked here, once, before either is read.
+        #
+        # `date_keyset` already reasons that CI runs no mypy step, so a wrong
+        # literal from a library caller has to be caught at runtime — but its
+        # checks are only reachable on the date branch, so the rank branch
+        # validated neither axis, and `sort` was never validated at all.
+        # Both silences were live: `sort="Date"` fell through the `== "date"`
+        # test below into the hybrid branch, serving rank ordering *and*
+        # `next_keyset=None` so the walk ended after one page; and
+        # `sort_order="ASC"` missed the exact-match refusal just below, so
+        # the rank path neither honoured, validated, nor reported it.
+        #
+        # A plain `ValueError`, not a named subclass: HTTP and MCP both
+        # declare these as `Literal`s, so this cannot arrive from the wire
+        # and there is no api/ mapping for it to be caught by. Worded like
+        # `date_keyset`'s sibling checks so the two cannot drift.
+        if effective_sort not in get_args(SortMode):
+            raise ValueError(
+                f"unknown sort {effective_sort!r}; expected one of "
+                f"{sorted(get_args(SortMode))}"
+            )
+        if effective_order not in get_args(SortOrder):
+            raise ValueError(
+                f"unknown sort_order {effective_order!r}; expected one of "
+                f"{sorted(get_args(SortOrder))}"
+            )
         # Refused rather than honoured: the rank path serves a bounded
         # candidate pool, so reversing it returns the least relevant of the
         # top hits rather than of the archive — an artifact of where the
@@ -1210,7 +1235,8 @@ class Searcher:
         # query has always been answered as a date-ordered list. It now
         # paginates too — before, it returned one page and no cursor, which
         # is the branch "show me my oldest mail" lands on.
-        if effective_sort == "date" or not parsed.free_text.strip():
+        if (effective_sort == "date"
+                or walk_for_text(parsed.free_text) == "archive"):
             t = time.monotonic()
             with self._pool.connection() as conn:
                 parsed = self._resolve_account_names(conn, parsed)

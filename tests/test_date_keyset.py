@@ -49,7 +49,7 @@ def test_both_dated_predicates_are_row_comparisons(order: SortOrder) -> None:
     file green — which is exactly how the descending half came to differ
     from the ascending one in the first place.
     """
-    sql, params = keyset_clause(_dated(order), order)
+    sql, params = keyset_clause(_dated(order))
     assert f"ROW({DATE_EXPR_SQL}, m.id)" in sql, sql
     assert " OR " not in sql, (
         "the dated keyset predicate grew a disjunct: Postgres will not "
@@ -66,14 +66,14 @@ def test_the_descending_dated_predicate_no_longer_admits_undated_rows() -> None:
     for its absence is the one that fails if someone restores it to "fix"
     a short page.
     """
-    sql, _ = keyset_clause(_dated("desc"), "desc")
+    sql, _ = keyset_clause(_dated("desc"))
     assert "IS NULL" not in sql, sql
 
 
 def test_the_two_directions_compare_in_opposite_senses() -> None:
     """Ascending walks forward from the cursor, descending backward."""
-    asc_sql, _ = keyset_clause(_dated("asc"), "asc")
-    desc_sql, _ = keyset_clause(_dated("desc"), "desc")
+    asc_sql, _ = keyset_clause(_dated("asc"))
+    desc_sql, _ = keyset_clause(_dated("desc"))
     assert ") > ROW(" in asc_sql, asc_sql
     assert ") < ROW(" in desc_sql, desc_sql
 
@@ -91,7 +91,7 @@ def test_an_undated_cursor_paginates_within_the_undated_block(
     condition the index can bound on, so the ``id`` comparison beside it is
     residual over that block alone rather than over the archive.
     """
-    sql, params = keyset_clause(_undated(order), order)
+    sql, params = keyset_clause(_undated(order))
     assert f"{DATE_EXPR_SQL} IS NULL" in sql, sql
     assert comparison in sql, sql
     assert params == [42]
@@ -104,9 +104,13 @@ def test_an_unknown_order_is_refused_by_name() -> None:
     without an ``else``: that pairing once served a walk in the direction
     nobody asked for, stopped only by the ORDER BY lookup that happened to
     run afterwards.
+
+    ``keyset_clause`` reads the direction off the cursor, so the bad literal
+    has to be *on* the cursor to reach it — which is the only way it can
+    arrive now that there is no second parameter to disagree with the field.
     """
     with pytest.raises(ValueError, match="unknown sort_order 'DESC'"):
-        keyset_clause(_dated("desc"), "DESC")  # type: ignore[arg-type]
+        keyset_clause(_dated("DESC"))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="unknown sort_order 'DESC'"):
         compose_date_keyset_sql(where="TRUE", order="DESC")  # type: ignore[arg-type]
 
@@ -146,14 +150,14 @@ def test_the_top_up_predicate_carries_no_parameters() -> None:
 def test_a_short_descending_dated_page_is_topped_up() -> None:
     """The one shape that needs it."""
     assert needs_undated_top_up(
-        keyset=_dated("desc"), order="desc", rows_returned=3, fetch_limit=51,
+        keyset=_dated("desc"), rows_returned=3, fetch_limit=51,
     )
 
 
 def test_a_full_descending_page_is_not_topped_up() -> None:
     """No slots to fill; the next page's cursor reaches the tail in turn."""
     assert not needs_undated_top_up(
-        keyset=_dated("desc"), order="desc", rows_returned=51, fetch_limit=51,
+        keyset=_dated("desc"), rows_returned=51, fetch_limit=51,
     )
 
 
@@ -164,7 +168,7 @@ def test_page_one_is_never_topped_up() -> None:
     by the same statement.
     """
     assert not needs_undated_top_up(
-        keyset=None, order="desc", rows_returned=0, fetch_limit=51,
+        keyset=None, rows_returned=0, fetch_limit=51,
     )
 
 
@@ -177,7 +181,7 @@ def test_a_cursor_already_inside_the_undated_block_is_not_topped_up() -> None:
     others.
     """
     assert not needs_undated_top_up(
-        keyset=_undated("desc"), order="desc", rows_returned=1, fetch_limit=51,
+        keyset=_undated("desc"), rows_returned=1, fetch_limit=51,
     )
 
 
@@ -189,5 +193,5 @@ def test_ascending_is_never_topped_up() -> None:
     to the end of an ascending page, which is the wrong end entirely.
     """
     assert not needs_undated_top_up(
-        keyset=_dated("asc"), order="asc", rows_returned=3, fetch_limit=51,
+        keyset=_dated("asc"), rows_returned=3, fetch_limit=51,
     )

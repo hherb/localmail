@@ -221,8 +221,12 @@ cause of the corruption above (the instrumented runs showed zero contention).
    - **Residual implausible language labels dominated by `ja`** (~0.24%); the
      confidence-floor lever was measured useless. **Sample `ja` first.**
    - **The DGX drops remain uninvestigated** (risk 7).
-   - **`resetpwd.py` is untracked in the working tree** — a one-off admin
-     password reset script. Not committed, not in `.gitignore`. Decide.
+   - **`resetpwd.py` is GONE** — the previous handoff carried it as an
+     untracked working-tree file to decide about; it no longer exists, so that
+     item is closed. (Carried items are worth re-checking, not re-copying.)
+   - **A session-22 stash is still on the stack** (`stash@{0}: On
+     docs/session-22-handoff: review-fixes`); its content is on `main`, so
+     `git stash drop` it if you want the tree tidy.
    - **A stray SDD workspace** at `.superpowers/sdd/`. Git-ignored scratch.
 
 ## Open decisions & risks

@@ -117,7 +117,13 @@ race the migration runner either). New pure module
 
 - **Both refs measured in this session** (risk 5): `main` **2951** collected →
   branch **2974** (+23, the new test file).
-- `uv run pytest -q` → **2974 passed, 0 failed, 0 skipped** (181 s).
+- `uv run pytest -q` → **2974 passed, 0 failed, 0 skipped** (181 s) on macOS.
+- **CI green on both interpreter legs**: `2973 passed, 1 skipped` on 3.12 and
+  3.13. That **1 skipped is pre-existing on Linux, not introduced here** —
+  the control run on `main` at `815e74b` reads `2950 passed, 1 skipped`, and
+  both sum to their respective collect counts (2951 and 2974). Worth knowing
+  because it also proves the new `lock_probe_dsn` fixture did **not** skip in
+  CI, i.e. the `postgres` maintenance database really is reachable there.
 - **The acceptance experiment**: the concurrent-session run that previously
   produced 5 failures is now green — the second session prints its waiting
   notice, takes **9.9 s** where an uncontended run takes ~2 s (proving it
@@ -385,7 +391,11 @@ git diff --stat main origin/<branch>     # EMPTY = landed, not stranded
 # Python suite. NEVER a bare `uv sync` (risk 15).
 unset VIRTUAL_ENV && uv sync --all-extras
 unset VIRTUAL_ENV && uv run pytest -q
-#   expect 2974 passed, 0 failed, 0 SKIPPED on this branch; 2951 collected on main.
+#   macOS: expect 2974 passed, 0 failed, 0 skipped; 2951 collected on main.
+#   LINUX/CI: expect 2973 passed, 1 SKIPPED — that skip is pre-existing (main at
+#   815e74b reads 2950 passed, 1 skipped). Do NOT read it as a missing extra
+#   (risk 15) without checking a main run first; it is a platform difference,
+#   still unidentified, and is the one loose end this session left.
 #   MEASURE BOTH REFS IN THIS SESSION (risk 7) — no DB needed:
 unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2
 unset VIRTUAL_ENV && uv run mypy src/localmail    # expect Success, 152 files

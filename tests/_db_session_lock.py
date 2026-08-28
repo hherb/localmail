@@ -35,6 +35,16 @@ sharing this database were never running concurrently in any useful sense,
 they were corrupting each other. A session that wants real parallelism points
 ``LOCALMAIL_TEST_DSN`` at its own database, which the per-database key already
 keeps independent.
+
+**Adding ``pytest-xdist`` needs this module changed first.** It is not a
+dependency today. Each xdist worker is its own process, so under one shared
+DSN exactly one would acquire and the rest would block for
+``DEFAULT_LOCK_TIMEOUT_S`` and then fail — which looks like this guard being
+broken rather than like the workers sharing a database they must not share.
+The fix at that point is per-worker DSNs (``PYTEST_XDIST_WORKER`` suffixing),
+which the per-database key already supports and which is the direction #335
+suggested; note it needs a database the test role can *create*, and see the
+privilege constraint above before assuming it can.
 """
 from __future__ import annotations
 

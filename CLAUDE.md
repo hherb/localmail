@@ -4227,6 +4227,14 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     Verified that the `localmail` role can reach `postgres` on the exact
     `pgvector/pgvector:pg18` image CI uses, so the fixture's skip branch does
     not fire there and the suite's `0 skipped` invariant holds.
+  - **Adding `pytest-xdist` needs `_db_session_lock.py` changed first.** It is
+    not a dependency today. Each worker is its own process, so under one shared
+    DSN exactly one acquires and the rest block for `DEFAULT_LOCK_TIMEOUT_S`
+    and then fail — which reads as the guard being broken rather than as the
+    workers sharing a database they must not share. The fix then is per-worker
+    DSNs (`PYTEST_XDIST_WORKER` suffixing), which the per-database key already
+    supports; it needs a database the test role can *create*, so re-read the
+    privilege constraint above before assuming that is free.
   - **Known, filed not fixed:** five files (`test_serve_admin_csp.py`,
     `test_serve_admin_login.py`, `test_serve_daemon_wiring.py`,
     `test_serve_version_route.py`, `test_session_cookie_scope.py`) build a

@@ -104,6 +104,13 @@ race the migration runner either). New pure module
 - `DatabaseSessionBusy`, **not** `TestDatabaseBusy` — pytest collects any
   module-level `Test*` class and warns it cannot. Same call as
   `probe_connection`.
+- **Adding `pytest-xdist` needs this module changed first** (recorded in both
+  the module docstring and CLAUDE.md). It is not a dependency today; each
+  worker is its own process, so under one shared DSN exactly one would acquire
+  and the rest would block then fail — which reads as the guard being broken.
+  Per-worker DSNs are the answer, and they need a database the test role can
+  **create**, which it cannot for a fresh one (no superuser, `CREATE EXTENSION
+  vector`).
 
 ### Verification (this Mac, all extras)
 

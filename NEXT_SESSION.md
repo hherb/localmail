@@ -2,8 +2,9 @@
 
 > **Status as of 2026-08-28 (session 35).** `main` was **`815e74b`** at the
 > start — PR #333 had already been merged by the operator. This session opened
-> **one PR** on `fix/test-db-concurrent-session-guard` (2 commits) closing
-> **#335** and **#329**, and closed **#323** and **#326** by hand.
+> **one PR (#336)** on `fix/test-db-concurrent-session-guard` — 4 commits,
+> `d4412dd` (the fix), `56fb3df` / `83d2053` / `2fac3ae` (handoff + docs) —
+> closing **#335** and **#329**, and closed **#323** and **#326** by hand.
 >
 > **The previous handoff was accurate on substance and wrong on two facts**,
 > both caught by opening with `git`/`gh` (risk 2, now four-times earned):
@@ -438,8 +439,9 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
 #   expect: 0 svelte-check errors, 408 vitest, 104 cargo
 ```
 
-`main` tip at session start was **`815e74b`**. This session left **one PR**
-open on `fix/test-db-concurrent-session-guard`, closing **#335** and **#329**;
+`main` tip at session start was **`815e74b`**. This session left **one PR
+(#336)** open on `fix/test-db-concurrent-session-guard` (4 commits, head
+`2fac3ae`), closing **#335** and **#329**;
 **#323** and **#326** were closed by hand. Latest migration
 **`0036_api_keys.sql`**; next free slot `0037_*.sql` (this session adds none).
 **Open issues: 24**, dropping to **22** on merge. **Dependabot: 0.**

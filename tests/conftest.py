@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Horst Herb
 
 import os
+import sys
 from dataclasses import dataclass
 
 import keyring
@@ -11,6 +12,7 @@ from keyring.backend import KeyringBackend
 
 from localmail import secrets
 from localmail.db import apply_migrations
+from tests._db_session_lock import acquire_exclusive
 
 TEST_DSN = os.environ.get(
     "LOCALMAIL_TEST_DSN",
@@ -122,13 +124,41 @@ def _db_available() -> bool:
 _DB_OK = _db_available()
 
 
+def _announce(request, message: str) -> None:
+    """Put `message` in front of the operator during session setup.
+
+    Fixture-setup output is captured, so a plain `print` is invisible for as
+    long as the wait lasts — which is exactly the window where silence reads
+    as a hung run. The terminal reporter writes past the capture; stderr is
+    the fallback for a `-p no:terminal` invocation.
+    """
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"\n{message}", yellow=True)
+        return
+    print(message, file=sys.stderr, flush=True)
+
+
 @pytest.fixture(scope="session")
-def db_dsn():
-    """Apply migrations once per session; skip dependent tests if no DB."""
+def db_dsn(request):
+    """Apply migrations once per session; skip dependent tests if no DB.
+
+    Holds the per-database session lock for the whole run (#335). Every test
+    truncates every table, so two pytest sessions sharing one test database
+    delete each other's seeded rows — silently, because the truncate
+    succeeds. The lock is taken *before* `apply_migrations` so two sessions
+    cannot race the migration runner either.
+    """
     if not _DB_OK:
         pytest.skip(f"no Postgres reachable at {TEST_DSN}")
-    apply_migrations(TEST_DSN)
-    return TEST_DSN
+    holder = acquire_exclusive(
+        TEST_DSN, on_wait=lambda msg: _announce(request, msg)
+    )
+    try:
+        apply_migrations(TEST_DSN)
+        yield TEST_DSN
+    finally:
+        holder.close()
 
 
 _EMBEDDING_PROBE: tuple[bool, str] | None = None

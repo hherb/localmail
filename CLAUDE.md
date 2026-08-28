@@ -4185,6 +4185,56 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
 - `LOCALMAIL_TEST_DSN` defaults to the **`localmail_test`** database, not the
   live `localmail` one. This is intentional and important — running pytest
   must not touch live archives.
+- **One pytest session at a time per test database, enforced (#335, #329).**
+  `db_conn` opens every test with `TRUNCATE … RESTART IDENTITY CASCADE` over
+  every data table, so two pytest processes on one database delete each
+  other's seeded rows and seed rows into each other's queries. Nothing errors
+  — the truncate *succeeds* — so it surfaces as impossible archive states
+  ("48 rows where 9 were seeded"), mid-insert reads, and tests that pass alone
+  and fail in company, all of which read as product bugs. The `db_dsn` fixture
+  now holds a **session-level Postgres advisory lock** keyed on the database
+  name, taken *before* `apply_migrations` so two sessions cannot race the
+  migration runner either. Rules:
+  [tests/_db_session_lock.py](tests/_db_session_lock.py).
+  - **#335 named the wrong mechanism, and the correction is the point.** It
+    attributed this to `TRUNCATE` *blocking* on a connection left open by a
+    previous test's `open_pool`. Measured against that: with a `lock_timeout`
+    armed on the truncate, three full-suite runs and seven targeted runs
+    recorded **zero** blocked truncates, while one concurrent pytest process
+    reproduced the exact tests the issue names on the first attempt. A second
+    session is the cause; a lingering pool is not. Do not "also" fix the
+    truncate for lock contention — there is no evidence of any.
+  - **A second session waits, then fails by name.** `DEFAULT_LOCK_TIMEOUT_S`
+    is 600 s (a full suite is ~3 min here), overridable via
+    `LOCALMAIL_TEST_DB_LOCK_TIMEOUT_S`. The wait is announced once through
+    pytest's terminal reporter — fixture-setup output is captured, so a plain
+    `print` would be invisible for exactly as long as the wait lasts, which is
+    the window where silence reads as a hung run.
+  - **An advisory lock, not a row in a table**, because it dies with its
+    backend: a run killed with SIGKILL releases it instead of wedging every
+    later run. **Keyed per database**, so a session pointed at its own DSN
+    never blocks on the shared one — which is also the escape hatch for anyone
+    who genuinely wants two suites at once.
+  - **The key is a blake2b digest, never `hash()`.** `hash()` is salted per
+    process, so two sessions would derive different keys, both acquire, and
+    the guard would exclude nothing while every unit test still passed. That
+    is the one way this fails silently, so it is pinned **across processes**
+    (`test_the_key_is_stable_ACROSS_processes` spawns a subprocess) — the
+    same-process assertion beside it is satisfied by the broken version.
+  - **The exclusion tests run against the `postgres` maintenance database**,
+    not `localmail_test`: the live session holds that lock for the whole run,
+    which is the fix, so a test cannot acquire the same key to prove anything.
+    Verified that the `localmail` role can reach `postgres` on the exact
+    `pgvector/pgvector:pg18` image CI uses, so the fixture's skip branch does
+    not fire there and the suite's `0 skipped` invariant holds.
+  - **Known, filed not fixed:** five files (`test_serve_admin_csp.py`,
+    `test_serve_admin_login.py`, `test_serve_daemon_wiring.py`,
+    `test_serve_version_route.py`, `test_session_cookie_scope.py`) build a
+    `create_app(db_dsn=…)` inline and never close its pool, so the GC finalises
+    a live `ConnectionPool` and psycopg's `__del__` raises `RuntimeError:
+    cannot join current thread`. That warning names the leaking files exactly
+    and is the observable evidence for **#321**; it is *not* the cause of the
+    corruption above.
 - The `memory_keyring` fixture (autouse) intercepts every `keyring` call so
   real Keychain entries aren't written/read during tests.
 - **If exactly the three `LISTEN`/`NOTIFY` tests fail** with

@@ -110,6 +110,49 @@ def test_a_dsn_naming_no_database_is_refused_rather_than_keyed_as_blank() -> Non
         database_name("postgresql://user:pw@host:5432/")
 
 
+
+
+@pytest.mark.parametrize(
+    ("dsn", "expected"),
+    [
+        # libpq keyword/value form. `psycopg.connect` takes it, so
+        # LOCALMAIL_TEST_DSN can carry it; `urlsplit` returns the whole
+        # string as the "path" and reports no scheme, so a hand-rolled
+        # parser digests the connection string instead of the database.
+        ("host=localhost port=5532 dbname=localmail_test user=u", "localmail_test"),
+        # Same database, different spelling. These MUST agree or two
+        # sessions derive different keys, both acquire, and the guard
+        # excludes nothing — silently.
+        ("dbname=localmail_test host=localhost port=5532 user=u", "localmail_test"),
+        # libpq honours a `dbname` query parameter over the URI path.
+        ("postgresql://h:5432/ignored?dbname=localmail_test", "localmail_test"),
+        # Percent-encoding is the URI's, not the database's.
+        ("postgresql://h/localmail%5Ftest", "localmail_test"),
+    ],
+)
+def test_database_name_matches_what_libpq_would_connect_to(dsn: str, expected: str) -> None:
+    """The key must name the database psycopg will actually open.
+
+    Any divergence between this and libpq's own resolution is the failure
+    `advisory_lock_key`'s docstring exists to prevent, arriving one function
+    earlier: two DSNs naming one database yield two keys, and the guard
+    excludes nothing without erroring.
+    """
+    assert database_name(dsn) == expected
+
+
+def test_a_password_in_the_dsn_never_reaches_the_lock_key_or_the_messages() -> None:
+    """`busy_message`/`waiting_message` interpolate the parsed name, and a
+    contended run prints them to the terminal and into CI logs. Returning an
+    unparsed connection string would put the password in both."""
+    dsn = "host=localhost port=5532 dbname=localmail_test user=u password=s3cr3t"
+    name = database_name(dsn)
+    assert name == "localmail_test"
+    assert "s3cr3t" not in name
+    assert "s3cr3t" not in busy_message(name, timeout_s=1.0)
+    assert "s3cr3t" not in waiting_message(name)
+
+
 # --------------------------------------------------------------------------
 # Pure: advisory_lock_key
 # --------------------------------------------------------------------------
@@ -153,8 +196,34 @@ def test_different_databases_get_different_keys() -> None:
     assert advisory_lock_key("localmail_test") != advisory_lock_key("localmail_other")
 
 
+
+
+#: Names spanning both signs of the digest, so the `signed=True` argument is
+#: actually exercised. Verified to contain at least one of each by the test
+#: below, which fails rather than silently degrading if that stops holding.
+_KEY_WIDTH_PROBE_NAMES = [
+    "localmail_test", "localmail_test_2", "localmail_test_3",
+    "postgres", "a", "x" * 63, "UPPER_case",
+]
+
+
+def test_the_key_is_signed_so_high_digests_do_not_overflow_bigint() -> None:
+    """`signed=False` survives every name this file otherwise uses: all of
+    them happen to digest to a clear top bit. A name on the other side of
+    that coin is what makes the `signed=True` argument load-bearing, and
+    `pg_advisory_lock(bigint)` rejects the unsigned value at session start.
+    """
+    negatives = [n for n in _KEY_WIDTH_PROBE_NAMES if advisory_lock_key(n) < 0]
+    assert negatives, (
+        "no probe name digests with the top bit set, so this test cannot "
+        "distinguish signed from unsigned; add one"
+    )
+    for name in _KEY_WIDTH_PROBE_NAMES:
+        assert -(2**63) <= advisory_lock_key(name) < 2**63, name
+
+
 # --------------------------------------------------------------------------
-# Pure: busy_message
+# Pure: busy_message / waiting_message
 # --------------------------------------------------------------------------
 
 
@@ -165,6 +234,18 @@ def test_the_busy_message_names_the_database_and_the_remedy() -> None:
     assert "localmail_test" in msg
     assert "waited 30s" in msg  # not a bare "30", which any incidental digit pair satisfies
     assert "LOCALMAIL_TEST_DSN" in msg
+
+
+
+
+def test_the_waiting_message_names_the_database_and_the_remedy() -> None:
+    """The behavioural test asserts `database_name(probe) in seen[0]`, and the
+    probe database used to be literally named `postgres` — so the whole body
+    could be replaced by a literal and stay green. Pin the content here."""
+    msg = waiting_message("localmail_test")
+    assert "localmail_test" in msg
+    assert "LOCALMAIL_TEST_DSN" in msg
+    assert "wait" in msg.lower()
 
 
 # --------------------------------------------------------------------------
@@ -295,96 +376,6 @@ def test_the_running_pytest_session_holds_the_lock_on_its_test_database(db_dsn) 
             "this pytest session does not hold the session lock on its test "
             "database, so a second session can run against it concurrently"
         )
-
-
-# --------------------------------------------------------------------------
-# Pure: database_name against the forms libpq actually accepts
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("dsn", "expected"),
-    [
-        # libpq keyword/value form. `psycopg.connect` takes it, so
-        # LOCALMAIL_TEST_DSN can carry it; `urlsplit` returns the whole
-        # string as the "path" and reports no scheme, so a hand-rolled
-        # parser digests the connection string instead of the database.
-        ("host=localhost port=5532 dbname=localmail_test user=u", "localmail_test"),
-        # Same database, different spelling. These MUST agree or two
-        # sessions derive different keys, both acquire, and the guard
-        # excludes nothing — silently.
-        ("dbname=localmail_test host=localhost port=5532 user=u", "localmail_test"),
-        # libpq honours a `dbname` query parameter over the URI path.
-        ("postgresql://h:5432/ignored?dbname=localmail_test", "localmail_test"),
-        # Percent-encoding is the URI's, not the database's.
-        ("postgresql://h/localmail%5Ftest", "localmail_test"),
-    ],
-)
-def test_database_name_matches_what_libpq_would_connect_to(dsn: str, expected: str) -> None:
-    """The key must name the database psycopg will actually open.
-
-    Any divergence between this and libpq's own resolution is the failure
-    `advisory_lock_key`'s docstring exists to prevent, arriving one function
-    earlier: two DSNs naming one database yield two keys, and the guard
-    excludes nothing without erroring.
-    """
-    assert database_name(dsn) == expected
-
-
-def test_a_password_in_the_dsn_never_reaches_the_lock_key_or_the_messages() -> None:
-    """`busy_message`/`waiting_message` interpolate the parsed name, and a
-    contended run prints them to the terminal and into CI logs. Returning an
-    unparsed connection string would put the password in both."""
-    dsn = "host=localhost port=5532 dbname=localmail_test user=u password=s3cr3t"
-    name = database_name(dsn)
-    assert name == "localmail_test"
-    assert "s3cr3t" not in name
-    assert "s3cr3t" not in busy_message(name, timeout_s=1.0)
-    assert "s3cr3t" not in waiting_message(name)
-
-
-# --------------------------------------------------------------------------
-# The key width is name-dependent, so the pin must be too
-# --------------------------------------------------------------------------
-
-
-def test_the_key_is_signed_so_high_digests_do_not_overflow_bigint() -> None:
-    """`signed=False` survives every name this file otherwise uses: all of
-    them happen to digest to a clear top bit. A name on the other side of
-    that coin is what makes the `signed=True` argument load-bearing, and
-    `pg_advisory_lock(bigint)` rejects the unsigned value at session start.
-    """
-    negatives = [n for n in _KEY_WIDTH_PROBE_NAMES if advisory_lock_key(n) < 0]
-    assert negatives, (
-        "no probe name digests with the top bit set, so this test cannot "
-        "distinguish signed from unsigned; add one"
-    )
-    for name in _KEY_WIDTH_PROBE_NAMES:
-        assert -(2**63) <= advisory_lock_key(name) < 2**63, name
-
-
-#: Names spanning both signs of the digest, so the `signed=True` argument is
-#: actually exercised. Verified to contain at least one of each by the test
-#: above, which fails rather than silently degrading if that stops holding.
-_KEY_WIDTH_PROBE_NAMES = [
-    "localmail_test", "localmail_test_2", "localmail_test_3",
-    "postgres", "a", "x" * 63, "UPPER_case",
-]
-
-
-# --------------------------------------------------------------------------
-# waiting_message content, pinned directly rather than via the probe's name
-# --------------------------------------------------------------------------
-
-
-def test_the_waiting_message_names_the_database_and_the_remedy() -> None:
-    """The behavioural test asserts `database_name(probe) in seen[0]`, and the
-    probe database used to be literally named `postgres` — so the whole body
-    could be replaced by a literal and stay green. Pin the content here."""
-    msg = waiting_message("localmail_test")
-    assert "localmail_test" in msg
-    assert "LOCALMAIL_TEST_DSN" in msg
-    assert "wait" in msg.lower()
 
 
 # --------------------------------------------------------------------------

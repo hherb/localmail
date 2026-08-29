@@ -86,8 +86,8 @@ race the migration runner either). New pure module
   sharing this database were never running concurrently in any useful sense.
 - **The key is a blake2b digest, never `hash()`.** `hash()` is salted per
   process, so two sessions would derive *different* keys, both acquire, and the
-  guard would exclude nothing — with every unit test still green. That is the
-  one silent failure mode, so it is pinned **across processes**
+  guard would exclude nothing — with every unit test still green. Pinned
+  **across processes**
   (`test_the_key_is_stable_ACROSS_processes` spawns a subprocess). **The
   same-process assertion beside it is satisfied by the broken version** — the
   mutation proves only the cross-process test catches it.
@@ -96,32 +96,74 @@ race the migration runner either). New pure module
   as long as the wait lasts, which is the window where silence reads as a hang.
   Timeout `DEFAULT_LOCK_TIMEOUT_S` 600 s, overridable via
   `LOCALMAIL_TEST_DB_LOCK_TIMEOUT_S`.
-- **The exclusion tests run against the `postgres` maintenance database**, not
-  `localmail_test`: the live session holds that lock for the whole run — that
-  *is* the fix — so a test cannot acquire the same key to prove anything about
-  it. Verified the `localmail` role can reach `postgres` on the exact
-  `pgvector/pgvector:pg18` image CI uses, so the fixture's skip branch does not
-  fire there and the `0 skipped` invariant holds.
-- `DatabaseSessionBusy`, **not** `TestDatabaseBusy` — pytest collects any
-  module-level `Test*` class and warns it cannot. Same call as
+- **The exclusion tests create their own scratch database**
+  (`localmail_locktest_<pid>`), not `localmail_test`: the live session holds
+  that lock for the whole run — that *is* the fix — so a test cannot acquire
+  the same key to prove anything about it. It must be **per session**: a fixed
+  probe database makes every concurrent suite contend on one key, which broke
+  the escape hatch the guard documents (measured: two suites, 6 failures
+  apiece). `CREATE DATABASE` needs only `CREATEDB`.
+- `DatabaseSessionBusy`, **not** `TestDatabaseBusy`. Nothing collects
+  `_db_session_lock.py` itself (it matches no `python_files` pattern) — the
+  warning would come from the test module *importing* the class, since pytest
+  collects `Test*` classes it finds in a test module's namespace. Same call as
   `probe_connection`.
 - **Adding `pytest-xdist` needs this module changed first** (recorded in both
   the module docstring and CLAUDE.md). It is not a dependency today; each
   worker is its own process, so under one shared DSN exactly one would acquire
   and the rest would block then fail — which reads as the guard being broken.
-  Per-worker DSNs are the answer, and they need a database the test role can
-  **create**, which it cannot for a fresh one (no superuser, `CREATE EXTENSION
-  vector`).
+  Per-worker DSNs are the answer. Migrating such a database needs
+  `CREATE EXTENSION vector` — migration **`0004`**, not `0001` — and `vector`
+  is untrusted, so that needs superuser, which this Mac's role lacks. It does
+  **not** generalise: CI's `POSTGRES_USER: localmail` is the bootstrap
+  superuser on the pgvector image, so the constraint does not bind there.
+
+### The review round on #336 — two silent-failure holes and five false claims
+
+A full review of the branch (`1e3964e`, `d90751d`, `8520c30`) found the guard
+itself could fail the way the bug it fixes does.
+
+- **The lock could be lost mid-run and nothing noticed.** Acquired once, never
+  re-checked, riding the most idle connection in the suite. Reproduced with
+  `pg_terminate_backend`: the lock dies with the backend, a second session
+  acquires freely, `conn.closed` still reads `False`, and teardown's `close()`
+  returns clean. `verify_still_held` now runs in `db_conn` immediately before
+  the TRUNCATE — it asks `pg_locks`, not whether the socket is alive, because
+  a pooler's `DISCARD ALL` releases the lock while the connection survives.
+- **`database_name` hand-parsed the DSN.** `urlsplit` handles only the URI
+  form, so the libpq `host=… dbname=…` form came back *whole* as the database
+  name: two spellings of one database, two keys, both acquire, guard excludes
+  nothing — and `password=…` printed into `busy_message` and CI logs. Defers
+  to `psycopg.conninfo.conninfo_to_dict` now.
+- **Advisory locks are per-database, not cluster-global.** Three comments said
+  otherwise, and two rationales rested on it. One query refutes it; a
+  constant-key mutation left 22/23 green. Consequence that *does* bite: the
+  shared `postgres` probe database made concurrent suites contend (6 failures
+  apiece), so the probe is now `localmail_locktest_<pid>`.
+- Also: the `except Exception` around the probe connect (it hid a fixture bug
+  as six silent skips on a green suite); no `connect_timeout`; the timeout
+  override read at import (a typo failed collection of the whole suite);
+  contention raising instead of `pytest.exit` (~850 lines of traceback for one
+  file); and five pins that survived mutation, including `signed=True` and
+  `_announce`, which had no test at all.
+- **Documentation corrections**: `CREATE EXTENSION vector` is migration
+  `0004`, not `0001`, and the "role is not superuser" conclusion is
+  host-specific (CI's role *is* superuser); there is no `0 skipped` invariant;
+  "no evidence of any [contention]" overstated it, since #335 does carry a
+  `DeadlockDetected` traceback — it simply did not reproduce.
+
+**#337 filed**: the six `tests/acceptance/run_*.py` harnesses truncate the
+same tables with no lock, so the guard covers pytest, not the database.
 
 ### Verification (this Mac, all extras)
 
 - **Both refs measured in this session** (risk 5): `main` **2951** collected →
-  branch **2974** (+23, the new test file).
-- `uv run pytest -q` → **2974 passed, 0 failed, 0 skipped** (181 s) on macOS.
-- **CI green on both interpreter legs**: `2973 passed, 1 skipped` on 3.12 and
+  branch **2988** (+37: 23 for the new test file, +14 from the review round).
+- `uv run pytest -q` → **2988 passed, 0 failed, 0 skipped** on macOS.
+- **CI green on both interpreter legs**: `2987 passed, 1 skipped` on 3.12 and
   3.13. That **1 skipped is pre-existing on Linux, not introduced here** —
   the control run on `main` at `815e74b` reads `2950 passed, 1 skipped`, and
-  both sum to their respective collect counts (2951 and 2974). Worth knowing
+  both sum to their respective collect counts (2951 and 2988). Worth knowing
   because it also proves the new `lock_probe_dsn` fixture did **not** skip in
   CI, i.e. the `postgres` maintenance database really is reachable there.
 - **The acceptance experiment**: the concurrent-session run that previously
@@ -275,7 +317,7 @@ cause of the corruption above (the instrumented runs showed zero contention).
    it. `ssh 10.0.0.3 'cd ~/src/localmail && git log --oneline -1'` plus
    `/v1/version`'s `build_hash` settles it.
 7. **Test-count baselines: measure both refs IN THE SAME SESSION** *(carried)*.
-   `main` **2951**, branch **2974**. A number quoted from a previous handoff is
+   `main` **2951**, branch **2988**. A number quoted from a previous handoff is
    not a baseline — last session's handoff said 2850, which was already stale
    by the time it merged (the PR's own review round took it to 2951).
 8. **A same-process assertion cannot pin a cross-process property** *(new)*.
@@ -391,8 +433,8 @@ git diff --stat main origin/<branch>     # EMPTY = landed, not stranded
 # Python suite. NEVER a bare `uv sync` (risk 15).
 unset VIRTUAL_ENV && uv sync --all-extras
 unset VIRTUAL_ENV && uv run pytest -q
-#   macOS: expect 2974 passed, 0 failed, 0 skipped; 2951 collected on main.
-#   LINUX/CI: expect 2973 passed, 1 SKIPPED — that skip is pre-existing (main at
+#   macOS: expect 2988 passed, 0 failed, 0 skipped; 2951 collected on main.
+#   LINUX/CI: expect 2987 passed, 1 SKIPPED — that skip is pre-existing (main at
 #   815e74b reads 2950 passed, 1 skipped). Do NOT read it as a missing extra
 #   (risk 15) without checking a main run first; it is a platform difference,
 #   still unidentified, and is the one loose end this session left.

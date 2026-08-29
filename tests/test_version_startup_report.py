@@ -83,8 +83,14 @@ def _construct(reader: str, db_dsn: str) -> None:
 
     `finally`, not a trailing `.close()`: both constructors open a pool part-way
     through, so a raise after that point would leak it along with its background
-    threads — and a leaked writer is what makes `db_conn`'s TRUNCATE deadlock in
-    a later test rather than here.
+    threads, which then outlive this test (#321).
+
+    An earlier wording here said a leaked writer is what makes `db_conn`'s
+    TRUNCATE deadlock in a later test. That was #335's theory and it was
+    measured false — with a `lock_timeout` armed on the truncate, ten
+    instrumented runs recorded zero blocked truncates; the corruption came from
+    a second pytest session, which `db_session_lock` now excludes. Closing the
+    pool is still right, just for the ordinary reason.
     """
     if reader == "daemon":
         cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})

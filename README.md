@@ -1074,6 +1074,12 @@ and then proceeds once the first finishes, or fails after
 once, give each its own database via `LOCALMAIL_TEST_DSN` — the lock is keyed
 on the database name, so distinct databases never block each other.
 
+The lock covers **pytest**, not the database. The standalone acceptance
+harnesses under `tests/acceptance/` truncate the same tables without taking
+it, so running one alongside a suite corrupts both exactly as two suites
+would (tracked as an open issue). Point them at their own `LOCALMAIL_TEST_DSN`
+or run them alone. Tracked as [#337](https://github.com/hherb/localmail/issues/337).
+
 CI: `.github/workflows/python-ci.yml` runs the full pytest suite on every
 push to `main` and every PR touching `src/`, `tests/`, `migrations/`,
 `pyproject.toml`, `uv.lock`, or the workflow itself. The runner uses a

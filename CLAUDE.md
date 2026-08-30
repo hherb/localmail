@@ -4185,6 +4185,133 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
 - `LOCALMAIL_TEST_DSN` defaults to the **`localmail_test`** database, not the
   live `localmail` one. This is intentional and important — running pytest
   must not touch live archives.
+- **One pytest session at a time per test database, enforced (#335, #329).**
+  `db_conn` opens every test with `TRUNCATE … RESTART IDENTITY CASCADE` over
+  every data table, so two pytest processes on one database delete each
+  other's seeded rows and seed rows into each other's queries. Nothing errors
+  — the truncate *succeeds* — so it surfaces as impossible archive states
+  ("48 rows where 9 were seeded"), mid-insert reads, and tests that pass alone
+  and fail in company, all of which read as product bugs. The `db_session_lock`
+  fixture holds a **session-level Postgres advisory lock** keyed on the
+  database name; `db_dsn` requests it, so `apply_migrations` cannot run before
+  the lock is held and two sessions cannot race the migration runner either.
+  That ordering is a **fixture-graph dependency, not a statement order**, and
+  is pinned as such — a line-order pin inside one function reads as though it
+  covers this and is undone by any refactor that splits them. Rules:
+  [tests/_db_session_lock.py](tests/_db_session_lock.py).
+  - **#335 named the wrong mechanism, and the correction is the point.** It
+    attributed this to `TRUNCATE` *blocking* on a connection left open by a
+    previous test's `open_pool`. Measured against that: with a `lock_timeout`
+    armed on the truncate, three full-suite runs and seven targeted runs
+    recorded **zero** blocked truncates, while one concurrent pytest process
+    reproduced the exact tests the issue names on the first attempt. A second
+    session explains every symptom the issue lists; a lingering pool explains
+    none of them. Note the issue *does* carry a real `DeadlockDetected`
+    traceback, so contention is not impossible — it simply did not reproduce
+    across those ten instrumented runs, and it is not what #329 was. Do not
+    reach for a truncate-side fix without first reproducing one; the
+    instrumentation was temporary and is not in the tree.
+  - **A second session waits, then fails by name** — as a single
+    `pytest.exit` line, not a raise: a session fixture that raises reports one
+    ERROR block per dependent test, ~850 lines for a single file against a
+    suite of ~1000 DB tests, which buries the one sentence saying what to do.
+    `DEFAULT_LOCK_TIMEOUT_S` is the literal 600 s (a full suite is ~3 min
+    here); `resolve_lock_timeout_s` applies the
+    `LOCALMAIL_TEST_DB_LOCK_TIMEOUT_S` override **per call, not at import** —
+    read at import, a typo was a bare `ValueError` that failed collection of
+    the whole suite, including the ~2000 tests that never touch a database.
+    The two are kept apart so the test pinning "long enough for a full suite"
+    asserts the constant; asserting the resolved value turns the documented
+    override into a red suite. The wait is announced once through
+    pytest's terminal reporter — fixture-setup output is captured, so a plain
+    `print` would be invisible for exactly as long as the wait lasts, which is
+    the window where silence reads as a hung run.
+  - **An advisory lock, not a row in a table**, because it dies with its
+    backend: a run killed with SIGKILL releases it instead of wedging every
+    later run. **Keyed per database**, so a session pointed at its own DSN
+    never blocks on the shared one — the escape hatch for anyone who genuinely
+    wants two suites at once.
+  - **That same property is the guard's own failure mode, so it is re-checked
+    rather than trusted.** The lock rides the most idle connection in the
+    suite — open for the whole run with no traffic — which is the first thing
+    a Postgres restart, an `idle_session_timeout`, a failover or a reaped TCP
+    flow takes out. The lock then dies with that backend, a second session
+    acquires freely, and **nothing notices**: psycopg does not see a dead
+    backend until the connection is used, so `conn.closed` still reads `False`
+    and even `close()` returns clean. `db_conn` therefore calls
+    `verify_still_held` immediately **before** its `TRUNCATE` — guarding the
+    destructive act itself, which bounds the damage to one test — and that
+    ordering is pinned structurally. The check asks `pg_locks`, **not** whether
+    the connection is alive: a pooler issuing `DISCARD ALL` releases every
+    advisory lock while the socket survives, and a liveness ping would call
+    that healthy.
+  - **Postgres already scopes advisory locks per database** (`pg_locks` keys
+    them by database OID), so the per-database key is defence in depth and is
+    what keeps `busy_message` honest about *which* database is contended — it
+    is **not** what provides the isolation. Three comments claimed otherwise
+    and were wrong; the refutation is one query (`pg_try_advisory_lock(K)`
+    succeeds concurrently in two databases). It matters because a shared probe
+    database *does* collide: the exclusion tests below create their own.
+  - **`database_name` defers to libpq** (`psycopg.conninfo.conninfo_to_dict`),
+    never to `urlsplit`. `LOCALMAIL_TEST_DSN` may legitimately carry the
+    keyword/value form (`host=… dbname=…`), which `urlsplit` returns *whole*
+    as the "database name" with no error — so two sessions spelling one
+    database differently derived two keys, both acquired, and the guard
+    excluded nothing. That is the same silent failure the blake2b rule below
+    exists to prevent, one function earlier; it also put `password=…` into
+    `busy_message`, which is printed to the terminal and into CI logs.
+  - **The key is a blake2b digest, never `hash()`.** `hash()` is salted per
+    process, so two sessions would derive different keys, both acquire, and
+    the guard would exclude nothing while every unit test still passed. That
+    is the one way this fails silently, so it is pinned **across processes**
+    (`test_the_key_is_stable_ACROSS_processes` spawns a subprocess) — the
+    same-process assertion beside it is satisfied by the broken version.
+  - **The exclusion tests create their own scratch database**, because the
+    live session holds `localmail_test`'s lock for the whole run — that is the
+    fix — so a test cannot acquire that key to prove anything. It must be
+    unique per session (`localmail_locktest_<pid>`, dropped at teardown): a
+    fixed probe database means every concurrent suite contends on one key, so
+    the test file for the concurrency guard would itself break the escape
+    hatch the guard documents. Measured against the shared `postgres` it used
+    to use: two suites, **6 failures apiece**. `CREATE DATABASE` needs only
+    `CREATEDB`, which the test role has — and notably *not* the superuser that
+    `CREATE EXTENSION vector` would, since nothing migrates that database.
+    A missing maintenance database is caught as `psycopg.OperationalError`
+    alone, not `Exception`: the broad form also swallowed a bug in the
+    fixture's own DSN rewrite and reported it as an environment fact, turning
+    the entire exclusion proof into six silent skips on a green suite.
+  - **CI reports `1 skipped`, and that is pre-existing.** The `0 skipped`
+    reading is macOS-only. The control run on `main` at `815e74b` reads
+    `2950 passed, 1 skipped` against 2951 collected, so the skip predates this
+    work; do **not** read it as a missing uv extra (this repo's usual meaning
+    for a non-zero skip count) without checking a `main` run first.
+  - **Adding `pytest-xdist` needs `_db_session_lock.py` changed first.** It is
+    not a dependency today. Each worker is its own process, so under one shared
+    DSN exactly one acquires and the rest block for `DEFAULT_LOCK_TIMEOUT_S`
+    and then fail — which reads as the guard being broken rather than as the
+    workers sharing a database they must not share. The fix then is per-worker
+    DSNs (`PYTEST_XDIST_WORKER` suffixing), which the per-database key already
+    supports. Migrating such a database needs `CREATE EXTENSION vector`
+    (migration **`0004`**, not `0001`), and `vector` is **not** a trusted
+    extension, so that needs superuser — which the reference cluster's role
+    does not have. This does not generalise: CI passes `POSTGRES_USER:
+    localmail` to the `pgvector` image, making that role the bootstrap
+    superuser, so the constraint does not bind there. Measure before relying
+    on it either way.
+  - **The guard covers pytest, not the database (#337, open).** The six
+    standalone harnesses under `tests/acceptance/` truncate the same tables
+    against the same `LOCALMAIL_TEST_DSN` and take no lock, so running one
+    beside a suite reproduces exactly this corruption, in both directions and
+    with the same silence. README states the limitation; the fix is for each
+    harness entry point to call `acquire_exclusive` and hold it for the run.
+  - **Known, filed not fixed:** five files (`test_serve_admin_csp.py`,
+    `test_serve_admin_login.py`, `test_serve_daemon_wiring.py`,
+    `test_serve_version_route.py`, `test_session_cookie_scope.py`) build a
+    `create_app(db_dsn=…)` inline and never close its pool, so the GC finalises
+    a live `ConnectionPool` and psycopg's `__del__` raises `RuntimeError:
+    cannot join current thread`. That warning names the leaking files exactly
+    and is the observable evidence for **#321**; it is *not* the cause of the
+    corruption above.
 - The `memory_keyring` fixture (autouse) intercepts every `keyring` call so
   real Keychain entries aren't written/read during tests.
 - **If exactly the three `LISTEN`/`NOTIFY` tests fail** with

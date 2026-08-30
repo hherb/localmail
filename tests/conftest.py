@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Horst Herb
 
 import os
+import sys
 from dataclasses import dataclass
 
 import keyring
@@ -11,6 +12,11 @@ from keyring.backend import KeyringBackend
 
 from localmail import secrets
 from localmail.db import apply_migrations
+from tests._db_session_lock import (
+    DatabaseSessionBusy,
+    acquire_exclusive,
+    verify_still_held,
+)
 
 TEST_DSN = os.environ.get(
     "LOCALMAIL_TEST_DSN",
@@ -122,11 +128,64 @@ def _db_available() -> bool:
 _DB_OK = _db_available()
 
 
+def _announce(request, message: str) -> None:
+    """Put `message` in front of the operator during session setup.
+
+    Fixture-setup output is captured, so a plain `print` is invisible for as
+    long as the wait lasts — which is exactly the window where silence reads
+    as a hung run. The terminal reporter writes past the capture; stderr is
+    the fallback for a `-p no:terminal` invocation.
+    """
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"\n{message}", yellow=True)
+        return
+    print(message, file=sys.stderr, flush=True)
+
+
 @pytest.fixture(scope="session")
-def db_dsn():
-    """Apply migrations once per session; skip dependent tests if no DB."""
+def db_session_lock(request):
+    """Hold the per-database session lock for the rest of the run (#335).
+
+    Session-scoped but lazily instantiated, so the lock is taken when the
+    first DB test asks for it, not at session start — a run of only non-DB
+    tests takes it never. Harmless, because `db_conn` is the only thing that
+    truncates and it requests this too.
+
+    Every test truncates every table, so two pytest sessions sharing one test
+    database delete each other's seeded rows — silently, because the truncate
+    succeeds.
+
+    Separate from `db_dsn` so that "the lock is taken before anything touches
+    the database" is enforced by the fixture graph rather than by statement
+    order: `db_dsn` requests this, so migrations cannot run first, and two
+    sessions cannot race the migration runner.
+    """
     if not _DB_OK:
         pytest.skip(f"no Postgres reachable at {TEST_DSN}")
+    try:
+        holder = acquire_exclusive(
+            TEST_DSN, on_wait=lambda msg: _announce(request, msg)
+        )
+    except DatabaseSessionBusy as exc:
+        # One line, not one traceback per dependent test. Letting this
+        # propagate makes every DB test report its own ERROR block — ~850
+        # lines for a single file, and the suite has ~1000 — which buries the
+        # one sentence that says what to do about it.
+        pytest.exit(str(exc), returncode=1)
+    try:
+        yield holder
+    finally:
+        holder.close()
+
+
+@pytest.fixture(scope="session")
+def db_dsn(db_session_lock):
+    """Apply migrations once per session.
+
+    Dependent tests skip when no DB is reachable — that decision lives in
+    `db_session_lock`, which this requests.
+    """
     apply_migrations(TEST_DSN)
     return TEST_DSN
 
@@ -179,8 +238,16 @@ def require_real_embedding_model():
 
 
 @pytest.fixture
-def db_conn(db_dsn):
-    """Yield a clean connection. Truncates all data tables before each test."""
+def db_conn(db_dsn, db_session_lock):
+    """Yield a clean connection. Truncates all data tables before each test.
+
+    The truncate is the destructive act, so the session lock is re-checked
+    immediately before it rather than trusted for the length of the run: the
+    lock rides an idle connection that a restart or an idle-session reaper
+    can take out silently, and losing it puts two sessions back to deleting
+    each other's rows. Checking here bounds the damage to one test.
+    """
+    verify_still_held(db_session_lock)
     conn = psycopg.connect(db_dsn, autocommit=False)
     try:
         with conn.cursor() as cur:

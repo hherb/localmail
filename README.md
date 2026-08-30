@@ -1049,7 +1049,7 @@ npm run tauri build        # produces a platform-specific release bundle
 
 ```bash
 uv sync
-uv run pytest                # full suite (~800 tests); skipped if no Postgres
+uv run pytest                # full suite (~2970 tests); skipped if no Postgres
 uv run localmail --help
 ```
 
@@ -1057,6 +1057,28 @@ uv run localmail --help
 at `LOCALMAIL_TEST_DSN` (defaults to
 `postgresql://localmail:local%40%40mail@localhost:5532/localmail_test` — a
 separate database from the live archive, so tests can't clobber real data).
+
+**Only one pytest session may use a given test database at a time.** Every
+test truncates every data table, so a second concurrent session would delete
+the first one's seeded rows — silently, since the truncate succeeds. The suite
+takes a Postgres advisory lock on the database for the length of the run; a
+second session prints
+
+```
+waiting for another pytest session to release the test database 'localmail_test';
+set LOCALMAIL_TEST_DSN to run against your own.
+```
+
+and then proceeds once the first finishes, or fails after
+`LOCALMAIL_TEST_DB_LOCK_TIMEOUT_S` (default 600) seconds. To run two suites at
+once, give each its own database via `LOCALMAIL_TEST_DSN` — the lock is keyed
+on the database name, so distinct databases never block each other.
+
+The lock covers **pytest**, not the database. The standalone acceptance
+harnesses under `tests/acceptance/` truncate the same tables without taking
+it, so running one alongside a suite corrupts both exactly as two suites
+would (tracked as an open issue). Point them at their own `LOCALMAIL_TEST_DSN`
+or run them alone. Tracked as [#337](https://github.com/hherb/localmail/issues/337).
 
 CI: `.github/workflows/python-ci.yml` runs the full pytest suite on every
 push to `main` and every PR touching `src/`, `tests/`, `migrations/`,

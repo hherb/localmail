@@ -90,6 +90,15 @@ markers = [
     "slow: tests that load real embedding/reranker models (opt-in)",
     "integration: tests requiring local services (opt-in via env)",
 ]
+# A leaked connection pool surfaces only as this warning, from a finaliser, on
+# whichever unrelated test the GC happened to interrupt (#321) — so the whole
+# evidence that the autouse pool-closing fixture still works was a human
+# comparing warning counts between runs, and the leak is invisible on macOS
+# while reported on Linux/3.13. Escalating it is what makes a regression turn
+# CI red. The test it fails is arbitrary; the message ("cannot join current
+# thread") is the diagnosis. The two known `websockets` deprecations (#25) are
+# DeprecationWarnings and are unaffected.
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 
 [tool.mypy]
 python_executable = ".venv/bin/python"

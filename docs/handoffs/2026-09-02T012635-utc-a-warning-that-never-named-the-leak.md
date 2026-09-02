@@ -69,12 +69,14 @@ their creation stacks in a single run**. Reading the warning would never have
 commands section below; it is worth keeping in the toolkit.
 
 New pure module [tests/_pool_leaks.py](tests/_pool_leaks.py); autouse fixture
-`conftest.close_leaked_pools`; **26 tests** in
-[tests/test_pool_leaks.py](tests/test_pool_leaks.py).
+`conftest.close_leaked_pools`; **36 tests** in
+[tests/test_pool_leaks.py](tests/test_pool_leaks.py) (26 as first written, 11
+more from the review round below).
 
 - **The per-file sweep #321 proposes was measured and rejected — with the
-  operator's explicit sign-off on the alternative.** It is **34 files, 162 call
-  sites**; and as worded (wrap each in `with TestClient(...)`) it *breaks* the
+  operator's explicit sign-off on the alternative.** It is **41 files, 162 call
+  sites** (33 of the 41 actually leak; the other 8 close the pool or stub
+  `create_app`); and as worded (wrap each in `with TestClient(...)`) it *breaks* the
   tests that exist to assert `create_app` alone is side-effect-free, because
   running the lifespan is exactly what binds the daemon control socket
   (`test_creating_app_does_not_bind_control_socket`). It also buys discipline
@@ -97,13 +99,16 @@ New pure module [tests/_pool_leaks.py](tests/_pool_leaks.py); autouse fixture
   would have more than doubled it. The inference (module absent ⟹ no collected
   test can call `create_app`) holds only because pytest imports every collected
   module before running any test — **sound for a module-level import, false for
-  a function-local one**. Six such imports existed across three files
+  a function-local one**. Seven such imports existed across four files
   (`test_api_auth_rate_limiter.py`, `test_mcp_cli_wiring.py`,
-  `test_mcp_discovery.py`); they are hoisted, and the pure
-  `function_local_serve_app_imports` scans the whole suite to keep it that way.
-  It reads the **AST**, not the text, because the rationale necessarily quotes
-  the import it forbids — the `_mentions_version_option` call, mutation-proven
-  in both directions. **The `localmail.db` seam needs no such rule**:
+  `test_mcp_discovery.py`, and — found in review —
+  `test_daemon_supervisor_lifecycle.py`); they are hoisted, and the pure
+  `function_local_serve_app_imports` scans every `.py` under `tests/` to keep it
+  that way. It reads the **AST**, not the text, because `test_pool_leaks.py`
+  quotes the forbidden import verbatim in the source strings it feeds the
+  scanner as test cases. **But the scanner is belt, not braces** — see the
+  review round below for why the teardown re-check is what actually holds this
+  up. **The `localmail.db` seam needs no such rule**:
   `conftest.py` imports that module itself for `apply_migrations`, so it is
   always loaded.
 - **`unclosed` filters before closing**, so the count `close_pools` returns is
@@ -114,6 +119,59 @@ New pure module [tests/_pool_leaks.py](tests/_pool_leaks.py); autouse fixture
   *test* backstop, not a claim that `Daemon` should close it — #321 is not the
   place to change that.
 
+### The review round (same PR, per the one-PR-per-session rule)
+
+A multi-agent review of the branch found eleven issues; all are fixed here.
+Three mattered, and the first two are the same defect from opposite ends —
+**the fixture was fine once armed; nothing reliably armed it.**
+
+- **The strongest end-to-end pin was red when run alone.**
+  `pytest tests/test_pool_leaks.py::test_create_app_registers_its_pool_with_the_running_fixture`
+  failed *and leaked the pool it was asserting about*, because that file had no
+  module-scope `import localmail.serve.app` — the seam was live only if an
+  earlier test in the file had already `importlib.import_module`d it. The file
+  enforcing "import at module scope" was itself relying on a function-local
+  import. One line fixed it; the lesson is that **every new end-to-end pin
+  here must be run in isolation**, since intra-file ordering hides exactly the
+  failure this module is about.
+- **The `sys.modules` gate's guard covered 1 of 4 import spellings.**
+  `_imports_serve_app` matched only `from localmail.serve.app import …`, so
+  the sibling `from localmail.serve import app` (live, in
+  `test_daemon_supervisor_lifecycle.py`), `importlib.import_module` (live, in
+  `test_pool_leaks.py` itself) and a lazy import inside `src/` (`cli.py`'s
+  `serve_cmd`) all read as compliant. The scanner is widened, the offender
+  hoisted — but the real fix is `late_seam_error`: the fixture now **verifies
+  the inference at teardown** instead of trusting it, so a module arriving by
+  any route fails the test that let it in. Chasing spellings is a losing race;
+  checking the outcome is not.
+- **The fixture's own broken-seam report was unpinned.** `missing_seam_error`
+  was pinned as a pure function; replacing the fixture's *use* of it with a
+  `continue` left the whole suite green — a guard going quietly inert, in the
+  module written to end that. It is now `pytest.exit` (the `db_session_lock`
+  call: one line, not 3000 ERROR blocks) and driven by a real test.
+
+Also: `POOL_SEAMS` is now checked against the pool constructors actually
+present in `src/` (a third module, a fully-qualified call, or
+`AsyncConnectionPool` all used to slip past `hasattr`); the fixture owns a
+private `MonkeyPatch` (five files call `monkeypatch.undo()`, one of them two
+tests from building a `Daemon`); `close_pools` no longer abandons the
+remaining pools when one `close()` raises; `Closable.closed` is a property, so
+the Protocol matches the class it describes; and the stale
+`filterwarnings("ignore::…Unraisable…")` marker in `test_serve_app_baseline.py`
+is gone with the leak it documented.
+
+**`filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]` is new
+in `pyproject.toml`, and it is the point.** Until now the only evidence this
+fixture still worked was a human comparing warning counts between runs — on
+macOS, where the leak is invisible. A regression is now a red suite.
+
+Five doc claims were wrong and are corrected: "34 files" (41 call it, 33 leak,
+38 affected), "39 files" (38), "the two that name `db_dsn`" (three), the AST
+rationale's claim that *this* docstring quotes the forbidden import (it does
+not — `test_pool_leaks.py`'s fixture strings do), and "3014 passed on macOS
+*and* both CI legs" (CI is `3013 passed, 1 skipped`; only the warning count
+generalises).
+
 ### Verification (this Mac, all extras)
 
 - **Both refs measured in this session** (risk 7):
@@ -122,7 +180,8 @@ New pure module [tests/_pool_leaks.py](tests/_pool_leaks.py); autouse fixture
   |---|---|---|
   | `main` @ `5dbaea0` | 2988 passed, **0 skipped**, 201.70 s | **6** |
   | branch, first push (`b286887`) | 3009 passed, 178.84 s | 2 on macOS, **3 on CI 3.13** |
-  | branch, final | 3014 passed, **0 skipped**, 184.26 s | **2** |
+  | branch, before the review round | 3014 passed, **0 skipped**, 184.26 s | **2** |
+  | branch, final (review round) | 3025 passed, **0 skipped**, 190.89 s | **2** |
 
   The 6 are 2 pre-existing `websockets` deprecations (**#25**) plus **4**
   `cannot join current thread`. The final 2 are the websockets pair alone —
@@ -324,7 +383,7 @@ carried as one issue:
    `/v1/version`'s `build_hash` settles it. **Both hosts were left untouched
    this session** — the diff is test-only, so neither needs a pull.
 9. **Test-count baselines: measure both refs IN THE SAME SESSION** *(carried)*.
-   `main` **2988**, branch **3014**. A number quoted from a previous handoff is
+   `main` **2988**, branch **3025**. A number quoted from a previous handoff is
    not a baseline.
 10. **A same-process assertion cannot pin a cross-process property** *(carried)*.
 11. **A keyset predicate must be a row comparison, in BOTH directions**
@@ -424,21 +483,25 @@ git diff --stat main origin/<branch>     # EMPTY = landed, not stranded
 # Python suite. NEVER a bare `uv sync` (risk 17).
 unset VIRTUAL_ENV && uv sync --all-extras
 unset VIRTUAL_ENV && uv run pytest -q
-#   macOS: expect 3014 passed, 0 failed, 0 skipped, and **2 warnings**.
+#   macOS: expect 3025 passed, 0 failed, 0 skipped, and **2 warnings**.
 #   THOSE 2 ARE THE ACCEPTANCE SIGNAL FOR #321: both are the pre-existing
-#   `websockets` DeprecationWarnings (#25). A third warning mentioning
-#   "ConnectionPool.__del__" or "cannot join current thread" means the pool
-#   seam went inert — see risk 7, and check for a function-local import of
-#   localmail.serve.app.
+#   `websockets` DeprecationWarnings (#25). A leaked pool no longer shows up
+#   as a THIRD warning — since the review round, pyproject escalates
+#   PytestUnraisableExceptionWarning to an ERROR, so it is a FAILING test
+#   whose message reads "cannot join current thread". The test it names is
+#   arbitrary (the GC picks it); the message is the diagnosis. Check for an
+#   import of localmail.serve.app that is not at module scope.
 #   LINUX/CI: expect 1 SKIPPED as well; pre-existing (risk 28).
 #   MEASURE BOTH REFS IN THIS SESSION (risk 9) — no DB needed:
-unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2   # branch: 3014
+unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2   # branch: 3025
 unset VIRTUAL_ENV && uv run mypy src/localmail    # expect Success, 152 files
 unset VIRTUAL_ENV && uv run ruff check src/localmail/ | tail -2   # expect 10 (#285)
 
 # The #321 fix, verified directly (should print nothing at all):
 unset VIRTUAL_ENV && uv run pytest -q 2>&1 | grep -c "cannot join current thread"   # expect 0
-unset VIRTUAL_ENV && uv run pytest -q tests/test_pool_leaks.py                      # expect 26 passed
+unset VIRTUAL_ENV && uv run pytest -q tests/test_pool_leaks.py                      # expect 37 passed
+# Run the end-to-end pins ALONE too — intra-file ordering hid a red one once:
+unset VIRTUAL_ENV && uv run pytest -q tests/test_pool_leaks.py -k "registers_its_pool" # expect 1 passed
 
 # THE POOL-LEAK PROBE (risk 5) — reusable; this is what found the second seam.
 # Drop it anywhere on PYTHONPATH and load with -p. Reports every unclosed pool

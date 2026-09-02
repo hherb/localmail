@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
-import pytest
 from fastapi.testclient import TestClient
 
 import localmail
@@ -57,13 +56,16 @@ def test_html_problem_responses_use_problem_json(db_dsn: str) -> None:
     assert r.headers["content-type"].startswith("application/problem+json")
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 def test_health_returns_503_when_db_unreachable(db_dsn: str) -> None:
     """A health endpoint that always returns 200 is useless to a load balancer.
     Patch pool.connection to raise so we simulate "DB unreachable" without
-    waiting on a bogus DSN. The filterwarnings is for psycopg_pool's __del__
-    quirk: when the test-scoped pool is GC'd inside its own worker thread it
-    surfaces a benign "cannot join current thread" — unrelated to the test."""
+    waiting on a bogus DSN.
+
+    The `filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")`
+    that used to sit here — for psycopg_pool's `__del__` raising "cannot join
+    current thread" on a GC'd pool — is gone with the leak itself (#321): the
+    autouse fixture closes this app's pool, so no finaliser has anything to
+    join."""
     from contextlib import contextmanager
 
     import psycopg

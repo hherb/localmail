@@ -3,7 +3,7 @@
 
 """The rules behind the autouse pool-closing fixture (#321).
 
-Every test here is pure except the two that name `db_dsn`, so the file runs
+Every test here is pure except the three that name `db_dsn`, so the file runs
 without Postgres apart from those.
 """
 from __future__ import annotations
@@ -15,6 +15,14 @@ from pathlib import Path
 
 import pytest
 
+# Module scope, and load-bearing for this file's own end-to-end pins: the
+# autouse fixture patches a seam only if its module is already in
+# `sys.modules`. Without this line the three `db_dsn` tests below passed only
+# because an earlier test in the file happened to `importlib.import_module` it
+# first, so running one of them alone — `pytest tests/test_pool_leaks.py::…` —
+# failed, and leaked the very pool it was asserting about.
+import localmail.serve.app  # noqa: F401
+
 from tests._pool_leaks import (
     DB_MODULE,
     POOL_SEAM_ATTR,
@@ -22,11 +30,30 @@ from tests._pool_leaks import (
     SERVE_APP_MODULE,
     close_pools,
     function_local_serve_app_imports,
+    late_seam_error,
     loaded_seams,
     missing_seam_error,
+    pool_constructor_calls,
     recording_factory,
     unclosed,
 )
+
+
+def _scanned_python_files() -> list[Path]:
+    """Every Python file under `tests/`, recursively.
+
+    Not `test_*.py`: `conftest.py`, the `_*.py` helpers and `acceptance/` can
+    import `localmail.serve.app` too, and a function-local import in any of
+    them defeats the fixture's `sys.modules` gate exactly as one in a test
+    file does.
+    """
+    return sorted(Path(__file__).parent.rglob("*.py"))
+
+
+def _repo_source_files() -> list[Path]:
+    """Every Python file under `src/localmail/`, recursively."""
+    root = Path(__file__).resolve().parent.parent / "src" / "localmail"
+    return sorted(root.rglob("*.py"))
 
 
 class FakePool:
@@ -122,6 +149,40 @@ def test_close_pools_with_nothing_recorded_is_a_no_op() -> None:
     assert close_pools([]) == 0
 
 
+def test_close_pools_closes_every_pool_even_when_one_raises() -> None:
+    """Aborting on the first failure would leak the rest — and their
+    finalisers then raise `cannot join current thread` against some later,
+    unrelated test, which is the misattribution this module exists to end.
+    """
+    class Boom(FakePool):
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    boom, after = Boom(), FakePool()
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        close_pools([boom, after])
+
+    assert after.closed, "a pool after the failing one was left open"
+
+
+def test_close_pools_reports_a_second_failure_rather_than_dropping_it() -> None:
+    """Raising only the first would make the broad catch silent for the rest."""
+    class Boom(FakePool):
+        def __init__(self, label: str) -> None:
+            super().__init__()
+            self.label = label
+
+        def close(self) -> None:
+            raise RuntimeError(f"close failed: {self.label}")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        close_pools([Boom("first"), Boom("second")])
+
+    assert "first" in str(excinfo.value)
+    assert any("second" in note for note in excinfo.value.__notes__)
+
+
 # --------------------------------------------------------------------------
 # the seam
 # --------------------------------------------------------------------------
@@ -175,6 +236,26 @@ def test_the_db_seam_is_always_loaded_because_conftest_imports_it() -> None:
 # --------------------------------------------------------------------------
 
 
+def test_the_scanner_reports_the_sibling_from_localmail_serve_import_app() -> None:
+    """`from localmail.serve import app` loads the same module.
+
+    Matching only `from localmail.serve.app import …` let a function-local
+    `from localmail.serve import app as app_mod` sit in
+    `test_daemon_supervisor_lifecycle.py` while this scan called the suite
+    compliant.
+    """
+    source = "def test_x():\n    from localmail.serve import app as app_mod\n"
+
+    assert function_local_serve_app_imports(source, "t.py") == [2]
+
+
+def test_the_scanner_ignores_an_unrelated_name_from_the_parent_package() -> None:
+    """The parent package has other members; only `app` is a seam."""
+    source = "def test_x():\n    from localmail.serve import admin\n"
+
+    assert function_local_serve_app_imports(source, "t.py") == []
+
+
 def test_the_scanner_reports_a_function_local_import() -> None:
     source = (
         "def test_x():\n"
@@ -210,7 +291,7 @@ def test_no_collected_test_module_imports_serve_app_below_module_scope() -> None
     import therefore leaks that file's pools, silently.
     """
     offenders: list[str] = []
-    for path in sorted(Path(__file__).parent.glob("test_*.py")):
+    for path in _scanned_python_files():
         lines = function_local_serve_app_imports(path.read_text(), path.name)
         offenders.extend(f"{path.name}:{n}" for n in lines)
 
@@ -235,7 +316,7 @@ def test_the_autouse_fixture_closes_a_pool_opened_during_the_test(monkeypatch) -
     app_module = importlib.import_module(SERVE_APP_MODULE)
     monkeypatch.setattr(app_module, POOL_SEAM_ATTR, FakePool)
 
-    gen = close_leaked_pools.__wrapped__(monkeypatch)
+    gen = close_leaked_pools.__wrapped__()
     recorded = next(gen)
 
     pool = getattr(app_module, POOL_SEAM_ATTR)("dsn")
@@ -250,13 +331,23 @@ def test_the_autouse_fixture_closes_a_pool_opened_during_the_test(monkeypatch) -
 def test_the_fixture_records_nothing_when_serve_app_was_never_imported(
     monkeypatch,
 ) -> None:
-    """A run collecting no serve test must not pay for importing the module."""
+    """A run collecting no serve test must not pay for importing the module.
+
+    The assertion is that the module is *still absent* afterwards, not that no
+    pool was recorded: no pool is built here, so the recorded list is empty
+    under every implementation — including one that imports the module rather
+    than skipping it. That is what this test used to assert, and it passed
+    against exactly the mutation it was written to catch.
+    """
     from tests.conftest import close_leaked_pools
 
     monkeypatch.delitem(sys.modules, SERVE_APP_MODULE, raising=False)
 
-    gen = close_leaked_pools.__wrapped__(monkeypatch)
+    gen = close_leaked_pools.__wrapped__()
     assert next(gen) == []
+    assert SERVE_APP_MODULE not in sys.modules, (
+        "the fixture imported the module it is supposed to skip"
+    )
     with pytest.raises(StopIteration):
         next(gen)
 
@@ -307,14 +398,138 @@ def test_every_test_module_is_scanned_by_the_import_rule() -> None:
     reports every future function-local import as compliant. Named files
     rather than a count threshold, so the pin says what it depends on.
     """
-    scanned = {path.name for path in Path(__file__).parent.glob("test_*.py")}
+    scanned = {path.name for path in _scanned_python_files()}
 
     assert Path(__file__).name in scanned
     # A file that really does import the module the scan is about.
     assert "test_serve_app_baseline.py" in scanned
+    # Not just `test_*.py`: conftest and the `_*.py` helpers can import it too,
+    # and a helper's function-local import leaks exactly as a test file's does.
+    assert "conftest.py" in scanned
+    assert "_pool_leaks.py" in scanned
 
 
 def test_the_scanner_parses_every_test_module_it_claims_to_scan() -> None:
     """`ast.parse` must not raise on any collected module, or the scan is blind."""
-    for path in sorted(Path(__file__).parent.glob("test_*.py")):
+    for path in _scanned_python_files():
         ast.parse(path.read_text(), filename=path.name)
+
+
+# --------------------------------------------------------------------------
+# the teardown re-check: the gate's inference verified rather than trusted
+# --------------------------------------------------------------------------
+
+
+def test_late_seam_error_names_a_seam_that_arrived_after_setup() -> None:
+    message = late_seam_error({SERVE_APP_MODULE: object()}, patched=[])
+
+    assert message is not None
+    assert SERVE_APP_MODULE in message
+
+
+def test_late_seam_error_is_quiet_when_the_seam_was_patched() -> None:
+    assert (
+        late_seam_error({SERVE_APP_MODULE: object()}, patched=[SERVE_APP_MODULE])
+        is None
+    )
+
+
+def test_late_seam_error_is_quiet_when_the_seam_never_loaded() -> None:
+    """The legitimate skip: a unit-only run never imports serve.app at all."""
+    assert late_seam_error({}, patched=[]) is None
+
+
+def test_the_fixture_reports_a_module_that_arrived_during_the_test(
+    monkeypatch,
+) -> None:
+    """The route no scanner can enumerate — a lazy import inside `src/`, an
+    `importlib.import_module`, a `__import__` — is caught by its outcome.
+    """
+    from tests.conftest import close_leaked_pools
+
+    monkeypatch.delitem(sys.modules, SERVE_APP_MODULE, raising=False)
+
+    gen = close_leaked_pools.__wrapped__()
+    next(gen)
+    # Stand in for whatever imported it mid-test.
+    monkeypatch.setitem(sys.modules, SERVE_APP_MODULE, object())
+
+    with pytest.raises(RuntimeError, match="after the pool seam was patched"):
+        next(gen)
+
+
+# --------------------------------------------------------------------------
+# a broken seam stops the run rather than going quietly inert
+# --------------------------------------------------------------------------
+
+
+def test_the_fixture_stops_the_run_when_a_seam_lost_its_attribute(
+    monkeypatch,
+) -> None:
+    """An aliased import (`... as Pool`) makes the fixture unable to record.
+
+    Driven through the fixture, not just through `missing_seam_error`: the
+    pure rule was pinned and the fixture's *use* of it was not, so replacing
+    the report with a `continue` left the whole suite green — a guard going
+    quietly inert, which is the shape this module exists to remove.
+
+    `pytest.exit` raises `_pytest.outcomes.Exit`, which is private; the type
+    is asserted by name so the one-line-not-3000-tracebacks choice is pinned
+    without importing it.
+    """
+    from tests.conftest import close_leaked_pools
+
+    db_module = importlib.import_module(DB_MODULE)
+    monkeypatch.delattr(db_module, POOL_SEAM_ATTR)
+
+    gen = close_leaked_pools.__wrapped__()
+    with pytest.raises(BaseException) as excinfo:
+        next(gen)
+
+    assert type(excinfo.value).__name__ == "Exit"
+    assert POOL_SEAM_ATTR in str(excinfo.value)
+    assert DB_MODULE in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# POOL_SEAMS is the complete set of modules that build a pool
+# --------------------------------------------------------------------------
+
+
+def test_pool_constructor_calls_finds_every_spelling_of_a_pool_build() -> None:
+    source = (
+        "import psycopg_pool\n"
+        "a = ConnectionPool(dsn)\n"
+        "b = psycopg_pool.ConnectionPool(dsn)\n"
+        "c = AsyncConnectionPool(dsn)\n"
+        "d = something_else(dsn)\n"
+    )
+
+    assert [name for name, _line in pool_constructor_calls(source, "t.py")] == [
+        "ConnectionPool",
+        "ConnectionPool",
+        "AsyncConnectionPool",
+    ]
+
+
+def test_only_the_declared_seams_construct_a_pool_anywhere_in_src() -> None:
+    """`missing_seam_error` asks whether the *name* is present, so it cannot
+    see a third module growing a pool, an existing one switching to a
+    fully-qualified `psycopg_pool.ConnectionPool(...)` call, or a move to
+    `AsyncConnectionPool`. All three leave `POOL_SEAMS` intact, nothing
+    patched, and no test failing — so the construction sites are read from
+    `src/` directly and compared against what the fixture patches.
+    """
+    building: dict[str, list[tuple[str, int]]] = {}
+    root = Path(__file__).resolve().parent.parent / "src"
+    for path in _repo_source_files():
+        calls = pool_constructor_calls(path.read_text(), path.name)
+        if calls:
+            module = path.relative_to(root).with_suffix("")
+            building[".".join(module.parts)] = calls
+
+    assert set(building) == {name for name, _attr in POOL_SEAMS}, (
+        f"pools are built in {sorted(building)}; POOL_SEAMS declares "
+        f"{sorted(name for name, _attr in POOL_SEAMS)}. Add the new module to "
+        f"POOL_SEAMS or its pools leak unrecorded (#321)."
+    )

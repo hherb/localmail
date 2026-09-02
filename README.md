@@ -1092,10 +1092,15 @@ against whatever unrelated test happened to be running at the time.
 Nothing is required of a test that builds an app or a daemon. The one rule is
 that a test module must import `localmail.serve.app` at **module scope**, never
 inside a function, because the fixture patches the pool seam before the test
-runs and pytest imports every collected module first.
-`tests/test_pool_leaks.py` enforces that rule over the whole suite. (The
-`localmail.db` seam needs no such rule — `conftest.py` imports that module
-itself.)
+runs and pytest imports every collected module first. (The `localmail.db` seam
+needs no such rule — `conftest.py` imports that module itself.)
+
+You do not have to remember the rule for it to be enforced. A source scan over
+every `.py` under `tests/` catches the two import spellings it can see and
+names the offending line; and because no scan can enumerate the rest —
+`importlib.import_module`, `__import__`, or a lazy import inside `src/`, which
+`serve_cmd` has — the fixture also checks at teardown that nothing arrived
+after it looked, and fails the test that let it in.
 
 CI: `.github/workflows/python-ci.yml` runs the full pytest suite on every
 push to `main` and every PR touching `src/`, `tests/`, `migrations/`,

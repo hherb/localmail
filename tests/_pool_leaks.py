@@ -15,7 +15,7 @@ happened to be running when the collection fired, which is why the warning
 names a different set of files on every run and never names the leak site.
 
 **The closing is done once, in an autouse fixture, rather than by giving each
-of the 34 affected files a closing fixture of its own.** Two reasons, and the
+of the 38 affected files a closing fixture of its own.** Two reasons, and the
 first is the one this codebase keeps re-learning: a new inline
 ``create_app(...)`` written tomorrow silently reintroduces the leak, so a
 per-file sweep buys discipline where the seam buys construction. The second
@@ -37,9 +37,9 @@ There are **two** seams, listed in :data:`POOL_SEAMS`, and both were needed:
 
 Each seam is the name its own module resolves from its globals on **every**
 call, so replacing it reaches every caller regardless of how that caller
-imported the function around it — which matters because every test module binds
-``create_app`` into its own namespace at import time, where a patch cannot
-reach it.
+imported the function around it — which matters because every test module that
+calls ``create_app`` binds it into its own namespace at import time, where a
+patch cannot reach it.
 
 Nothing here closes a pool that was already closed: that path is correct and
 :func:`unclosed` filters it out, so the count :func:`close_pools` returns is
@@ -63,10 +63,12 @@ POOL_SEAM_ATTR = "ConnectionPool"
 
 #: Every ``(module name, attribute)`` a pool is built through.
 #:
-#: :data:`DB_MODULE` is always importable by the time a fixture runs, because
-#: ``tests/conftest.py`` imports ``localmail.db`` at module scope for
-#: ``apply_migrations``. :data:`SERVE_APP_MODULE` is not, which is the whole
-#: reason :func:`function_local_serve_app_imports` exists — and why the rule it
+#: :data:`DB_MODULE` is always already in ``sys.modules`` by the time a fixture
+#: runs — both seams are always *importable*, which is not the property
+#: :func:`loaded_seams` turns on — because ``tests/conftest.py`` imports
+#: ``localmail.db`` at module scope for ``apply_migrations``.
+#: :data:`SERVE_APP_MODULE` has no such guarantee, which is the whole reason
+#: :func:`function_local_serve_app_imports` exists — and why the rule it
 #: enforces names that module only.
 POOL_SEAMS: tuple[tuple[str, str], ...] = (
     (SERVE_APP_MODULE, POOL_SEAM_ATTR),
@@ -75,9 +77,17 @@ POOL_SEAMS: tuple[tuple[str, str], ...] = (
 
 
 class Closable(Protocol):
-    """The two members of ``ConnectionPool`` this module touches."""
+    """The two members of ``ConnectionPool`` this module touches.
 
-    closed: bool
+    ``closed`` is declared read-only because that is what ``ConnectionPool``
+    actually exposes — a ``property``. Declared as a settable attribute the
+    Protocol does not match the one class it exists to describe, and mypy says
+    so ("expected settable variable, got read-only attribute"), which would
+    make it wrong at the first call site that ever annotated a real pool.
+    """
+
+    @property
+    def closed(self) -> bool: ...
 
     def close(self) -> None: ...
 
@@ -118,10 +128,31 @@ def close_pools(pools: Iterable[Closable]) -> int:
     ``ConnectionPool.close`` is idempotent, so re-closing would be harmless —
     but the return value is a claim about what this fixture had to do, and
     filtering first is what keeps that claim true.
+
+    Every pool is closed even when one of them raises, and the first failure
+    is re-raised afterwards. Aborting on the first would leave the rest open,
+    and their finalisers then surface as a
+    ``RuntimeError: cannot join current thread`` charged to some later,
+    unrelated test — the exact misattribution this module exists to end,
+    reintroduced by its own cleanup.
+
+    A second and later failure is **attached to the first as a note**, not
+    dropped: raising only the first would make this broad catch a silent one
+    for every failure after it, and the note is what keeps the traceback an
+    honest account of what the teardown actually hit.
     """
     leaked = unclosed(pools)
+    failures: list[Exception] = []
     for pool in leaked:
-        pool.close()
+        try:
+            pool.close()
+        except Exception as exc:  # noqa: BLE001 - re-raised below, never swallowed
+            failures.append(exc)
+    if failures:
+        first, rest = failures[0], failures[1:]
+        for other in rest:
+            first.add_note(f"and closing a later pool also failed: {other!r}")
+        raise first
     return len(leaked)
 
 
@@ -185,8 +216,19 @@ def function_local_serve_app_imports(source: str, filename: str) -> list[int]:
     fixture has already decided there was nothing to patch, and that file's
     pools leak with nothing reporting it.
 
-    The rule is read from the AST rather than the text because a docstring or
-    a comment quoting the import — this one does — is prose, not code.
+    The rule is read from the AST rather than the text because
+    ``tests/test_pool_leaks.py`` quotes the forbidden import verbatim, in the
+    source strings it feeds this function as test cases. A substring scan
+    flags those three lines; an AST walk correctly reads them as the string
+    literals they are. (An earlier wording claimed *this* docstring quoted the
+    import. It does not, and nothing else in this file does either — the
+    reason is sound, the example was wrong.)
+
+    **This is a belt to the fixture's braces, not the primary guard.** It
+    cannot see ``importlib.import_module``, a ``__import__``, or a lazy import
+    inside ``src/`` — `serve_cmd` has one — so the fixture re-checks at
+    teardown that no declared seam arrived after it looked. See
+    :func:`late_seam_error`.
     """
     tree = ast.parse(source, filename=filename)
     module_level = {id(node) for node in tree.body}
@@ -198,9 +240,88 @@ def function_local_serve_app_imports(source: str, filename: str) -> list[int]:
 
 
 def _imports_serve_app(node: ast.AST) -> TypeGuard[ast.Import | ast.ImportFrom]:
-    """Whether ``node`` is an import of :data:`SERVE_APP_MODULE`."""
+    """Whether ``node`` is an import of :data:`SERVE_APP_MODULE`.
+
+    Both spellings count, because both put the module in ``sys.modules``:
+    ``from localmail.serve.app import create_app`` and
+    ``from localmail.serve import app``. Matching only the first is what let a
+    function-local ``from localmail.serve import app as app_mod`` sit in
+    ``test_daemon_supervisor_lifecycle.py`` while this scan reported the suite
+    compliant.
+    """
     if isinstance(node, ast.ImportFrom):
-        return node.module == SERVE_APP_MODULE
+        if node.module == SERVE_APP_MODULE:
+            return True
+        parent, _, leaf = SERVE_APP_MODULE.rpartition(".")
+        return node.module == parent and any(
+            alias.name == leaf for alias in node.names
+        )
     if isinstance(node, ast.Import):
         return any(alias.name == SERVE_APP_MODULE for alias in node.names)
     return False
+
+
+def late_seam_error(
+    modules: Mapping[str, Any],
+    patched: Iterable[str],
+    seams: Iterable[tuple[str, str]] = POOL_SEAMS,
+) -> str | None:
+    """Message naming a seam that arrived after the fixture looked, or ``None``.
+
+    :func:`loaded_seams` skips a module absent from ``sys.modules`` at setup,
+    on the inference that nothing can then build a pool through it. That
+    inference is false in four distinct ways — a function-local
+    ``from localmail.serve.app import …``, the sibling
+    ``from localmail.serve import app``, an ``importlib.import_module``, and a
+    lazy import inside ``src/`` (``cli.py``'s ``serve_cmd`` has one) — and only
+    the first two are visible to
+    :func:`function_local_serve_app_imports`, which cannot read production code
+    at all.
+
+    So the inference is **verified rather than trusted**: whatever route the
+    module took, if a declared seam is loaded at teardown and was not patched
+    at setup, every pool built through it during this test went unrecorded.
+    Checking the outcome costs one set difference and covers the routes no
+    scanner will ever enumerate — the standard this codebase applies to a
+    guard whose failure is otherwise silent.
+    """
+    already = set(patched)
+    late = sorted(name for name, _attr in seams if name in modules and name not in already)
+    if not late:
+        return None
+    return (
+        f"{', '.join(late)} was imported during this test, after the pool seam "
+        f"was patched — every pool built through it leaked, unrecorded (#321). "
+        f"Import it at module scope so the fixture can see it."
+    )
+
+
+def pool_constructor_calls(source: str, filename: str) -> list[tuple[str, int]]:
+    """``(callee name, line)`` for every call in ``source`` that builds a pool.
+
+    A callee whose name ends in ``ConnectionPool`` — so ``ConnectionPool(...)``,
+    ``psycopg_pool.ConnectionPool(...)`` and ``AsyncConnectionPool(...)`` all
+    count. Used to check :data:`POOL_SEAMS` against the modules that actually
+    construct pools, which is the hole :func:`missing_seam_error` cannot see:
+    it asks only whether the *name* is present, so a third module growing a
+    pool, or an existing one switching to a fully-qualified call or to the
+    async class, leaves the name intact, nothing patched, and no test failing.
+    """
+    tree = ast.parse(source, filename=filename)
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _callee_name(node.func)
+        if name is not None and name.endswith(POOL_SEAM_ATTR):
+            found.append((name, node.lineno))
+    return sorted(found, key=lambda pair: pair[1])
+
+
+def _callee_name(func: ast.expr) -> str | None:
+    """The bare or dotted-leaf name a call expression resolves to."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None

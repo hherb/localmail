@@ -20,7 +20,7 @@ from localmail.mcp.discovery import (  # noqa: E402
 )
 
 # Module scope, not function scope: the autouse pool-closing fixture reads
-# sys.modules at test-setup time (#321, tests/_serve_app_pools.py).
+# sys.modules at test-setup time (#321, tests/_pool_leaks.py).
 from localmail.serve.app import create_app  # noqa: E402
 
 

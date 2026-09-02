@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from localmail.cli import main
 
 # Module scope, not function scope: the autouse pool-closing fixture reads
-# sys.modules at test-setup time (#321, tests/_serve_app_pools.py).
+# sys.modules at test-setup time (#321, tests/_pool_leaks.py).
 import localmail.serve.app as serve_app
 
 

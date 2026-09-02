@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
-"""Close the connection pools ``create_app`` opens during a test (#321).
+"""Close the connection pools a test opens and never closes (#321).
 
 ``serve.app.create_app`` opens its pool eagerly (``open=True``) and closes it
 only in the FastAPI lifespan's ``finally``. A test that never runs the
@@ -24,28 +24,54 @@ is that the sweep as issue #321 words it — wrap each call in
 ``create_app`` alone is side-effect-free, since running the lifespan is
 exactly what binds the daemon control socket.
 
-The seam is :data:`POOL_SEAM_ATTR` on :data:`SERVE_APP_MODULE`. ``create_app``
-resolves that name from its module globals on **every** call, so replacing it
-reaches every caller regardless of how the caller imported ``create_app`` —
-which matters because every test module binds ``create_app`` into its own
-namespace at import time, where a patch cannot reach it.
+There are **two** seams, listed in :data:`POOL_SEAMS`, and both were needed:
 
-Nothing here closes a pool the lifespan already closed: that path is correct
-and :func:`unclosed` filters it out, so the count :func:`close_pools` returns
-is the number of pools that genuinely leaked.
+* ``localmail.serve.app`` — the ``create_app`` pools above;
+* ``localmail.db`` — the pools ``open_pool`` builds for ``Daemon`` and
+  ``Searcher``. ``Daemon.stop()``/``join()`` do **not** close ``self.pool``, so
+  13 daemon tests across four files plus one ``create_searcher`` test leaked one
+  each. That half was invisible on macOS and reported on Linux/3.13 — the GC
+  decides, so a platform can hide it entirely. Found by instrumenting
+  ``open_pool``, not by reading the warning, which names the wrong file by
+  construction.
+
+Each seam is the name its own module resolves from its globals on **every**
+call, so replacing it reaches every caller regardless of how that caller
+imported the function around it — which matters because every test module binds
+``create_app`` into its own namespace at import time, where a patch cannot
+reach it.
+
+Nothing here closes a pool that was already closed: that path is correct and
+:func:`unclosed` filters it out, so the count :func:`close_pools` returns is
+the number of pools that genuinely leaked.
 """
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol, TypeGuard, TypeVar
 
-#: The module whose ``create_app`` opens the pools this file exists to close.
+#: The module whose ``create_app`` opens a pool per app.
 SERVE_APP_MODULE = "localmail.serve.app"
 
-#: The name ``create_app`` resolves from :data:`SERVE_APP_MODULE`'s globals to
-#: build its pool. Patching it is what makes every call site reachable.
+#: The module whose ``open_pool`` builds the ``Daemon`` and ``Searcher`` pools.
+DB_MODULE = "localmail.db"
+
+#: The name each module resolves from its own globals to build a pool.
+#: Patching it is what makes every call site reachable.
 POOL_SEAM_ATTR = "ConnectionPool"
+
+#: Every ``(module name, attribute)`` a pool is built through.
+#:
+#: :data:`DB_MODULE` is always importable by the time a fixture runs, because
+#: ``tests/conftest.py`` imports ``localmail.db`` at module scope for
+#: ``apply_migrations``. :data:`SERVE_APP_MODULE` is not, which is the whole
+#: reason :func:`function_local_serve_app_imports` exists — and why the rule it
+#: enforces names that module only.
+POOL_SEAMS: tuple[tuple[str, str], ...] = (
+    (SERVE_APP_MODULE, POOL_SEAM_ATTR),
+    (DB_MODULE, POOL_SEAM_ATTR),
+)
 
 
 class Closable(Protocol):
@@ -99,13 +125,33 @@ def close_pools(pools: Iterable[Closable]) -> int:
     return len(leaked)
 
 
-def missing_seam_error(app_module: object) -> str | None:
+def loaded_seams(
+    modules: Mapping[str, Any], seams: Iterable[tuple[str, str]] = POOL_SEAMS
+) -> list[tuple[str, Any, str]]:
+    """The ``(name, module, attribute)`` seams already present in ``modules``.
+
+    Pure over a ``sys.modules``-shaped mapping. A seam whose module has not
+    been imported is skipped rather than imported: nothing can have built a
+    pool through a module that does not exist yet, and importing
+    ``localmail.serve.app`` speculatively costs ~0.5 s on every unit-only run.
+    See :func:`function_local_serve_app_imports` for what keeps that inference
+    true.
+    """
+    found = []
+    for name, attr in seams:
+        module = modules.get(name)
+        if module is not None:
+            found.append((name, module, attr))
+    return found
+
+
+def missing_seam_error(module: object, module_name: str, attr: str) -> str | None:
     """Message naming a broken pool seam, or ``None`` when it is intact.
 
     Shaped like ``account_names.account_name_error``: the rule answers, the
     caller decides what an error is.
 
-    The failure this catches is an aliased import in ``serve/app.py``
+    The failure this catches is an aliased import in the seam's module
     (``from psycopg_pool import ConnectionPool as Pool``). The attribute then
     does not exist, nothing patches, every pool leaks again — and no test
     fails, because closing a pool that was never recorded is a no-op. A guard
@@ -116,13 +162,12 @@ def missing_seam_error(app_module: object) -> str | None:
     different pool class under the same name is a legitimate change, and the
     wrapper would keep recording and closing it correctly.
     """
-    if not hasattr(app_module, POOL_SEAM_ATTR):
+    if not hasattr(module, attr):
         return (
-            f"{SERVE_APP_MODULE} has no attribute {POOL_SEAM_ATTR!r}, so the "
-            f"autouse pool-closing fixture cannot record the pools create_app "
-            f"opens and every one of them leaks (#321). If the import was "
-            f"aliased, restore the plain name or update POOL_SEAM_ATTR in "
-            f"tests/_serve_app_pools.py."
+            f"{module_name} has no attribute {attr!r}, so the autouse "
+            f"pool-closing fixture cannot record the pools it builds and every "
+            f"one of them leaks (#321). If the import was aliased, restore the "
+            f"plain name or update POOL_SEAMS in tests/_pool_leaks.py."
         )
     return None
 

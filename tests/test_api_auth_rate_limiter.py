@@ -12,7 +12,7 @@ from localmail.api.auth import create_user, login, reset_login_rate_limiter
 from localmail.api.errors import AuthenticationFailed, RateLimited
 from localmail.config import AuthConfig
 # Module scope, not function scope: the autouse pool-closing fixture reads
-# sys.modules at test-setup time (#321, tests/_serve_app_pools.py).
+# sys.modules at test-setup time (#321, tests/_pool_leaks.py).
 from localmail.serve.app import create_app
 
 

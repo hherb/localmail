@@ -15,11 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from tests._serve_app_pools import (
+from tests._pool_leaks import (
+    DB_MODULE,
     POOL_SEAM_ATTR,
+    POOL_SEAMS,
     SERVE_APP_MODULE,
     close_pools,
     function_local_serve_app_imports,
+    loaded_seams,
     missing_seam_error,
     recording_factory,
     unclosed,
@@ -124,11 +127,13 @@ def test_close_pools_with_nothing_recorded_is_a_no_op() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_the_real_serve_app_module_exposes_the_seam() -> None:
-    """`create_app` resolves this name from module globals on every call."""
-    app_module = importlib.import_module(SERVE_APP_MODULE)
+@pytest.mark.parametrize("module_name", [SERVE_APP_MODULE, DB_MODULE])
+def test_every_declared_seam_really_exposes_its_attribute(module_name: str) -> None:
+    """Each module resolves this name from its own globals on every call."""
+    module = importlib.import_module(module_name)
+    attr = dict((name, a) for name, a in POOL_SEAMS)[module_name]
 
-    assert missing_seam_error(app_module) is None
+    assert missing_seam_error(module, module_name, attr) is None
 
 
 def test_missing_seam_error_names_the_module_and_the_attribute() -> None:
@@ -136,11 +141,33 @@ def test_missing_seam_error_names_the_module_and_the_attribute() -> None:
     class Renamed:
         pass
 
-    message = missing_seam_error(Renamed)
+    message = missing_seam_error(Renamed, SERVE_APP_MODULE, POOL_SEAM_ATTR)
 
     assert message is not None
     assert SERVE_APP_MODULE in message
     assert POOL_SEAM_ATTR in message
+
+
+def test_loaded_seams_skips_a_module_that_is_not_imported() -> None:
+    """Nothing can have built a pool through a module that does not exist yet."""
+    modules = {"present": object()}
+
+    found = loaded_seams(modules, [("present", "X"), ("absent", "X")])
+
+    assert [name for name, _module, _attr in found] == ["present"]
+
+
+def test_loaded_seams_defaults_to_every_declared_seam() -> None:
+    fake = {name: object() for name, _attr in POOL_SEAMS}
+
+    assert len(loaded_seams(fake)) == len(POOL_SEAMS)
+
+
+def test_the_db_seam_is_always_loaded_because_conftest_imports_it() -> None:
+    """`conftest` imports `localmail.db` for `apply_migrations`, so that seam
+    never depends on the module-scope import rule below — only serve.app does.
+    """
+    assert DB_MODULE in sys.modules
 
 
 # --------------------------------------------------------------------------
@@ -203,12 +230,12 @@ def test_the_autouse_fixture_closes_a_pool_opened_during_the_test(monkeypatch) -
     The seam is swapped for `FakePool` first, so the fixture wraps that rather
     than opening real connections.
     """
-    from tests.conftest import close_serve_app_pools
+    from tests.conftest import close_leaked_pools
 
     app_module = importlib.import_module(SERVE_APP_MODULE)
     monkeypatch.setattr(app_module, POOL_SEAM_ATTR, FakePool)
 
-    gen = close_serve_app_pools.__wrapped__(monkeypatch)
+    gen = close_leaked_pools.__wrapped__(monkeypatch)
     recorded = next(gen)
 
     pool = getattr(app_module, POOL_SEAM_ATTR)("dsn")
@@ -224,28 +251,42 @@ def test_the_fixture_records_nothing_when_serve_app_was_never_imported(
     monkeypatch,
 ) -> None:
     """A run collecting no serve test must not pay for importing the module."""
-    from tests.conftest import close_serve_app_pools
+    from tests.conftest import close_leaked_pools
 
     monkeypatch.delitem(sys.modules, SERVE_APP_MODULE, raising=False)
 
-    gen = close_serve_app_pools.__wrapped__(monkeypatch)
+    gen = close_leaked_pools.__wrapped__(monkeypatch)
     assert next(gen) == []
     with pytest.raises(StopIteration):
         next(gen)
 
 
 def test_create_app_registers_its_pool_with_the_running_fixture(
-    db_dsn: str, close_serve_app_pools: list
+    db_dsn: str, close_leaked_pools: list
 ) -> None:
     """End to end against the real `create_app`: the seam is live during a test."""
     app_module = importlib.import_module(SERVE_APP_MODULE)
     app = app_module.create_app(db_dsn=db_dsn, searcher=None)
 
-    assert app.state.pool in close_serve_app_pools
+    assert app.state.pool in close_leaked_pools
+
+
+def test_a_db_pool_is_recorded_too(db_dsn: str, close_leaked_pools: list) -> None:
+    """`localmail.db.open_pool` is the other seam: Daemon and Searcher pools.
+
+    `Daemon.stop()`/`join()` do not close `self.pool`, so 13 daemon tests plus
+    one searcher test leaked one each — invisible on macOS and reported on
+    Linux/3.13, because the warning depends on when the GC runs.
+    """
+    from localmail.db import open_pool
+
+    pool = open_pool(db_dsn)
+
+    assert pool in close_leaked_pools
 
 
 def test_a_lifespan_run_closes_the_pool_before_the_fixture_sees_it(
-    db_dsn: str, close_serve_app_pools: list
+    db_dsn: str, close_leaked_pools: list
 ) -> None:
     """`with TestClient(app)` is already correct; the fixture must find nothing."""
     from fastapi.testclient import TestClient
@@ -255,8 +296,8 @@ def test_a_lifespan_run_closes_the_pool_before_the_fixture_sees_it(
     with TestClient(app):
         pass
 
-    assert app.state.pool in close_serve_app_pools
-    assert unclosed(close_serve_app_pools) == []
+    assert app.state.pool in close_leaked_pools
+    assert unclosed(close_leaked_pools) == []
 
 
 def test_every_test_module_is_scanned_by_the_import_rule() -> None:

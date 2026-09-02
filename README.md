@@ -1080,17 +1080,22 @@ it, so running one alongside a suite corrupts both exactly as two suites
 would (tracked as an open issue). Point them at their own `LOCALMAIL_TEST_DSN`
 or run them alone. Tracked as [#337](https://github.com/hherb/localmail/issues/337).
 
-An autouse fixture closes every connection pool `create_app` opened during a
-test. `create_app` opens its pool eagerly and closes it only in the FastAPI
-lifespan, so a test that builds an app without running one — a bare
-`create_app(...)`, or `TestClient(app)` used without `with` — would otherwise
-hold its connections until the garbage collector reached the pool, and report
-`RuntimeError: cannot join current thread` against whatever unrelated test
-happened to be running at the time. Nothing is required of a test that builds
-an app; the one rule is that a test module must import `localmail.serve.app`
-at **module scope**, never inside a function, because the fixture patches the
-pool seam before the test runs. `tests/test_serve_app_pools.py` enforces that
-rule over the whole suite.
+An autouse fixture closes every connection pool a test opened and did not
+close. Two things leak them: `create_app` opens its pool eagerly and closes it
+only in the FastAPI lifespan, so an app built without running one — a bare
+`create_app(...)`, or `TestClient(app)` used without `with` — keeps it; and
+`Daemon.stop()`/`join()` do not close `self.pool`, so daemon and searcher tests
+keep theirs. Either way the connections are held until the garbage collector
+reaches the pool, which then reports `RuntimeError: cannot join current thread`
+against whatever unrelated test happened to be running at the time.
+
+Nothing is required of a test that builds an app or a daemon. The one rule is
+that a test module must import `localmail.serve.app` at **module scope**, never
+inside a function, because the fixture patches the pool seam before the test
+runs and pytest imports every collected module first.
+`tests/test_pool_leaks.py` enforces that rule over the whole suite. (The
+`localmail.db` seam needs no such rule — `conftest.py` imports that module
+itself.)
 
 CI: `.github/workflows/python-ci.yml` runs the full pytest suite on every
 push to `main` and every PR touching `src/`, `tests/`, `migrations/`,

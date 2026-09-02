@@ -4415,10 +4415,10 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     (2 pre-existing `websockets` deprecations, #25, + **4**
     `cannot join current thread`); the branch runs **2** warnings — the
     websockets pair alone — on macOS *and* on both CI legs. Only the warning
-    count generalises across platforms: the pass count measured here is
-    `3025 passed, 0 skipped` on macOS, and CI trades one of those for the
-    `1 skipped` that the #335 entry above records as pre-existing — macOS is
-    the odd one out on skips, not CI.
+    count generalises across platforms: the pass count is `3025 passed,
+    0 skipped` on macOS and `3024 passed, 1 skipped` on CI (both legs,
+    verified) — the same 3025 tests, with the `1 skipped` that the #335 entry
+    above records as pre-existing. macOS is the odd one out on skips, not CI.
     The instrumented run reports **0 of 131** `localmail.db` pools unclosed,
     where the first pass reported 14. Closing costs nothing measurable (a
     serve-heavy pair of files: 6.84 s with, 6.99 s without).

@@ -182,6 +182,7 @@ generalises).
   | branch, first push (`b286887`) | 3009 passed, 178.84 s | 2 on macOS, **3 on CI 3.13** |
   | branch, before the review round | 3014 passed, **0 skipped**, 184.26 s | **2** |
   | branch, final (review round) | 3025 passed, **0 skipped**, 190.89 s | **2** |
+  | branch, final on **CI**, 3.12 *and* 3.13 | 3024 passed, **1 skipped** | **2** |
 
   The 6 are 2 pre-existing `websockets` deprecations (**#25**) plus **4**
   `cannot join current thread`. The final 2 are the websockets pair alone —

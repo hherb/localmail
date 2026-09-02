@@ -248,6 +248,68 @@ def test_the_waiting_message_names_the_database_and_the_remedy() -> None:
     assert "wait" in msg.lower()
 
 
+def test_the_messages_do_not_claim_the_holder_is_a_pytest_session() -> None:
+    """Since #337 an acceptance harness holds this same lock.
+
+    The messages used to say "another pytest session", which sends an
+    operator hunting a pytest process that may not exist — a confident and
+    wrong diagnosis, which is the one thing these strings exist to avoid.
+    They must name a class of holder wide enough to be true of both.
+    """
+    for msg in (busy_message("localmail_test", timeout_s=1.0), waiting_message("localmail_test")):
+        assert "pytest session" not in msg
+        assert "test run" in msg
+
+
+class _ConnRaising:
+    """A connection whose backend is gone: the probe itself errors."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def execute(self, *_args: object, **_kwargs: object):
+        raise self._exc
+
+
+class _ConnReturning:
+    """A live connection that no longer holds the lock (a pooler's DISCARD)."""
+
+    def __init__(self, held: bool) -> None:
+        self._held = held
+
+    def execute(self, *_args: object, **_kwargs: object):
+        class _Cur:
+            def fetchone(_self):
+                return (held,)
+
+        held = self._held
+        return _Cur()
+
+
+def test_the_lost_lock_messages_do_not_name_pytest_either() -> None:
+    """The same sweep, applied to the other operator-facing strings.
+
+    `SessionLockLost` describes the *other* party — the run that can now
+    truncate underneath us — which since #337 may equally be a harness. The
+    two strings were left behind by the sweep that documents why they are
+    wrong, because the pin above covers only the two functions it fixed.
+
+    Read off records the module actually raises, not off literals: a test
+    comparing against its own copy of the wording passes against a message
+    and a rationale that agree with the copy and not with each other.
+    """
+    messages = []
+    for conn in (_ConnRaising(psycopg.OperationalError("boom")), _ConnReturning(False)):
+        with pytest.raises(SessionLockLost) as caught:
+            verify_still_held(conn)
+        messages.append(str(caught.value))
+
+    assert len(messages) == 2, "both branches must be exercised"
+    for msg in messages:
+        assert "pytest" not in msg
+        assert "test run" in msg
+
+
 # --------------------------------------------------------------------------
 # Behavioural: the lock actually excludes
 # --------------------------------------------------------------------------

@@ -54,6 +54,7 @@ from tests.acceptance.browse_explain_lib import (
 )
 
 from localmail.db import apply_migrations
+from tests.acceptance._harness_lock import checkpoint, harness_db_lock
 
 
 def _render_table(
@@ -181,86 +182,92 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print(f"connecting to {args.dsn}")
-    apply_migrations(args.dsn)
-    with psycopg.connect(args.dsn) as conn:
-        print("truncating data tables…")
-        with conn.cursor() as cur:
-            cur.execute(TRUNCATE_SQL)
-        conn.commit()
-
-        cfg = SeedConfig(
-            total_rows=args.total_rows,
-            num_accounts=args.accounts,
-            distribution=args.distribution,
-        )
-        account_ids = seed_accounts(conn, args.accounts)
-        seed_messages(conn, account_ids, cfg, verbose=True)
-        folders: FolderMailboxes | None = None
-        if args.folder_filter:
-            folders = seed_folder_filter_mailboxes(
-                conn, account_ids, verbose=True,
-            )
-        probes = build_probes(
-            cfg, account_ids, args.page_size, folders=folders,
-        )
-        if not probes:
-            print("no probes generated (no accounts?)", file=sys.stderr)
-            return 1
-
-        summaries: list[PlanSummary] = []
-        for probe in probes:
-            summ = run_explain(
-                conn, probe, args.page_size,
-                predicate_form=args.predicate_form,
-            )
-            summaries.append(summ)
-
-        if args.json:
-            print(json.dumps({
-                "config": {
-                    "total_rows": args.total_rows,
-                    "accounts": args.accounts,
-                    "distribution": args.distribution,
-                    "page_size": args.page_size,
-                    "predicate_form": args.predicate_form,
-                    "folder_filter": args.folder_filter,
-                },
-                "probes": [
-                    {
-                        "name": p.name,
-                        "acl_size": len(p.account_ids),
-                        "keyset": p.cursor is not None,
-                        "folder_filter": p.folder_ids is not None,
-                        "folder_count": len(p.folder_ids) if p.folder_ids else 0,
-                        "plan_family": s.plan_family,
-                        "actual_rows": s.actual_rows,
-                        "rows_removed_by_filter": s.rows_removed_by_filter,
-                        "execution_ms": s.execution_ms,
-                        "planning_ms": s.planning_ms,
-                        "buf_hit": s.shared_hit_blocks,
-                        "buf_read": s.shared_read_blocks,
-                    }
-                    for p, s in zip(probes, summaries)
-                ],
-                "verdict": _verdict(probes, summaries),
-            }, indent=2))
-        else:
-            print("\n" + _render_table(probes, summaries))
-            print("\n" + _verdict(probes, summaries))
-            print("\nRaw EXPLAIN output per probe written to stderr below "
-                  "for debugging:", file=sys.stderr)
-            for probe, summ in zip(probes, summaries):
-                print(f"\n=== {probe.name} ===", file=sys.stderr)
-                print(summ.raw, file=sys.stderr)
-
-        if not args.keep_data:
-            print("\ntruncating to leave a clean DB…")
+    with harness_db_lock(args.dsn) as lock:
+        print(f"connecting to {args.dsn}")
+        apply_migrations(args.dsn)
+        with psycopg.connect(args.dsn) as conn:
+            print("truncating data tables…")
             with conn.cursor() as cur:
                 cur.execute(TRUNCATE_SQL)
             conn.commit()
 
-    return 0
+            cfg = SeedConfig(
+                total_rows=args.total_rows,
+                num_accounts=args.accounts,
+                distribution=args.distribution,
+            )
+            account_ids = seed_accounts(conn, args.accounts)
+            seed_messages(conn, account_ids, cfg, verbose=True)
+            folders: FolderMailboxes | None = None
+            if args.folder_filter:
+                folders = seed_folder_filter_mailboxes(
+                    conn, account_ids, verbose=True,
+                )
+            probes = build_probes(
+                cfg, account_ids, args.page_size, folders=folders,
+            )
+            if not probes:
+                print("no probes generated (no accounts?)", file=sys.stderr)
+                return 1
+
+            summaries: list[PlanSummary] = []
+            for probe in probes:
+                summ = run_explain(
+                    conn, probe, args.page_size,
+                    predicate_form=args.predicate_form,
+                )
+                summaries.append(summ)
+
+            if args.json:
+                print(json.dumps({
+                    "config": {
+                        "total_rows": args.total_rows,
+                        "accounts": args.accounts,
+                        "distribution": args.distribution,
+                        "page_size": args.page_size,
+                        "predicate_form": args.predicate_form,
+                        "folder_filter": args.folder_filter,
+                    },
+                    "probes": [
+                        {
+                            "name": p.name,
+                            "acl_size": len(p.account_ids),
+                            "keyset": p.cursor is not None,
+                            "folder_filter": p.folder_ids is not None,
+                            "folder_count": len(p.folder_ids) if p.folder_ids else 0,
+                            "plan_family": s.plan_family,
+                            "actual_rows": s.actual_rows,
+                            "rows_removed_by_filter": s.rows_removed_by_filter,
+                            "execution_ms": s.execution_ms,
+                            "planning_ms": s.planning_ms,
+                            "buf_hit": s.shared_hit_blocks,
+                            "buf_read": s.shared_read_blocks,
+                        }
+                        for p, s in zip(probes, summaries)
+                    ],
+                    "verdict": _verdict(probes, summaries),
+                }, indent=2))
+            else:
+                print("\n" + _render_table(probes, summaries))
+                print("\n" + _verdict(probes, summaries))
+                print("\nRaw EXPLAIN output per probe written to stderr below "
+                      "for debugging:", file=sys.stderr)
+                for probe, summ in zip(probes, summaries):
+                    print(f"\n=== {probe.name} ===", file=sys.stderr)
+                    print(summ.raw, file=sys.stderr)
+
+            if not args.keep_data:
+                # Re-checked, not trusted: this truncate is the furthest any
+                # harness gets from acquisition — a full seed plus every
+                # EXPLAIN probe — and the lock rides an idle connection that
+                # a restart or an idle-session reaper drops in silence.
+                checkpoint(lock)
+                print("\ntruncating to leave a clean DB…")
+                with conn.cursor() as cur:
+                    cur.execute(TRUNCATE_SQL)
+                conn.commit()
+
+        return 0
 
 
 if __name__ == "__main__":

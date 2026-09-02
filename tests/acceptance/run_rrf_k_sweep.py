@@ -58,6 +58,7 @@ from localmail.search.searcher import Searcher
 
 from tests._attachment_corpus import build_corpus as build_attachment_corpus
 from tests._multilingual_corpus import build_corpus as build_multilingual_corpus
+from tests.acceptance._harness_lock import harness_db_lock
 
 # Phase-1 gated languages — the mean used to pick a winner is over these.
 # The attachment corpus only ships English queries, so when it's selected the
@@ -219,75 +220,76 @@ def main() -> int:
         print("--rrf-ks must contain at least one integer", file=sys.stderr)
         return 2
 
-    print(f"Applying migrations to {dsn!r} …", file=sys.stderr)
-    apply_migrations(dsn)
+    with harness_db_lock(dsn):
+        print(f"Applying migrations to {dsn!r} …", file=sys.stderr)
+        apply_migrations(dsn)
 
-    cfg_seed = SearchConfig()
-    suite = json.loads(args.queries.read_text())
-    queries = suite["queries"]
+        cfg_seed = SearchConfig()
+        suite = json.loads(args.queries.read_text())
+        queries = suite["queries"]
 
-    attachments_tmpdir: tempfile.TemporaryDirectory | None = (
-        tempfile.TemporaryDirectory() if args.corpus == "attachment" else None
-    )
-    try:
-        if args.corpus == "multilingual":
-            with psycopg.connect(dsn) as conn:
-                backend = _seed_and_embed_multilingual(conn, cfg_seed)
-        else:
-            assert attachments_tmpdir is not None
-            with psycopg.connect(dsn) as conn:
-                backend = _seed_and_embed_attachment(
-                    conn, cfg_seed, Path(attachments_tmpdir.name),
-                )
-
-        pool = open_pool(dsn)
+        attachments_tmpdir: tempfile.TemporaryDirectory | None = (
+            tempfile.TemporaryDirectory() if args.corpus == "attachment" else None
+        )
         try:
-            candidates = args.candidates_per_arm if args.candidates_per_arm else args.k * 3
-            results: dict[int, tuple[dict[str, float], dict[str, float]]] = {}
-            for k_value in ks:
-                cfg = cfg_seed.model_copy(update={"rrf_k": k_value})
-                results[k_value] = _evaluate_one(
-                    pool, cfg, backend, queries, args.k, candidates,
-                )
+            if args.corpus == "multilingual":
+                with psycopg.connect(dsn) as conn:
+                    backend = _seed_and_embed_multilingual(conn, cfg_seed)
+            else:
+                assert attachments_tmpdir is not None
+                with psycopg.connect(dsn) as conn:
+                    backend = _seed_and_embed_attachment(
+                        conn, cfg_seed, Path(attachments_tmpdir.name),
+                    )
+
+            pool = open_pool(dsn)
+            try:
+                candidates = args.candidates_per_arm if args.candidates_per_arm else args.k * 3
+                results: dict[int, tuple[dict[str, float], dict[str, float]]] = {}
+                for k_value in ks:
+                    cfg = cfg_seed.model_copy(update={"rrf_k": k_value})
+                    results[k_value] = _evaluate_one(
+                        pool, cfg, backend, queries, args.k, candidates,
+                    )
+            finally:
+                pool.close()
         finally:
-            pool.close()
-    finally:
-        if attachments_tmpdir is not None:
-            attachments_tmpdir.cleanup()
+            if attachments_tmpdir is not None:
+                attachments_tmpdir.cleanup()
 
-    gated = _gated_for_corpus(args.corpus)
-    langs_seen = sorted({lang for recall, _ in results.values() for lang in recall})
-    print(f"\n{'rrf_k':>6}  " + "  ".join(f"{lang:^14}" for lang in langs_seen)
-          + f"  {'mean(gated)':>12}")
-    print("-" * (8 + 16 * len(langs_seen) + 14))
-    gated_means_by_k: dict[int, float] = {}
-    for k_value in ks:
-        recall, mrr = results[k_value]
-        row = f"{k_value:>6}  "
-        for lang in langs_seen:
-            r = recall.get(lang, float("nan"))
-            m = mrr.get(lang, float("nan"))
-            row += f"R{r:.3f}/M{m:.3f}  "
-        gated_means = [recall[lang] for lang in gated if lang in recall]
-        gated_mean = statistics.fmean(gated_means) if gated_means else float("nan")
-        gated_means_by_k[k_value] = gated_mean
-        row += f"{gated_mean:>12.4f}"
-        print(row)
+        gated = _gated_for_corpus(args.corpus)
+        langs_seen = sorted({lang for recall, _ in results.values() for lang in recall})
+        print(f"\n{'rrf_k':>6}  " + "  ".join(f"{lang:^14}" for lang in langs_seen)
+              + f"  {'mean(gated)':>12}")
+        print("-" * (8 + 16 * len(langs_seen) + 14))
+        gated_means_by_k: dict[int, float] = {}
+        for k_value in ks:
+            recall, mrr = results[k_value]
+            row = f"{k_value:>6}  "
+            for lang in langs_seen:
+                r = recall.get(lang, float("nan"))
+                m = mrr.get(lang, float("nan"))
+                row += f"R{r:.3f}/M{m:.3f}  "
+            gated_means = [recall[lang] for lang in gated if lang in recall]
+            gated_mean = statistics.fmean(gated_means) if gated_means else float("nan")
+            gated_means_by_k[k_value] = gated_mean
+            row += f"{gated_mean:>12.4f}"
+            print(row)
 
-    # Pick a "winner" only when the spread across rrf_k is above measurement
-    # noise. Otherwise the sweep is saturated (one arm dominates fusion) and
-    # printing a winner is misleading — call the tie out instead so readers
-    # don't quote a meaningless leader.
-    spread = max(gated_means_by_k.values()) - min(gated_means_by_k.values())
-    if spread < 1e-4:
-        any_mean = next(iter(gated_means_by_k.values()))
-        print(f"\nAll rrf_k tied for mean recall@{args.k} across {gated} "
-              f"(mean={any_mean:.4f}, spread<1e-4). Fusion is saturated.")
-    else:
-        best_k = max(gated_means_by_k, key=lambda k: gated_means_by_k[k])
-        print(f"\nBest rrf_k by mean recall@{args.k} across {gated}: "
-              f"{best_k} (mean={gated_means_by_k[best_k]:.4f})")
-    return 0
+        # Pick a "winner" only when the spread across rrf_k is above measurement
+        # noise. Otherwise the sweep is saturated (one arm dominates fusion) and
+        # printing a winner is misleading — call the tie out instead so readers
+        # don't quote a meaningless leader.
+        spread = max(gated_means_by_k.values()) - min(gated_means_by_k.values())
+        if spread < 1e-4:
+            any_mean = next(iter(gated_means_by_k.values()))
+            print(f"\nAll rrf_k tied for mean recall@{args.k} across {gated} "
+                  f"(mean={any_mean:.4f}, spread<1e-4). Fusion is saturated.")
+        else:
+            best_k = max(gated_means_by_k, key=lambda k: gated_means_by_k[k])
+            print(f"\nBest rrf_k by mean recall@{args.k} across {gated}: "
+                  f"{best_k} (mean={gated_means_by_k[best_k]:.4f})")
+        return 0
 
 
 if __name__ == "__main__":

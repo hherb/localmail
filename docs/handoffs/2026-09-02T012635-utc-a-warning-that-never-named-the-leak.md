@@ -14,6 +14,11 @@
 > already counted.
 >
 > **Open issue count is now 23, dropping to 22 on merge.**
+>
+> **The headline lesson is risk 5**: the first push looked complete on this
+> laptop — three green full runs, warning gone — and CI's 3.13 leg proved it
+> half-done. A `ConnectionPool.__del__` warning is a GC-timing artefact, so a
+> quiet platform is not evidence. Instrument the seam.
 
 ## Project context (1-minute version)
 
@@ -31,7 +36,7 @@ SPDX headers in `src/localmail/`; **not** in `gui/`).
 
 ## What we shipped this session
 
-### `b286887` — #321: close the pools `create_app` opens, in one place
+### #321 — close the pools a test leaks, in one place
 
 `create_app` opens its pool eagerly (`open=True`) and closes it **only** in the
 FastAPI lifespan's `finally`. So a bare `create_app(...)`, or a
@@ -47,9 +52,25 @@ this session's baseline named four, overlapping in exactly one
 and neither list was a list of leaking files. Worth knowing before chasing the
 next such warning.
 
-New pure module [tests/_serve_app_pools.py](tests/_serve_app_pools.py); autouse
-fixture `conftest.close_serve_app_pools`; **21 tests** in
-[tests/test_serve_app_pools.py](tests/test_serve_app_pools.py).
+**There were TWO seams, and the second was only found because CI disagreed
+with the laptop.** The first push closed the `create_app` half and read
+2 warnings across three green macOS full runs — but CI's **3.13** leg still
+reported `cannot join current thread` (3 warnings; the 3.12 leg read 2). The GC
+decides when `__del__` runs, so a platform can hide the whole thing. The
+residual was `localmail.db.open_pool`: **`Daemon.stop()`/`join()` never close
+`self.pool`**, so 13 daemon tests across four files plus one `create_searcher`
+test leaked one each.
+
+**It was found by instrumenting, not by reading the warning.** A temporary
+`pytest_sessionstart` plugin wrapping `localmail.db.ConnectionPool` and
+reporting unclosed pools at `pytest_sessionfinish` named **all 14 sites with
+their creation stacks in a single run**. Reading the warning would never have
+— it names the wrong file by construction. That probe is reproduced in the
+commands section below; it is worth keeping in the toolkit.
+
+New pure module [tests/_pool_leaks.py](tests/_pool_leaks.py); autouse fixture
+`conftest.close_leaked_pools`; **26 tests** in
+[tests/test_pool_leaks.py](tests/test_pool_leaks.py).
 
 - **The per-file sweep #321 proposes was measured and rejected — with the
   operator's explicit sign-off on the alternative.** It is **34 files, 162 call
@@ -59,17 +80,18 @@ fixture `conftest.close_serve_app_pools`; **21 tests** in
   (`test_creating_app_does_not_bind_control_socket`). It also buys discipline
   where the seam buys construction: a new inline `create_app(...)` written
   tomorrow cannot reintroduce the leak.
-- **The seam is `localmail.serve.app.ConnectionPool`**, which `create_app`
-  resolves from module globals on every call, so patching it reaches every
-  caller. **Patching `create_app` itself would reach none of them** — each test
-  module binds it into its own namespace at import time.
+- **A seam is the `ConnectionPool` name in the module that builds the pool** —
+  `localmail.serve.app` and `localmail.db`, listed in `POOL_SEAMS`. Each is
+  resolved from that module's globals on every call, so patching it reaches
+  every caller. **Patching `create_app` itself would reach none of them** —
+  each test module binds it into its own namespace at import time.
 - **`missing_seam_error` reports rather than skips.** An aliased import
   (`from psycopg_pool import ConnectionPool as Pool`) leaves the attribute
   absent, nothing patches, every pool leaks again — and *no test fails*, because
   closing a pool that was never recorded is a no-op. It deliberately does **not**
   check the seam's *identity*: swapping a different pool class in under the same
   name is legitimate and the wrapper handles it correctly.
-- **The fixture no-ops when `localmail.serve.app` is not in `sys.modules`.**
+- **The fixture skips a seam whose module is not in `sys.modules`.**
   That keeps ~0.5 s of FastAPI import off every unit-only run — `pytest
   tests/test_pgtext.py` is 0.27 s in-pytest, so importing it unconditionally
   would have more than doubled it. The inference (module absent ⟹ no collected
@@ -81,13 +103,16 @@ fixture `conftest.close_serve_app_pools`; **21 tests** in
   `function_local_serve_app_imports` scans the whole suite to keep it that way.
   It reads the **AST**, not the text, because the rationale necessarily quotes
   the import it forbids — the `_mentions_version_option` call, mutation-proven
-  in both directions.
+  in both directions. **The `localmail.db` seam needs no such rule**:
+  `conftest.py` imports that module itself for `apply_migrations`, so it is
+  always loaded.
 - **`unclosed` filters before closing**, so the count `close_pools` returns is
   the number of pools that genuinely leaked. `close()` is idempotent, so the
   filter is about keeping the claim true, not about safety.
-- **`localmail.db.open_pool` is a separate seam and is NOT covered.** The
-  `Searcher`/`Daemon` pools go through it; every test file that opens one closes
-  it today. If this warning ever names a search or daemon file, that is why.
+- **`Daemon` not closing its own pool is unchanged production behaviour.**
+  `run_forever` owns the process, so the pool dies with it. This fixture is a
+  *test* backstop, not a claim that `Daemon` should close it — #321 is not the
+  place to change that.
 
 ### Verification (this Mac, all extras)
 
@@ -96,17 +121,24 @@ fixture `conftest.close_serve_app_pools`; **21 tests** in
   | ref | result | warnings |
   |---|---|---|
   | `main` @ `5dbaea0` | 2988 passed, **0 skipped**, 201.70 s | **6** |
-  | branch @ `b286887` | 3009 passed, **0 skipped**, 178.84 s | **2** |
+  | branch, first push (`b286887`) | 3009 passed, 178.84 s | 2 on macOS, **3 on CI 3.13** |
+  | branch, final | 3014 passed, **0 skipped**, 184.26 s | **2** |
 
   The 6 are 2 pre-existing `websockets` deprecations (**#25**) plus **4**
-  `cannot join current thread`. The 2 are the websockets pair alone — **the
-  acceptance criterion, met**.
+  `cannot join current thread`. The final 2 are the websockets pair alone —
+  **and CI confirms it on both legs**: `3013 passed, 1 skipped, 2 warnings` on
+  3.12 *and* 3.13, with no `cannot join current thread` on either (run
+  `33581065558`). That last check is the one the first push failed, so make it
+  the habit (risk 5). The
+  instrumented run reports **0 of 131** `localmail.db` pools unclosed, against
+  **14** before; the `couldn't stop thread …` spam psycopg printed at
+  interpreter shutdown is gone with them.
 - **The fix is not a slowdown.** An intermediate run read 247 s, which looked
   like a 23 % regression; it was machine noise. Timed directly on a serve-heavy
   pair (`test_serve_attachments_routes.py` + `test_serve_acl_routes.py`):
   **6.84 s with closing, 6.99 s without**. The final full run is *faster* than
   the baseline.
-- **Six mutations, each caught by its intended test** (restored from a
+- **Eight mutations, each caught by its intended test** (restored from a
   scratchpad copy every time, never `git checkout` — risk 13):
 
   | mutation | caught by |
@@ -116,8 +148,10 @@ fixture `conftest.close_serve_app_pools`; **21 tests** in
   | a hoisted import put back inside a function | the AST pin |
   | `unclosed` returns every pool | 4 tests |
   | seam guard always says "intact" | 1 test |
-  | **prose quoting the forbidden import** | **correctly NOT flagged** (21 passed) |
-- `mypy src/localmail` → Success, **152** files. `mypy tests/_serve_app_pools.py`
+  | the `localmail.db` seam dropped from `POOL_SEAMS` | 2 tests |
+  | `loaded_seams` ignores whether the module is loaded | 26 errors |
+  | **prose quoting the forbidden import** | **correctly NOT flagged** |
+- `mypy src/localmail` → Success, **152** files. `mypy tests/_pool_leaks.py`
   → Success.
 - `ruff check src/localmail/` → **10**, the unchanged #285 baseline (no `src/`
   file was touched). The two new test modules and all four changed ones: clean.
@@ -266,7 +300,13 @@ carried as one issue:
 5. **A `PytestUnraisableExceptionWarning` names the test GC ran during, NOT the
    leak site** *(new, and it cost two handoffs a wrong list of files)*. The
    previous handoff's five files and this session's four overlap in one. Do not
-   treat such a list as evidence about which code leaks; find the seam instead.
+   treat such a list as evidence about which code leaks — **instrument the
+   seam** (the probe is in the commands section) and read the creation stacks.
+   Corollary, earned the hard way this session: **a clean local run does not
+   mean the leak is gone.** Three green macOS full runs read 2 warnings while
+   CI's 3.13 leg read 3, because the GC decides when `__del__` fires. When the
+   evidence is a GC-timing artefact, **believe the instrumentation, not the
+   platform that happens to be quiet.**
 6. **NEVER run two pytest sessions against one test database** *(carried —
    enforced since #336)*. The second now **waits**. To run both, give one its
    own `LOCALMAIL_TEST_DSN`. The guard covers **pytest only** — the acceptance
@@ -274,15 +314,17 @@ carried as one issue:
 7. **A test module must import `localmail.serve.app` at MODULE scope** *(new)*.
    The autouse pool-closing fixture reads `sys.modules` at test-setup time, so a
    function-local import arrives too late and that file's pools leak silently.
-   `tests/test_serve_app_pools.py::test_no_collected_test_module_imports_serve_app_below_module_scope`
+   `tests/test_pool_leaks.py::test_no_collected_test_module_imports_serve_app_below_module_scope`
    enforces it over the whole suite. If it fires, hoist the import — do not
-   relax the rule; it is what makes the ~0.5 s import saving sound.
+   relax the rule; it is what makes the ~0.5 s import saving sound. The
+   `localmail.db` seam is exempt because `conftest.py` imports that module
+   itself.
 8. **Verify host revisions; do not infer them** *(carried, earned twice)*.
    `ssh 10.0.0.3 'cd ~/src/localmail && git log --oneline -1'` plus
    `/v1/version`'s `build_hash` settles it. **Both hosts were left untouched
    this session** — the diff is test-only, so neither needs a pull.
 9. **Test-count baselines: measure both refs IN THE SAME SESSION** *(carried)*.
-   `main` **2988**, branch **3009**. A number quoted from a previous handoff is
+   `main` **2988**, branch **3014**. A number quoted from a previous handoff is
    not a baseline.
 10. **A same-process assertion cannot pin a cross-process property** *(carried)*.
 11. **A keyset predicate must be a row comparison, in BOTH directions**
@@ -382,7 +424,7 @@ git diff --stat main origin/<branch>     # EMPTY = landed, not stranded
 # Python suite. NEVER a bare `uv sync` (risk 17).
 unset VIRTUAL_ENV && uv sync --all-extras
 unset VIRTUAL_ENV && uv run pytest -q
-#   macOS: expect 3009 passed, 0 failed, 0 skipped, and **2 warnings**.
+#   macOS: expect 3014 passed, 0 failed, 0 skipped, and **2 warnings**.
 #   THOSE 2 ARE THE ACCEPTANCE SIGNAL FOR #321: both are the pre-existing
 #   `websockets` DeprecationWarnings (#25). A third warning mentioning
 #   "ConnectionPool.__del__" or "cannot join current thread" means the pool
@@ -390,13 +432,37 @@ unset VIRTUAL_ENV && uv run pytest -q
 #   localmail.serve.app.
 #   LINUX/CI: expect 1 SKIPPED as well; pre-existing (risk 28).
 #   MEASURE BOTH REFS IN THIS SESSION (risk 9) — no DB needed:
-unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2
+unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2   # branch: 3014
 unset VIRTUAL_ENV && uv run mypy src/localmail    # expect Success, 152 files
 unset VIRTUAL_ENV && uv run ruff check src/localmail/ | tail -2   # expect 10 (#285)
 
 # The #321 fix, verified directly (should print nothing at all):
 unset VIRTUAL_ENV && uv run pytest -q 2>&1 | grep -c "cannot join current thread"   # expect 0
-unset VIRTUAL_ENV && uv run pytest -q tests/test_serve_app_pools.py                 # expect 21 passed
+unset VIRTUAL_ENV && uv run pytest -q tests/test_pool_leaks.py                      # expect 26 passed
+
+# THE POOL-LEAK PROBE (risk 5) — reusable; this is what found the second seam.
+# Drop it anywhere on PYTHONPATH and load with -p. Reports every unclosed pool
+# with the stack that built it, which the warning itself never tells you.
+cat > /tmp/pool_leak_probe.py <<'PROBE'
+import traceback
+_RECORDS = []
+def pytest_sessionstart(session):
+    import localmail.db as db          # or localmail.serve.app
+    real = db.ConnectionPool
+    def factory(*a, **k):
+        pool = real(*a, **k)
+        _RECORDS.append((pool, traceback.extract_stack()[:-1]))
+        return pool
+    db.ConnectionPool = factory
+def pytest_sessionfinish(session, exitstatus):
+    leaked = [(p, st) for p, st in _RECORDS if not p.closed]
+    print(f"\n=== {len(_RECORDS)} pools, {len(leaked)} UNCLOSED ===")
+    for _p, st in leaked:
+        frames = [f for f in st if "/tests/" in f.filename or "/localmail/" in f.filename]
+        print("  " + " <- ".join(f"{f.filename.split('/')[-1]}:{f.lineno} {f.name}" for f in frames[-4:]))
+PROBE
+unset VIRTUAL_ENV && PYTHONPATH=/tmp uv run pytest -q -p pool_leak_probe 2>&1 | grep -A 20 "UNCLOSED"
+#   expect: "131 pools, 0 UNCLOSED"
 
 # RISK 6 — the test-database session lock (#336). A second pytest session WAITS.
 # If a run seems to hang at startup, look for this line; it is not a fault:
@@ -443,7 +509,7 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
 ```
 
 `main` tip at session start was **`5dbaea0`**. This session left **one PR** open
-on `fix/321-testclient-pool-leak` (head `b286887` plus this handoff commit),
-closing **#321**. Latest migration **`0036_api_keys.sql`**; next free slot
+on `fix/321-testclient-pool-leak` — `b286887` (the `create_app` seam), the
+second-seam commit, and this handoff — closing **#321**. Latest migration **`0036_api_keys.sql`**; next free slot
 `0037_*.sql` (this session adds none). **Open issues: 23**, dropping to **22**
 on merge. **Dependabot: 0.**

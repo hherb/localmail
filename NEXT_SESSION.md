@@ -14,6 +14,11 @@
 > already counted.
 >
 > **Open issue count is now 23, dropping to 22 on merge.**
+>
+> **The headline lesson is risk 5**: the first push looked complete on this
+> laptop — three green full runs, warning gone — and CI's 3.13 leg proved it
+> half-done. A `ConnectionPool.__del__` warning is a GC-timing artefact, so a
+> quiet platform is not evidence. Instrument the seam.
 
 ## Project context (1-minute version)
 
@@ -121,9 +126,10 @@ New pure module [tests/_pool_leaks.py](tests/_pool_leaks.py); autouse fixture
 
   The 6 are 2 pre-existing `websockets` deprecations (**#25**) plus **4**
   `cannot join current thread`. The final 2 are the websockets pair alone —
-  the acceptance criterion, met on macOS. **Re-check the CI 3.13 leg on the
-  final commit before believing it globally** (risk 5); the first push is
-  exactly why. The
+  **and CI confirms it on both legs**: `3013 passed, 1 skipped, 2 warnings` on
+  3.12 *and* 3.13, with no `cannot join current thread` on either (run
+  `33581065558`). That last check is the one the first push failed, so make it
+  the habit (risk 5). The
   instrumented run reports **0 of 131** `localmail.db` pools unclosed, against
   **14** before; the `couldn't stop thread …` spam psycopg printed at
   interpreter shutdown is gone with them.

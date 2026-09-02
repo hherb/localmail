@@ -329,13 +329,24 @@ _NO_REQUIRED_ARGS_HARNESS = "run_browse_explain.py"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_a_harness_started_beside_this_suite_refuses_the_database(db_session_lock) -> None:
+def test_a_harness_started_beside_this_suite_refuses_the_database(
+    db_session_lock, db_dsn: str
+) -> None:
     """#337 itself, reproduced: this session holds the lock, the harness waits.
 
     Requesting `db_session_lock` is what makes the precondition real rather
     than assumed — it is the fixture holding `localmail_test` for the length
     of this run, i.e. exactly the "suite already in flight" the issue is
     about.
+
+    The DSN comes from `db_dsn`, **not** from `db_session_lock.info.dsn`.
+    libpq's `ConnectionInfo.dsn` is a *report*, not a round-trippable
+    connection string: it omits the password. Locally that is invisible
+    wherever `pg_hba.conf` does not demand one, so this test passed on macOS
+    while failing on both CI legs with `fe_sendauth: no password supplied` —
+    the harness died in a traceback instead of being refused, which is a
+    different outcome that happens to be non-zero. Never reconstruct a DSN
+    from a live connection.
 
     The subprocess is given a one-second budget so the test costs a second
     rather than the ten-minute default; the point being proved is that it
@@ -356,7 +367,7 @@ def test_a_harness_started_beside_this_suite_refuses_the_database(db_session_loc
             sys.executable,
             str(REPO_ROOT / "tests" / "acceptance" / _NO_REQUIRED_ARGS_HARNESS),
             "--dsn",
-            db_session_lock.info.dsn,
+            db_dsn,
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -370,4 +381,7 @@ def test_a_harness_started_beside_this_suite_refuses_the_database(db_session_loc
         f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
     )
     assert "another test run is using" in proc.stderr
+    # Not cosmetic: a harness that cannot *connect* also exits non-zero, so
+    # without this the test would pass on a broken DSN. That is precisely how
+    # it failed on CI while passing locally.
     assert "Traceback" not in proc.stderr

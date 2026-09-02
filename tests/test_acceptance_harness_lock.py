@@ -25,17 +25,34 @@ from pathlib import Path
 
 import pytest
 
-from tests._db_session_lock import DatabaseSessionBusy
+from tests._db_session_lock import (
+    DatabaseSessionBusy,
+    SessionLockLost,
+    verify_still_held,
+)
 from tests.acceptance._harness_lock import (
     BUSY_EXIT_CODE,
+    COVERED_LIBRARIES,
     DB_ENTRY_CALLS,
+    HARNESS_LOCK_MODULE,
     LOCK_HELPER_NAME,
+    acceptance_coverage_error,
+    checkpoint,
     harness_db_lock,
     harness_entry_points,
     harness_lock_error,
 )
 
 ACCEPTANCE_DIR = Path(__file__).parent / "acceptance"
+
+
+def _noop_verify(conn: object) -> None:
+    """Stand in for `verify_still_held`, which needs a real backend.
+
+    Passed explicitly at every call site rather than defaulted, so the
+    production default stays pinned by
+    `test_the_exit_check_defaults_to_the_shared_verify`.
+    """
 
 
 class _FakeConn:
@@ -62,13 +79,17 @@ def _acquire_returning(conn: _FakeConn):
 
 def test_the_lock_connection_is_yielded_to_the_harness() -> None:
     conn = _FakeConn()
-    with harness_db_lock("postgresql:///x", acquire=_acquire_returning(conn)) as held:
+    with harness_db_lock(
+        "postgresql:///x", acquire=_acquire_returning(conn), verify=_noop_verify
+    ) as held:
         assert held is conn
 
 
 def test_the_lock_is_released_when_the_harness_finishes() -> None:
     conn = _FakeConn()
-    with harness_db_lock("postgresql:///x", acquire=_acquire_returning(conn)):
+    with harness_db_lock(
+        "postgresql:///x", acquire=_acquire_returning(conn), verify=_noop_verify
+    ):
         assert not conn.closed
     assert conn.closed
 
@@ -82,7 +103,9 @@ def test_the_lock_is_released_when_the_harness_raises() -> None:
     """
     conn = _FakeConn()
     with pytest.raises(ZeroDivisionError):
-        with harness_db_lock("postgresql:///x", acquire=_acquire_returning(conn)):
+        with harness_db_lock(
+            "postgresql:///x", acquire=_acquire_returning(conn), verify=_noop_verify
+        ):
             raise ZeroDivisionError("harness blew up")
     assert conn.closed
 
@@ -101,7 +124,9 @@ def test_a_contended_database_exits_with_the_message_and_no_traceback() -> None:
         raise DatabaseSessionBusy("another test run is using 'localmail_test'")
 
     with pytest.raises(SystemExit) as caught:
-        with harness_db_lock("postgresql:///x", acquire=acquire, announce=said.append):
+        with harness_db_lock(
+            "postgresql:///x", acquire=acquire, announce=said.append, verify=_noop_verify
+        ):
             pytest.fail("the body must not run when the lock was refused")
 
     # The code, not `!= 0`: `SystemExit("some message")` exits **1** and puts
@@ -122,7 +147,9 @@ def test_the_wait_notice_is_announced_to_the_caller() -> None:
         on_wait("waiting for another test run")
         return conn
 
-    with harness_db_lock("postgresql:///x", acquire=acquire, announce=said.append):
+    with harness_db_lock(
+        "postgresql:///x", acquire=acquire, announce=said.append, verify=_noop_verify
+    ):
         pass
 
     assert said == ["waiting for another test run"]
@@ -302,10 +329,13 @@ def test_the_entry_point_glob_finds_the_harnesses_and_not_their_library() -> Non
 
 
 def test_the_db_entry_calls_are_the_ones_the_harnesses_actually_use() -> None:
-    """The rule pivots on this set, so a name dropped from it goes quiet.
+    """Every entry point is a DB harness, so the rule belongs on it.
 
-    Every entry point must contain at least one of them — otherwise it is
-    not a DB harness and the rule is being applied to the wrong file.
+    Note what this does **not** prove: it asserts a non-empty intersection,
+    which `apply_migrations` alone satisfies for all five, so it cannot
+    detect a name dropped from the set. It used to claim otherwise, and the
+    comment on `DB_ENTRY_CALLS` cited it for that. The dropped-name property
+    is `test_every_db_entry_call_name_is_reached_by_some_harness`.
     """
     for path in harness_entry_points(ACCEPTANCE_DIR):
         called = {
@@ -322,8 +352,13 @@ def test_the_db_entry_calls_are_the_ones_the_harnesses_actually_use() -> None:
 # a database this very pytest session is holding.
 # --------------------------------------------------------------------------
 
-#: Needs only `--dsn`, so argparse — which runs *before* the lock — cannot
-#: exit first and make the assertion below pass for the wrong reason.
+#: Needs only `--dsn`. argparse runs *before* the lock, so a harness with a
+#: required argument (`run_recall_eval.py --queries`) exits 2 without ever
+#: reaching `harness_db_lock`, and the test would be exercising argparse
+#: rather than the wiring it is here to prove. (An earlier note claimed such
+#: a harness would *pass* the test for the wrong reason; it fails it — the
+#: assertion below demands BUSY_EXIT_CODE, not merely non-zero. The wording
+#: was left over from a draft that asserted `!= 0`.)
 _NO_REQUIRED_ARGS_HARNESS = "run_browse_explain.py"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -352,11 +387,22 @@ def test_a_harness_started_beside_this_suite_refuses_the_database(
     rather than the ten-minute default; the point being proved is that it
     refuses at all, not how long it is willing to wait.
 
+    `--total-rows 1` bounds the counterfactual. This spawns a fully
+    destructive harness against the database the suite is using, and its
+    safety rests entirely on the lock still being held — the one property
+    `_db_session_lock` says must be re-checked rather than assumed. So it is
+    re-checked, immediately before the spawn; and if the check should ever
+    be wrong, the harness seeds one row instead of the 100,000 its default
+    would.
+
     Every other test here injects a fake `acquire`, so this is the only one
     that proves the wiring: that the import resolves on the harness's own
-    sys.path, that `--dsn` reaches the helper, and that the refusal survives
-    as a process exit code.
+    sys.path and that the refusal survives as a process exit code. It does
+    **not** pin that `--dsn` is read — the env passes `LOCALMAIL_TEST_DSN`
+    through, so the harness resolves the same database from its own default
+    either way.
     """
+    verify_still_held(db_session_lock)
     env = {
         **os.environ,
         "PYTHONPATH": f"src{os.pathsep}.",
@@ -368,6 +414,8 @@ def test_a_harness_started_beside_this_suite_refuses_the_database(
             str(REPO_ROOT / "tests" / "acceptance" / _NO_REQUIRED_ARGS_HARNESS),
             "--dsn",
             db_dsn,
+            "--total-rows",
+            "1",
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -385,3 +433,374 @@ def test_a_harness_started_beside_this_suite_refuses_the_database(
     # without this the test would pass on a broken DSN. That is precisely how
     # it failed on CI while passing locally.
     assert "Traceback" not in proc.stderr
+
+
+# --------------------------------------------------------------------------
+# The exit status is a value, not a self-comparison.
+# --------------------------------------------------------------------------
+
+
+def test_the_busy_exit_code_is_a_status_no_other_outcome_uses() -> None:
+    """The two behavioural assertions above cannot pin this, and did not.
+
+    Both of them compare the observed status against `BUSY_EXIT_CODE`
+    itself, so both sides move together and the constant could be set to
+    anything — including `0`, at which point a harness refused the database
+    reports success and a shell loop carries on. Mutation-proven: with
+    `BUSY_EXIT_CODE = 0` the whole file stayed green while the real harness
+    subprocess exited 0 on a contended database.
+
+    That is the `!= 0` trap this module already paid for once, wearing a
+    self-referential hat, so the value is asserted against literals here —
+    the `DEFAULT_LOCK_TIMEOUT_S` arrangement in `_db_session_lock.py`, and
+    for the same reason.
+
+    The excluded values are the ones a harness reaches for other reasons:
+    `0` success, `1` an eval failing its own acceptance gates, `2` argparse.
+    """
+    assert BUSY_EXIT_CODE == 3
+    assert BUSY_EXIT_CODE != 0, "a refused database must not report success"
+    assert BUSY_EXIT_CODE != 1, "1 is an eval failing its gates"
+    assert BUSY_EXIT_CODE != 2, "2 is argparse rejecting the command line"
+
+
+# --------------------------------------------------------------------------
+# The lock can lapse mid-run, so it is re-checked rather than trusted.
+# --------------------------------------------------------------------------
+
+
+def test_a_lock_lost_during_the_run_is_reported_at_exit() -> None:
+    """A harness holds this lock across the longest work in the tree.
+
+    `_db_session_lock` documents that the lock rides the most idle
+    connection in the run and dies silently with its backend — a restart, an
+    `idle_session_timeout`, a reaped TCP flow — while `conn.closed` still
+    reads False. pytest re-checks before every TRUNCATE; a harness has no
+    per-test seam to hang that on, so the check runs on the way out. It
+    cannot undo a truncate that already raced, but it turns "the numbers are
+    quietly wrong" into a failed run, which is the whole difference.
+    """
+    conn = _FakeConn()
+
+    def verify(_conn: object) -> None:
+        raise SessionLockLost("the lock lapsed mid-run")
+
+    with pytest.raises(SessionLockLost):
+        with harness_db_lock(
+            "postgresql:///x", acquire=_acquire_returning(conn), verify=verify
+        ):
+            pass
+    assert conn.closed, "the connection is released even when the check fails"
+
+
+def test_the_exit_check_does_not_mask_the_harness_s_own_failure() -> None:
+    """A harness that raises must surface *its* exception, not the check's.
+
+    The check runs after the body returns normally, so a body that raised
+    never reaches it — otherwise a lapsed lock would rewrite every harness
+    crash into `SessionLockLost` and hide the real cause.
+    """
+    conn = _FakeConn()
+
+    def verify(_conn: object) -> None:
+        raise SessionLockLost("must not be raised")
+
+    with pytest.raises(ZeroDivisionError):
+        with harness_db_lock(
+            "postgresql:///x", acquire=_acquire_returning(conn), verify=verify
+        ):
+            raise ZeroDivisionError("the real failure")
+    assert conn.closed
+
+
+def test_the_exit_check_defaults_to_the_shared_verify() -> None:
+    """Injected everywhere in these tests, so the default needs its own pin.
+
+    Without it, `verify` could default to a no-op and every test above would
+    still pass — the guard present in the signature and absent in effect.
+    """
+    import inspect
+
+    default = inspect.signature(harness_db_lock).parameters["verify"].default
+    assert default is verify_still_held
+
+
+def test_checkpoint_delegates_to_the_shared_verify() -> None:
+    """`checkpoint` is what a harness calls before a *late* truncate.
+
+    The exit check bounds the report; this bounds the damage. It must be the
+    same rule `db_conn` applies, not a second one that could drift.
+    """
+    seen: list[object] = []
+    conn = _FakeConn()
+    checkpoint(conn, verify=seen.append)
+    assert seen == [conn]
+
+    import inspect
+
+    default = inspect.signature(checkpoint).parameters["verify"].default
+    assert default is verify_still_held
+
+
+# --------------------------------------------------------------------------
+# The rule follows `main` into the helpers it calls.
+# --------------------------------------------------------------------------
+
+
+#: The shape `run_chunk_insert_bench.py` already has: `main` takes the lock
+#: and the DB work lives in a helper. The rule used to walk `main` only, so
+#: hoisting that helper's call out of the `with` left every TRUNCATE
+#: unlocked and the rule silent — #337 admitted by the guard written to end
+#: it. Verified against the real file before the fix.
+_HELPER_DOES_THE_DB_WORK_OUTSIDE_THE_LOCK = """
+import psycopg
+from tests.acceptance._harness_lock import harness_db_lock
+from localmail.db import apply_migrations
+
+def _run_mode(dsn):
+    with psycopg.connect(dsn) as conn:
+        conn.execute("TRUNCATE messages")
+
+def main() -> int:
+    dsn = "postgresql:///x"
+    results = _run_mode(dsn)
+    with harness_db_lock(dsn):
+        apply_migrations(dsn)
+    return 0
+"""
+
+_HELPER_DOES_THE_DB_WORK_INSIDE_THE_LOCK = """
+import psycopg
+from tests.acceptance._harness_lock import harness_db_lock
+from localmail.db import apply_migrations
+
+def _run_mode(dsn):
+    with psycopg.connect(dsn) as conn:
+        conn.execute("TRUNCATE messages")
+
+def main() -> int:
+    dsn = "postgresql:///x"
+    with harness_db_lock(dsn):
+        apply_migrations(dsn)
+        _run_mode(dsn)
+    return 0
+"""
+
+#: Two hops, because one is an arbitrary depth to stop at and the harnesses
+#: already nest (`_seed_and_embed_multilingual` calls further helpers).
+_HELPER_CALLS_ANOTHER_HELPER = """
+from tests.acceptance._harness_lock import harness_db_lock
+from localmail.db import apply_migrations, open_pool
+
+def _inner(dsn):
+    return open_pool(dsn)
+
+def _outer(dsn):
+    return _inner(dsn)
+
+def main() -> int:
+    dsn = "postgresql:///x"
+    pool = _outer(dsn)
+    with harness_db_lock(dsn):
+        apply_migrations(dsn)
+    return 0
+"""
+
+#: A helper that takes the lock itself is compliant — the rule is about
+#: position, not about which function the `with` is written in.
+_HELPER_TAKES_THE_LOCK_ITSELF = """
+from tests.acceptance._harness_lock import harness_db_lock
+from localmail.db import apply_migrations
+
+def _run(dsn):
+    with harness_db_lock(dsn):
+        apply_migrations(dsn)
+
+def main() -> int:
+    return _run("postgresql:///x")
+"""
+
+#: Mutual recursion: the walk must terminate rather than hang the suite.
+_HELPERS_CALL_EACH_OTHER = """
+from tests.acceptance._harness_lock import harness_db_lock
+from localmail.db import apply_migrations
+
+def _a(dsn):
+    return _b(dsn)
+
+def _b(dsn):
+    apply_migrations(dsn)
+    return _a(dsn)
+
+def main() -> int:
+    return _a("postgresql:///x")
+"""
+
+#: Module-level DB work runs at *import*, so no `with` inside `main` can
+#: ever cover it — it is unlocked by construction.
+_DB_WORK_AT_MODULE_LEVEL = """
+from tests.acceptance._harness_lock import harness_db_lock
+from localmail.db import apply_migrations
+
+apply_migrations("postgresql:///x")
+
+def main() -> int:
+    with harness_db_lock("postgresql:///x"):
+        return 0
+"""
+
+#: Python binds the *last* definition, so a rule reading the first inspects
+#: a `main` that will never run.
+_TWO_MAINS_THE_LAST_UNLOCKED = """
+from tests.acceptance._harness_lock import harness_db_lock
+from localmail.db import apply_migrations
+
+def main() -> int:
+    with harness_db_lock("postgresql:///x"):
+        apply_migrations("postgresql:///x")
+        return 0
+
+def main() -> int:
+    apply_migrations("postgresql:///x")
+    return 0
+"""
+
+#: A locally defined `harness_db_lock` satisfies a rule that matches the
+#: *name*. Nothing about it takes a lock.
+_SHADOWS_THE_LOCK_HELPER = """
+from contextlib import contextmanager
+from localmail.db import apply_migrations
+
+@contextmanager
+def harness_db_lock(dsn):
+    yield None
+
+def main() -> int:
+    with harness_db_lock("postgresql:///x"):
+        apply_migrations("postgresql:///x")
+        return 0
+"""
+
+
+def test_db_work_in_a_helper_outside_the_lock_is_reported() -> None:
+    problem = harness_lock_error(
+        _HELPER_DOES_THE_DB_WORK_OUTSIDE_THE_LOCK, "run_helper.py"
+    )
+    assert problem is not None
+    assert "session lock: connect" in problem
+
+
+def test_db_work_in_a_helper_inside_the_lock_passes() -> None:
+    """The positive control: without it, a rule that reports every helper
+    call would pass the test above and fail all five real harnesses."""
+    assert (
+        harness_lock_error(_HELPER_DOES_THE_DB_WORK_INSIDE_THE_LOCK, "run_ok.py")
+        is None
+    )
+
+
+def test_the_walk_follows_more_than_one_hop() -> None:
+    problem = harness_lock_error(_HELPER_CALLS_ANOTHER_HELPER, "run_deep.py")
+    assert problem is not None
+    assert "session lock: open_pool" in problem
+
+
+def test_a_helper_that_takes_the_lock_itself_passes() -> None:
+    assert harness_lock_error(_HELPER_TAKES_THE_LOCK_ITSELF, "run_inner.py") is None
+
+
+def test_mutually_recursive_helpers_terminate_and_are_reported() -> None:
+    problem = harness_lock_error(_HELPERS_CALL_EACH_OTHER, "run_cycle.py")
+    assert problem is not None
+    assert "session lock: apply_migrations" in problem
+
+
+def test_module_level_db_work_is_reported() -> None:
+    problem = harness_lock_error(_DB_WORK_AT_MODULE_LEVEL, "run_import.py")
+    assert problem is not None
+    assert "session lock: apply_migrations" in problem
+    assert "import" in problem, "the message must say why no `with` can cover it"
+
+
+def test_the_rule_reads_the_main_python_will_actually_run() -> None:
+    problem = harness_lock_error(_TWO_MAINS_THE_LAST_UNLOCKED, "run_twice.py")
+    assert problem is not None
+    assert "session lock: apply_migrations" in problem
+
+
+def test_a_locally_shadowed_lock_helper_does_not_count() -> None:
+    """Matching a bare name accepts any function spelled that way.
+
+    Only reachable once the position rule passes — which is exactly when it
+    matters, because the shadowed helper made everything look covered.
+    """
+    problem = harness_lock_error(_SHADOWS_THE_LOCK_HELPER, "run_shadow.py")
+    assert problem is not None
+    assert HARNESS_LOCK_MODULE in problem
+
+
+# --------------------------------------------------------------------------
+# Coverage cannot shrink silently: every DB-touching module is accounted for.
+# --------------------------------------------------------------------------
+
+
+def test_the_acceptance_directory_has_no_unaccounted_db_module() -> None:
+    """The glob is `run_*.py`; nothing made that a rule rather than a habit.
+
+    A harness named `bench_*.py`, or dropped in a subdirectory, took no lock
+    and was never asked to — coverage shrinking with every test still green.
+    This is the `pool_constructor_calls` arrangement in `tests/_pool_leaks.py`,
+    which exists because `missing_seam_error` asks only whether a name is
+    present.
+    """
+    assert acceptance_coverage_error(ACCEPTANCE_DIR) is None
+
+
+def test_a_db_module_that_is_not_an_entry_point_is_reported(tmp_path: Path) -> None:
+    (tmp_path / "run_real.py").write_text(_COMPLIANT)
+    (tmp_path / "bench_new_thing.py").write_text(_NO_LOCK_AT_ALL)
+    problem = acceptance_coverage_error(tmp_path)
+    assert problem is not None
+    assert "bench_new_thing.py" in problem
+
+
+def test_an_allowlisted_library_may_not_touch_the_db_at_import(tmp_path: Path) -> None:
+    """`browse_explain_lib.py` is exempt because its work runs inside
+    `run_browse_explain.main`'s lock. That is true only while it does
+    nothing at import — and nothing checked it.
+    """
+    (tmp_path / "run_real.py").write_text(_COMPLIANT)
+    name = sorted(COVERED_LIBRARIES)[0]
+    (tmp_path / name).write_text(_DB_WORK_AT_MODULE_LEVEL)
+    problem = acceptance_coverage_error(tmp_path)
+    assert problem is not None
+    assert name in problem
+
+
+def test_every_db_entry_call_name_is_reached_by_some_harness() -> None:
+    """The set is the rule's pivot, and the per-file test cannot pin it.
+
+    That one asserts a non-empty *intersection*, which every harness
+    satisfies through `apply_migrations` alone — so dropping `open_pool` or
+    `connect` left the suite green while the rule stopped seeing a pool
+    opened before the lock. Mutation-proven in both directions.
+
+    Direction matters: this asserts every member is *used*, which is what
+    fails when a name is dropped and re-added to the set as dead weight.
+    """
+    used: set[str] = set()
+    for path in harness_entry_points(ACCEPTANCE_DIR):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call) and isinstance(
+                node.func, ast.Attribute | ast.Name
+            ):
+                used.add(
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else node.func.id
+                )
+    missing = DB_ENTRY_CALLS - used
+    assert not missing, (
+        f"{sorted(missing)} is in DB_ENTRY_CALLS but no harness calls it, so "
+        f"nothing would fail if the rule stopped recognising it"
+    )

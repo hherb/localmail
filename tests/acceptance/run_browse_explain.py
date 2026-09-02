@@ -54,7 +54,7 @@ from tests.acceptance.browse_explain_lib import (
 )
 
 from localmail.db import apply_migrations
-from tests.acceptance._harness_lock import harness_db_lock
+from tests.acceptance._harness_lock import checkpoint, harness_db_lock
 
 
 def _render_table(
@@ -182,7 +182,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    with harness_db_lock(args.dsn):
+    with harness_db_lock(args.dsn) as lock:
         print(f"connecting to {args.dsn}")
         apply_migrations(args.dsn)
         with psycopg.connect(args.dsn) as conn:
@@ -257,6 +257,11 @@ def main() -> int:
                     print(summ.raw, file=sys.stderr)
 
             if not args.keep_data:
+                # Re-checked, not trusted: this truncate is the furthest any
+                # harness gets from acquisition — a full seed plus every
+                # EXPLAIN probe — and the lock rides an idle connection that
+                # a restart or an idle-session reaper drops in silence.
+                checkpoint(lock)
                 print("\ntruncating to leave a clean DB…")
                 with conn.cursor() as cur:
                     cur.execute(TRUNCATE_SQL)

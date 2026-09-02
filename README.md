@@ -1094,10 +1094,19 @@ with harness_db_lock(dsn):
 and that is enforced rather than remembered. The harnesses are not collected
 by pytest — they match no `python_files` pattern, so no fixture can arm them —
 so `tests/test_acceptance_harness_lock.py` walks each entry point's **AST**
-and fails if any call that reaches the database sits outside the lock. It
-enumerates them from the filesystem, so a sixth harness is in scope the day it
-is added. The rule reads the AST rather than the text because every harness
-names the helper in prose while explaining why it calls it.
+and fails if a call that reaches the database sits outside the lock, following
+`main` into the helpers it calls and reporting anything that runs at import
+time. It enumerates the entry points from the filesystem, so a sixth harness is
+in scope the day it is added, and a separate check fails if any other module in
+that directory touches the database without being either an entry point or an
+allowlisted library. The rule reads the AST rather than the text because every
+harness names the helper in prose while explaining why it calls it.
+
+The lock is re-checked rather than trusted: it rides an idle connection that a
+restart or an idle-session reaper can drop in silence, so each harness verifies
+it still holds the lock on the way out — and before any truncate that comes
+long after acquisition. A lapsed lock fails the run instead of quietly
+producing wrong numbers.
 
 An autouse fixture closes every connection pool a test opened and did not
 close. Two things leak them: `create_app` opens its pool eagerly and closes it

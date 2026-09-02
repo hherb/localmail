@@ -221,7 +221,7 @@ def db_session_lock(request):
     tests takes it never. Harmless, because `db_conn` is the only thing that
     truncates and it requests this too.
 
-    Every test truncates every table, so two pytest sessions sharing one test
+    Every test truncates every table, so two runs sharing one test
     database delete each other's seeded rows — silently, because the truncate
     succeeds.
 

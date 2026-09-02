@@ -4371,6 +4371,40 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     - **"Somewhere in main" is not the rule; "before the first touch" is.**
       A harness that migrates and *then* locks has taken no lock at all — the
       truncate has already run — so the rule is about position, not presence.
+    - **The walk follows `main` into its helpers, and that was a review fix,
+      not the original shape.** Reading `main` alone left the rule blind to
+      the most natural refactor there is — extract the database phase — and
+      `run_chunk_insert_bench.py` **already has that shape**: `_run_mode`
+      holds both the `psycopg.connect` and the `TRUNCATE`, so the only thing
+      the rule checked in that file was the `apply_migrations` in `main`.
+      Hoisting `_run_mode`'s call out of the `with` left every truncate
+      unlocked and the rule silent — #337 admitted by the guard written to
+      end it. A helper reached from *inside* the lock is not followed (it is
+      covered whatever it does); one reached from outside is followed with
+      its own lock-covered set computed, so a helper that takes the lock
+      itself passes. Mutual recursion is bounded by a `seen` set.
+    - **Module-level database work is reported separately**, because no
+      `with` inside `main` can cover something that already ran at import.
+    - **`_local_functions` keeps the *last* `def main`**, which is what
+      Python binds; the rule used to read the first, i.e. audit a `main`
+      that never runs.
+    - **The lock check matches a name, so the module must import the real
+      helper.** A local `harness_db_lock` that yields `None` satisfies the
+      position rule while locking nothing. The import check runs *after* the
+      position rule — it is the backstop for shadowing, which only matters
+      once the position rule passes.
+    - **Two imprecisions, both deliberate and both written down.** A callee
+      *rename* (`from psycopg import connect as pg_connect`) dodges the rule,
+      because following it means resolving imports rather than reading call
+      names — the earlier claim that "an aliased import cannot dodge it" was
+      true only of `import psycopg as pg`. And the combined
+      `with harness_db_lock(dsn), psycopg.connect(dsn):` is *reported* though
+      it is genuinely locked, since only the `with` body is covered — it
+      fails closed, so it costs a spurious report and never a missed one.
+      **#340 is the third and is open**: the rule compares call positions,
+      never arguments, so locking one database while working against another
+      passes. Latent (all five harnesses use one `dsn`), and a correct check
+      needs parameter-flow analysis across the helper walk above.
     - **The AST, not the text**, for the reason `_mentions_version_option`
       gives: every harness names the helper in prose while explaining why it
       calls it, and a substring scan reads that as compliance.
@@ -4381,6 +4415,43 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
       first and the end-to-end test is what caught it; the unit test's
       `code != 0` had passed *vacuously*, because `code` was the message
       string. Message and status are separate channels on purpose.
+      - **The replacement was vacuous too, and the constant is pinned against
+        literals now.** Both assertions compared the observed status against
+        `BUSY_EXIT_CODE` itself, so both sides moved together: `BUSY_EXIT_CODE
+        = 0` left the whole file green while the real harness subprocess
+        exited **0** on a contended database — the constant's own stated
+        purpose, unenforced. A self-referential comparison is the same trap as
+        the `!= 0` it replaced, so the value is asserted directly, the
+        `DEFAULT_LOCK_TIMEOUT_S` arrangement one module over. `2` is excluded
+        as well: that is argparse.
+    - **The lock is re-checked, not trusted for the length of the run.**
+      `_db_session_lock` states the obligation in the imperative — the lock
+      rides the most idle connection in the run and dies silently with its
+      backend — and `db_conn` discharges it before every `TRUNCATE`. The
+      harnesses did not, while holding it across the longest work in the tree
+      (a ~250 MB model download, a ~100 s docling init, a 100k-row seed) with
+      destructive statements at the far end. Two halves now: `harness_db_lock`
+      verifies **on the way out**, raising `SessionLockLost`, which cannot
+      undo a truncate that already raced but turns "this run's numbers are
+      quietly wrong" into a failed run; and `checkpoint(lock)` is called
+      before the two truncates that are *far* from acquisition
+      (`run_browse_explain`'s final clean-up, `run_chunk_insert_bench`'s
+      per-mode truncate, which on the default `--mode both` fires after a
+      complete benchmark). The exit check runs **only when the body completed**
+      — rewriting every harness crash into `SessionLockLost` would bury the
+      real cause.
+    - **`acceptance_coverage_error` is the reverse cross-check, and it was
+      missing.** `harness_entry_points` globs `run_*.py`, which is a naming
+      habit rather than a rule, so a harness called `bench_*.py` or dropped in
+      a subdirectory took no lock and was never asked to — coverage shrinking
+      with every test still green. Every module under `tests/acceptance/` that
+      names a `DB_ENTRY_CALLS` member must be an entry point or be listed in
+      `COVERED_LIBRARIES`, and an allowlisted library may do no database work
+      at **import** time, since that runs before the importing harness locks.
+      This is `_pool_leaks.py`'s `pool_constructor_calls` arrangement, which
+      exists because `missing_seam_error` asks only whether a name is present.
+      It is also what finally pins the standing claim that
+      `browse_explain_lib.py` is safe by virtue of being imported.
     - **The end-to-end pin runs a real harness subprocess against the database
       this very pytest session is holding**, requesting `db_session_lock` so
       the precondition is real rather than assumed. Every other test injects a
@@ -4406,6 +4477,28 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
       fixtures for a wrong context manager of **both** AST shapes
       (`psycopg.connect(...)` is an `Attribute`, `ExitStack()` a `Name`;
       each branch survived until its own fixture existed).
+    - **The `DB_ENTRY_CALLS` comment cited a pin that could not hold.** It
+      named `test_the_db_entry_calls_are_the_ones_the_harnesses_actually_use`
+      for the dropped-name property, but that test asserts a non-empty
+      *intersection*, which `apply_migrations` satisfies for all five — so
+      dropping `open_pool` or `connect` was a surviving mutation, and the rule
+      then stopped seeing a pool opened before the lock. The directional
+      `test_every_db_entry_call_name_is_reached_by_some_harness` is the pin;
+      the per-file one keeps its narrower claim (each entry point is a DB
+      harness) and now says so.
+    - **The end-to-end pin bounds its own counterfactual.** It spawns a fully
+      destructive harness against the database the suite is using, and its
+      safety rested entirely on the lock still being held — the one thing
+      that must be re-checked rather than assumed. It calls
+      `verify_still_held` immediately before the spawn and passes
+      `--total-rows 1`, so a wrong precondition costs one row instead of
+      100,000. It does **not** pin that `--dsn` is read, which its docstring
+      used to claim: the subprocess inherits `LOCALMAIL_TEST_DSN`, so the
+      harness resolves the same database from its own default either way.
+      The argparse rationale beside it was backwards too — a required-argument
+      harness exits **2** and *fails* the assertion (which demands 3), rather
+      than passing it for the wrong reason; that wording was left over from
+      the draft asserting `!= 0`.
   - **The leaked-pool warning that ran alongside this is #321, now fixed** —
     see the next entry. It was never the cause of the corruption above; the
     instrumented runs showed zero contention.

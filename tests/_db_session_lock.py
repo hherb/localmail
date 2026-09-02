@@ -5,9 +5,8 @@
 
 `db_conn` opens every test with ``TRUNCATE … RESTART IDENTITY CASCADE`` over
 every data table. That is correct for one session and destructive for two:
-a second pytest process on the same ``localmail_test`` deletes the rows the
-first has just seeded, and seeds rows of its own into the first one's
-queries. Nothing errors — the truncate *succeeds* — so the damage surfaces
+a second run on the same ``localmail_test`` deletes the rows the first has
+just seeded, and seeds rows of its own into the first one's queries. Nothing errors — the truncate *succeeds* — so the damage surfaces
 as impossible archive states and as tests that pass alone and fail in
 company, which reads as a product bug rather than as contention.
 
@@ -19,7 +18,7 @@ the exact tests the issue names on the first attempt. Blocking is not the
 mechanism; sharing is.
 
 The guard is a **session-level Postgres advisory lock** keyed on the database
-name, taken once per pytest session before migrations run. Three properties
+name, taken once per test run before migrations run. Three properties
 earn it that shape:
 
 * it needs no privileges of its own, where the per-worker database #335
@@ -124,11 +123,14 @@ CONNECT_TIMEOUT_S = 10
 
 
 class DatabaseSessionBusy(RuntimeError):
-    """Another pytest session holds this test database.
+    """Another test run holds this test database.
 
     A named class rather than a bare ``TimeoutError`` so a caller can tell
-    "someone else is running the suite" — which is a wait, not a fault —
-    from a Postgres that is genuinely unreachable.
+    "someone else is running" — which is a wait, not a fault — from a
+    Postgres that is genuinely unreachable. Not "pytest session": since #337
+    an acceptance harness holds this same lock, and this class is what
+    ``harness_db_lock`` catches, so the harness path is the one case the old
+    wording denied.
 
     Deliberately **not** named ``Test…``. Nothing collects *this* module —
     it matches no ``python_files`` pattern — but ``test_db_session_lock.py``
@@ -196,7 +198,7 @@ def advisory_lock_key(database: str) -> int:
     """Return the stable advisory-lock key for ``database``.
 
     Derived by digest rather than by hash() — the latter is salted per
-    process, so two pytest sessions would compute different keys and the
+    process, so two runs would compute different keys and the
     guard would exclude nothing, with every unit test still green. That is
     the failure mode this whole module is shaped around; note it has a
     second door, which is why :func:`database_name` defers to libpq instead
@@ -272,7 +274,7 @@ def acquire_exclusive(
                 # Unreachable: a scalar SELECT with no FROM always returns one
                 # row. Named rather than folded into the "contended" branch
                 # below, which would hand the operator a confident and false
-                # diagnosis ("another pytest session") plus two remedies that
+                # diagnosis ("another test run") plus two remedies that
                 # cannot apply — after waiting out the full timeout for it.
                 # Same call as `upsert_message`'s no-match RuntimeError.
                 raise RuntimeError(
@@ -326,14 +328,14 @@ def verify_still_held(conn: psycopg.Connection) -> None:
     except psycopg.Error as exc:
         raise SessionLockLost(
             "the test-database session lock is no longer held: the connection "
-            f"holding it has failed ({exc}). Another pytest session may have "
+            f"holding it has failed ({exc}). Another test run may have "
             "been running against this database unguarded; treat this run's "
             "results as untrustworthy and re-run it."
         ) from exc
     if row is None or not row[0]:
         raise SessionLockLost(
             "the test-database session lock is no longer held, although its "
-            "connection is still open. Another pytest session can now truncate "
+            "connection is still open. Another test run can now truncate "
             "this database mid-run; treat this run's results as untrustworthy "
             "and re-run it."
         )

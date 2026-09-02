@@ -14,6 +14,39 @@
 > the sessions. The one it repeated from CLAUDE.md: there are **five**
 > acceptance harnesses, not six.
 >
+> **Review round (same session, commit `222a9d0`).** A full agent review of the
+> PR found that three of the guard's own claims did not hold, each in the way
+> the module exists to prevent — a rule going quiet with nothing failing — plus
+> one obligation it documented and did not discharge. All fixed in this PR;
+> issue count therefore goes to **22 after merge**, not 21, because #340 was
+> filed for the one gap left open.
+>
+> - **The AST rule read `main` only**, so DB work in a helper was invisible —
+>   and `run_chunk_insert_bench.py` already has that shape. Hoisting its
+>   `_run_mode` call out of the `with` left every TRUNCATE unlocked and the
+>   rule silent. The walk follows helpers now.
+> - **`BUSY_EXIT_CODE` was pinned by two tautologies** — both assertions
+>   compared the status against the constant itself, so `BUSY_EXIT_CODE = 0`
+>   was a surviving mutation with the real harness exiting 0 on a contended
+>   database. That is the `!= 0` trap of `74b8573` in a second costume: the
+>   *replacement* for a vacuous assertion was vacuous too. **Assert a
+>   constant against a literal, never against itself.**
+> - **`DB_ENTRY_CALLS` cited a pin that could not exist** (a non-empty
+>   intersection cannot detect a dropped name).
+> - **The lock was taken and then trusted**, against `_db_session_lock`'s own
+>   imperative. It is re-checked on exit, and before the two truncates far
+>   from acquisition.
+> - Also: no reverse cross-check on the `run_*.py` glob (the
+>   `_pool_leaks.py::pool_constructor_calls` arrangement was missing); a
+>   locally shadowed `harness_db_lock` satisfied the name match; and two
+>   written rationales — "an aliased import cannot dodge it" and the argparse
+>   note — were simply wrong.
+>
+> **The lesson worth carrying: a comment asserting a pin is not a pin.** Three
+> of the four came from a comment that named a test which could not check the
+> property it claimed. Verify the cited test actually fails under the mutation
+> it is cited for.
+>
 > **Open issue count is 22, dropping to 21 on merge. Dependabot is 5, dropping
 > to 1** — and that last one is a decision, not an oversight (see risk 1).
 >
@@ -86,7 +119,8 @@ silence — a `TRUNCATE` that deletes another run's rows *succeeds*.
 Each entry point now wraps its database work — from `apply_migrations` onward —
 in the new [tests/acceptance/_harness_lock.py](tests/acceptance/_harness_lock.py)`::harness_db_lock`.
 **17 tests** in [tests/test_acceptance_harness_lock.py](tests/test_acceptance_harness_lock.py)
-(16 there + 1 added to `test_db_session_lock.py`).
+(16 there + 1 added to `test_db_session_lock.py`) — **35 after the review round
+above** (33 + 2), which is where the count stands on merge.
 
 - **The helper and the rule requiring it live in one module** — the
   `blob_temps.py` minting-beside-matching call — and here the reason is
@@ -96,7 +130,10 @@ in the new [tests/acceptance/_harness_lock.py](tests/acceptance/_harness_lock.py
   that gets forgotten. `harness_lock_error` walks each entry point's **AST**
   and reports any `DB_ENTRY_CALLS` member (`apply_migrations`, `open_pool`,
   `connect`) outside the lock; entry points are enumerated **from the
-  filesystem**, so a sixth harness is in scope the day it lands.
+  filesystem**, so a sixth harness is in scope the day it lands. (**Corrected
+  by the review round**: as shipped it walked `main` only, so a member reached
+  through a helper was invisible — and `run_chunk_insert_bench.py` already had
+  that shape.)
 - **"Somewhere in `main`" is not the rule; "before the first touch" is.** A
   harness that migrates and *then* locks has taken no lock at all.
 - **The AST, not the text**, for the `_mentions_version_option` reason: every

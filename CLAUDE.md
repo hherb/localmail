@@ -751,6 +751,16 @@ first is uv's documented resolution behaviour:
   project environment while reporting only what it "would" do, leaving the wrong
   interpreter **and no extras** — observed with the extra flags present, so the
   flags are no protection. Do not reach for it to "just check".
+  - **`uv lock --dry-run` is a different command and *is* read-only** —
+    verified, not assumed, because of the sibling above: `uv.lock`,
+    `pyproject.toml` and the installed versions all compare byte-identical
+    across `uv lock --upgrade-package <pkg> --dry-run`. That is the command to
+    reach for when sizing a dependency bump.
+  - **A branch checkout re-resolves the environment.** Switching to `main` and
+    back mid-session silently downgraded `pypdf`/`icalendar` to the versions
+    the *other* branch's lock names, and the next `uv run` re-installed them
+    again. Re-sync deliberately after any checkout you intend to measure
+    against; do not assume the venv followed you.
 - **`.python-version` (`3.13`) beats `UV_PYTHON`.** Every uv command reads it,
   including `uv run`, and only an explicit `--python` overrides it. That is why
   `python-ci.yml` passes `--python ${{ matrix.python }}` to both `uv sync` and

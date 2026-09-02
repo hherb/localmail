@@ -838,6 +838,8 @@ tests/
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
   _eml.py           # MIME fixture builders (no .eml files on disk)
   _fake_imap.py     # in-memory IMAP fake with IDLE support
+  _gated_supervisor.py  # DaemonSupervisor whose stop() parks — busy-guard pins
+                    #   hold their window open instead of racing a timer (#299)
   _multilingual_corpus.py  # synthetic 50-message corpus for multilingual eval
   fixtures/         # multilingual_queries.example.json
   test_*.py
@@ -2161,15 +2163,39 @@ extracting XForm objects, and algorithmic complexity in icalendar's
   extraction tests pass. The script is not kept — it builds its fixtures with
   reportlab/PIL exactly as `test_extractor.py` does, which is where a
   permanent regression gate for this already lives.
-- **`transformers` (Dependabot #70, HIGH) is deliberately NOT bumped.** It
-  arrives via docling under the `[extraction]` extra, `grep -rn transformers
-  src/` is empty, and the advisory is a path traversal in `save_pretrained` —
-  a *write* path localmail never calls. `uv lock --upgrade-package
-  transformers` moves it 5.8.1 → 5.15.1 for the cost of one `safetensors`
-  bump, so it is cheap; it is a seven-minor jump in the package docling runs
-  its layout models through, which is why it is the operator's call and not a
-  side effect of a security sweep. **Expect the Dependabot count to read 1,
-  not 0, until that decision is made.**
+**`transformers>=5.10.0` is the third security floor, and the one that is
+*not* on an attacker-controlled path** (Dependabot #70, HIGH, CVE-2026-9856,
+range `< 5.10.0`). It arrives via docling under the `[extraction]` extra,
+`grep -rn transformers src/` is empty, and the advisory is a path traversal in
+`save_pretrained` via chat-template names — a **write** path localmail never
+calls. So this is the sqlparse case (hygiene), not the pypdf/icalendar one.
+
+- **It is declared even though nothing imports it**, which is the corollary of
+  the lesson `icalendar` taught: the lock is the state, the floor is the
+  constraint, and a lock-only fix says nothing about what a re-resolution may
+  pick. Listing a package we do not import follows `ocrmac` beside it — that
+  one is there for the same reason, to shape what docling does.
+- **The advisory was reachable in the lock and invisible in the manifest**:
+  `transformers` appeared in neither `[project.dependencies]` nor any extra,
+  so there was no floor to read against at all. Read
+  `vulnerable_version_range` against `uv.lock`.
+- **Verified end to end, not by the test suite**, because the suite cannot see
+  this: every docling test mocks the converter, so nothing in it loads the
+  layout models a transformers bump moves. A one-off probe built an image-only
+  PDF (PIL + reportlab, as `test_extractor.py` does), confirmed
+  `LightweightExtractor` finds no text in it, and ran a **real** OCR pass
+  through `DoclingExtractor` before and after. The extracted string is
+  byte-identical (`"Invoice 4711 total 250 EUR"`), and the run reports
+  `Loading weights: 770`, which is what proves the bumped package is on the
+  path rather than merely installed. The probe is not kept, for the reason the
+  pypdf/icalendar one was not.
+- **The bump was larger than the pre-measurement**: `uv lock --dry-run` had
+  reported 5.8.1 → 5.15.1 plus one `safetensors` bump and "nothing else". The
+  real re-lock moved **three** packages — `transformers 5.16.1`,
+  `safetensors 0.8.0`, `tokenizers 0.23.1` — partly because the declared floor
+  changes the resolution and partly because a release landed in between. A
+  dry-run measures the resolution at the moment it runs; it is not a promise
+  about the one that ships.
 
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
@@ -4626,6 +4652,63 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     behaviour** — `run_forever` owns the process, so the pool dies with it.
     The fixture is a *test* backstop; it is not a statement that `Daemon`
     should close it, and #321 is not the place to change that.
+- **A busy-guard pin holds its window open; it never races a timer (#299).**
+  The two tests #299 filed as flaky were flaky for a reason the issue did not
+  name, and only one of them needed a change.
+  - **The reported flake was a concurrent pytest session — #329/#335, closed
+    by #336.** Measured rather than argued: an instrumented copy of the
+    route-level pin used **6.7 ms of its 3000 ms** budget, a 450× margin, which
+    cannot explain a test the issue reports failing in **3 of 3** runs. The
+    mechanism was then reproduced directly, by running the pair beside a
+    non-pytest process performing the per-test `TRUNCATE` a second session
+    would: **8 of 8** runs failed, 2 with both tests failing — the issue's
+    pattern exactly. And the failure is **not a timing one**: the interferer
+    truncates `api_users`, the admin session's principal vanishes, the route
+    303s to the login page, and `_poll_state` decodes HTML as JSON. Control on
+    current `main`: **20 of 20** clean.
+  - So **`test_route_driven_login_failures_persist_audit_rows` got no
+    change.** It has no concurrency of its own and its exact-count assertion
+    is correct; #336 is the fix. Do not "harden" it — there is nothing there
+    to harden, and a retry or a tolerance would hide the next real #335.
+  - The busy-guard pins were rewritten anyway, because **a pin that must win a
+    wall-clock race is one a loaded runner eventually breaks and the next
+    session then learns to ignore** — the failure mode this file already
+    records for pins that "were weaker than they read".
+    [tests/_gated_supervisor.py](tests/_gated_supervisor.py)`::GatedStopSupervisor`
+    parks `stop()` on an event, so the second request is issued while the
+    first is **provably** in flight. Only `stop()` is overridden;
+    `request_stop` and the guard it consults are the production ones, and the
+    guard reads *the thread*, not what the thread runs.
+  - **The parked thread holds no lock**, which is load-bearing: it waits
+    *before* delegating to `super().stop()`, the call that takes `_lock`.
+    Parking under the lock would block the very `request_stop` whose refusal
+    is being asserted, and the test would hang rather than fail.
+  - **Both pins start the child synchronously**, not through the route: a
+    routed start spawns a lifecycle thread of its own, which would still be in
+    flight when the first stop lands and answer it with the very 409 the test
+    attributes to the stop.
+  - **`gate_timed_out` keeps the residual bound honest.** The wait cannot be
+    unbounded (a test failing before its `finally` would hang the suite), but
+    an expired park lets the lifecycle thread finish and the guard then
+    *correctly* returns 202 — which reads as a broken guard. Asserting the flag
+    reports the window instead of a verdict: the rule that a test whose subject
+    is a refusal must pin *why* it was refused.
+  - **Two mutation results are recorded rather than smoothed over.** The
+    *unit* busy-guard pin (`test_daemon_supervisor.py`) **survives** removing
+    the gate — without it the window is milliseconds against a microsecond
+    assertion path, so no mutation can demonstrate the gate there; it removes a
+    small race, not an observable one. And
+    `test_a_gated_stop_parks_instead_of_finishing` was first written asserting
+    only that the state was still STOPPING, which survived that same mutation
+    **by luck** — the identical lucky-win the gate exists to remove. It joins
+    the thread now. Its timeout is one-sided by construction: it bounds only
+    how long a *broken* gate is given to reveal itself.
+  - **The three `time.sleep()` calls in `test_daemon_extract_thread.py` are
+    deleted, not lengthened.** `start_workers()` calls `Thread.start()` for
+    every worker synchronously, `Thread.start()` returns only once the thread
+    is registered, and `threading.enumerate()` covers the active *and* limbo
+    tables — so they waited for something that had already happened. Do not
+    add one back; `_live_thread_names()` carries the reason.
 - The `memory_keyring` fixture (autouse) intercepts every `keyring` call so
   real Keychain entries aren't written/read during tests.
 - **If exactly the three `LISTEN`/`NOTIFY` tests fail** with

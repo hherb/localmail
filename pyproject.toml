@@ -76,6 +76,18 @@ extraction = [
     # "auto" default simply finds no engine and degrades to no-OCR rather than
     # failing — install easyocr or rapidocr there to opt in.
     "ocrmac>=1.0 ; sys_platform == 'darwin'",
+    # Transitive via docling (which runs its layout models through it) and
+    # never imported by localmail — `grep -rn transformers src/` is empty. The
+    # floor is security-driven and declared anyway, because the lock alone is
+    # not the constraint: CVE-2026-9856 (HIGH, Dependabot #70) covers
+    # < 5.10.0, and the lock sat at 5.8.1, squarely inside it. The advisory is
+    # a path traversal in `save_pretrained` via chat-template names — a *write*
+    # path nothing here calls — so this is the sqlparse case (hygiene, not an
+    # incident), not the pypdf/icalendar one where the input is an attachment.
+    # Declared so a re-resolution cannot land back inside the range; listing a
+    # package we do not import follows ocrmac above, which is here for the same
+    # reason: it shapes what docling does.
+    "transformers>=5.10.0",
 ]
 mcp = [
     "mcp>=1.13.0",

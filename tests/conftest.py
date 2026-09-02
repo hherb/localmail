@@ -17,6 +17,13 @@ from tests._db_session_lock import (
     acquire_exclusive,
     verify_still_held,
 )
+from tests._serve_app_pools import (
+    POOL_SEAM_ATTR,
+    SERVE_APP_MODULE,
+    close_pools,
+    missing_seam_error,
+    recording_factory,
+)
 
 TEST_DSN = os.environ.get(
     "LOCALMAIL_TEST_DSN",
@@ -103,6 +110,44 @@ def fresh_build_info():
     reset_build_info()
     yield
     reset_build_info()
+
+
+@pytest.fixture(autouse=True)
+def close_serve_app_pools(monkeypatch):
+    """Close every pool `create_app` opened during the test (#321).
+
+    `create_app` opens its pool eagerly and closes it only in the FastAPI
+    lifespan, so the 34 test files that build an app without running one leak
+    it — as held connections, and as a `PytestUnraisableExceptionWarning` on
+    an unrelated test whenever the collector reaches the pool. Closing here
+    rather than in each of those files is what makes a new inline
+    `create_app(...)` safe by construction; see `tests/_serve_app_pools.py`
+    for why the per-file sweep #321 proposes was not the shape chosen.
+
+    Yields the pools recorded so far, so a test can assert its own app
+    registered.
+
+    Skipped entirely when nothing has imported `localmail.serve.app`: pytest
+    imports every collected module before running any test, so its absence
+    here means no collected test can call `create_app`, and importing it
+    would add ~0.5 s to every unit-only run. `function_local_serve_app_imports`
+    is what keeps that inference true.
+    """
+    app_module = sys.modules.get(SERVE_APP_MODULE)
+    if app_module is None:
+        yield []
+        return
+    problem = missing_seam_error(app_module)
+    if problem is not None:
+        raise RuntimeError(problem)
+    opened: list = []
+    monkeypatch.setattr(
+        app_module,
+        POOL_SEAM_ATTR,
+        recording_factory(getattr(app_module, POOL_SEAM_ATTR), opened),
+    )
+    yield opened
+    close_pools(opened)
 
 
 @pytest.fixture(autouse=True)

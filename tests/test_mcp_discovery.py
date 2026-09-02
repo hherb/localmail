@@ -19,6 +19,10 @@ from localmail.mcp.discovery import (  # noqa: E402
     resolve_authorization_servers,
 )
 
+# Module scope, not function scope: the autouse pool-closing fixture reads
+# sys.modules at test-setup time (#321, tests/_serve_app_pools.py).
+from localmail.serve.app import create_app  # noqa: E402
+
 
 def test_mount_path_constant():
     assert MCP_MOUNT_PATH == "/mcp"
@@ -133,8 +137,6 @@ def _has_prm_route(app) -> bool:
 
 
 def test_prm_route_present_when_mcp_enabled(db_dsn):
-    from localmail.serve.app import create_app
-
     app = create_app(
         db_dsn=db_dsn, enable_mcp=True, mcp_config=McpConfig(enabled=True)
     )
@@ -145,8 +147,6 @@ def test_prm_route_present_when_mcp_enabled(db_dsn):
 
 
 def test_prm_route_absent_by_default(db_dsn):
-    from localmail.serve.app import create_app
-
     app = create_app(db_dsn=db_dsn)
     try:
         assert not _has_prm_route(app)
@@ -159,8 +159,6 @@ def test_prm_route_served_publicly_through_full_app(db_dsn):
     # (middleware included). It must be reachable without auth and return the
     # metadata document — a route merely being present in app.routes wouldn't
     # catch a middleware that shadows or rejects it.
-    from localmail.serve.app import create_app
-
     app = create_app(
         db_dsn=db_dsn,
         enable_mcp=True,

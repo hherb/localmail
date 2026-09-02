@@ -6,10 +6,13 @@ from click.testing import CliRunner
 
 from localmail.cli import main
 
+# Module scope, not function scope: the autouse pool-closing fixture reads
+# sys.modules at test-setup time (#321, tests/_serve_app_pools.py).
+import localmail.serve.app as serve_app
+
 
 def _patch_serve_runtime(monkeypatch, captured):
     """Stub the heavy bits of serve_cmd so we can capture create_app kwargs."""
-    import localmail.serve.app as serve_app
     import localmail.db as db_mod
     import localmail.search as search_mod
     import uvicorn
@@ -66,7 +69,6 @@ def test_serve_searcher_uses_override_dsn(monkeypatch, tmp_path, db_dsn):
     so the searcher could silently query a different database than serve itself.
     serve must pass the override DSN through.
     """
-    import localmail.serve.app as serve_app
     import localmail.db as db_mod
     import localmail.search as search_mod
     import uvicorn

@@ -26,6 +26,12 @@ from localmail.serve.daemon_supervisor import (
     socket_path,
 )
 
+from tests._gated_supervisor import (
+    GATE_TIMEOUT_S,
+    GATED_GRACE_S,
+    GatedStopSupervisor,
+)
+
 
 # --- pure helpers ---------------------------------------------------------
 
@@ -242,17 +248,27 @@ def test_request_stop_sets_transitional_then_stopped() -> None:
 
 
 def test_busy_guard_rejects_second_lifecycle_op() -> None:
-    s = DaemonSupervisor(argv=_DEAF_SLEEPER, grace_seconds=1.0)
+    """The guard refuses a second request while the first is in flight.
+
+    Gated rather than timed: this had the same wall-clock shape as the
+    route-level pin #299 was filed about — the window was the child's grace
+    period, so the assertion had to beat a timer. See
+    `tests/_gated_supervisor.py`.
+    """
+    s = GatedStopSupervisor(argv=_SLEEPER, grace_seconds=GATED_GRACE_S)
+    # Start synchronously so the only lifecycle thread in play is the stop's.
+    s.start()
     try:
-        s.request_start()
-        _wait_state(s, SupervisorState.RUNNING)
-        s.request_stop()  # now in flight, blocking on the 1s grace wait
+        s.request_stop()
+        assert s.stop_entered.wait(GATE_TIMEOUT_S), "stop body never ran"
         assert s.status().state == SupervisorState.STOPPING
         with pytest.raises(SupervisorUnavailable):
             s.request_stop()
-        _wait_state(s, SupervisorState.STOPPED)
+        assert not s.gate_timed_out, "the gate expired; the window was not open"
     finally:
+        s.release()
         s.stop()
+    _wait_state(s, SupervisorState.STOPPED)
 
 
 def test_request_start_idempotent_when_running() -> None:

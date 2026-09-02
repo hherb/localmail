@@ -30,6 +30,12 @@ from localmail.serve.daemon_supervisor import (
     SupervisorState,
 )
 
+from tests._gated_supervisor import (
+    GATE_TIMEOUT_S,
+    GATED_GRACE_S,
+    GatedStopSupervisor,
+)
+
 
 _SIGNING_KEY = "x" * 43
 _SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
@@ -173,52 +179,39 @@ def test_start_returns_202_and_settles_running(admin_client, app) -> None:
         sup.stop()
 
 
-_DEAF_SLEEPER = [
-    sys.executable, "-c",
-    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-    "print('up', flush=True); time.sleep(60)",
-]
-
-
-def _poll_log_contains(sup: DaemonSupervisor, fragment: str, timeout: float = 6.0) -> bool:
-    """Spin until the supervisor's ring buffer contains `fragment`."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if any(fragment in line for line in sup.recent_log_lines()):
-            return True
-        time.sleep(0.02)
-    return False
-
-
 def test_second_lifecycle_op_while_busy_is_409(admin_client, app) -> None:
-    # Generous grace so the first stop stays in-flight (busy) well past the
-    # poll+POST round trip even on a loaded CI runner — the window must not
-    # close before the second POST lands, or the busy-guard would admit it.
-    sup = DaemonSupervisor(argv=_DEAF_SLEEPER, grace_seconds=3.0)
+    """A lifecycle request issued while one is in flight is refused as 409.
+
+    The window is held open by the gate, not by a grace period — see
+    `tests/_gated_supervisor.py` for why a timer cannot carry this assertion.
+    """
+    sup = GatedStopSupervisor(argv=_SLEEPER, grace_seconds=GATED_GRACE_S)
     app.state.daemon_supervisor = sup
+    # Bring the child up synchronously rather than through the route: a routed
+    # start spawns a lifecycle thread of its own, which would still be in
+    # flight when the first stop lands and answer it with the very 409 this
+    # test exists to attribute to the stop.
+    sup.start()
     try:
-        admin_client.post(
-            "/v1/admin/daemon/start",
-            headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/daemon/start")},
-        )
-        # Wait for the child to print "up" so its SIGTERM handler is installed.
-        assert _poll_log_contains(sup, "up"), "deaf sleeper never printed 'up'"
-        # First stop — will block on the grace-period wait because the child
-        # ignores SIGTERM. Poll for STOPPING to confirm the lifecycle thread is
-        # in the grace wait before firing the second request.
-        admin_client.post(
+        first = admin_client.post(
             "/v1/admin/daemon/stop",
             headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/daemon/stop")},
         )
-        _poll_state(admin_client, SupervisorState.STOPPING)
-        r = admin_client.post(
+        assert first.status_code == 202, first.text
+        # The lifecycle thread is now parked inside stop() and cannot leave
+        # until the gate opens, so the second request is provably concurrent.
+        assert sup.stop_entered.wait(GATE_TIMEOUT_S), "stop body never ran"
+        second = admin_client.post(
             "/v1/admin/daemon/stop",
             headers={"X-CSRF-Token": admin_client.csrf_for("/v1/admin/daemon/stop")},
         )
-        assert r.status_code == 409
-        assert _poll_state(admin_client, SupervisorState.STOPPED)
+        assert not sup.gate_timed_out, "the gate expired; the window was not open"
+        assert second.status_code == 409, second.text
     finally:
+        sup.release()
         sup.stop()
+    # The refused request must not have wedged the accepted one.
+    assert _poll_state(admin_client, SupervisorState.STOPPED)
 
 
 def test_build_daemon_view_matches_get_route_shape(app, db_conn) -> None:

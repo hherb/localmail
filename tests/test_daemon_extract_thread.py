@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import threading
-import time
 
 from localmail.config import LocalmailConfig
 from localmail.daemon import Daemon
@@ -25,17 +24,29 @@ class _E:
         pass
 
 
+def _live_thread_names() -> set[str]:
+    """Thread names as of right now — no wait, and none should be added back.
+
+    ``Daemon.start()`` calls ``start_workers()``, which calls ``Thread.start()``
+    for every account and worker thread synchronously; ``Thread.start()`` returns
+    only once the thread is registered, and ``threading.enumerate()`` covers both
+    the active and limbo tables. So a fixed ``time.sleep()`` here waits for
+    something that has already happened, and buys nothing but a race the test
+    can lose on a loaded runner (#299).
+    """
+    return {t.name for t in threading.enumerate()}
+
+
 def test_daemon_starts_extract_worker_when_enabled(db_dsn, db_conn) -> None:
     cfg = LocalmailConfig.model_validate({"database": {"dsn": db_dsn}})
     cfg.search.run_extract_worker = True
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
     d.start()
-    time.sleep(0.5)
-    names = {t.name for t in threading.enumerate()}
+    names = _live_thread_names()
     assert any(n.startswith("extract_worker") for n in names)
     d.stop()
     d.join(timeout=5)
-    names_after = {t.name for t in threading.enumerate()}
+    names_after = _live_thread_names()
     assert not any(n.startswith("extract_worker") for n in names_after)
 
 
@@ -44,8 +55,7 @@ def test_daemon_skips_extract_worker_when_disabled(db_dsn, db_conn) -> None:
     cfg.search.run_extract_worker = False
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
     d.start()
-    time.sleep(0.3)
-    names = {t.name for t in threading.enumerate()}
+    names = _live_thread_names()
     assert not any(n.startswith("extract_worker") for n in names)
     d.stop()
     d.join(timeout=5)
@@ -77,15 +87,14 @@ def test_daemon_starts_idle_poll_extract_together_and_joins_on_stop(
     cfg.search.run_embed_worker = True
     d = Daemon(cfg=cfg, dsn=db_dsn, embedding_backend_factory=lambda c: _E())
     d.start()
-    time.sleep(0.5)
-    names = {t.name for t in threading.enumerate()}
+    names = _live_thread_names()
     assert any(n == "idle-test-acct" for n in names), names
     assert any(n == "poll-test-acct" for n in names), names
     assert any(n == "embed_worker" for n in names), names
     assert any(n == "extract_worker" for n in names), names
     d.stop()
     d.join(timeout=10)
-    names_after = {t.name for t in threading.enumerate()}
+    names_after = _live_thread_names()
     assert not any(n.startswith("idle-") for n in names_after), names_after
     assert not any(n.startswith("poll-") for n in names_after), names_after
     assert "embed_worker" not in names_after

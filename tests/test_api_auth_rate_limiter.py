@@ -11,6 +11,9 @@ from localmail.api import auth as auth_mod
 from localmail.api.auth import create_user, login, reset_login_rate_limiter
 from localmail.api.errors import AuthenticationFailed, RateLimited
 from localmail.config import AuthConfig
+# Module scope, not function scope: the autouse pool-closing fixture reads
+# sys.modules at test-setup time (#321, tests/_pool_leaks.py).
+from localmail.serve.app import create_app
 
 
 def _count(conn: psycopg.Connection, sql: str, *params) -> int:
@@ -343,9 +346,6 @@ def test_per_ip_cap_uses_xff_when_trusted(db_dsn: str, api_user) -> None:
     shared IP under the cap; the 4th from the same IP must trip 429.
     """
     from fastapi.testclient import TestClient
-
-    from localmail.config import AuthConfig
-    from localmail.serve.app import create_app
 
     cfg = AuthConfig(
         trusted_proxies=["127.0.0.0/8"],

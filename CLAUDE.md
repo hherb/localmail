@@ -4304,14 +4304,133 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     beside a suite reproduces exactly this corruption, in both directions and
     with the same silence. README states the limitation; the fix is for each
     harness entry point to call `acquire_exclusive` and hold it for the run.
-  - **Known, filed not fixed:** five files (`test_serve_admin_csp.py`,
-    `test_serve_admin_login.py`, `test_serve_daemon_wiring.py`,
-    `test_serve_version_route.py`, `test_session_cookie_scope.py`) build a
-    `create_app(db_dsn=…)` inline and never close its pool, so the GC finalises
-    a live `ConnectionPool` and psycopg's `__del__` raises `RuntimeError:
-    cannot join current thread`. That warning names the leaking files exactly
-    and is the observable evidence for **#321**; it is *not* the cause of the
-    corruption above.
+  - **The leaked-pool warning that ran alongside this is #321, now fixed** —
+    see the next entry. It was never the cause of the corruption above; the
+    instrumented runs showed zero contention.
+- **Leaked test pools are closed by one autouse fixture, not by 38 files
+  (#321).** Two seams, both real. `create_app` opens its pool eagerly
+  (`open=True`) and closes it only in the FastAPI lifespan's `finally`, so a
+  bare `create_app(...)` or a `TestClient(app)` used without `with` leaks it;
+  and **`Daemon.stop()`/`join()` never close `self.pool`**, so 13 daemon tests
+  across four files plus one `create_searcher` test leak one each through
+  `db.open_pool`. The pool then holds its
+  connections until the GC reaches it, and `ConnectionPool.__del__` joins the
+  pool's own worker thread *from inside that thread* → `RuntimeError: cannot
+  join current thread`, reported as a `PytestUnraisableExceptionWarning`
+  against whichever unrelated test was running when the collection fired.
+  **That is why the warning names a different set of files on every run and
+  never names the leak site** — the handoff's five and this session's four
+  overlap in one file. Rules:
+  [tests/_pool_leaks.py](tests/_pool_leaks.py); fixture
+  `conftest.close_leaked_pools`; 37 tests in
+  [tests/test_pool_leaks.py](tests/test_pool_leaks.py).
+  - **The `db.open_pool` half was invisible on macOS and reported on
+    Linux/3.13.** The GC decides when `__del__` runs, so a platform can hide
+    the whole thing: three green macOS full runs read 2 warnings while CI's
+    3.13 leg read 3. **Do not conclude from a clean local run that this class
+    of leak is gone** — instrument the seam instead. A temporary
+    `pytest_sessionstart` plugin that wraps `localmail.db.ConnectionPool` and
+    reports unclosed pools at `pytest_sessionfinish` named all 14 sites with
+    their creation stacks in one run; reading the warning would never have,
+    because it names the wrong file by construction.
+  - **The per-file sweep #321 proposes was measured and rejected**: **41
+    files, 162 call sites** — and as worded (wrap each in
+    `with TestClient(...)`) it breaks the tests that exist to assert
+    `create_app` alone is side-effect-free, since running the lifespan is
+    exactly what binds the daemon control socket. The sweep also buys
+    discipline where the seam buys construction: a new inline `create_app(...)`
+    cannot reintroduce the leak.
+    **Three counts, deliberately kept apart** — an earlier wording reported
+    `34` for all of them, which is a number no measurement produces. `41`
+    files call `create_app` (the sweep's scope, the set `162` also measures);
+    `33` of those actually leak one (the other 8 close it, or stub
+    `create_app` outright); `5` more leak a `db.open_pool` pool, disjoint from
+    the 33 — hence `38` affected files in the heading.
+  - **A seam is the `ConnectionPool` name in the module that builds the pool** —
+    `localmail.serve.app` and `localmail.db`, listed in `POOL_SEAMS`. Each is
+    resolved from that module's globals on every call, so patching it reaches
+    every caller. Patching `create_app` itself would reach none of them: each
+    test module binds it into its own namespace at import time.
+  - **`missing_seam_error` reports rather than skips.** An aliased import
+    (`... as Pool`) leaves the attribute absent, nothing patches, every pool
+    leaks again — and no test fails, because closing a pool that was never
+    recorded is a no-op. It deliberately does **not** check the seam's
+    *identity*: swapping in a different pool class under the same name is a
+    legitimate change the wrapper handles correctly.
+  - **The fixture skips a seam whose module is not in `sys.modules`**,
+    which keeps ~0.5 s of FastAPI import off every unit-only run (a bare
+    `pytest tests/test_pgtext.py` is 0.27 s in-pytest, so the import would
+    have doubled it). That inference — absent module ⟹ no collected test can
+    call `create_app` — holds only because pytest imports every collected
+    module before running any test, so it is sound for a **module-level**
+    import and false for a function-local one. Seven such imports existed, in
+    four files; they are hoisted, and the pure
+    `function_local_serve_app_imports` scans every `.py` under `tests/` to
+    keep it that way. It reads the **AST**, not the text, because
+    `test_pool_leaks.py` quotes the forbidden import verbatim in the source
+    strings it feeds the scanner as test cases — a substring scan flags those
+    three lines. (The `_mentions_version_option` precedent is a *docstring*
+    case; an earlier wording here claimed this rationale quoted the import
+    too, and it does not. The reason is sound, the example was wrong.)
+  - **The inference is verified at teardown, not trusted — and that is the
+    load-bearing half.** A scanner cannot enumerate the ways a module arrives:
+    the sibling `from localmail.serve import app`, an
+    `importlib.import_module`, a `__import__`, or a lazy import inside `src/`
+    — `cli.py`'s `serve_cmd` has one, so **production code** can load the
+    module mid-test with no test-file import anywhere. Three such routes were
+    live in the tree when this shipped, one of them inside the file that
+    enforces the rule. `late_seam_error` therefore compares what is loaded at
+    teardown against what was patched at setup and raises naming the test, so
+    every route is caught by its outcome. The scanner stays as belt to that
+    braces — it names the offending *line*, which the outcome check cannot.
+  - **`POOL_SEAMS` is checked against `src/`, not just against itself.**
+    `missing_seam_error` asks only whether the *name* is present, so a third
+    module growing a pool, an existing one switching to a fully-qualified
+    `psycopg_pool.ConnectionPool(...)` call, or a move to
+    `AsyncConnectionPool` all leave the name intact, nothing patched, and no
+    test failing. `pool_constructor_calls` walks every `src/localmail/**/*.py`
+    for a call whose callee ends in `ConnectionPool` and the set of modules
+    must equal `POOL_SEAMS` — mutation-proven in both directions (drop a seam;
+    add a third constructor).
+  - **The fixture owns a private `pytest.MonkeyPatch`.** Sharing the
+    `monkeypatch` fixture meant a test calling `monkeypatch.undo()` reverted
+    the seam patch too; five files call it, and one is two tests away from
+    building a `Daemon` afterwards.
+  - **A broken seam ends the run with one line** (`pytest.exit`), the call
+    `db_session_lock` makes for the same reason — the condition is a property
+    of the tree, identical for all ~3000 tests, and an ERROR block per test
+    buries the sentence that says what to do. The *fixture's* use of
+    `missing_seam_error` is pinned, not just the pure rule: replacing the
+    report with a `continue` used to leave the whole suite green.
+  - **`filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]`
+    is the regression gate.** Without it the only evidence this fixture still
+    works was a human comparing warning counts between runs — and the leak is
+    invisible on macOS while reported on Linux/3.13, so nobody would compare
+    on the platform that shows it. The test it fails is arbitrary (the GC
+    picks it); the message, `cannot join current thread`, is the diagnosis.
+  - **`unclosed` filters before closing** so the count `close_pools` returns
+    is the number of pools that genuinely leaked; `close()` is idempotent, so
+    the filter is about the claim, not about safety.
+  - **Measured**: `main` at `5dbaea0` runs 2988 passed with **6** warnings
+    (2 pre-existing `websockets` deprecations, #25, + **4**
+    `cannot join current thread`); the branch runs **2** warnings — the
+    websockets pair alone — on macOS *and* on both CI legs. Only the warning
+    count generalises across platforms: the pass count is `3025 passed,
+    0 skipped` on macOS and `3024 passed, 1 skipped` on CI (both legs,
+    verified) — the same 3025 tests, with the `1 skipped` that the #335 entry
+    above records as pre-existing. macOS is the odd one out on skips, not CI.
+    The instrumented run reports **0 of 131** `localmail.db` pools unclosed,
+    where the first pass reported 14. Closing costs nothing measurable (a
+    serve-heavy pair of files: 6.84 s with, 6.99 s without).
+  - **"Safe by construction" is scoped to `create_app` and `open_pool`
+    callers.** About a dozen test files build a `psycopg_pool.ConnectionPool`
+    directly; those bypass both seams and are unrecorded. They all close what
+    they build today, and the `filterwarnings` gate above is what now makes it
+    a failure rather than a warning if one stops.
+  - **`Daemon` does not close its own pool, and that is unchanged production
+    behaviour** — `run_forever` owns the process, so the pool dies with it.
+    The fixture is a *test* backstop; it is not a statement that `Daemon`
+    should close it, and #321 is not the place to change that.
 - The `memory_keyring` fixture (autouse) intercepts every `keyring` call so
   real Keychain entries aren't written/read during tests.
 - **If exactly the three `LISTEN`/`NOTIFY` tests fail** with

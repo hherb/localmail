@@ -15,6 +15,9 @@ import time
 
 import pytest
 
+# Module scope, not function scope: the autouse pool-closing fixture reads
+# sys.modules at test-setup time (#321, tests/_pool_leaks.py).
+from localmail.serve import app as app_mod
 from localmail.serve.daemon_supervisor import (
     DaemonSupervisor,
     SupervisorState,
@@ -34,8 +37,6 @@ def test_serve_gives_the_supervisor_more_than_the_childs_own_grace() -> None:
     Asserted against the source of the wiring rather than a live app because
     building an app needs a DB; the value it passes is what matters.
     """
-    from localmail.serve import app as app_mod
-
     src = (app_mod.__file__ or "")
     text = open(src, encoding="utf-8").read()
     assert "supervisor_kill_after(" in text, (

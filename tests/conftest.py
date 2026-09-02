@@ -17,6 +17,13 @@ from tests._db_session_lock import (
     acquire_exclusive,
     verify_still_held,
 )
+from tests._pool_leaks import (
+    close_pools,
+    late_seam_error,
+    loaded_seams,
+    missing_seam_error,
+    recording_factory,
+)
 
 TEST_DSN = os.environ.get(
     "LOCALMAIL_TEST_DSN",
@@ -103,6 +110,68 @@ def fresh_build_info():
     reset_build_info()
     yield
     reset_build_info()
+
+
+@pytest.fixture(autouse=True)
+def close_leaked_pools():
+    """Close every connection pool the test opened and did not close (#321).
+
+    Two seams (`tests/_pool_leaks.py::POOL_SEAMS`). `create_app` opens its pool
+    eagerly and closes it only in the FastAPI lifespan, so the 33 test files
+    that build an app without running one leak it. `Daemon.stop()`/`join()` do
+    not close `self.pool` either, so 13 daemon tests plus one searcher test
+    leak one each through `db.open_pool`. Both surface as held connections and
+    as a `PytestUnraisableExceptionWarning` on an unrelated test whenever the
+    collector reaches the pool.
+
+    Closing here rather than in each of those files is what makes a new inline
+    `create_app(...)` or `Daemon(...)` safe by construction; see
+    `tests/_pool_leaks.py` for why the per-file sweep #321 proposes was not the
+    shape chosen.
+
+    Yields the pools recorded so far, so a test can assert its own registered.
+
+    A seam whose module is not yet imported is skipped — pytest imports every
+    collected module before running any test, so its absence means no collected
+    test can reach it, and importing `localmail.serve.app` speculatively would
+    add ~0.5 s to every unit-only run. That inference is **verified at
+    teardown** by `late_seam_error` rather than trusted: a module can still
+    arrive mid-test through a spelling no scanner enumerates, including a lazy
+    import inside `src/` (`cli.py`'s `serve_cmd` has one), and the pools it
+    built would otherwise go unrecorded in silence.
+
+    A **private** `MonkeyPatch`, not the shared fixture: sharing it meant a
+    test calling `monkeypatch.undo()` reverted the seam patch too, and five
+    files do call it — one of them two tests away from building a `Daemon`
+    afterwards.
+
+    A broken seam ends the run with one line rather than an ERROR block per
+    test, the call `db_session_lock` makes below for the same reason: it is a
+    property of the tree, identical for all ~3000 tests, and 3000 tracebacks
+    bury the one sentence that says what to do.
+    """
+    opened: list = []
+    patched: list[str] = []
+    mp = pytest.MonkeyPatch()
+    try:
+        for name, module, attr in loaded_seams(sys.modules):
+            problem = missing_seam_error(module, name, attr)
+            if problem is not None:
+                pytest.exit(problem, returncode=1)
+            mp.setattr(module, attr, recording_factory(getattr(module, attr), opened))
+            patched.append(name)
+        yield opened
+    finally:
+        mp.undo()
+        close_pools(opened)
+    # After the pools are closed, so a late import still gets its pools shut
+    # before it is reported. Reached whether the test passed or failed —
+    # pytest drives teardown by resuming the generator and never throws the
+    # test's own exception into it — which is what we want: the leak is real
+    # either way, and a failing test is no reason to hide it.
+    late = late_seam_error(sys.modules, patched)
+    if late is not None:
+        raise RuntimeError(late)
 
 
 @pytest.fixture(autouse=True)

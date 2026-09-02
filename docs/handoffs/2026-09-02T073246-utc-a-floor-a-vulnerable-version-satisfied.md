@@ -4,7 +4,8 @@
 > start — PR #338 had already been merged by the operator, and **#321
 > auto-closed correctly** (risk 2 discharged for a second consecutive round).
 > This session opened **one PR** on `fix/dep-security-and-337-harness-lock`,
-> closing **#337** and clearing four of the five Dependabot alerts.
+> closing **#337** and clearing four of the five Dependabot alerts. **CI green
+> on both legs** after one round of it catching a real defect.
 >
 > **The previous handoff was accurate on every fact this session checked**,
 > with one exception it could not have known and one it should have: `main` at
@@ -16,10 +17,17 @@
 > **Open issue count is 22, dropping to 21 on merge. Dependabot is 5, dropping
 > to 1** — and that last one is a decision, not an oversight (see risk 1).
 >
-> **The headline lesson is risk 5**: a dependency floor that a *vulnerable*
-> version satisfies is not a floor. `icalendar>=6.0` read as unaffected against
-> a `>= 7.1.0, < 7.1.3` advisory while the lock sat at 7.1.0, squarely inside
-> it. Read the range against `uv.lock`, never against the declared floor.
+> **Two headline lessons.** Risk 5: a dependency floor that a *vulnerable*
+> version satisfies is not a floor — `icalendar>=6.0` read as unaffected
+> against a `>= 7.1.0, < 7.1.3` advisory while the lock sat at 7.1.0, squarely
+> inside it. Read the range against `uv.lock`, never the declared floor.
+>
+> And risk 31, which is last session's risk 5 paying out a second time: **the
+> first push was green on this laptop and RED on both CI legs.** The
+> end-to-end pin rebuilt its DSN from a live connection
+> (`conn.info.dsn`), which silently omits the password; macOS `pg_hba` did not
+> demand one, CI did. Fixed in `74b8573`; CI is green now. A local pass is
+> still not evidence.
 
 ## Project context (1-minute version)
 
@@ -142,6 +150,20 @@ code under test.
   i.e. **#321's acceptance signal still holds**: no third warning, and
   `pyproject`'s `error::PytestUnraisableExceptionWarning` would have made one
   a failure.
+- **CI, both legs, after `74b8573`: `3041 passed, 1 skipped, 2 warnings`** —
+  matching risk 29's pre-existing Linux skip exactly, with no third warning on
+  either. Run `33603599768`.
+- **The first push was green here and RED on both CI legs**, and the defect was
+  real. The end-to-end pin passed `db_session_lock.info.dsn` to the harness
+  subprocess. `ConnectionInfo.dsn` is libpq's *report* of a connection, not a
+  round-trippable connection string: **it omits the password.** This Mac's
+  `pg_hba.conf` does not demand one on that path, so the subprocess connected
+  and the test passed; CI's does, so the harness died with
+  `fe_sendauth: no password supplied` — a traceback, not a refusal, which is a
+  *different* outcome that happens to also be non-zero. The DSN comes from
+  `db_dsn` now. The pre-existing `"Traceback" not in stderr` assertion is what
+  made the failure legible rather than a silent pass, and is documented as
+  load-bearing.
 - **Mutation battery, 10 mutations** (restored from a scratchpad copy every
   time, never `git checkout` — risk 13):
 
@@ -405,6 +427,22 @@ code under test.
 30. **No ROADMAP.md** *(carried, re-confirmed a fourth time)* — that
     `/nextsession` step is a no-op. **README and CLAUDE.md were both updated**
     this session.
+31. **A green local run is still not evidence — and never rebuild a DSN from a
+    live connection** *(new; last session's risk 5, one layer over)*. The
+    end-to-end harness pin passed `conn.info.dsn` to a subprocess.
+    `ConnectionInfo.dsn` is libpq's **report** of a connection, not a
+    round-trippable connection string: it keeps host, port, user and dbname and
+    **drops the password**. This Mac's `pg_hba.conf` does not demand one on
+    that path, so it passed here and failed on both CI legs. Use the DSN the
+    fixture was given (`db_dsn`), never one reconstructed from a connection.
+    - The generalisation is the part to keep: **any test whose subject is
+      "this process refuses / exits non-zero" must assert *why*.** A harness
+      that cannot connect also exits non-zero, so the assertion that saved this
+      was `"Traceback" not in stderr`, not the exit code. When a test asserts a
+      failure, pin the failure's *shape*, or a different failure passes it.
+    - Corollary for this repo specifically: **the local Postgres is more
+      permissive than CI's.** A test that authenticates will pass here whether
+      or not it supplies credentials. Push and let CI decide.
 
 ## Exact commands to resume
 
@@ -540,7 +578,9 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
 
 `main` tip at session start was **`ad69279`**. This session left **one PR** open
 on `fix/dep-security-and-337-harness-lock` — `afc8c5f` (the security floors),
-`f282016` (#337), and this handoff — closing **#337**. Latest migration
+`f282016` (#337), `c435fff` (this handoff) and `74b8573` (the CI fix) —
+closing **#337**. **CI green on both legs**: `3041 passed, 1 skipped,
+2 warnings`. Latest migration
 **`0036_api_keys.sql`**; next free slot `0037_*.sql` (this session adds none).
 **Open issues: 22**, dropping to **21** on merge. **Dependabot: 5 → 1**, the
 remainder deliberate.

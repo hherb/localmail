@@ -53,6 +53,7 @@ from localmail.config import SearchConfig
 from localmail.db import apply_migrations
 from localmail.search.chunking import ChunkSpec, MessageRow, chunk_message
 from localmail.search.embed_worker import record_failed_chunking
+from tests.acceptance._harness_lock import harness_db_lock
 
 # Both INSERT strategies share this SQL; only the call shape (execute vs
 # executemany) differs between the two timed variants below.
@@ -223,27 +224,28 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    apply_migrations(args.dsn)
-    body = (_WORD * args.body_words).strip()
-    cfg = SearchConfig()
-    modes = ("row", "executemany") if args.mode == "both" else (args.mode,)
-    results = [_run_mode(args.dsn, m, args.messages, body, cfg) for m in modes]
+    with harness_db_lock(args.dsn):
+        apply_migrations(args.dsn)
+        body = (_WORD * args.body_words).strip()
+        cfg = SearchConfig()
+        modes = ("row", "executemany") if args.mode == "both" else (args.mode,)
+        results = [_run_mode(args.dsn, m, args.messages, body, cfg) for m in modes]
 
-    if args.json:
-        print(json.dumps({"results": results}, indent=2))
+        if args.json:
+            print(json.dumps({"results": results}, indent=2))
+            return 0
+
+        print(f"chunk-insert benchmark: {args.messages} messages, "
+              f"body~{args.body_words} words")
+        for r in results:
+            print(f"  {r['mode']:>11}: {r['chunks_inserted']} chunks in "
+                  f"{r['elapsed_s']}s  ({r['chunks_per_s']} chunks/s)")
+        by_mode = {r["mode"]: r for r in results}
+        if "row" in by_mode and "executemany" in by_mode:
+            row_t, em_t = by_mode["row"]["elapsed_s"], by_mode["executemany"]["elapsed_s"]
+            if em_t:
+                print(f"  speedup (executemany vs row): {row_t / em_t:.2f}x")
         return 0
-
-    print(f"chunk-insert benchmark: {args.messages} messages, "
-          f"body~{args.body_words} words")
-    for r in results:
-        print(f"  {r['mode']:>11}: {r['chunks_inserted']} chunks in "
-              f"{r['elapsed_s']}s  ({r['chunks_per_s']} chunks/s)")
-    by_mode = {r["mode"]: r for r in results}
-    if "row" in by_mode and "executemany" in by_mode:
-        row_t, em_t = by_mode["row"]["elapsed_s"], by_mode["executemany"]["elapsed_s"]
-        if em_t:
-            print(f"  speedup (executemany vs row): {row_t / em_t:.2f}x")
-    return 0
 
 
 if __name__ == "__main__":

@@ -1058,14 +1058,14 @@ at `LOCALMAIL_TEST_DSN` (defaults to
 `postgresql://localmail:local%40%40mail@localhost:5532/localmail_test` — a
 separate database from the live archive, so tests can't clobber real data).
 
-**Only one pytest session may use a given test database at a time.** Every
-test truncates every data table, so a second concurrent session would delete
-the first one's seeded rows — silently, since the truncate succeeds. The suite
-takes a Postgres advisory lock on the database for the length of the run; a
-second session prints
+**Only one test run may use a given test database at a time.** Every test
+truncates every data table, so a second concurrent run would delete the first
+one's seeded rows — silently, since the truncate succeeds. The suite takes a
+Postgres advisory lock on the database for the length of the run; a second one
+prints
 
 ```
-waiting for another pytest session to release the test database 'localmail_test';
+waiting for another test run to release the test database 'localmail_test';
 set LOCALMAIL_TEST_DSN to run against your own.
 ```
 
@@ -1074,11 +1074,30 @@ and then proceeds once the first finishes, or fails after
 once, give each its own database via `LOCALMAIL_TEST_DSN` — the lock is keyed
 on the database name, so distinct databases never block each other.
 
-The lock covers **pytest**, not the database. The standalone acceptance
-harnesses under `tests/acceptance/` truncate the same tables without taking
-it, so running one alongside a suite corrupts both exactly as two suites
-would (tracked as an open issue). Point them at their own `LOCALMAIL_TEST_DSN`
-or run them alone. Tracked as [#337](https://github.com/hherb/localmail/issues/337).
+**The standalone acceptance harnesses take the same lock.** The five
+`tests/acceptance/run_*.py` scripts truncate the same tables against the same
+DSN, so until #337 they could corrupt a running suite exactly as a second
+suite would. Each now holds the lock from `apply_migrations` to the end of its
+run; started beside a suite, a harness prints the same waiting notice and then
+proceeds. A harness that cannot get the lock inside the budget exits **3** —
+distinct from the `1` an eval returns when it fails its own gates, so a shell
+loop can tell "someone else is running" from "the numbers regressed".
+
+Nothing is required of a harness author beyond wrapping the database work:
+
+```python
+with harness_db_lock(dsn):
+    apply_migrations(dsn)
+    ...
+```
+
+and that is enforced rather than remembered. The harnesses are not collected
+by pytest — they match no `python_files` pattern, so no fixture can arm them —
+so `tests/test_acceptance_harness_lock.py` walks each entry point's **AST**
+and fails if any call that reaches the database sits outside the lock. It
+enumerates them from the filesystem, so a sixth harness is in scope the day it
+is added. The rule reads the AST rather than the text because every harness
+names the helper in prose while explaining why it calls it.
 
 An autouse fixture closes every connection pool a test opened and did not
 close. Two things leak them: `create_app` opens its pool eagerly and closes it

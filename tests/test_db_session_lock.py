@@ -248,6 +248,19 @@ def test_the_waiting_message_names_the_database_and_the_remedy() -> None:
     assert "wait" in msg.lower()
 
 
+def test_the_messages_do_not_claim_the_holder_is_a_pytest_session() -> None:
+    """Since #337 an acceptance harness holds this same lock.
+
+    The messages used to say "another pytest session", which sends an
+    operator hunting a pytest process that may not exist — a confident and
+    wrong diagnosis, which is the one thing these strings exist to avoid.
+    They must name a class of holder wide enough to be true of both.
+    """
+    for msg in (busy_message("localmail_test", timeout_s=1.0), waiting_message("localmail_test")):
+        assert "pytest session" not in msg
+        assert "test run" in msg
+
+
 # --------------------------------------------------------------------------
 # Behavioural: the lock actually excludes
 # --------------------------------------------------------------------------

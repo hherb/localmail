@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
-"""One pytest session at a time per test database (#335, #329).
+"""One test run at a time per test database (#335, #329, #337).
 
 `db_conn` opens every test with ``TRUNCATE … RESTART IDENTITY CASCADE`` over
 every data table. That is correct for one session and destructive for two:
@@ -43,6 +43,13 @@ willingly, while ``conn.closed`` still reads ``False``. So callers holding
 this for a long time must re-check it at the point it protects — for
 ``db_conn``, immediately before the ``TRUNCATE`` — rather than assume it
 survived.
+
+Since #337 the holder need not be a pytest session: the standalone
+harnesses under ``tests/acceptance/`` take this same lock through
+``tests.acceptance._harness_lock.harness_db_lock``. They truncate the same
+tables against the same DSN, so leaving them out left the guard covering
+pytest rather than the database. It is why :func:`busy_message` and
+:func:`waiting_message` name a "test run" and not a pytest session.
 
 Serialising is deliberate and is not a parallelism regression: two sessions
 sharing this database were never running concurrently in any useful sense,
@@ -200,11 +207,17 @@ def advisory_lock_key(database: str) -> int:
 
 
 def busy_message(database: str, *, timeout_s: float) -> str:
-    """Return the operator-facing explanation for a contended database."""
+    """Return the operator-facing explanation for a contended database.
+
+    Says "test run", not "pytest session": since #337 an acceptance harness
+    holds this same lock, so naming pytest sends the operator hunting a
+    process that need not exist. Pinned by
+    ``test_the_messages_do_not_claim_the_holder_is_a_pytest_session``.
+    """
     return (
-        f"another pytest session is using the test database {database!r} "
-        f"(waited {timeout_s:g}s). Two sessions sharing one test database "
-        f"corrupt each other's runs: every test truncates every table. "
+        f"another test run is using the test database {database!r} "
+        f"(waited {timeout_s:g}s). Two runs sharing one test database "
+        f"corrupt each other: every test truncates every table. "
         f"Wait for the other run to finish, or point LOCALMAIL_TEST_DSN at a "
         f"different database."
     )
@@ -217,7 +230,7 @@ def waiting_message(database: str) -> str:
     :func:`acquire_exclusive` and to conftest's ``_announce``, not here.
     """
     return (
-        f"waiting for another pytest session to release the test database "
+        f"waiting for another test run to release the test database "
         f"{database!r}; set LOCALMAIL_TEST_DSN to run against your own."
     )
 

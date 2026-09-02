@@ -820,9 +820,11 @@ src/localmail/
                     #   needs its query back (#326)
 migrations/         # 0001_init.sql … 0036_api_keys.sql (0023_daemon_heartbeats.sql also applied)
 tests/
-  acceptance/       # standalone eval harnesses (run_recall_eval.py,
+  acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
-                    # run_browse_explain.py, run_chunk_insert_bench.py)
+                    # run_browse_explain.py, run_chunk_insert_bench.py);
+                    # browse_explain_lib.py is a library, not an entry point
+    _harness_lock.py  # harness_db_lock + the AST rule requiring it (#337)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
   _eml.py           # MIME fixture builders (no .eml files on disk)
   _fake_imap.py     # in-memory IMAP fake with IDLE support
@@ -2121,6 +2123,43 @@ reaches the parser — this function is its only consumer and it reads our own
 numbered migration files — so the bump is hygiene, not incident response,
 which is why it was **verified rather than assumed**: splitting every
 migration on disk yields byte-identical statement lists under 0.5.5 and 0.6.0.
+
+**`pypdf>=6.16.1` and `icalendar>=7.1.3` are the security floors where the
+input IS attacker-controlled**, which is the case the sqlparse note above
+contrasts against. Both are parsed straight out of email attachments —
+`extractor._extract_pdf` calls `PdfReader`/`page.extract_text()`, and
+`_extract_ics` calls `Calendar.from_ical` — so the four DoS advisories they
+carry (Dependabot #66–#69: an infinite loop in pypdf's
+`TreeObject.insert_child`, unbounded runtime/memory retrieving outlines and
+extracting XForm objects, and algorithmic complexity in icalendar's
+`Component.__eq__`) are reachable by anyone who can email the archive.
+
+- **They are still floors and not an incident**, because the blast radius was
+  already bounded: a hostile attachment costs one extraction slot and then
+  poison-pills under #153's transient budget. What it cannot do is stall the
+  archive, which is what makes this a bump rather than a rollback.
+- **The icalendar floor is the fix, not a formality.** Its vulnerable range is
+  `>= 7.1.0, < 7.1.3` — *above* the old `>=6.0` floor — so the declaration
+  read as unaffected while the resolver, picking the newest compatible
+  release, landed squarely inside the window (the lock held 7.1.0). A floor
+  that a vulnerable version satisfies is not a floor. Do not read a
+  `vulnerable_version_range` against the declared floor; read it against
+  `uv.lock`.
+- **Verified rather than assumed**, the same way sqlparse was: extraction over
+  six PDF/ICS shapes (native, multipage, outlined, scanned, a two-event
+  calendar, an empty one) is **byte-identical** across the bump, and the 99
+  extraction tests pass. The script is not kept — it builds its fixtures with
+  reportlab/PIL exactly as `test_extractor.py` does, which is where a
+  permanent regression gate for this already lives.
+- **`transformers` (Dependabot #70, HIGH) is deliberately NOT bumped.** It
+  arrives via docling under the `[extraction]` extra, `grep -rn transformers
+  src/` is empty, and the advisory is a path traversal in `save_pretrained` —
+  a *write* path localmail never calls. `uv lock --upgrade-package
+  transformers` moves it 5.8.1 → 5.15.1 for the cost of one `safetensors`
+  bump, so it is cheap; it is a seven-minor jump in the package docling runs
+  its layout models through, which is why it is the operator's call and not a
+  side effect of a security sweep. **Expect the Dependabot count to read 1,
+  not 0, until that decision is made.**
 
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
@@ -4298,12 +4337,65 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     localmail` to the `pgvector` image, making that role the bootstrap
     superuser, so the constraint does not bind there. Measure before relying
     on it either way.
-  - **The guard covers pytest, not the database (#337, open).** The six
-    standalone harnesses under `tests/acceptance/` truncate the same tables
-    against the same `LOCALMAIL_TEST_DSN` and take no lock, so running one
-    beside a suite reproduces exactly this corruption, in both directions and
-    with the same silence. README states the limitation; the fix is for each
-    harness entry point to call `acquire_exclusive` and hold it for the run.
+  - **The guard covers the database now, not just pytest (#337, fixed).** The
+    **five** standalone harnesses under `tests/acceptance/` truncate the same
+    tables against the same `LOCALMAIL_TEST_DSN` and took no lock, so running
+    one beside a suite reproduced exactly this corruption, in both directions
+    and with the same silence. (This entry and the #337 issue both said
+    **six**; `browse_explain_lib.py` touches the database but is imported by
+    `run_browse_explain.py`, never started, so its work already runs inside
+    that harness's lock. The Layout section's own list has always named five.)
+    Each entry point now wraps its database work — from `apply_migrations`
+    onward — in
+    [tests/acceptance/_harness_lock.py](tests/acceptance/_harness_lock.py)`::harness_db_lock`.
+    - **The helper and the rule that requires it live in one module**, the
+      `blob_temps.py` minting-beside-matching call, and here the reason is
+      sharper than usual: **nothing collects these files.** They match no
+      `python_files` pattern, so no conftest fixture can arm them and the
+      call has to be written into each `main()` by hand — which is precisely
+      the kind of obligation that is forgotten. `harness_lock_error` walks
+      each entry point's **AST** and reports any `DB_ENTRY_CALLS` member
+      (`apply_migrations`, `open_pool`, `connect`) sitting outside a
+      `with harness_db_lock(...)`. Entry points are enumerated from the
+      filesystem, so a sixth harness is in scope the day it lands.
+    - **"Somewhere in main" is not the rule; "before the first touch" is.**
+      A harness that migrates and *then* locks has taken no lock at all — the
+      truncate has already run — so the rule is about position, not presence.
+    - **The AST, not the text**, for the reason `_mentions_version_option`
+      gives: every harness names the helper in prose while explaining why it
+      calls it, and a substring scan reads that as compliance.
+    - **A contended database announces one line and exits `BUSY_EXIT_CODE`
+      (3).** `SystemExit("some message")` prints the string and exits **1** —
+      which is also what an eval returns when it fails its own acceptance
+      gates, so a shell loop could not tell the two apart. It shipped that way
+      first and the end-to-end test is what caught it; the unit test's
+      `code != 0` had passed *vacuously*, because `code` was the message
+      string. Message and status are separate channels on purpose.
+    - **The end-to-end pin runs a real harness subprocess against the database
+      this very pytest session is holding**, requesting `db_session_lock` so
+      the precondition is real rather than assumed. Every other test injects a
+      fake `acquire`, so this is the only one proving the wiring — that the
+      import resolves on the harness's own `sys.path`, that `--dsn` reaches
+      the helper, and that the refusal survives as a process exit code. It
+      drives `run_browse_explain.py` because that harness has **no required
+      argparse arguments**: argparse runs *before* the lock, so a harness
+      needing `--queries` would exit 2 first and pass the test for the wrong
+      reason.
+    - **`busy_message`/`waiting_message` say "test run", not "pytest
+      session".** The holder may now be a harness, and naming pytest sends an
+      operator hunting a process that need not exist — a confident, wrong
+      diagnosis, which is the one thing those strings exist to avoid.
+    - **Two mutations survived the first battery and both were test defects,
+      not code defects.** `_is_lock_call` forced to `True` left every test
+      green, because the only non-compliant fixture had no `with` at all and
+      never reached it; and the assertion that caught the replacement,
+      `"apply_migrations" in problem`, was satisfied by the *remedy* sentence
+      ("from apply_migrations onward") rather than by the uncovered-call list
+      — the `__version__ in output` trap, one module over. The assertions
+      anchor on `"session lock: apply_migrations"` now, and there are
+      fixtures for a wrong context manager of **both** AST shapes
+      (`psycopg.connect(...)` is an `Attribute`, `ExitStack()` a `Name`;
+      each branch survived until its own fixture existed).
   - **The leaked-pool warning that ran alongside this is #321, now fixed** —
     see the next entry. It was never the cause of the corruption above; the
     instrumented runs showed zero contention.

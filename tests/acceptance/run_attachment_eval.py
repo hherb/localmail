@@ -50,6 +50,7 @@ from localmail.search.extractor import _try_import_docling
 from localmail.search.searcher import Searcher
 
 from tests._attachment_corpus import build_corpus
+from tests.acceptance._harness_lock import harness_db_lock
 
 
 def _reciprocal_rank(ordered: list[str], relevant: set[str]) -> float:
@@ -240,99 +241,100 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    print(f"Applying migrations to {dsn!r} …", file=sys.stderr)
-    apply_migrations(dsn)
+    with harness_db_lock(dsn):
+        print(f"Applying migrations to {dsn!r} …", file=sys.stderr)
+        apply_migrations(dsn)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        attachments_root = Path(tmpdir)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            attachments_root = Path(tmpdir)
 
-        print("Seeding corpus …", file=sys.stderr)
-        with psycopg.connect(dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "TRUNCATE accounts, mailboxes, messages, message_labels,"
-                    " attachment_blobs, failed_messages, message_chunks,"
-                    " failed_embeddings, embedding_models, failed_chunkings,"
-                    " attachment_text, attachment_chunks, failed_extractions"
-                    " RESTART IDENTITY CASCADE"
+            print("Seeding corpus …", file=sys.stderr)
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "TRUNCATE accounts, mailboxes, messages, message_labels,"
+                        " attachment_blobs, failed_messages, message_chunks,"
+                        " failed_embeddings, embedding_models, failed_chunkings,"
+                        " attachment_text, attachment_chunks, failed_extractions"
+                        " RESTART IDENTITY CASCADE"
+                    )
+                conn.commit()
+                seeded = build_corpus(conn, attachments_root=attachments_root)
+
+                cfg = SearchConfig()
+                backend = FastEmbedBackend(cfg)
+
+                print("Running extract_worker …", file=sys.stderr)
+                passes = 0
+                while True:
+                    wrote = run_extract_worker_once(conn, cfg)
+                    passes += 1
+                    if wrote == 0:
+                        break
+                print(f"  extract_worker: {passes} pass(es)", file=sys.stderr)
+
+                print("Running embed_worker …", file=sys.stderr)
+                passes = 0
+                while True:
+                    sweep = run_embed_worker_once(conn, cfg, backend)
+                    passes += 1
+                    if not sweep.made_progress:
+                        break
+                print(f"  embed_worker: {passes} pass(es)", file=sys.stderr)
+
+                # Gate A.
+                non_sentinel, total, rate, details = _gate_a(
+                    conn, seeded, docling_available
                 )
-            conn.commit()
-            seeded = build_corpus(conn, attachments_root=attachments_root)
 
-            cfg = SearchConfig()
-            backend = FastEmbedBackend(cfg)
-
-            print("Running extract_worker …", file=sys.stderr)
-            passes = 0
-            while True:
-                wrote = run_extract_worker_once(conn, cfg)
-                passes += 1
-                if wrote == 0:
-                    break
-            print(f"  extract_worker: {passes} pass(es)", file=sys.stderr)
-
-            print("Running embed_worker …", file=sys.stderr)
-            passes = 0
-            while True:
-                sweep = run_embed_worker_once(conn, cfg, backend)
-                passes += 1
-                if not sweep.made_progress:
-                    break
-            print(f"  embed_worker: {passes} pass(es)", file=sys.stderr)
-
-            # Gate A.
-            non_sentinel, total, rate, details = _gate_a(
-                conn, seeded, docling_available
+            print(
+                f"\nGate A (extraction success): {non_sentinel}/{total} = {rate:.3f}"
+                f"  (target >= 0.95)"
             )
+            print(f"\n{'fixture':<32} {'extractor'}")
+            print("-" * 55)
+            for subject, extractor in details:
+                print(f"  {subject:<30} {extractor or '(none)'}")
+            gate_a_pass = rate >= 0.95
 
-        print(
-            f"\nGate A (extraction success): {non_sentinel}/{total} = {rate:.3f}"
-            f"  (target >= 0.95)"
-        )
-        print(f"\n{'fixture':<32} {'extractor'}")
-        print("-" * 55)
-        for subject, extractor in details:
-            print(f"  {subject:<30} {extractor or '(none)'}")
-        gate_a_pass = rate >= 0.95
-
-        # Gate B.
-        pool = open_pool(dsn)
-        try:
-            per_lang_recall, per_lang_mrr = _gate_b(
-                pool, cfg, backend, args.queries, args.k
-            )
-        finally:
-            pool.close()
-
-        print(f"\nGate B (retrieval quality, k={args.k}):")
-        print(f"{'lang':<6} {'#q':>4} {'recall@K':>10} {'MRR@K':>8}  status")
-        print("-" * 40)
-        gate_b_failures: list[str] = []
-        for lang in sorted(per_lang_recall):
-            recalls = per_lang_recall[lang]
-            mrrs = per_lang_mrr[lang]
-            r = statistics.fmean(recalls)
-            m = statistics.fmean(mrrs)
-            ok = r >= 0.80 and m >= 0.50
-            status = "PASS" if ok else "FAIL"
-            if not ok:
-                gate_b_failures.append(f"{lang}: recall={r:.3f}, MRR={m:.3f}")
-            print(f"{lang:<6} {len(recalls):>4} {r:>10.3f} {m:>8.3f}  {status}")
-
-        all_pass = gate_a_pass and not gate_b_failures
-        if not all_pass:
-            print("\nFAILURES:", file=sys.stderr)
-            if not gate_a_pass:
-                print(
-                    f"  - Gate A: extraction rate {rate:.3f} < 0.95",
-                    file=sys.stderr,
+            # Gate B.
+            pool = open_pool(dsn)
+            try:
+                per_lang_recall, per_lang_mrr = _gate_b(
+                    pool, cfg, backend, args.queries, args.k
                 )
-            for failure in gate_b_failures:
-                print(f"  - Gate B {failure}", file=sys.stderr)
-            return 1
+            finally:
+                pool.close()
 
-        print("\nAll Phase 2 acceptance gates PASS.")
-        return 0
+            print(f"\nGate B (retrieval quality, k={args.k}):")
+            print(f"{'lang':<6} {'#q':>4} {'recall@K':>10} {'MRR@K':>8}  status")
+            print("-" * 40)
+            gate_b_failures: list[str] = []
+            for lang in sorted(per_lang_recall):
+                recalls = per_lang_recall[lang]
+                mrrs = per_lang_mrr[lang]
+                r = statistics.fmean(recalls)
+                m = statistics.fmean(mrrs)
+                ok = r >= 0.80 and m >= 0.50
+                status = "PASS" if ok else "FAIL"
+                if not ok:
+                    gate_b_failures.append(f"{lang}: recall={r:.3f}, MRR={m:.3f}")
+                print(f"{lang:<6} {len(recalls):>4} {r:>10.3f} {m:>8.3f}  {status}")
+
+            all_pass = gate_a_pass and not gate_b_failures
+            if not all_pass:
+                print("\nFAILURES:", file=sys.stderr)
+                if not gate_a_pass:
+                    print(
+                        f"  - Gate A: extraction rate {rate:.3f} < 0.95",
+                        file=sys.stderr,
+                    )
+                for failure in gate_b_failures:
+                    print(f"  - Gate B {failure}", file=sys.stderr)
+                return 1
+
+            print("\nAll Phase 2 acceptance gates PASS.")
+            return 0
 
 
 if __name__ == "__main__":

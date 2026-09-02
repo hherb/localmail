@@ -46,6 +46,7 @@ from localmail.search.lang_detect import make_detector, run_lang_detect_pass
 from localmail.search.searcher import Searcher
 
 from tests._multilingual_corpus import build_corpus
+from tests.acceptance._harness_lock import harness_db_lock
 
 # Phase-1 acceptance gates: recall@K >= target[0], MRR@K >= target[1].
 # Norwegian is reported but not gated (vocabulary frugality makes it OK for now).
@@ -90,108 +91,109 @@ def main() -> int:
         or "postgresql://localmail:local%40%40mail@localhost:5532/localmail_test"
     )
 
-    print(f"Applying migrations to {dsn!r} …", file=sys.stderr)
-    apply_migrations(dsn)
+    with harness_db_lock(dsn):
+        print(f"Applying migrations to {dsn!r} …", file=sys.stderr)
+        apply_migrations(dsn)
 
-    print("Seeding corpus …", file=sys.stderr)
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "TRUNCATE accounts, mailboxes, messages, message_labels,"
-                " attachment_blobs, failed_messages, message_chunks,"
-                " failed_embeddings, embedding_models RESTART IDENTITY CASCADE"
-            )
-        conn.commit()
-        seeded = build_corpus(conn)
-
-        cfg = SearchConfig()
-        backend = FastEmbedBackend(cfg)
-        lang_detector = make_detector(cfg)
-        print("Running embed worker …", file=sys.stderr)
-        passes = 0
-        while True:
-            sweep = run_embed_worker_once(
-                conn, cfg, backend, lang_detector=lang_detector,
-            )
-            passes += 1
-            if not sweep.made_progress:
-                break
-        print(f"  embed worker: {passes} pass(es)", file=sys.stderr)
-
-        if lang_detector is not None:
-            print("Running language detection pass …", file=sys.stderr)
-            detected = 0
-            while True:
-                n = run_lang_detect_pass(conn, cfg, lang_detector)
-                if n == 0:
-                    break
-                detected += n
+        print("Seeding corpus …", file=sys.stderr)
+        with psycopg.connect(dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT body_lang, count(*) FROM messages"
-                            " GROUP BY body_lang ORDER BY 2 DESC")
-                breakdown = cur.fetchall()
-            print(f"  lang detect: {detected} message(s), breakdown {breakdown}",
-                  file=sys.stderr)
-
-    pool = open_pool(dsn)
-    try:
-        searcher = Searcher(
-            pool=pool,
-            cfg=cfg,
-            embeddings=backend,
-            reranker=None,   # Phase-1 gate is un-reranked baseline
-            rewriter=None,
-        )
-
-        suite = json.loads(args.queries.read_text())
-        per_lang_recall: dict[str, list[float]] = defaultdict(list)
-        per_lang_mrr: dict[str, list[float]] = defaultdict(list)
-
-        for q in suite["queries"]:
-            page = searcher.search(
-                q["query"],
-                allowed_account_ids=None,
-                page_size=args.k,
-                candidates_per_arm=args.k * 3,
-                rerank_pool_size=args.k * 3,
-            )
-            ranked = [r.subject for r in page.results]
-            relevant = set(q["relevant_subjects"])
-            hits = len([s for s in ranked if s in relevant])
-            recall = hits / max(1, len(relevant))
-            per_lang_recall[q["lang"]].append(min(1.0, recall))
-            per_lang_mrr[q["lang"]].append(_reciprocal_rank(ranked, relevant))
-    finally:
-        pool.close()
-
-    failures: list[str] = []
-    print(f"\n{'lang':<6} {'#q':>4} {'recall@K':>10} {'MRR@K':>8}  status")
-    print("-" * 40)
-    for lang in sorted({*per_lang_recall, *per_lang_mrr}):
-        recalls = per_lang_recall[lang]
-        mrrs = per_lang_mrr[lang]
-        r = statistics.fmean(recalls)
-        m = statistics.fmean(mrrs)
-        target = TARGETS.get(lang)
-        status = "—"
-        if target:
-            ok = r >= target[0] and m >= target[1]
-            status = "PASS" if ok else "FAIL"
-            if not ok:
-                failures.append(
-                    f"{lang}: recall={r:.3f} (need {target[0]}),"
-                    f" MRR={m:.3f} (need {target[1]})"
+                cur.execute(
+                    "TRUNCATE accounts, mailboxes, messages, message_labels,"
+                    " attachment_blobs, failed_messages, message_chunks,"
+                    " failed_embeddings, embedding_models RESTART IDENTITY CASCADE"
                 )
-        print(f"{lang:<6} {len(recalls):>4} {r:>10.3f} {m:>8.3f}  {status}")
+            conn.commit()
+            seeded = build_corpus(conn)
 
-    if failures:
-        print("\nFAILURES (Phase 1 acceptance gates not met):", file=sys.stderr)
-        for f in failures:
-            print(f"  - {f}", file=sys.stderr)
-        return 1
+            cfg = SearchConfig()
+            backend = FastEmbedBackend(cfg)
+            lang_detector = make_detector(cfg)
+            print("Running embed worker …", file=sys.stderr)
+            passes = 0
+            while True:
+                sweep = run_embed_worker_once(
+                    conn, cfg, backend, lang_detector=lang_detector,
+                )
+                passes += 1
+                if not sweep.made_progress:
+                    break
+            print(f"  embed worker: {passes} pass(es)", file=sys.stderr)
 
-    print("\nAll gated languages PASS Phase 1 acceptance.")
-    return 0
+            if lang_detector is not None:
+                print("Running language detection pass …", file=sys.stderr)
+                detected = 0
+                while True:
+                    n = run_lang_detect_pass(conn, cfg, lang_detector)
+                    if n == 0:
+                        break
+                    detected += n
+                with conn.cursor() as cur:
+                    cur.execute("SELECT body_lang, count(*) FROM messages"
+                                " GROUP BY body_lang ORDER BY 2 DESC")
+                    breakdown = cur.fetchall()
+                print(f"  lang detect: {detected} message(s), breakdown {breakdown}",
+                      file=sys.stderr)
+
+        pool = open_pool(dsn)
+        try:
+            searcher = Searcher(
+                pool=pool,
+                cfg=cfg,
+                embeddings=backend,
+                reranker=None,   # Phase-1 gate is un-reranked baseline
+                rewriter=None,
+            )
+
+            suite = json.loads(args.queries.read_text())
+            per_lang_recall: dict[str, list[float]] = defaultdict(list)
+            per_lang_mrr: dict[str, list[float]] = defaultdict(list)
+
+            for q in suite["queries"]:
+                page = searcher.search(
+                    q["query"],
+                    allowed_account_ids=None,
+                    page_size=args.k,
+                    candidates_per_arm=args.k * 3,
+                    rerank_pool_size=args.k * 3,
+                )
+                ranked = [r.subject for r in page.results]
+                relevant = set(q["relevant_subjects"])
+                hits = len([s for s in ranked if s in relevant])
+                recall = hits / max(1, len(relevant))
+                per_lang_recall[q["lang"]].append(min(1.0, recall))
+                per_lang_mrr[q["lang"]].append(_reciprocal_rank(ranked, relevant))
+        finally:
+            pool.close()
+
+        failures: list[str] = []
+        print(f"\n{'lang':<6} {'#q':>4} {'recall@K':>10} {'MRR@K':>8}  status")
+        print("-" * 40)
+        for lang in sorted({*per_lang_recall, *per_lang_mrr}):
+            recalls = per_lang_recall[lang]
+            mrrs = per_lang_mrr[lang]
+            r = statistics.fmean(recalls)
+            m = statistics.fmean(mrrs)
+            target = TARGETS.get(lang)
+            status = "—"
+            if target:
+                ok = r >= target[0] and m >= target[1]
+                status = "PASS" if ok else "FAIL"
+                if not ok:
+                    failures.append(
+                        f"{lang}: recall={r:.3f} (need {target[0]}),"
+                        f" MRR={m:.3f} (need {target[1]})"
+                    )
+            print(f"{lang:<6} {len(recalls):>4} {r:>10.3f} {m:>8.3f}  {status}")
+
+        if failures:
+            print("\nFAILURES (Phase 1 acceptance gates not met):", file=sys.stderr)
+            for f in failures:
+                print(f"  - {f}", file=sys.stderr)
+            return 1
+
+        print("\nAll gated languages PASS Phase 1 acceptance.")
+        return 0
 
 
 if __name__ == "__main__":

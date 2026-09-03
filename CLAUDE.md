@@ -2163,6 +2163,7 @@ extracting XForm objects, and algorithmic complexity in icalendar's
   extraction tests pass. The script is not kept — it builds its fixtures with
   reportlab/PIL exactly as `test_extractor.py` does, which is where a
   permanent regression gate for this already lives.
+
 **`transformers>=5.10.0` is the third security floor, and the one that is
 *not* on an attacker-controlled path** (Dependabot #70, HIGH, CVE-2026-9856,
 range `< 5.10.0`). It arrives via docling under the `[extraction]` extra,
@@ -4623,12 +4624,15 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     buries the sentence that says what to do. The *fixture's* use of
     `missing_seam_error` is pinned, not just the pure rule: replacing the
     report with a `continue` used to leave the whole suite green.
-  - **`filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]`
+  - **`error::pytest.PytestUnraisableExceptionWarning` in `filterwarnings`
     is the regression gate.** Without it the only evidence this fixture still
     works was a human comparing warning counts between runs — and the leak is
     invisible on macOS while reported on Linux/3.13, so nobody would compare
     on the platform that shows it. The test it fails is arbitrary (the GC
     picks it); the message, `cannot join current thread`, is the diagnosis.
+    It is one of **two** entries now — `PytestUnhandledThreadExceptionWarning`
+    joined it for #299's worker-survival channel; the two are independent
+    gates over different thread failure modes, so neither subsumes the other.
   - **`unclosed` filters before closing** so the count `close_pools` returns
     is the number of pools that genuinely leaked; `close()` is idempotent, so
     the filter is about the claim, not about safety.
@@ -4693,6 +4697,29 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     *correctly* returns 202 — which reads as a broken guard. Asserting the flag
     reports the window instead of a verdict: the rule that a test whose subject
     is a refusal must pin *why* it was refused.
+    - **The flag must be read BEFORE the verdict it explains**, which review
+      caught the unit pin not doing: it sat after a `pytest.raises`, so an
+      expired window aborted on `DID NOT RAISE` and the explanatory assertion
+      was never reached — the misleading message the flag exists to replace,
+      in the pin that introduced the flag. Both consumers now observe first
+      (capture the state and the refusal), then read the flag, then judge.
+  - **The settle assertion stays inside the `try`.** Both rewritten pins first
+    moved it after the `finally`, where `sup.stop()` sets STOPPED from the main
+    thread whatever the lifecycle thread is doing — so the poll passed with the
+    accepted op wedged **forever** (measured), satisfied by the test's own
+    teardown. On `main` it had been inside the `try` and was genuine. The pin
+    releases the gate itself and watches the *accepted* stop settle, keeping the
+    teardown as belt-and-braces.
+  - **`_lifecycle_thread` is read off the supervisor, never `threading.enumerate()`.**
+    A process-wide scan asserting "exactly one" thread by production name is a
+    cross-test coupling — those threads are daemons and no `stop()` joins them —
+    so the file that exists to remove wall-clock margins would have rested on
+    one. `_spawn_lifecycle` assigns the attribute under `_lock` before
+    `Thread.start()`, so it is set the moment `request_stop` returns.
+  - **The double is single-use, and says so.** Both events latch and `release()`
+    is permanent, so every signal means "at some point, ever". A second park on
+    the same instance would return instantly from the previous cycle's signal
+    and put the busy-guard assertion back on the clock with nothing failing.
   - **Two mutation results are recorded rather than smoothed over.** The
     *unit* busy-guard pin (`test_daemon_supervisor.py`) **survives** removing
     the gate — without it the window is milliseconds against a microsecond
@@ -4709,6 +4736,16 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     is registered, and `threading.enumerate()` covers the active *and* limbo
     tables — so they waited for something that had already happened. Do not
     add one back; `_live_thread_names()` carries the reason.
+    - **They were also proving survival, and that half had to be replaced.**
+      Registration precedes the target running a line, so a name lookup passes
+      for a worker that raises microseconds later: mutating `run_extract_worker`
+      to raise on entry was caught **9 runs in 10** with the sleeps and **0 in
+      10** without. The replacement is not a longer sleep but
+      `filterwarnings = error::pytest.PytestUnhandledThreadExceptionWarning`
+      (`pyproject.toml`), which fails **3 of the 4** tests on that mutation with
+      no timer at all — deterministic where the sleep was probabilistic. An
+      `is_alive()` at the same point would **not** work: it is True for a thread
+      that has not yet been scheduled, i.e. a pin weaker than it reads.
 - The `memory_keyring` fixture (autouse) intercepts every `keyring` call so
   real Keychain entries aren't written/read during tests.
 - **If exactly the three `LISTEN`/`NOTIFY` tests fail** with

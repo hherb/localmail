@@ -206,8 +206,10 @@ def test_external_stub_refuses_lifecycle(method: str) -> None:
 
 # --- async lifecycle (request_*) -----------------------------------------
 
-# A child that ignores SIGTERM so stop() blocks the full grace window,
-# giving a deterministic interval to observe STOPPING / hit the busy-guard.
+# A child that ignores SIGTERM so stop() blocks the full grace window, giving a
+# deterministic interval in which STOPPING is observable. The busy-guard pin used
+# to lean on this too and no longer does — it holds its own window open now, see
+# `tests/_gated_supervisor.py`.
 _DEAF_SLEEPER = [
     sys.executable, "-c",
     "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
@@ -261,14 +263,26 @@ def test_busy_guard_rejects_second_lifecycle_op() -> None:
     try:
         s.request_stop()
         assert s.stop_entered.wait(GATE_TIMEOUT_S), "stop body never ran"
-        assert s.status().state == SupervisorState.STOPPING
-        with pytest.raises(SupervisorUnavailable):
+        # Observe first, judge second. `pytest.raises` would abort on the verdict
+        # and never reach the flag below, so an expired window would be reported
+        # as "DID NOT RAISE" — the misleading message the flag exists to replace.
+        state = s.status().state
+        refused: SupervisorUnavailable | None = None
+        try:
             s.request_stop()
+        except SupervisorUnavailable as exc:
+            refused = exc
         assert not s.gate_timed_out, "the gate expired; the window was not open"
+        assert state == SupervisorState.STOPPING
+        assert refused is not None, "the busy-guard admitted a second request"
+        # The refused request must not have wedged the accepted one — asserted
+        # inside the `try`, because the teardown `stop()` below sets STOPPED from
+        # the main thread and would satisfy this poll on its own.
+        s.release()
+        _wait_state(s, SupervisorState.STOPPED)
     finally:
         s.release()
         s.stop()
-    _wait_state(s, SupervisorState.STOPPED)
 
 
 def test_request_start_idempotent_when_running() -> None:

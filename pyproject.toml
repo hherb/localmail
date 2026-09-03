@@ -127,7 +127,18 @@ markers = [
 # CI red. The test it fails is arbitrary; the message ("cannot join current
 # thread") is the diagnosis. The two known `websockets` deprecations (#25) are
 # DeprecationWarnings and are unaffected.
-filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+#
+# A worker thread that dies on startup is otherwise invisible: the daemon tests
+# assert on `threading.enumerate()`, and `Thread.start()` returns once the thread
+# is *registered* — before its target has run a line — so a name lookup passes
+# for a thread that raises microseconds later (measured: listed 50/50). The
+# `time.sleep()` calls those tests used to carry caught it only incidentally and
+# only probabilistically; escalating the exception itself is deterministic and
+# needs no timer. Same reasoning as the entry above, one thread-channel over.
+filterwarnings = [
+    "error::pytest.PytestUnraisableExceptionWarning",
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+]
 
 [tool.mypy]
 python_executable = ".venv/bin/python"

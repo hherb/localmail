@@ -207,11 +207,16 @@ def test_second_lifecycle_op_while_busy_is_409(admin_client, app) -> None:
         )
         assert not sup.gate_timed_out, "the gate expired; the window was not open"
         assert second.status_code == 409, second.text
+        # The refused request must not have wedged the accepted one. Assert that
+        # HERE, not after the `finally`: the teardown `stop()` sets STOPPED from
+        # the main thread whatever the lifecycle thread is doing, so a poll
+        # placed after it passes even with the accepted op wedged forever
+        # (measured) — a pin satisfied by its own teardown.
+        sup.release()
+        assert _poll_state(admin_client, SupervisorState.STOPPED)
     finally:
         sup.release()
         sup.stop()
-    # The refused request must not have wedged the accepted one.
-    assert _poll_state(admin_client, SupervisorState.STOPPED)
 
 
 def test_build_daemon_view_matches_get_route_shape(app, db_conn) -> None:

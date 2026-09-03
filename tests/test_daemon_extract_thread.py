@@ -33,6 +33,22 @@ def _live_thread_names() -> set[str]:
     the active and limbo tables. So a fixed ``time.sleep()`` here waits for
     something that has already happened, and buys nothing but a race the test
     can lose on a loaded runner (#299).
+
+    **What this proves and what it does not.** Registration happens *before* the
+    target runs a line, so a name found here says the thread was created — never
+    that it survived. The deleted sleeps were incidentally proving survival too,
+    and only probabilistically (a worker raising 50 ms in was caught 9 runs in
+    10). That signal is not lost, it is relocated and made deterministic: a
+    worker that dies of an exception now fails the test through
+    ``filterwarnings = error::pytest.PytestUnhandledThreadExceptionWarning``
+    (`pyproject.toml`), which needs no timer at all. Do not reintroduce a sleep
+    to "check it is still alive" — an ``is_alive()`` here would be True for a
+    thread that has not yet been scheduled, i.e. a pin weaker than it reads.
+
+    The post-stop uses answer the opposite question, and their guarantee is
+    ``Daemon.join()`` having actually joined; ``join`` applies its timeout per
+    thread and does not report a timeout, so a stalled worker surfaces here as
+    the name still being present.
     """
     return {t.name for t in threading.enumerate()}
 

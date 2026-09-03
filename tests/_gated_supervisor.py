@@ -15,16 +15,22 @@ closed by #336), but a pin whose correctness rests on winning a timer is one a
 loaded runner eventually breaks and a future session then learns to ignore.
 
 Parking ``stop()`` on an event makes the window the test's to open and close:
-the second request is issued while the first is *provably* still in flight,
-with no timer anywhere in the assertion path.
+the second request is issued while the first is *provably* still in flight. The
+only remaining timer is the 10 s ``GATE_TIMEOUT_S`` backstop, and its expiry is
+reported (``gate_timed_out``) rather than silently answering the assertion.
 
-Only ``stop()`` is overridden. ``request_stop`` and the guard it consults are
-the production ones, which is what keeps this a test double rather than a
-reimplementation of the thing under test — and the guard reads the thread, not
-what the thread is running, so gating the body changes nothing it can observe.
-The real SIGTERM-then-SIGKILL path keeps its own coverage in
-``test_daemon_supervisor.py`` and ``test_daemon_control_socket.py``, which drive
-a SIGTERM-deaf child precisely to exercise the grace wait.
+``stop()`` is the only *behaviour* overridden (``__init__`` merely adds the two
+events). ``request_stop`` and the guard it consults are the production ones,
+which is what keeps this a test double rather than a reimplementation of the
+thing under test — and the guard reads the thread, not what the thread is
+running, so gating the body changes nothing it can observe.
+
+The kill-vs-grace *decision* is asserted in ``test_daemon_supervisor_lifecycle.py``
+by ``test_a_child_that_exits_within_the_margin_is_not_killed`` (exit 0, not -9,
+proves no SIGKILL). The SIGTERM-deaf children still in
+``test_daemon_supervisor.py`` and ``test_daemon_control_socket.py`` execute the
+``TimeoutExpired -> proc.kill()`` branch but assert nothing about it — they hold
+a window open to observe STOPPING, which is the shape this module replaces.
 
 The parked thread holds no lock: ``stop()`` waits *before* delegating to
 ``super().stop()``, which is the call that takes ``_lock``. That is load-bearing
@@ -56,6 +62,15 @@ class GatedStopSupervisor(DaemonSupervisor):
     proves the lifecycle thread is *inside* ``stop()``; ``stop_released`` is
     what lets it leave. Between the two the thread cannot finish, so the
     busy-guard's answer is a property of the test, not of the clock.
+
+    **One gate per instance — do not reuse one across two stop cycles.** Both
+    events latch and ``release()`` is permanent, so every signal here means "at
+    some point, ever", not "right now". A caller that parked once and parks
+    again gets a ``stop_entered.wait()`` that returns instantly on the *previous*
+    cycle's signal, and its busy-guard assertion is back on the wall clock with
+    nothing failing — #299 reintroduced one caller later. Build a fresh
+    supervisor per cycle; if a second cycle is ever genuinely needed, count
+    entries rather than latching a flag.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -69,8 +84,11 @@ class GatedStopSupervisor(DaemonSupervisor):
         #: the lifecycle thread finish, and the busy-guard would then correctly
         #: admit the second request — a 202 that looks like a broken guard.
         #: A caller that asserts on this flag is told the window closed, not
-        #: that the guard is broken. Same rule as #299's own lesson and risk 31:
-        #: a test whose subject is a refusal must pin *why* it was refused.
+        #: that the guard is broken — provided it reads the flag BEFORE the
+        #: verdict the flag explains, since the verdict aborts the test first.
+        #: Same rule as #299's own lesson: a test whose subject is a refusal
+        #: must pin *why* it was refused. (No risk number: `NEXT_SESSION.md` is
+        #: rewritten every session, so its numbering rots with nothing failing.)
         self.gate_timed_out = False
 
     def stop(self) -> None:

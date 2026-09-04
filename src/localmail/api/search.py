@@ -199,11 +199,20 @@ def run_search(
     ``searcher.config.candidates_per_arm_max``.
 
     ``sort`` and ``sort_order`` are ``None`` when the caller stated none.
-    With no cursor that means the module defaults; with one, the cursor
-    decides both — see ``search_cursor.resolve_cursor_plan``, which rejects
-    a stated value the cursor cannot serve instead of dropping either.
-    ``sort_order="asc"`` pairs only with ``sort="date"``; asking for it on
-    the rank path is a 400, not a quietly ignored field.
+    With a cursor, the cursor decides both — see
+    ``search_cursor.resolve_cursor_plan``, which rejects a stated value the
+    cursor cannot serve instead of dropping either. Without one,
+    ``sort_order`` falls to its module default and ``sort`` is resolved
+    against the **query** (#324): a query with no free text — blank, or only
+    filter operators — has nothing for the hybrid pool to rank, so it
+    resolves to ``date``, and a *stated* ``"rank"`` for one is a 400 rather
+    than a silent drop.
+
+    ``sort_order="asc"`` pairs only with a resolved ``sort="date"``; asking
+    for it on the rank path is a 400, not a quietly ignored field. Because
+    the sort is resolved from the query, ``sort_order="asc"`` alone on a
+    textless query is *honoured* — it used to be refused for naming a rank
+    path such a request never takes.
 
     ``smart`` requests an LLM query rewrite on page 1 (cursor is None) when the
     searcher has a rewriter configured. The response carries ``rewrite_status``

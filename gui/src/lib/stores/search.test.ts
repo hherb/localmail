@@ -344,3 +344,108 @@ describe("search.loadMore", () => {
     expect(search.snapshot.results.map((r) => r.message_id)).toEqual(["9"]);
   });
 });
+
+/**
+ * #324 — the sort the store puts on the wire.
+ *
+ * `statedSort` itself is unit-tested in `../search_paging.test.ts`; these pin
+ * what the *store* sends, which a rule test cannot see. The case that matters
+ * is the one the server refuses: a query it cannot rank. It decides that after
+ * lifting filter operators out, so `from:alice` — which `SearchBar`'s own
+ * placeholder advertises — is textless server-side even though the box is not
+ * empty. Stating the store's default `rank` for it would turn an advertised
+ * search into an error banner, so `rank` is never stated at all.
+ */
+describe("search store: the sort it states (#324)", () => {
+  beforeEach(() => {
+    search.reset();
+    vi.restoreAllMocks();
+  });
+
+  const empty = {
+    results: [], next_cursor: null, total_estimate: null, took_ms: 1,
+  };
+
+  it("omits the default rank sort when the box is empty but a filter is set", async () => {
+    // "Everything from this account" — a shipped flow the refusal must not
+    // break. The server resolves an unstated sort to the date walk, which is
+    // exactly what this flow received before #324.
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch").mockResolvedValue(empty);
+    search.setFilters({ ...emptyFilters(), from: "anna" });
+    await search.submit();
+    expect(spy.mock.calls[0][0].sort).toBeUndefined();
+  });
+
+  it("omits rank for a box holding only filter operators, which the server cannot rank", async () => {
+    // The regression a `query.trim() !== ""` rule would reintroduce: this is
+    // textless server-side, so stating `rank` is a 400 and the store would
+    // clear its results and show a banner for a search the placeholder
+    // advertises.
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch").mockResolvedValue(empty);
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(spy.mock.calls[0][0].sort).toBeUndefined();
+  });
+
+  it("omits rank for an ordinary text query too, where it is merely redundant", async () => {
+    // Equivalent, not lossy: an unstated sort resolves server-side to `rank`
+    // whenever there is text to rank.
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch").mockResolvedValue(empty);
+    search.setQuery("invoice");
+    await search.submit();
+    expect(spy.mock.calls[0][0].sort).toBeUndefined();
+  });
+
+  it("still states date, so the sort selector is not inert", async () => {
+    // The positive control: a store that dropped every sort would pass every
+    // assertion above while silently retiring the Date option.
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch").mockResolvedValue(empty);
+    search.setSort("date");
+    search.setQuery("invoice");
+    await search.submit();
+    expect(spy.mock.calls[0][0].sort).toBe("date");
+  });
+
+  it("omits it on the 409 recovery re-run too, which is a fresh request", async () => {
+    // The recovery has no cursor to inherit an ordering from, so it is a
+    // second place a sort could reach the wire — and it fires exactly when the
+    // user is already looking at a failure.
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch")
+      .mockResolvedValueOnce({
+        results: [], next_cursor: "K|abc", total_estimate: null, took_ms: 1,
+      })
+      .mockRejectedValueOnce(new Error(
+        '{"type":"/problems/search-cursor-expired"}',
+      ))
+      .mockResolvedValueOnce(empty);
+    search.setFilters({ ...emptyFilters(), from: "anna" });
+    await search.submit();
+    await search.loadMore();
+    expect(spy.mock.calls[2][0].cursor).toBe(null);
+    expect(spy.mock.calls[2][0].sort).toBeUndefined();
+  });
+
+  it("still states date on the 409 recovery, which is what keeps it a date search", async () => {
+    // Mutation-relevant: a recovery that dropped the sort would silently flip
+    // a `sort=date` search back to the server's default ordering.
+    const tauri = await import("../tauri");
+    const spy = vi.spyOn(tauri, "runSearch")
+      .mockResolvedValueOnce({
+        results: [], next_cursor: "K|abc", total_estimate: null, took_ms: 1,
+      })
+      .mockRejectedValueOnce(new Error(
+        '{"type":"/problems/search-cursor-expired"}',
+      ))
+      .mockResolvedValueOnce(empty);
+    search.setSort("date");
+    search.setQuery("invoice");
+    await search.submit();
+    await search.loadMore();
+    expect(spy.mock.calls[2][0].sort).toBe("date");
+  });
+});

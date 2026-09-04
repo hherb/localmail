@@ -265,7 +265,7 @@ accounts the token's user has been granted.
 
 | Tool | Parameters | When to use |
 | --- | --- | --- |
-| `search` | `query`, `sort="rank"\|"date"`, `sort_order="asc"\|"desc"` (omit both when paging), `limit`, `cursor`, `account_ids`, `folder_ids`, `date_from`, `date_to`, `from_addr`, `to`, `subject`, `has_attachment`, `lang`, `smart` | Hybrid lexical + vector search over the archive. The default entry point for "find mail about X". Rank-ordered by default; pass `sort="date"` for strictly newest-first, and `sort_order="asc"` alongside it for oldest-first — pairing `sort_order="asc"` with the rank ordering is rejected, since the rank path searches a bounded candidate pool and reversing it would surface the least relevant of the top hits rather than of the archive. Pass `smart=true` for a local LLM query rewrite (page 1 only). The response carries `rewrite_status` (`applied`, `unavailable`, `failed`, `not_attempted`, or `not_requested`) and an optional curated `rewrite_note` with an actionable detail; `rewrite_skipped` (kept for back-compat) is true only for `unavailable`/`failed`. On a continuation page `smart` is ignored and the status is `not_attempted`. |
+| `search` | `query`, `sort="rank"\|"date"`, `sort_order="asc"\|"desc"` (omit both when paging), `limit`, `cursor`, `account_ids`, `folder_ids`, `date_from`, `date_to`, `from_addr`, `to`, `subject`, `has_attachment`, `lang`, `smart` | Hybrid lexical + vector search over the archive. The default entry point for "find mail about X". Rank-ordered by default; pass `sort="date"` for strictly newest-first, and `sort_order="asc"` alongside it for oldest-first — pairing `sort_order="asc"` with the rank ordering is rejected, since the rank path searches a bounded candidate pool and reversing it would surface the least relevant of the top hits rather than of the archive. A query with no free text (blank, or only filter operators) cannot be ranked at all, so `sort="rank"` for one is rejected too — omit `sort` and it resolves to the ordering that will actually serve the request. Pass `smart=true` for a local LLM query rewrite (page 1 only). The response carries `rewrite_status` (`applied`, `unavailable`, `failed`, `not_attempted`, or `not_requested`) and an optional curated `rewrite_note` with an actionable detail; `rewrite_skipped` (kept for back-compat) is true only for `unavailable`/`failed`. On a continuation page `smart` is ignored and the status is `not_attempted`. |
 | `get_message` | `message_id`, `full_headers=False` | Fetch one message's headers, body, and attachment list once search/browse has surfaced its ID. Each attachment entry carries `filename`, `sha256`, `content_type` (stored MIME type), and `size` (decoded bytes) — enough to decide text-vs-original retrieval and size a download before fetching. |
 | `get_attachment` | `sha256`, `mode="text"\|"metadata"` | Read an attachment's **extracted text** or its metadata. Never returns raw bytes. |
 | `list_messages` | `account_ids`, `folder_ids`, `limit`, `cursor` | Keyset date-ordered browse (newest first) when there's no query — "show me recent mail". |
@@ -296,11 +296,25 @@ Two rules for a `search` cursor. Both are enforced, the first only partly:
   query. (A query of nothing but filter operators — `subject:invoice` alone —
   counts as blank throughout, since those parse out of the text the walk
   searches.)
+
+  **Such a query cannot be rank-ordered, and saying so is a validation
+  error.** There is nothing to rank against, so it has always been answered
+  date-ordered; `sort="rank"` for it is refused on page 1 rather than dropped
+  in silence. Omit `sort` (or state `sort="date"`). The upside is that
+  `sort_order="asc"` now works on its own for these — oldest mail first,
+  across the whole archive or any filter — where it used to be refused for
+  naming a rank path the request never took.
 * **Leave `sort` and `sort_order` unset.** The cursor already carries the
   ordering it continues, on both axes. Stating a value that disagrees with it
   on either is a validation error — the alternative was serving page 1 of a
   differently ordered search, which is indistinguishable from a continuation
   until you notice the results repeating.
+
+  This is also why `sort` is best left unset on **page 1** of a query with no
+  free text. Such a query cannot be ranked, so `sort="rank"` for one is a
+  validation error; unset resolves to whatever will actually serve the
+  request — `date` here, `rank` as soon as there is text — and the cursor you
+  get back then agrees with it.
 
 If a `search` cursor has expired (its underlying result pool was evicted from
 the in-process cache — TTL, LRU, or a `serve` restart), the tool returns a

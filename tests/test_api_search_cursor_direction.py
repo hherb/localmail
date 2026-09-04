@@ -90,9 +90,21 @@ def test_a_stated_order_agreeing_with_the_cursor_is_accepted() -> None:
 
 
 def test_a_fresh_request_resolves_both_defaults() -> None:
+    """``free_text`` is load-bearing here, not incidental: since #324 the
+    ``sort`` default only applies to a query the rank path can serve. A
+    textless one resolves to ``date`` — the case below."""
+    plan = resolve_cursor_plan(cursor=None, requested_sort=None,
+                               requested_sort_order=None, free_text="invoice")
+    assert plan == CursorPlan(mode="fresh", sort="rank", sort_order="desc")
+
+
+def test_a_fresh_textless_request_resolves_sort_to_date() -> None:
+    """#324: the hybrid pool has nothing to rank against, so the date walk
+    is the only branch that can serve such a query — and resolving to
+    ``rank`` here is what made #322's cursor contradict its own page 1."""
     plan = resolve_cursor_plan(cursor=None, requested_sort=None,
                                requested_sort_order=None, free_text="")
-    assert plan == CursorPlan(mode="fresh", sort="rank", sort_order="desc")
+    assert plan == CursorPlan(mode="fresh", sort="date", sort_order="desc")
 
 
 def test_a_fresh_request_keeps_what_the_caller_stated() -> None:

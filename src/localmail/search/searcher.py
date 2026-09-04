@@ -43,6 +43,8 @@ from localmail.search.sort_axes import (
     DEFAULT_SORT_ORDER,
     SortMode,
     SortOrder,
+    resolve_sort,
+    sort_applicability_error,
 )
 from localmail.search.keyset_walk import (
     KeysetWalk,
@@ -57,6 +59,35 @@ from localmail.search.date_keyset import (
     needs_undated_top_up,
 )
 
+
+
+class SortNotApplicable(ValueError):
+    """A stated ``sort`` cannot be served by the query it arrived with (#324).
+
+    Today that is ``sort="rank"`` on a query with no free text: the hybrid
+    pool has nothing to rank against, so the date-ordered walk has always
+    answered such a query — silently, until #322 gave that walk a cursor
+    recording ``date`` and the drop became a contradiction the caller could
+    see one page later.
+
+    A named subclass rather than a bare ``ValueError`` for the reason its
+    three siblings are: the api/ boundary maps exactly this to a 400, and
+    catching bare ``ValueError`` there would also catch what psycopg,
+    ``datetime`` and the embedding backends raise, relabelling a real
+    outage as a caller error.
+
+    **Its audience is library callers**, plus every wire caller whose query
+    the two layers read differently. ``api.run_search`` refuses the same
+    shape at its own boundary, ahead of the empty-ACL short-circuit — but
+    the two guards read *different strings* (the raw request field there,
+    the ACL-composed query here), so this is not merely a backstop; see
+    ``run_search``'s catch, which maps it to a 400.
+
+    The CLI is **not** in that audience today: ``localmail search`` has no
+    ``--sort`` option and passes none, so this cannot be raised from it. If
+    one is ever added, note that ``cli.py``'s ``search`` catches only
+    ``RuntimeError``, so this would traceback rather than exit cleanly.
+    """
 
 
 class SortOrderNotApplicable(ValueError):
@@ -408,10 +439,12 @@ class KeysetCursorUnusable(ValueError):
 class SearchPage:
     """One page of results plus pagination metadata.
 
-    ``next_keyset`` is set on the date-ordered keyset walk — ``sort="date"``
-    with free text, or any blank query regardless of ``sort``. The hybrid
-    pool path keeps ``next_keyset=None`` and continues to use
-    ``search_token`` + page.
+    ``next_keyset`` is set on the date-ordered keyset walk — reached by a
+    resolved ``sort="date"``, which covers a stated one with free text and
+    any query with no free text at all (such a query resolves to ``date``
+    whatever was stated, and a stated ``"rank"`` for it is refused rather
+    than dropped — #324). The hybrid pool path keeps ``next_keyset=None``
+    and continues to use ``search_token`` + page.
     """
     results: list[SearchResult]
     page: int
@@ -1062,18 +1095,30 @@ class Searcher:
 
         `sort="date"` takes the date-ordered keyset walk directly
         (`_date_keyset_search`) rather than the hybrid retrieval pool —
-        true whether or not there is free text, and also true for any
-        blank query regardless of `sort`. The pool is reached only by the
-        remaining branch: `sort="rank"` (stated or defaulted) with
-        non-blank free text. ``continue_page`` honors whichever
-        `(sort, sort_order)` pair was in force when the cursor was minted.
+        true whether or not there is free text. A query with **no** free
+        text resolves to `"date"` too, whatever was stated, so it takes
+        that same walk; stating `"rank"` for one is refused rather than
+        silently dropped (#324, see below). The pool is reached only by the
+        remaining branch: a resolved `sort="rank"`, which requires non-blank
+        free text. ``continue_page`` honors whichever `(sort, sort_order)`
+        pair was in force when the cursor was minted.
 
         `sort=None` means "unstated" — the spelling every other layer of this
-        cluster uses since #308 — and resolves to `DEFAULT_SORT` here, once,
-        before anything reads it. It used to be neither accepted nor rejected:
-        it fell through the `== "date"` test to the same ordering by accident,
-        and was then cached as the pool's own sort, which `_check_pool_sort`
-        reads back to decide a 400 (#312).
+        cluster uses since #308 — and is resolved here, once, before anything
+        reads it. It used to be neither accepted nor rejected: it fell through
+        the `== "date"` test to the same ordering by accident, and was then
+        cached as the pool's own sort, which `_check_pool_sort` reads back to
+        decide a 400 (#312).
+
+        Since #324 that resolution reads the **query** as well as the
+        default (`sort_axes.resolve_sort`), which is why it happens after
+        `parse_query` rather than at the top: a query with no free text —
+        blank, or only filter operators, since the operators are lifted out
+        by then — has nothing for the hybrid pool to rank against, so the
+        date walk is the only branch that can serve it. An unstated `sort`
+        therefore resolves to `TEXTLESS_SORT` for such a query, and a
+        **stated** `sort="rank"` raises `SortNotApplicable` rather than
+        being dropped in silence the way it used to be.
 
         `sort_order` is orthogonal to `sort` and resolves once, here, into
         `effective_order` — every read below goes through that local, never
@@ -1092,16 +1137,25 @@ class Searcher:
         date-ordered keyset branch (`_date_keyset_search`, reached by
         `sort="date"` — with or without free text — or by any blank query),
         where both the ORDER BY and the keyset predicate flip to walk the
-        archive oldest-first. Pairing it with `sort="rank"` (stated or
-        defaulted) raises `SortOrderNotApplicable` regardless of the query,
-        blank or not — checked before the query is even parsed: the rank
-        path serves a bounded candidate pool, so reversing it would surface
-        the least relevant of the top hits rather than the oldest of the
-        archive, and a blank query defaulting to `sort="rank"` is no
-        exception — ascending order requires stating `sort="date"`.
+        archive oldest-first. Pairing it with a **resolved** `sort="rank"`
+        raises `SortOrderNotApplicable` — the rank path serves a bounded
+        candidate pool, so reversing it would surface the least relevant of
+        the top hits rather than the oldest of the archive. It reads the
+        resolved sort, so it reasons about the branch that will actually
+        serve the request: `sort_order="asc"` on a textless query is
+        **honoured** (that query resolves to `TEXTLESS_SORT`), where it used
+        to be refused for naming a rank path such a request never takes
+        (#324). Checked before any IO, though after the parse the resolution
+        now needs.
         """
         t0 = time.monotonic()
-        effective_sort: SortMode = DEFAULT_SORT if sort is None else sort
+        # `sort` is *not* resolved here. Its resolution reads the query
+        # (#324) — a query with no free text can only be served by the date
+        # walk — and the query is not parsed yet, so `effective_sort` is
+        # computed below, right after `parse_query`. Resolving it early from
+        # `DEFAULT_SORT` alone is what made the rank+asc guard reason about
+        # a branch the request would never take.
+        #
         # A cursor is a statement about ordering, and it is one we minted, so
         # it outranks an *unstated* argument — the rule `resolve_cursor_plan`
         # applies on the wire, applied here so library callers get it too.
@@ -1133,33 +1187,25 @@ class Searcher:
         # `sort_order="ASC"` missed the exact-match refusal just below, so
         # the rank path neither honoured, validated, nor reported it.
         #
+        # `sort` is checked as *stated*, not as resolved: since #324 a
+        # textless query resolves to `TEXTLESS_SORT` whatever arrived, so a
+        # misspelling would be swallowed on exactly the branch that used to
+        # swallow it. An unstated sort is a module constant and cannot be
+        # wrong, so the `is not None` guard costs no coverage.
+        #
         # A plain `ValueError`, not a named subclass: HTTP and MCP both
         # declare these as `Literal`s, so this cannot arrive from the wire
         # and there is no api/ mapping for it to be caught by. Worded like
         # `date_keyset`'s sibling checks so the two cannot drift.
-        if effective_sort not in get_args(SortMode):
+        if sort is not None and sort not in get_args(SortMode):
             raise ValueError(
-                f"unknown sort {effective_sort!r}; expected one of "
+                f"unknown sort {sort!r}; expected one of "
                 f"{sorted(get_args(SortMode))}"
             )
         if effective_order not in get_args(SortOrder):
             raise ValueError(
                 f"unknown sort_order {effective_order!r}; expected one of "
                 f"{sorted(get_args(SortOrder))}"
-            )
-        # Refused rather than honoured: the rank path serves a bounded
-        # candidate pool, so reversing it returns the least relevant of the
-        # top hits rather than of the archive — an artifact of where the
-        # pool stopped, wearing the shape of an answer. Refused rather than
-        # ignored because a stated parameter the server will not honour is
-        # reported, never dropped (#308, #312). Before any IO, so a caller
-        # error costs no connection.
-        if effective_sort == "rank" and effective_order == "asc":
-            raise SortOrderNotApplicable(
-                "sort_order='asc' is not applicable to sort='rank' (the "
-                "default); pass sort='date' for oldest-first. The rank path "
-                "serves a bounded candidate pool, so reversing it returns "
-                "the least relevant of the top hits, not of the archive."
             )
         cfg = self._cfg
         effective_page_size: int = min(page_size or cfg.page_size_default,
@@ -1173,6 +1219,52 @@ class Searcher:
         t = time.monotonic()
         parsed = parse_query(query)
         timing["parse"] = (time.monotonic() - t) * 1000
+
+        # `sort` resolves *here* because it reads the query (#324). A query
+        # with no free text has nothing for the hybrid pool to rank against,
+        # so the date walk is the only branch that can serve it — which it
+        # always did, silently, whatever `sort` said. #322 gave that walk a
+        # cursor recording `date`, turning the silent drop into a
+        # contradiction the caller met one page later: accepted on page 1,
+        # refused on page 2.
+        #
+        # Reading `parsed.free_text` before the smart rewrite and the ACL
+        # clamp is safe and deliberate: `apply_rewrite` leaves `free_text`
+        # untouched (it adds `rewritten_text`/`expansion_terms` so lexical
+        # exact-recall survives) and `_clamp_account_ids_to_acl` touches
+        # only `filters`. So this is the same string the branch below sees.
+        #
+        # The refusal is judged from the same pure rule the api boundary
+        # asks (`sort_axes`), so the two cannot word it differently — the
+        # `keyset_walk_error` arrangement. Before any IO, so a caller error
+        # costs no connection.
+        sort_error = sort_applicability_error(requested=sort,
+                                              free_text=parsed.free_text)
+        if sort_error is not None:
+            raise SortNotApplicable(sort_error)
+        effective_sort: SortMode = resolve_sort(requested=sort,
+                                                free_text=parsed.free_text)
+        # Refused rather than honoured: the rank path serves a bounded
+        # candidate pool, so reversing it returns the least relevant of the
+        # top hits rather than of the archive — an artifact of where the
+        # pool stopped, wearing the shape of an answer. Refused rather than
+        # ignored because a stated parameter the server will not honour is
+        # reported, never dropped (#308, #312).
+        #
+        # It reads the *resolved* sort, which is what makes it reason about
+        # the branch that will actually serve the request: `sort_order='asc'`
+        # on a textless query used to be refused naming `sort='rank'`, a path
+        # such a request has never taken. That was #324's inverse face, and
+        # the two had to be fixed together — whatever page 1 decides a stated
+        # sort means for a textless query, this guard reasons from the same
+        # thing.
+        if effective_sort == "rank" and effective_order == "asc":
+            raise SortOrderNotApplicable(
+                "sort_order='asc' is not applicable to sort='rank' (the "
+                "default); pass sort='date' for oldest-first. The rank path "
+                "serves a bounded candidate pool, so reversing it returns "
+                "the least relevant of the top hits, not of the archive."
+            )
 
         rewrite_status = NOT_REQUESTED
         rewrite_note: str | None = None
@@ -1229,14 +1321,20 @@ class Searcher:
         # chronological order. ``messages.fts_v2`` gives identical lexical
         # recall and the keyset cursor scrolls back arbitrarily far.
         #
-        # A blank query, whatever the sort: the hybrid pipeline degenerates
-        # for it (the BM25 arms early-return with no terms, the vector arms
-        # rank by distance to the embedding of the empty string), so a blank
-        # query has always been answered as a date-ordered list. It now
-        # paginates too — before, it returned one page and no cursor, which
-        # is the branch "show me my oldest mail" lands on.
-        if (effective_sort == "date"
-                or walk_for_text(parsed.free_text) == "archive"):
+        # A query with no free text, which resolves here whatever the sort
+        # said: the hybrid pipeline degenerates for it (the BM25 arms
+        # early-return with no terms, the vector arms rank by distance to
+        # the embedding of the empty string), so such a query has always
+        # been answered as a date-ordered list. It now paginates too —
+        # before, it returned one page and no cursor, which is the branch
+        # "show me my oldest mail" lands on — and a stated `sort="rank"` for
+        # it is refused above rather than dropped here (#324).
+        # One predicate, not two: `effective_sort` was resolved from this
+        # same `parsed.free_text` above, so the `or walk_for_text(...)` arm
+        # this used to carry is already inside it. Keeping both would be two
+        # readings of one rule, which is the shape of the #308 follow-up
+        # defect.
+        if effective_sort == "date":
             t = time.monotonic()
             with self._pool.connection() as conn:
                 parsed = self._resolve_account_names(conn, parsed)

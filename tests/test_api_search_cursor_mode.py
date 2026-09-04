@@ -25,6 +25,7 @@ from localmail.api.search_cursor import (
     SearchCursor,
     encode_keyset_cursor,
     encode_search_cursor,
+    resolve_cursor_plan,
 )
 from localmail.search.searcher import KeysetCursor, PoolMetadata
 
@@ -214,11 +215,19 @@ def test_a_stated_sort_still_governs_when_there_is_no_cursor() -> None:
 
 
 def test_an_omitted_sort_still_means_rank_when_there_is_no_cursor() -> None:
-    s = _searcher()
-    run_search(searcher=s, free_text="invoice", filters={}, limit=2,
-               allowed_account_ids=[1], user_id=99)
-    _, kwargs = s.search.call_args
-    assert kwargs.get("sort") == "rank"
+    """Asserted on the resolver, which is where this resolution still lives.
+
+    ``run_search`` forwards the caller's raw axes to the Searcher (#324's
+    review) rather than ``plan``'s resolution of them, so the forwarded
+    kwarg is ``None`` and says nothing about what "omitted" means. The
+    resolution is not dead code — ``plan.sort`` is what the api layer's own
+    rank+asc refusal reads — so it is pinned here, at the one place that
+    still consumes it.
+    """
+    plan = resolve_cursor_plan(cursor=None, requested_sort=None,
+                               requested_sort_order=None,
+                               free_text="invoice")
+    assert plan.sort == "rank"
 
 
 # --- end to end, against a real archive -------------------------------------

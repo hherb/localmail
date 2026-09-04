@@ -42,6 +42,7 @@ from localmail.search.searcher import (
     SearchResult,
     Searcher,
     SortMode,
+    SortNotApplicable,
     SortOrder,
     SortOrderNotApplicable,
 )
@@ -198,11 +199,20 @@ def run_search(
     ``searcher.config.candidates_per_arm_max``.
 
     ``sort`` and ``sort_order`` are ``None`` when the caller stated none.
-    With no cursor that means the module defaults; with one, the cursor
-    decides both — see ``search_cursor.resolve_cursor_plan``, which rejects
-    a stated value the cursor cannot serve instead of dropping either.
-    ``sort_order="asc"`` pairs only with ``sort="date"``; asking for it on
-    the rank path is a 400, not a quietly ignored field.
+    With a cursor, the cursor decides both — see
+    ``search_cursor.resolve_cursor_plan``, which rejects a stated value the
+    cursor cannot serve instead of dropping either. Without one,
+    ``sort_order`` falls to its module default and ``sort`` is resolved
+    against the **query** (#324): a query with no free text — blank, or only
+    filter operators — has nothing for the hybrid pool to rank, so it
+    resolves to ``date``, and a *stated* ``"rank"`` for one is a 400 rather
+    than a silent drop.
+
+    ``sort_order="asc"`` pairs only with a resolved ``sort="date"``; asking
+    for it on the rank path is a 400, not a quietly ignored field. Because
+    the sort is resolved from the query, ``sort_order="asc"`` alone on a
+    textless query is *honoured* — it used to be refused for naming a rank
+    path such a request never takes.
 
     ``smart`` requests an LLM query rewrite on page 1 (cursor is None) when the
     searcher has a rewriter configured. The response carries ``rewrite_status``
@@ -291,10 +301,53 @@ def run_search(
     # returned for `cursor is None` and for nothing else.
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
-        page = searcher.search(query, page_size=limit, user_id=user_id,
-                               sort=plan.sort, sort_order=plan.sort_order,
-                               smart=effective_smart,
-                               allowed_account_ids=allowed_account_ids)
+        try:
+            # The caller's **raw** axes, not `plan`'s resolution of them.
+            # `Searcher.search` resolves both itself, from the same two pure
+            # rules the gate above asked — but from the ACL-composed query,
+            # which is the string its FTS predicate is actually built from.
+            # Forwarding `plan.sort` instead destroys the one distinction the
+            # Searcher's guard turns on: `plan.sort` is never None, so an
+            # *unstated* sort arrived there looking stated, and a caller who
+            # omitted it was refused with "pass sort='date' or omit sort" —
+            # a remedy they had already followed. That is #324's own defect
+            # (a sort the caller never chose, reported as their statement)
+            # reintroduced by its fix, and it is reachable wherever the two
+            # strings disagree; see the catch below.
+            #
+            # This restores the rule CLAUDE.md states for this pair: the
+            # branch guard is the authority, because it reads the composed
+            # query. The gate stays as the early refusal that answers before
+            # any work and before the empty-ACL short-circuit.
+            page = searcher.search(query, page_size=limit, user_id=user_id,
+                                   sort=sort, sort_order=sort_order,
+                                   smart=effective_smart,
+                                   allowed_account_ids=allowed_account_ids)
+        except (SortNotApplicable, SortOrderNotApplicable) as exc:
+            # The residual of #324's two guards, and a **live** path rather
+            # than a backstop. The gate above parses the raw request field;
+            # the Searcher parses the ACL-composed query, and `parse_query`
+            # is not compositional across an unbalanced quote: `from:"`
+            # leaves `'from:'` as free text on its own and nothing once a
+            # trailing `account_id:` token joins it. So the gate reads the
+            # query as rankable, the branch reads it as textless, and
+            # without this catch the caller's error escapes as an
+            # operator-facing 500 on a query the boundary had already
+            # cleared.
+            #
+            # `SortOrderNotApplicable` rides along because the divergence
+            # runs both ways: `'"'` is textless to the gate and text once
+            # the ACL token is composed in, so a `sort_order="asc"` the gate
+            # cleared against its resolved `date` can meet a resolved `rank`
+            # in the Searcher. Unreachable while the gate forwarded its own
+            # resolution — which is exactly why passing the raw axes above
+            # requires widening this.
+            #
+            # Caught by named subclasses, never by bare ValueError —
+            # psycopg, datetime and the embedding backends raise that, and
+            # relabelling a real outage as a caller error would send them
+            # to fix a blameless query.
+            raise ValidationFailed(str(exc)) from exc
     elif plan.mode == "keyset":
         # Keyset cursor → date-keyset continuation. The cursor carries only
         # (ts, id) and the direction it was minted in; the query + filters

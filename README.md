@@ -893,15 +893,26 @@ whichever `sort` criterion is in force. Ascending therefore requires
 serves a bounded candidate pool, so reversing it would return the least
 relevant of the top hits rather than of the archive.
 
-That refusal is keyed on the `sort` you stated (or defaulted to), **not**
-on the branch that would have served the request. A query with no free
-text — blank, or made only of filter operators such as `subject:invoice`
-— is always answered by the date walk whatever `sort` says, so asking for
-`sort_order=asc` on one is still refused for naming `rank`, a path it
-would never have taken. State `sort=date` explicitly for those. Tracked
-as [#324](https://github.com/hherb/localmail/issues/324), together with
-the matching wart that such a request *is* served on page 1 and its own
-cursor then rejected on page 2.
+**A query with no free text cannot be ranked, and stating `sort=rank`
+for one is a 400.** "No free text" is decided *after* the filter
+operators are lifted out, so it covers a blank `query` and one made only
+of operators (`subject:invoice`, `has:attachment`, `lang:en`, …). Such a
+query has always been answered by the date walk — the lexical arms have
+no terms and the vector arms would rank by distance to the embedding of
+the empty string — so the stated `rank` was being dropped. It is reported
+now rather than dropped, which is this API's rule for any stated
+parameter the server will not honour.
+
+The remedy is to **omit `sort`**, which resolves to the branch that
+actually serves the request (`date` here, `rank` as soon as there is text
+to rank), or to state `sort=date`. Omitting is what every paging client
+already does, and what the desktop GUI does for a filter-only search.
+
+`sort_order=asc` on such a query is consequently **honoured**, not
+refused: with no stated sort the request resolves to `date`, so it walks
+the archive oldest-first and its cursor continues ascending. It used to
+be a 400 naming `sort=rank`, a path the request would never have taken.
+Both halves closed [#324](https://github.com/hherb/localmail/issues/324).
 
 When paging, send the cursor back with the same `query` and filters and
 **leave `sort` and `sort_order` unset**. The cursor already carries the
@@ -930,8 +941,9 @@ The two failures are different kinds and want different client handling. A
 so re-running it without a cursor continues where the user was. A **400** is
 permanent for that cursor: re-issuing the identical pair cannot succeed, so a
 client must retire the cursor rather than let infinite scroll re-fire it behind
-an error banner. The desktop GUI does both, and never states a `sort` on a
-request that carries a cursor — which is what makes the contradicting-sort 400
+an error banner. The desktop GUI does both, and never states a `sort` it knows
+the server will refuse — not on a request that carries a cursor, and not a
+`rank` on a query with nothing to rank — which is what makes both 400s
 unreachable from it rather than merely handled.
 
 Wire `date` on every paginated response (`/v1/messages`, `/v1/search`,

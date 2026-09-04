@@ -150,14 +150,20 @@ def build_mcp_server(
             'omitted) or "date" (strictly by date — newest first unless '
             '`sort_order` says otherwise). Leave it unset when '
             "paging — a `cursor` already carries the ordering it continues, "
-            "and a sort that contradicts it is rejected."))] = None,
+            "and a sort that contradicts it is rejected. Leave it unset "
+            "too when `query` has no free text (empty, or only filter "
+            'operators such as subject:): there is nothing to rank, so '
+            '"rank" is rejected for such a query and unset resolves to the '
+            "ordering that will actually serve it."))] = None,
         sort_order: Annotated[Literal["asc", "desc"] | None, Field(description=(
             'Direction for `sort`: "desc" (the default when omitted) or '
             '"asc". Only applicable to sort="date" — oldest first; '
             'sort="rank" with sort_order="asc" is rejected, because the '
             "rank path searches a bounded candidate pool and reversing it "
             "returns the least relevant of the top hits rather than of the "
-            "archive. Leave it unset when paging — a `cursor` already "
+            'archive. A `query` with no free text is date-ordered anyway, '
+            'so "asc" alone gives you oldest-first over the whole archive '
+            "or any filter. Leave it unset when paging — a `cursor` already "
             "carries the direction it continues, and a direction that "
             "contradicts it is rejected."))] = None,
         limit: Annotated[int, Field(ge=1, le=200, description=(
@@ -226,6 +232,10 @@ def build_mcp_server(
         Results are ACL-scoped: only the accounts you have been granted are
         searched. Rank-ordered by default; pass `sort="date"` for strictly
         newest-first, and `sort_order="asc"` alongside it for oldest-first.
+        A `query` with no free text — empty, or only filter operators — has
+        nothing to rank, so it is always date-ordered and `sort="rank"` for
+        one is rejected rather than dropped; omit `sort` there, which also
+        lets `sort_order="asc"` alone mean oldest-first.
         Page forward by calling again with the same `query` and filters plus
         the returned `next_cursor` in `cursor`, and leave `sort` and
         `sort_order` unset — the cursor carries the ordering it continues,

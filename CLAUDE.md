@@ -823,7 +823,9 @@ src/localmail/
     rewriter_backends.py # _HttpJsonRewriter base + Ollama/OpenAI/Anthropic backends + build_rewriter() factory
     rewriter_url.py # pure: base_url_error — the one base-URL rule (#235)
     searcher.py     # Searcher orchestrator, rrf_fuse(), make_snippet(), SearchResult
-    sort_axes.py    # pure: SortMode/SortOrder + their defaults — one authority (#312)
+    sort_axes.py    # pure: SortMode/SortOrder, their defaults, and
+                    #   resolve_sort/sort_applicability_error — one
+                    #   authority per axis (#312, #324)
     date_keyset.py  # pure: the date walk's ORDER BY, keyset predicates,
                     #   undated top-up and the one SQL emitter (#323)
     keyset_walk.py  # pure: walk_for_text / keyset_walk_error — a text cursor
@@ -3214,8 +3216,12 @@ for the full design.
       under `python -O` — `upsert_message`'s reasoning). The guard fires before
       any connection is opened, which its test asserts by handing the Searcher
       a pool that raises when touched.
-    - **`sort=None` is resolved to `DEFAULT_SORT` once, at the top of
-      `Searcher.search` (#312).** It used to be neither accepted nor rejected:
+    - **`sort=None` is resolved once, in `Searcher.search` (#312).**
+      (**Corrected by #324**: "to `DEFAULT_SORT`, at the top" — it resolves
+      through `sort_axes.resolve_sort`, which reads the query, so it happens
+      immediately *after* `parse_query` rather than before it. Once, and in
+      one place, which is the claim that matters here and is unchanged.)
+      It used to be neither accepted nor rejected:
       it fell through the `== "date"` test into the hybrid branch, which is the
       right *ordering* by accident and the wrong *record* — the raw argument is
       what the pool is cached with, and `_check_pool_sort` reads that field
@@ -3700,30 +3706,93 @@ for the full design.
         like `date_keyset`'s sibling checks so the two cannot drift.
         Reachable from CLI and library callers only. Pinned by
         `tests/test_searcher_sort_axis_validation.py`.
-      - **Known consequence, filed as #324:** a blank query is served by
-        the date branch whatever the `sort`, so a caller stating
-        `sort="rank"` with a blank query gets page 1 *and* a cursor — which
-        records `KEYSET_SORT = "date"`, the ordering that actually ran.
-        Re-stating that same `sort="rank"` on page 2 is then a 400. The
-        request shape is accepted on page 1 and refused on page 2. It is
-        unreachable under the documented contract (omit `sort` when
-        paging, which `gui/src/lib/search_paging.ts::statedSort` enforces
-        by construction) and reachable for any client that echoes its own
-        parameters back. The honest fix is to refuse the stated `rank` on
-        **page 1** — a blank query has always ignored it silently, which is
-        the pre-existing half — but that is a wire-visible change and wants
-        its own decision. Do **not** "fix" it by having the cursor record
-        the sort the caller *stated* rather than the one that ran: a cursor
-        claiming an ordering it did not walk is #308 itself.
-        **#324's surface is wider than "a blank query"** (review of #322):
-        the branch predicate is `not parsed.free_text.strip()`, evaluated
-        *after* `parse_query` lifts every filter operator out, so
-        `subject:invoice` — non-empty as a request field — takes the same
-        path. The rank+asc refusal has the inverse face of the same root:
-        it is keyed on the stated-or-defaulted `sort`, not on the branch
-        that will serve the request, so `{"query": "", "sort_order":
-        "asc"}` is refused for naming a `rank` path it would never have
-        taken. Both are recorded on #324; README states the behaviour.
+      - **A query with no free text cannot be ranked, and saying so is a
+        400 on page 1 (#324, resolved).** Such a query — blank, or made only
+        of filter operators, the branch predicate being evaluated *after*
+        `parse_query` lifts them out, so `subject:invoice` is one — has
+        always been served by the date walk, because the lexical arms
+        early-return with no terms and the vector arms would rank by
+        distance to the embedding of the empty string. The stated `sort`
+        was therefore dropped, silently. #322 gave that walk a cursor
+        recording `KEYSET_SORT = "date"`, which turned the silent drop into
+        a contradiction the caller met one page later: `{"query": "",
+        "sort": "rank"}` was **accepted on page 1** and its own cursor
+        **refused on page 2**. Option (2) of the issue: report it where the
+        caller can still act on it. Do **not** "fix" it instead by having
+        the cursor record the sort the caller *stated* rather than the one
+        that ran — a cursor claiming an ordering it did not walk is #308
+        itself.
+        - **The rule is the pure
+          [src/localmail/search/sort_axes.py](src/localmail/search/sort_axes.py)**,
+          two halves co-located for the reason `keyset_walk.py` gives:
+          `resolve_sort` says what will run, `sort_applicability_error`
+          says whether the caller was told, and split they are two
+          predicates for one question. The error half is shaped like
+          `account_names.account_name_error` — a message, or `None`, with
+          the caller deciding what an error *is* (`ValidationFailed` at the
+          api boundary, the named `SortNotApplicable` inside the Searcher),
+          so the wording cannot drift between the two ends.
+        - **`DEFAULT_SORT` had to move with it.** Resolution is no longer a
+          default but a function of the query, so a layer resolving from
+          `DEFAULT_SORT` alone now disagrees with the branch that serves the
+          request. That is #312's rule one level up, which is what makes the
+          co-location load-bearing rather than tidy.
+        - **The classification is `keyset_walk.walk_for_text`**, gaining a
+          third caller beside the branch and the cursor stamp. All three ask
+          the same question, so a resolution cannot predict a branch the
+          Searcher will not take — and the branch predicate lost its `or
+          walk_for_text(...)` arm, because `effective_sort` was resolved
+          from that same string. One reading, not two.
+        - **`Searcher.search` resolves `sort` *after* `parse_query`, not
+          before.** It reads the query now, so it cannot be resolved earlier;
+          the rank+asc refusal moved with it. Safe because `apply_rewrite`
+          leaves `free_text` untouched (it adds `rewritten_text` /
+          `expansion_terms` so lexical exact-recall survives) and
+          `_clamp_account_ids_to_acl` touches only `filters` — so the string
+          resolved from *is* the one the branch sees. Both guards still
+          precede every connection, which is what their tests assert.
+        - **The membership check reads `sort` as *stated*, not as resolved.**
+          A textless query resolves to `TEXTLESS_SORT` whatever arrived, so
+          checking the resolved value would swallow `sort="Date"` on exactly
+          the branch #333 found swallowing it. An unstated sort is a module
+          constant and cannot be wrong, so the `is not None` guard costs no
+          coverage. Pinned by
+          `test_an_unknown_sort_is_refused_on_a_textless_query_too` — every
+          pre-existing case in that file uses a query with free text and so
+          reaches none of this.
+        - **The inverse face was fixed with it, and had to be.** The rank+asc
+          refusal was keyed on the stated-or-defaulted `sort`, so `{"query":
+          "", "sort_order": "asc"}` was refused for naming a `rank` path the
+          request would never take. It reads the *resolved* sort now, so that
+          request is **honoured** — oldest-first over the whole archive or any
+          filter, with an ascending cursor. Whatever page 1 decides a stated
+          sort means for a textless query, this guard reasons from the same
+          thing.
+        - **`run_search`'s catch of `SortNotApplicable` is live, not a
+          backstop.** The api gate parses the raw request field and the
+          Searcher parses the ACL-composed query, and `parse_query` is not
+          compositional across an unbalanced quote: `from:"` leaves
+          `'from:'` as free text alone and nothing once a trailing
+          `account_id:` token joins it. Verified, not argued. Without the
+          catch the caller's error escapes as a 500 — `serve.app` handles
+          `APIError` only — on a query the boundary had already cleared.
+        - **The GUI states no sort it knows will be refused.**
+          `search_paging.statedSort` takes the query and drops a `rank` for a
+          blank box, which keeps a shipped flow working: an empty search box
+          with a filter chip set ("everything from this account") is an
+          ordinary request that would otherwise become an error banner.
+          Omitting is not a fallback — the server resolves an unstated sort
+          to the branch that serves it, which is what that flow already
+          received. `date` is still stated, or the sort selector goes inert
+          for the blank-box case. **Known imprecision, deliberate**: the
+          client uses `query.trim()`, not a reproduction of `parse_query`, so
+          `subject:invoice` typed into the box still earns the 400 — keeping
+          a second parser in step with the first is not worth one loud,
+          actionable refusal. The store's own `hasNoScope()` uses the same
+          notion. The **wiring** is pinned separately in
+          `gui/src/lib/stores/search.test.ts`, including the 409-recovery
+          call site: `statedSort`'s own tests stay green if a call site hands
+          it a constant.
     - **The keyset cursor carries its own direction, and the Searcher reads
       it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
       else, so `Searcher.search` paired a directionless cursor with a

@@ -112,3 +112,20 @@ def test_the_stated_defaults_still_pass() -> None:
         with pytest.raises(AssertionError, match="no connection"):
             searcher.search("invoice", allowed_account_ids=None, **kwargs)  # type: ignore[arg-type]
         pool.connection.assert_called_once()
+
+
+@pytest.mark.parametrize("sort", ["Date", "rnk", ""])
+def test_an_unknown_sort_is_refused_on_a_textless_query_too(sort: str) -> None:
+    """Since #324 a textless query resolves to ``TEXTLESS_SORT`` whatever
+    arrived, so a misspelling would be swallowed on exactly the branch that
+    used to swallow it — served date-ordered, silently, as if the caller had
+    asked for it.
+
+    That is why the membership check reads the value as **stated**, not as
+    resolved. Every case above uses a query with free text, so none of them
+    reaches this branch.
+    """
+    searcher, pool = _searcher()
+    with pytest.raises(ValueError, match=f"unknown sort {sort!r}"):
+        searcher.search("", allowed_account_ids=None, sort=sort)  # type: ignore[arg-type]
+    pool.connection.assert_not_called()

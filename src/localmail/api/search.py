@@ -42,6 +42,7 @@ from localmail.search.searcher import (
     SearchResult,
     Searcher,
     SortMode,
+    SortNotApplicable,
     SortOrder,
     SortOrderNotApplicable,
 )
@@ -291,10 +292,28 @@ def run_search(
     # returned for `cursor is None` and for nothing else.
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
-        page = searcher.search(query, page_size=limit, user_id=user_id,
-                               sort=plan.sort, sort_order=plan.sort_order,
-                               smart=effective_smart,
-                               allowed_account_ids=allowed_account_ids)
+        try:
+            page = searcher.search(query, page_size=limit, user_id=user_id,
+                                   sort=plan.sort, sort_order=plan.sort_order,
+                                   smart=effective_smart,
+                                   allowed_account_ids=allowed_account_ids)
+        except SortNotApplicable as exc:
+            # The residual of #324's two guards, and a **live** path rather
+            # than a backstop. The gate above parses the raw request field;
+            # the Searcher parses the ACL-composed query, and `parse_query`
+            # is not compositional across an unbalanced quote: `from:"`
+            # leaves `'from:'` as free text on its own and nothing once a
+            # trailing `account_id:` token joins it. So the gate reads the
+            # query as rankable, the branch reads it as textless, and
+            # without this catch the caller's error escapes as an
+            # operator-facing 500 on a query the boundary had already
+            # cleared.
+            #
+            # Caught by named subclass, never by bare ValueError — psycopg,
+            # datetime and the embedding backends raise that, and
+            # relabelling a real outage as a caller error would send them
+            # to fix a blameless query.
+            raise ValidationFailed(str(exc)) from exc
     elif plan.mode == "keyset":
         # Keyset cursor → date-keyset continuation. The cursor carries only
         # (ts, id) and the direction it was minted in; the query + filters

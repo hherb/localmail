@@ -44,6 +44,8 @@ from localmail.search.sort_axes import (
     DEFAULT_SORT_ORDER,
     SortMode,
     SortOrder,
+    resolve_sort,
+    sort_applicability_error,
 )
 
 #: One prefix per (direction, walk) pair, spelled ``K`` + ``A`` when
@@ -262,9 +264,23 @@ def resolve_cursor_plan(
     differently ordered search.
     """
     if cursor is None:
+        # A fresh request's sort is resolved against its own query (#324):
+        # a query with no free text has nothing for the hybrid pool to rank
+        # against, so the date walk is the only branch that can serve it.
+        # Resolving from ``DEFAULT_SORT`` alone made ``run_search``'s
+        # rank+asc refusal reason about a path such a request never takes,
+        # and made #322's cursor — which records the ordering that *ran* —
+        # contradict the ``sort`` its own page 1 had accepted.
+        #
+        # The same two pure rules ``Searcher.search`` asks, so a refusal
+        # cannot be worded differently at the two ends.
+        sort_error = sort_applicability_error(requested=requested_sort,
+                                              free_text=free_text)
+        if sort_error is not None:
+            raise ValidationFailed(sort_error)
         return CursorPlan(
             mode="fresh",
-            sort=DEFAULT_SORT if requested_sort is None else requested_sort,
+            sort=resolve_sort(requested=requested_sort, free_text=free_text),
             sort_order=(DEFAULT_SORT_ORDER if requested_sort_order is None
                         else requested_sort_order),
         )

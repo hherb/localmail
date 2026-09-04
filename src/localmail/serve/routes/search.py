@@ -40,10 +40,16 @@ class SearchRequest(BaseModel):
     query: str
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
-    # "rank" (the default when omitted) orders by rerank relevance; "date"
-    # takes the date-ordered keyset walk directly rather than the hybrid
-    # pool, ordering by COALESCE(internal_date, date_sent) DESC NULLS LAST.
-    # A blank query takes that same walk regardless of `sort`.
+    # "rank" orders by rerank relevance; "date" takes the date-ordered
+    # keyset walk directly rather than the hybrid pool, ordering by
+    # COALESCE(internal_date, date_sent) DESC NULLS LAST.
+    #
+    # Omitting it resolves to whichever of those will actually serve the
+    # request: "rank" when the query has free text, "date" when it has none
+    # (#324). A query with no free text — blank, or only filter operators,
+    # since `parse_query` lifts those out — has nothing for the pool to
+    # rank, so it takes the date walk and a *stated* "rank" for it is a 400
+    # rather than a silent drop.
     #
     # Null rather than "rank" so that omitting it is distinguishable from
     # asking for it: alongside a `cursor` the cursor decides the ordering,
@@ -52,9 +58,11 @@ class SearchRequest(BaseModel):
     sort: Literal["rank", "date"] | None = None
     # Direction for the sort criterion above. Orthogonal to `sort` so a
     # future criterion inherits it without doubling the `sort` enum.
-    # "asc" is rejected for sort="rank": the rank path serves a bounded
-    # candidate pool, so reversing it returns the least relevant of the top
-    # hits rather than of the archive.
+    # "asc" is rejected for a *resolved* sort="rank": the rank path serves a
+    # bounded candidate pool, so reversing it returns the least relevant of
+    # the top hits rather than of the archive. It reads the resolved sort, so
+    # "asc" alone on a query with no free text is honoured — that query
+    # resolves to "date" (#324).
     #
     # Null rather than "desc" for the reason `sort` is null: alongside a
     # `cursor` the cursor decides the direction, and a model default would

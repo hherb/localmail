@@ -314,7 +314,7 @@ Two rules for a `search` cursor. Both are enforced, the first only partly:
   free text. Such a query cannot be ranked, so `sort="rank"` for one is a
   validation error; unset resolves to whatever will actually serve the
   request — `date` here, `rank` as soon as there is text — and the cursor you
-  get back then agrees with it. See below.
+  get back then agrees with it.
 
 If a `search` cursor has expired (its underlying result pool was evicted from
 the in-process cache — TTL, LRU, or a `serve` restart), the tool returns a

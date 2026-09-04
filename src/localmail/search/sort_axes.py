@@ -55,9 +55,10 @@ def resolve_sort(*, requested: SortMode | None, free_text: str) -> SortMode:
     ``free_text`` must already be ``parse_query(...).free_text``: the filter
     operators are lifted out by then, so ``subject:invoice`` — a non-empty
     *request field* — correctly reads as textless. The classification is
-    ``keyset_walk.walk_for_text``, the same one authority the retrieval
-    branch and the cursor stamp ask, so a resolution here cannot disagree
-    with the branch it predicts.
+    ``keyset_walk.walk_for_text``, the same one authority the cursor stamp
+    asks. The retrieval branch no longer asks it directly: it tests the sort
+    this function resolved, so it cannot disagree with the prediction rather
+    than merely happening to agree with it.
 
     A textless query resolves to ``TEXTLESS_SORT`` **whatever was
     requested**, including a ``"rank"`` that ``sort_applicability_error``

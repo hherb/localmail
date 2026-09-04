@@ -39,8 +39,9 @@ def tool_search(
 ) -> dict[str, Any]:
     """Hybrid search, ACL-scoped. Page forward by passing back `next_cursor`.
 
-    `sort` defaults to `rank` and `sort_order` to `desc`; both are best left
-    unset when paging, since the cursor already carries the ordering — on
+    An unset `sort` resolves to `rank` when the query has free text and to
+    `date` when it has none; `sort_order` defaults to `desc`. Both are best
+    left unset when paging, since the cursor already carries the ordering — on
     both axes — it continues. Send back the same `query` and `filters` with
     it — a `sort=date` cursor walks the archive by date (lexically when the
     query has free text, over every filtered row when it does not) and
@@ -49,10 +50,13 @@ def tool_search(
     search: leaving
     `sort_order` unset is exactly what makes an ascending cursor keep
     walking ascending instead of silently reverting to `desc`.
-    `sort_order="asc"` only applies to `sort="date"`; pairing it with
-    `sort="rank"` (stated or defaulted) is refused, since the rank path
-    searches a bounded candidate pool and reversing it would surface the
-    least relevant of the top hits rather than of the archive.
+    `sort_order="asc"` only applies to `sort="date"`; pairing it with a
+    *resolved* `sort="rank"` is refused, since the rank path searches a
+    bounded candidate pool and reversing it would surface the least relevant
+    of the top hits rather than of the archive. A `query` with no free text
+    resolves to `date`, so `sort_order="asc"` alone is honoured for one —
+    and a `sort="rank"` stated for one is itself refused (#324), because
+    there is nothing to rank.
 
     `smart` opts into an LLM query rewrite (page 1 only). The response carries
     `rewrite_status` (one of `applied`, `unavailable`, `failed`,

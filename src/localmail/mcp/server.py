@@ -146,8 +146,9 @@ def build_mcp_server(
             "extracted attachment text. An empty string lists recent mail "
             "(date-ordered) — prefer `list_messages` for that intent."))],
         sort: Annotated[Literal["rank", "date"] | None, Field(description=(
-            'Result ordering: "rank" (hybrid relevance, the default when '
-            'omitted) or "date" (strictly by date — newest first unless '
+            'Result ordering: "rank" (hybrid relevance — what an omitted '
+            '`sort` resolves to whenever the query has text to rank) or '
+            '"date" (strictly by date — newest first unless '
             '`sort_order` says otherwise). Leave it unset when '
             "paging — a `cursor` already carries the ordering it continues, "
             "and a sort that contradicts it is rejected. Leave it unset "
@@ -230,8 +231,9 @@ def build_mcp_server(
         attachment text — the default way to answer "find mail about X".
 
         Results are ACL-scoped: only the accounts you have been granted are
-        searched. Rank-ordered by default; pass `sort="date"` for strictly
-        newest-first, and `sort_order="asc"` alongside it for oldest-first.
+        searched. Rank-ordered whenever there is text to rank; pass
+        `sort="date"` for strictly newest-first, and `sort_order="asc"`
+        alongside it for oldest-first.
         A `query` with no free text — empty, or only filter operators — has
         nothing to rank, so it is always date-ordered and `sort="rank"` for
         one is rejected rather than dropped; omit `sort` there, which also

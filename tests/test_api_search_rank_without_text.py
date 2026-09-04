@@ -144,12 +144,18 @@ def test_an_unstated_sort_without_free_text_reaches_the_searcher(
     free_text: str,
 ) -> None:
     """The half that keeps every filter-only search working: the GUI issues
-    exactly this shape whenever the search box is empty and a chip is set."""
+    exactly this shape whenever the search box is empty and a chip is set.
+
+    The forwarded ``sort`` is ``None``, not the gate's resolution of it —
+    see ``test_the_caller_s_axes_are_forwarded_verbatim`` below for why that
+    distinction is the whole of the fix. What this pins is that the request
+    is *not* refused: it reaches retrieval.
+    """
     s = _searcher()
     with pytest.raises(AssertionError, match="no search may run"):
         run_search(searcher=s, free_text=free_text, filters={}, limit=5,
                    allowed_account_ids=[1], user_id=1)
-    assert s.search.call_args.kwargs["sort"] == "date"
+    assert s.search.call_args.kwargs["sort"] is None
 
 
 def test_ascending_order_without_free_text_reaches_the_searcher() -> None:
@@ -158,7 +164,89 @@ def test_ascending_order_without_free_text_reaches_the_searcher() -> None:
         run_search(searcher=s, free_text="", filters={}, limit=5,
                    allowed_account_ids=[1], user_id=1, sort_order="asc")
     kwargs = s.search.call_args.kwargs
-    assert (kwargs["sort"], kwargs["sort_order"]) == ("date", "asc")
+    assert (kwargs["sort"], kwargs["sort_order"]) == (None, "asc")
+
+
+def test_the_caller_s_axes_are_forwarded_verbatim() -> None:
+    """The fresh branch hands the Searcher what the *caller* stated.
+
+    Forwarding the gate's resolution instead destroys the distinction the
+    Searcher's guard turns on. ``plan.sort`` is never ``None``, so an
+    unstated sort arrived looking stated, and on the divergent-parse class
+    below a caller who omitted ``sort`` was told to "pass sort='date' or
+    omit sort" — a remedy they had already followed. That is #324's own
+    defect, a sort the caller never chose reported as their statement,
+    reintroduced by #324's fix.
+
+    Pinned on both axes and in both directions, because a mutation that
+    forwards ``plan`` for one of them is otherwise invisible: the gate's
+    resolution and the caller's statement agree for every *ordinary* query,
+    which is what let this ship.
+    """
+    s = _searcher()
+    with pytest.raises(AssertionError, match="no search may run"):
+        run_search(searcher=s, free_text="invoice", filters={}, limit=5,
+                   allowed_account_ids=[1], user_id=1)
+    kwargs = s.search.call_args.kwargs
+    assert (kwargs["sort"], kwargs["sort_order"]) == (None, None)
+
+    s = _searcher()
+    with pytest.raises(AssertionError, match="no search may run"):
+        run_search(searcher=s, free_text="invoice", filters={}, limit=5,
+                   allowed_account_ids=[1], user_id=1, sort="rank",
+                   sort_order="desc")
+    kwargs = s.search.call_args.kwargs
+    assert (kwargs["sort"], kwargs["sort_order"]) == ("rank", "desc")
+
+
+def test_a_caller_who_omitted_sort_is_never_told_to_omit_it() -> None:
+    """The regression #324's fix introduced, on the class it documented.
+
+    ``parse_query`` is not compositional across an unbalanced quote:
+    ``from:"`` leaves ``'from:'`` as free text alone and nothing once the
+    ACL's ``account_id:`` token joins it. So the gate reads this query as
+    rankable and resolves ``rank``; the Searcher reads it as textless. With
+    the gate's resolution forwarded, that ``rank`` was attributed to a
+    caller who never wrote it.
+
+    Driven with the **real** Searcher, because the property is that the two
+    guards genuinely disagree — a mock would only prove the plumbing.
+    """
+    from localmail.config import SearchConfig
+    from localmail.search.searcher import Searcher
+
+    def _searcher_reaching_retrieval() -> Searcher:
+        pool = MagicMock()
+        # Reaching this proves the request was not refused: every #324 guard
+        # fires before any connection is opened.
+        pool.connection.side_effect = AssertionError("retrieval was reached")
+        return Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(),
+                        reranker=None, rewriter=None)
+
+    # No `sort` argument at all: there is nothing to refuse.
+    with pytest.raises(AssertionError, match="retrieval was reached"):
+        run_search(searcher=_searcher_reaching_retrieval(), free_text='from:"',
+                   filters={}, limit=5, allowed_account_ids=[1], user_id=1)
+
+    # The divergence runs the other way too, and that is what the widened
+    # catch is for: `'"'` is textless to the gate (so its rank+asc refusal
+    # does not fire) and text once the ACL token is composed in, so the
+    # Searcher resolves `rank`, meets `asc`, and raises
+    # `SortOrderNotApplicable`. Forwarding the gate's resolution made that
+    # unreachable; forwarding the caller's makes it a clean 400 instead of
+    # an uncaught 500. The Searcher's own wording identifies which guard
+    # answered.
+    with pytest.raises(ValidationFailed, match="bounded candidate pool"):
+        run_search(searcher=_searcher_reaching_retrieval(), free_text='"',
+                   filters={}, limit=5, allowed_account_ids=[1], user_id=1,
+                   sort_order="asc")
+
+    # The positive control: a *stated* rank on the same query is still a 400,
+    # so this is not merely a guard that stopped firing.
+    with pytest.raises(ValidationFailed, match="no free text"):
+        run_search(searcher=_searcher_reaching_retrieval(), free_text='from:"',
+                   filters={}, limit=5, allowed_account_ids=[1], user_id=1,
+                   sort="rank")
 
 
 def test_ascending_order_with_free_text_is_still_refused() -> None:
@@ -338,4 +426,11 @@ def test_a_textless_search_may_now_walk_oldest_first(db_dsn, db_conn) -> None:
     assert [r["date"] for r in asc["results"]] == sorted(
         r["date"] for r in asc["results"]
     )
-    assert asc["results"][0]["message_id"] != desc["results"][0]["message_id"]
+    # The *endpoints*, not merely "ascending and different from descending":
+    # ``_seed`` writes rows 1..n with strictly increasing ``internal_date``,
+    # so oldest-first must open at row 1 and newest-first at row n. An
+    # arbitrary ascending window — a walk that started in the middle, or one
+    # that ordered a truncated pool — satisfies the two looser assertions
+    # above while getting the whole point of the feature wrong.
+    assert asc["results"][0]["message_id"] == "1"
+    assert desc["results"][0]["message_id"] == "7"

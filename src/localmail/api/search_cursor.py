@@ -42,6 +42,7 @@ from localmail.search.searcher import KeysetCursor
 from localmail.search.sort_axes import (
     DEFAULT_SORT,
     DEFAULT_SORT_ORDER,
+    TEXTLESS_SORT,
     SortMode,
     SortOrder,
     resolve_sort,
@@ -111,7 +112,19 @@ if len(_TABLE_KEYSET_PAIRS) != len(_KEYSET_PREFIXES):
 
 #: The only sort a keyset cursor can continue — the date-keyset branch is
 #: the sole minter and the sole reader of that cursor kind.
-KEYSET_SORT: SortMode = "date"
+#:
+#: **Aliased to ``TEXTLESS_SORT`` rather than spelled ``"date"`` again**, so
+#: the two cannot drift. They are one fact seen from two ends: the walk a
+#: textless query resolves to *is* the walk that mints these cursors. Two
+#: independent literals held up two separate properties with nothing checking
+#: them — (1) page 1 accepts ``sort=TEXTLESS_SORT`` and mints a keyset cursor
+#: that ``_reject_sort_mismatch`` then compares against ``KEYSET_SORT``, so a
+#: divergence is #324's own shape (accepted on page 1, refused on page 2);
+#: and (2) ``run_search``'s keyset branch omits ``SortNotApplicable`` from its
+#: catch, which is safe only because ``sort_applicability_error`` returns
+#: ``None`` for ``TEXTLESS_SORT`` — so a divergence turns every keyset
+#: continuation of a blank-query walk into a 500.
+KEYSET_SORT: SortMode = TEXTLESS_SORT
 
 CursorMode = Literal["fresh", "pool", "keyset"]
 
@@ -123,7 +136,17 @@ class CursorPlan:
     Returned by :func:`resolve_cursor_plan`. ``sort`` and ``sort_order``
     are what the request was resolved to: the cursor's own for a keyset
     cursor, otherwise the caller's stated values, otherwise the module
-    defaults.
+    defaults — except that on ``mode="fresh"`` ``sort`` may also be
+    ``TEXTLESS_SORT``, derived from the query rather than from either
+    (#324), which is neither a stated value nor ``DEFAULT_SORT``.
+
+    They are **not** forwarded to ``Searcher.search`` on the *fresh*
+    branch, which passes the caller's raw axes so the Searcher can still
+    tell "unstated" from "stated" and resolve them from the composed query
+    it alone sees. There they serve this layer's own early refusals. The
+    *keyset* branch does forward them, deliberately: the cursor's kind is
+    what selects the date path, and any stated value contradicting the
+    cursor has already been rejected above.
 
     For ``mode="pool"`` they are **not** what the request will run with.
     ``continue_page`` serves whatever ordering the pool was built with, so
@@ -241,8 +264,13 @@ def resolve_cursor_plan(
     ``subject:invoice`` leaves no free text behind for an FTS predicate to
     be rebuilt from. Two predicates for one rule is what produced #308's
     follow-up defect — the api gate and the retrieval branch disagreeing
-    about what counted as a blank query — so this asks
-    ``keyset_walk.walk_for_text``, exactly as the branch does.
+    about what counted as a blank query — so this reads it through the same
+    ``sort_axes``/``keyset_walk`` rules the Searcher does. It reads a
+    *different string*, though: the raw request field, where the Searcher
+    parses the ACL-composed query. They agree for every well-formed query
+    and can diverge across an unbalanced quote, which is why the Searcher
+    stays the authority and ``run_search`` maps its refusals rather than
+    assuming they cannot happen.
 
     It is an input again, but for a narrower question than before #322.
     The old guard refused *any* keyset cursor presented with a blank query,

@@ -12,7 +12,11 @@ import pytest
 
 from localmail.api.errors import ValidationFailed
 from localmail.api.search import run_search
-from localmail.api.search_cursor import encode_keyset_cursor, keyset_order
+from localmail.api.search_cursor import (
+    encode_keyset_cursor,
+    keyset_order,
+    resolve_cursor_plan,
+)
 from localmail.search.searcher import KeysetCursor, PoolMetadata
 
 _KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
@@ -65,13 +69,26 @@ def test_a_stated_order_reaches_the_searcher() -> None:
     assert kwargs.get("sort_order") == "asc"
 
 
-def test_an_unstated_order_reaches_the_searcher_as_desc() -> None:
-    """Resolved at this boundary, from the one shared default."""
+def test_an_unstated_order_resolves_to_desc() -> None:
+    """Resolved from the one shared default — asserted on the resolver.
+
+    ``run_search`` forwards the caller's raw axes (#324's review), so the
+    Searcher receives ``None`` here and resolves it from the same constant.
+    ``plan.sort_order`` still feeds the api layer's rank+asc refusal, which
+    is why the resolution is pinned rather than deleted.
+    """
+    plan = resolve_cursor_plan(cursor=None, requested_sort="date",
+                               requested_sort_order=None, free_text="invoice")
+    assert plan.sort_order == "desc"
+
+
+def test_an_unstated_order_reaches_the_searcher_unresolved() -> None:
+    """The forwarding half: the Searcher is told what the caller stated."""
     s = _searcher()
     run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                allowed_account_ids=[1], user_id=99, sort="date")
     _, kwargs = s.search.call_args
-    assert kwargs.get("sort_order") == "desc"
+    assert kwargs.get("sort_order") is None
 
 
 def test_rank_with_ascending_is_a_validation_error_not_a_search() -> None:

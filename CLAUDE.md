@@ -3737,12 +3737,19 @@ for the full design.
           `DEFAULT_SORT` alone now disagrees with the branch that serves the
           request. That is #312's rule one level up, which is what makes the
           co-location load-bearing rather than tidy.
-        - **The classification is `keyset_walk.walk_for_text`**, gaining a
-          third caller beside the branch and the cursor stamp. All three ask
-          the same question, so a resolution cannot predict a branch the
-          Searcher will not take — and the branch predicate lost its `or
-          walk_for_text(...)` arm, because `effective_sort` was resolved
-          from that same string. One reading, not two.
+        - **The classification is `keyset_walk.walk_for_text`**, and it
+          *replaces* the branch's own call rather than joining it: the
+          branch predicate lost its `or walk_for_text(...)` arm, because
+          `effective_sort` was already resolved from that same string. So
+          the count is unchanged — `sort_axes` and the cursor stamp — and
+          the property is stronger than "all three agree": the branch can no
+          longer disagree with the resolution that predicts it, because it
+          tests that resolution. One reading, not two. (An earlier wording
+          here said "gaining a third caller beside the branch and the cursor
+          stamp… all three ask the same question", which counted the call
+          this same change removed; `grep -rn "walk_for_text(" src/` finds
+          four sites — `sort_axes` twice, `keyset_walk_error`, and the
+          stamp — and the branch is not among them.)
         - **`Searcher.search` resolves `sort` *after* `parse_query`, not
           before.** It reads the query now, so it cannot be resolved earlier;
           the rank+asc refusal moved with it. Safe because `apply_rewrite`
@@ -3768,6 +3775,45 @@ for the full design.
           filter, with an ascending cursor. Whatever page 1 decides a stated
           sort means for a textless query, this guard reasons from the same
           thing.
+        - **`run_search` forwards the caller's *raw* axes, never `plan`'s
+          resolution of them** (review follow-up). It shipped passing
+          `plan.sort`/`plan.sort_order` on the fresh branch, and `plan.sort`
+          is never `None` — so an *unstated* sort arrived at the Searcher
+          looking stated, and on the divergent-parse class below a caller
+          who omitted `sort` was refused with "pass sort='date' **or omit
+          sort**", a remedy they had already followed. #324's own defect — a
+          sort the caller never chose, reported as their statement —
+          reintroduced by #324's fix, and it breaks both
+          `sort_applicability_error`'s stated contract ("only a stated sort
+          is judged") and this file's rule that the branch guard is the
+          authority. The gate keeps its own resolution for its own early
+          refusals; it just no longer speaks for the caller.
+          - **Widening the fresh catch to `SortOrderNotApplicable` is part of
+            that change, not tidying.** The divergence runs both ways: `'"'`
+            is textless to the gate (whose rank+asc refusal therefore does
+            not fire) and text once the ACL token composes in, so the
+            Searcher resolves `rank`, meets a stated `asc`, and raises.
+            Unreachable while the gate forwarded its own resolution.
+          - **Known residual, filed not fixed**: the gate's rank+asc refusal
+            still reads `plan.sort`, so `sort_order="asc"` with no sort on
+            that same divergent class is still a 400 naming a `rank` path the
+            request would not take. Pre-existing — `main` behaves identically
+            — and fixing it means gating on the composed query, which needs
+            `run_search`'s ordering restructured around the empty-ACL
+            short-circuit.
+        - **`KEYSET_SORT` is `TEXTLESS_SORT`, aliased rather than respelled.**
+          Two `"date"` literals held up two non-local properties with nothing
+          checking either: page 1 accepts `sort=TEXTLESS_SORT` and mints a
+          keyset cursor that `_reject_sort_mismatch` compares against
+          `KEYSET_SORT` (a divergence is #324's own accepted-then-refused
+          shape), and `run_search`'s keyset branch omits `SortNotApplicable`
+          from its catch, which is safe only because
+          `sort_applicability_error` returns `None` for `TEXTLESS_SORT` (a
+          divergence is a 500 on every keyset continuation of a blank-query
+          walk). They are one fact seen from two ends — the walk a textless
+          query resolves to *is* the walk that mints those cursors — so the
+          alias makes drift impossible and `test_sort_axes.py` asserts the
+          property so that un-aliasing fails there rather than silently later.
         - **`run_search`'s catch of `SortNotApplicable` is live, not a
           backstop.** The api gate parses the raw request field and the
           Searcher parses the ACL-composed query, and `parse_query` is not
@@ -3776,23 +3822,38 @@ for the full design.
           `account_id:` token joins it. Verified, not argued. Without the
           catch the caller's error escapes as a 500 — `serve.app` handles
           `APIError` only — on a query the boundary had already cleared.
-        - **The GUI states no sort it knows will be refused.**
-          `search_paging.statedSort` takes the query and drops a `rank` for a
-          blank box, which keeps a shipped flow working: an empty search box
-          with a filter chip set ("everything from this account") is an
-          ordinary request that would otherwise become an error banner.
-          Omitting is not a fallback — the server resolves an unstated sort
-          to the branch that serves it, which is what that flow already
-          received. `date` is still stated, or the sort selector goes inert
-          for the blank-box case. **Known imprecision, deliberate**: the
-          client uses `query.trim()`, not a reproduction of `parse_query`, so
-          `subject:invoice` typed into the box still earns the 400 — keeping
-          a second parser in step with the first is not worth one loud,
-          actionable refusal. The store's own `hasNoScope()` uses the same
-          notion. The **wiring** is pinned separately in
-          `gui/src/lib/stores/search.test.ts`, including the 409-recovery
-          call site: `statedSort`'s own tests stay green if a call site hands
-          it a constant.
+        - **The GUI never states `rank` at all** (review follow-up).
+          `search_paging.statedSort` returns `undefined` for it and `date`
+          otherwise, reading only the cursor — **not** the query. It shipped
+          reading the query (`sort === "rank" && query.trim() === ""`), and
+          that was a regression: the server decides "textless" only *after*
+          lifting operators out, so `from:alice` and `has:attachment` — the
+          two shapes `SearchBar`'s own placeholder advertises — are textless
+          there while non-blank here. Those searches stated `rank`, earned
+          the new 400, and `submit()`'s catch cleared the results and showed
+          an error banner, where before they returned date-ordered rows.
+          The imprecision was documented as costing "one loud, actionable
+          400"; what it actually cost was the placeholder's own examples.
+        - **Dropping `rank` unconditionally is exactly equivalent, which is
+          why it is the fix rather than a client-side `parse_query`.** An
+          unstated sort resolves server-side to the branch that will serve
+          the request — `rank` whenever ranking is possible at all — so
+          omitting it matches stating it wherever stating it would have been
+          honoured, and avoids the 400 wherever it would not. Three
+          consequences: the query argument disappears (with it the
+          transposition hole — `statedSort(cursor, sort, query)` had two
+          adjacent `string` parameters and `cursor` is narrowed to `string`
+          at the `loadMore` call site, so a 1↔3 swap type-checked); README's
+          claim that both 400s are *unreachable* from the GUI becomes true
+          rather than aspirational; and there is no second parser to keep in
+          step with the first. `date` is still stated, or the sort selector
+          goes inert.
+        - **The store tests pin what reaches the wire, not the wiring.** The
+          three call sites forwarding a query are gone, so the pins are
+          behavioural: a filter-only search, an operator-only box (the
+          regression above), an ordinary text query, `date` surviving, and
+          both halves of the 409 recovery — which is a *fresh* request and
+          so the second place a sort reaches the wire.
     - **The keyset cursor carries its own direction, and the Searcher reads
       it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
       else, so `Searcher.search` paired a directionless cursor with a

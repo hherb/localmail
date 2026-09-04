@@ -108,8 +108,20 @@ def test_search_sort_param_is_forwarded_to_searcher(
 def test_search_sort_defaults_to_rank_when_omitted(
     db_dsn: str, api_token: str, db_conn, api_user,
 ) -> None:
-    """Omitting `sort` must default to "rank" — backward-compatible with
-    callers who don't know about the new field."""
+    """Omitting `sort` must stay backward-compatible for callers who don't
+    know about the field.
+
+    What the route guarantees is that it forwards the *omission* rather than
+    inventing a value: since #324's review the Searcher resolves both axes
+    itself, from the ACL-composed query, because only it sees the string its
+    FTS predicate is built from. Forwarding a resolution here is what made a
+    caller who omitted `sort` be refused for stating one.
+
+    The resolution "omitted means rank when there is text to rank" is pinned
+    at the resolver (`test_api_search_cursor_mode.py`) and on the rule
+    (`test_sort_axes.py`); end to end it is pinned against a real archive in
+    `test_api_search_rank_without_text.py`.
+    """
     _seed_acct_and_grant(db_conn, api_user.id)
     fake_searcher = _fake_searcher_returning_one_hit()
     app = create_app(db_dsn=db_dsn, searcher=fake_searcher)
@@ -120,7 +132,7 @@ def test_search_sort_defaults_to_rank_when_omitted(
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 200
-    assert fake_searcher.search.call_args.kwargs["sort"] == "rank"
+    assert fake_searcher.search.call_args.kwargs["sort"] is None
 
 
 def test_search_sort_invalid_value_is_rejected(
@@ -554,7 +566,11 @@ def test_search_sort_order_defaults_to_desc_when_omitted(
     db_dsn: str, api_token: str, db_conn, api_user,
 ) -> None:
     """Omitting it must reproduce today's behaviour byte for byte — the GUI
-    never sends the field."""
+    never sends the field.
+
+    Forwarded as the omission it is, for the reason its `sort` sibling above
+    gives; `DEFAULT_SORT_ORDER` is applied by the Searcher and pinned there.
+    """
     _seed_acct_and_grant(db_conn, api_user.id)
     fake_searcher = _fake_searcher_returning_one_hit()
     app = create_app(db_dsn=db_dsn, searcher=fake_searcher)
@@ -565,7 +581,7 @@ def test_search_sort_order_defaults_to_desc_when_omitted(
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 200
-    assert fake_searcher.search.call_args.kwargs["sort_order"] == "desc"
+    assert fake_searcher.search.call_args.kwargs["sort_order"] is None
 
 
 def test_search_rejects_ascending_rank_at_the_http_boundary(
@@ -603,10 +619,15 @@ def test_search_rejects_ascending_with_no_sort_stated_at_all(
 ) -> None:
     """The commonest way to hit the refusal: `sort_order="asc"` alone.
 
-    An unstated `sort` resolves to "rank", so this is the same 400 — and
-    it must not be reached by the alternative the design rejected, where
-    `sort_order="asc"` silently *implies* `sort="date"` and the parameter
-    stops being a direction.
+    An unstated `sort` resolves to "rank" **for a query with text to rank**,
+    so this is the same 400 — and it must not be reached by the alternative
+    the design rejected, where `sort_order="asc"` silently *implies*
+    `sort="date"` and the parameter stops being a direction.
+
+    The qualifier is #324 and is load-bearing: a query with no free text
+    resolves to "date" instead, so `sort_order="asc"` alone is *honoured*
+    there. This test uses `query="hello"` and so stays on the rank side;
+    the carve-out has its own transport pin below.
     """
     _seed_acct_and_grant(db_conn, api_user.id)
     fake = _fake_searcher_returning_one_hit()
@@ -783,3 +804,70 @@ def test_a_descending_search_mints_a_descending_cursor(
     cursor = r.json()["next_cursor"]
     assert decode_keyset_cursor(cursor) == minted, cursor
     assert keyset_order(cursor) == "desc"
+
+
+def test_search_rejects_a_stated_rank_for_a_query_it_cannot_rank(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """#324 on the wire, which is the only place the status code shows.
+
+    A query with no free text has nothing for the hybrid pool to rank, so
+    it has always been answered date-ordered — silently, until #322 gave
+    that walk a cursor recording `date` and the drop became a request
+    accepted on page 1 and refused on page 2. It is refused on page 1 now.
+
+    Here for the reason the sibling above gives for itself: `ValidationFailed`
+    is an `APIError` so the mapping is generic, and that argument is
+    rejected there by name — "only the transport shows that" applies
+    unchanged to a refusal added later, which is exactly what this is.
+
+    Both spellings of "no free text" are covered, because the operator-only
+    one is a *non-blank* request field and is the shape #308's follow-up
+    defect lived in.
+    """
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    for query in ("", "subject:invoice"):
+        r = c.post(
+            "/v1/search",
+            json={"query": query, "filters": {}, "limit": 20, "sort": "rank"},
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+        assert r.status_code == 400, query
+        assert r.headers["content-type"].startswith("application/problem+json")
+        body = r.json()
+        assert body["type"] == "/problems/validation-failed"
+        assert "no free text" in body["detail"]
+        fake.search.assert_not_called()
+
+
+def test_search_honours_ascending_alone_for_a_query_it_cannot_rank(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """#324's inverse face, and a **status-code change** for a shipped shape.
+
+    `{"query": "", "sort_order": "asc"}` used to be a 400 naming
+    `sort='rank'` — a path such a request has never taken, since a textless
+    query is served by the date walk. It resolves to `date` now, so the
+    request is honoured and walks the archive oldest-first.
+
+    Pinned at the transport because the change is the status code: an
+    api-level test sees a returned page either way, and the sibling
+    refusal one function up still asserts 400 for the *text* case, so
+    nothing else here would notice this flipping back.
+    """
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "", "filters": {}, "limit": 20, "sort_order": "asc"},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    # The Searcher is handed the caller's own axes and resolves them itself
+    # (#324's review); what matters on the wire is that `asc` survived.
+    assert fake.search.call_args.kwargs["sort_order"] == "asc"

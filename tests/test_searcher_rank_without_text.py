@@ -62,6 +62,34 @@ TEXTLESS_QUERIES = ("", "   ", "subject:invoice", 'from:"alice@example.com"',
                     "has:attachment", "lang:en", "account_id:1")
 
 
+def _assert_takes_the_date_walk(query: str, **kw) -> None:
+    """Prove the *date-keyset* branch ran, rather than merely that IO began.
+
+    The two retrieval branches are indistinguishable from the pool — both
+    open a connection — so a ``pool.connection.assert_called_once()`` stays
+    green when the query is routed into the hybrid pool instead, which is
+    exactly the regression the callers of this helper claim to catch.
+
+    The branch is therefore observed at the one method only the date walk
+    calls. The pool is left working so that method is reached, and the two
+    reads it makes first are stubbed; the hybrid branch would instead reach
+    ``_Embeddings.embed_query`` and raise "retrieval must not start", so the
+    two outcomes are told apart by message rather than by both being IO.
+    """
+    pool = MagicMock()
+    searcher = Searcher(pool=pool, cfg=SearchConfig(),
+                        embeddings=_Embeddings(), reranker=None,
+                        rewriter=None)
+    searcher._resolve_account_names = (  # type: ignore[method-assign]
+        lambda conn, parsed: parsed)
+    searcher._maybe_warn_unpopulated_body_lang = (  # type: ignore[method-assign]
+        lambda conn, parsed: None)
+    searcher._date_keyset_search = MagicMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("the date walk ran"))
+    with pytest.raises(AssertionError, match="the date walk ran"):
+        searcher.search(query, allowed_account_ids=None, **kw)
+
+
 @pytest.mark.parametrize("query", TEXTLESS_QUERIES)
 def test_a_stated_rank_without_free_text_is_refused_before_any_io(
     query: str,
@@ -86,21 +114,22 @@ def test_an_unstated_sort_without_free_text_reaches_the_date_walk(
 ) -> None:
     """The positive control. A guard that refused every textless query
     would satisfy the refusal test above and break every filter-only
-    search the GUI issues."""
-    searcher, pool = _searcher()
-    with pytest.raises(AssertionError, match="no connection"):
-        searcher.search(query, allowed_account_ids=None)
-    pool.connection.assert_called_once()
+    search the GUI issues.
+
+    Asserted on ``_date_keyset_search`` itself, not on the pool: **both**
+    branches open a connection, so a pool assertion cannot see which one
+    ran and stays green even when the query is routed into the hybrid
+    pool — which is precisely the regression this test's name claims to
+    catch.
+    """
+    _assert_takes_the_date_walk(query)
 
 
 @pytest.mark.parametrize("query", TEXTLESS_QUERIES)
 def test_a_stated_date_without_free_text_reaches_the_date_walk(
     query: str,
 ) -> None:
-    searcher, pool = _searcher()
-    with pytest.raises(AssertionError, match="no connection"):
-        searcher.search(query, allowed_account_ids=None, sort="date")
-    pool.connection.assert_called_once()
+    _assert_takes_the_date_walk(query, sort="date")
 
 
 @pytest.mark.parametrize("query", TEXTLESS_QUERIES)

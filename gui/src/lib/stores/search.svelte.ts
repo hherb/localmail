@@ -115,7 +115,7 @@ class SearchStore {
         filters: this.#wireFilters(),
         limit: settings.snapshot.pageSize,
         cursor: null,
-        sort: statedSort(null, this.#state.sort, this.#state.query),
+        sort: statedSort(null, this.#state.sort),
       });
       if (seq !== this.#submitSeq) return;
       this.#state.results = resp.results;
@@ -155,7 +155,7 @@ class SearchStore {
           filters: this.#wireFilters(),
           limit: settings.snapshot.pageSize,
           cursor,
-          sort: statedSort(cursor, this.#state.sort, this.#state.query),
+          sort: statedSort(cursor, this.#state.sort),
         });
       } catch (err: unknown) {
         if (!isSearchCursorExpired(err)) throw err;
@@ -166,7 +166,7 @@ class SearchStore {
           filters: this.#wireFilters(),
           limit: settings.snapshot.pageSize,
           cursor: null,
-          sort: statedSort(null, this.#state.sort, this.#state.query),
+          sort: statedSort(null, this.#state.sort),
         });
         if (seq !== this.#submitSeq) return;
         if (fresh.results.length <= priorCount) {

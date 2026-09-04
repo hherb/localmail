@@ -76,11 +76,17 @@ class SortNotApplicable(ValueError):
     ``datetime`` and the embedding backends raise, relabelling a real
     outage as a caller error.
 
-    **Its audience is library and CLI callers.** ``api.run_search`` refuses
-    the same shape at its own boundary, ahead of the empty-ACL
-    short-circuit — but the two guards read *different strings* (the raw
-    request field there, the ACL-composed query here), so this is not
-    merely a backstop; see ``run_search``'s catch.
+    **Its audience is library callers**, plus every wire caller whose query
+    the two layers read differently. ``api.run_search`` refuses the same
+    shape at its own boundary, ahead of the empty-ACL short-circuit — but
+    the two guards read *different strings* (the raw request field there,
+    the ACL-composed query here), so this is not merely a backstop; see
+    ``run_search``'s catch, which maps it to a 400.
+
+    The CLI is **not** in that audience today: ``localmail search`` has no
+    ``--sort`` option and passes none, so this cannot be raised from it. If
+    one is ever added, note that ``cli.py``'s ``search`` catches only
+    ``RuntimeError``, so this would traceback rather than exit cleanly.
     """
 
 
@@ -433,10 +439,12 @@ class KeysetCursorUnusable(ValueError):
 class SearchPage:
     """One page of results plus pagination metadata.
 
-    ``next_keyset`` is set on the date-ordered keyset walk — ``sort="date"``
-    with free text, or any blank query regardless of ``sort``. The hybrid
-    pool path keeps ``next_keyset=None`` and continues to use
-    ``search_token`` + page.
+    ``next_keyset`` is set on the date-ordered keyset walk — reached by a
+    resolved ``sort="date"``, which covers a stated one with free text and
+    any query with no free text at all (such a query resolves to ``date``
+    whatever was stated, and a stated ``"rank"`` for it is refused rather
+    than dropped — #324). The hybrid pool path keeps ``next_keyset=None``
+    and continues to use ``search_token`` + page.
     """
     results: list[SearchResult]
     page: int
@@ -1087,11 +1095,13 @@ class Searcher:
 
         `sort="date"` takes the date-ordered keyset walk directly
         (`_date_keyset_search`) rather than the hybrid retrieval pool —
-        true whether or not there is free text, and also true for any
-        blank query regardless of `sort`. The pool is reached only by the
-        remaining branch: `sort="rank"` (stated or defaulted) with
-        non-blank free text. ``continue_page`` honors whichever
-        `(sort, sort_order)` pair was in force when the cursor was minted.
+        true whether or not there is free text. A query with **no** free
+        text resolves to `"date"` too, whatever was stated, so it takes
+        that same walk; stating `"rank"` for one is refused rather than
+        silently dropped (#324, see below). The pool is reached only by the
+        remaining branch: a resolved `sort="rank"`, which requires non-blank
+        free text. ``continue_page`` honors whichever `(sort, sort_order)`
+        pair was in force when the cursor was minted.
 
         `sort=None` means "unstated" — the spelling every other layer of this
         cluster uses since #308 — and is resolved here, once, before anything
@@ -1311,12 +1321,14 @@ class Searcher:
         # chronological order. ``messages.fts_v2`` gives identical lexical
         # recall and the keyset cursor scrolls back arbitrarily far.
         #
-        # A blank query, whatever the sort: the hybrid pipeline degenerates
-        # for it (the BM25 arms early-return with no terms, the vector arms
-        # rank by distance to the embedding of the empty string), so a blank
-        # query has always been answered as a date-ordered list. It now
-        # paginates too — before, it returned one page and no cursor, which
-        # is the branch "show me my oldest mail" lands on.
+        # A query with no free text, which resolves here whatever the sort
+        # said: the hybrid pipeline degenerates for it (the BM25 arms
+        # early-return with no terms, the vector arms rank by distance to
+        # the embedding of the empty string), so such a query has always
+        # been answered as a date-ordered list. It now paginates too —
+        # before, it returned one page and no cursor, which is the branch
+        # "show me my oldest mail" lands on — and a stated `sort="rank"` for
+        # it is refused above rather than dropped here (#324).
         # One predicate, not two: `effective_sort` was resolved from this
         # same `parsed.free_text` above, so the `or walk_for_text(...)` arm
         # this used to carry is already inside it. Keeping both would be two

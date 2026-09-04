@@ -888,8 +888,9 @@ Poll, process, ack. Semantics:
   discriminator, not API.
 
 `sort_order` is `"asc"` or `"desc"` (default `"desc"`), and modifies
-whichever `sort` criterion is in force. Ascending therefore requires
-`sort=date`: `sort=rank` with `sort_order=asc` is a 400 — the rank path
+whichever `sort` criterion is in force. Ascending therefore requires that
+the sort **resolve** to `date` — state it, or omit it on a query with
+nothing to rank: `sort=rank` with `sort_order=asc` is a 400 — the rank path
 serves a bounded candidate pool, so reversing it would return the least
 relevant of the top hits rather than of the archive.
 

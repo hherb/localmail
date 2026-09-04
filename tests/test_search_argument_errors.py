@@ -12,8 +12,9 @@ tuple is an operator-facing **500**, because ``serve.app`` registers a
 handler for ``APIError`` only.
 
 That is not hypothetical. #342 shipped with ``SortNotApplicable`` missing
-from the keyset tuple, and its safety rested on ``KEYSET_SORT`` and
-``TEXTLESS_SORT`` being two independently declared ``"date"`` literals.
+from the keyset tuple, and its safety rested on ``KEYSET_SORT is
+TEXTLESS_SORT`` — an aliasing decision made in ``search_cursor.py``, i.e. in
+a different module from the omission it was holding up.
 
 The pins here are deliberately two kinds, because either alone has a hole:
 
@@ -23,8 +24,19 @@ The pins here are deliberately two kinds, because either alone has a hole:
 * **Behavioural** — the family is enumerated from the **type**
   (``__subclasses__``, transitively), never from a list here, and every
   member is driven through both ``run_search`` branches. A member added
-  later is therefore in scope for this test without anyone editing it,
-  which is the property a hand-written list cannot have.
+  later is therefore in scope for **those pins** without anyone editing
+  them, which is the property a hand-written list cannot have.
+
+Two tests here *are* hand-written lists, and deliberately: the
+``_KNOWN_MEMBERS`` control and the ``wire_prefix`` mapping both fail on a
+fifth member, which is how the author is made to decide its prefix rather
+than inherit one silently. So the file does need an edit — the parametrised
+pins do not, and they are the ones that would otherwise pass vacuously.
+
+**What none of this reaches** is a fifth member written *outside*
+``argument_errors``: the structural pin filters on ``__module__``, so a
+``class Foo(ValueError)`` in ``searcher.py`` reproduces #344 verbatim with
+every test here green. That reverse cross-check is #347.
 """
 from __future__ import annotations
 
@@ -63,13 +75,24 @@ def _family(
     """Every concrete member of the family, transitively.
 
     Derived from the type rather than listed, so a member added later is
-    covered by every test below without this file being edited — the whole
-    point of giving the four a base class. ``__subclasses__`` is direct
-    only, hence the recursion.
+    covered by the parametrised pins below without this file being edited —
+    the whole point of giving the four a base class. ``__subclasses__`` is
+    direct only, hence the recursion.
+
+    Restricted to classes defined in ``argument_errors``, because
+    ``__subclasses__`` is process-global while ``@parametrize`` is evaluated
+    at **import**: without the filter the case set would depend on which test
+    modules pytest happened to import first, and the day any file defines a
+    local subclass as a negative control — a natural thing to write for this
+    feature — ``test_the_family_is_exactly_the_four_known_members`` becomes
+    order-dependent. The filter costs nothing, since a member belongs in that
+    module anyway (#347) and the structural pin below independently requires
+    every class defined there to inherit the base.
     """
     out: list[type[SearchArgumentRefused]] = []
     for sub in base.__subclasses__():
-        out.append(sub)
+        if sub.__module__ == argument_errors.__name__:
+            out.append(sub)
         out.extend(_family(sub))
     return out
 
@@ -140,10 +163,15 @@ def _keyset_cursor() -> str:
 def test_the_fresh_branch_maps_every_family_member_to_a_400(
     exc_type: type[Exception],
 ) -> None:
+    """``ValidationFailed`` alone would not pin this — ``run_search`` raises
+    it from at least three sites that never touch the searcher, so the call
+    is asserted as well as the outcome."""
     s = _searcher(exc_type("refused"))
     with pytest.raises(ValidationFailed):
         run_search(searcher=s, free_text="invoice", filters={}, limit=5,
                    allowed_account_ids=[1], user_id=1)
+    s.search.assert_called_once()
+    assert "keyset_cursor" not in s.search.call_args.kwargs
 
 
 @pytest.mark.parametrize("exc_type", _family(), ids=lambda t: t.__name__)
@@ -155,12 +183,21 @@ def test_the_keyset_branch_maps_every_family_member_to_a_400(
     It was safe only because ``KEYSET_SORT is TEXTLESS_SORT``, i.e. by an
     aliasing decision made in a different module — the kind of non-local
     reasoning a base class removes.
+
+    The branch is asserted, not assumed. On ``pytest.raises(ValidationFailed)``
+    alone this test passed with ``elif plan.mode == "keyset"`` mutated to
+    ``elif False`` — control fell through to the pool branch, where
+    ``decode_search_cursor`` raises a *different* ``ValidationFailed`` over
+    the same cursor. A test named for a branch that passes while the branch
+    never runs is the shape this file exists to remove.
     """
     s = _searcher(exc_type("refused"))
     with pytest.raises(ValidationFailed):
         run_search(searcher=s, free_text="invoice", filters={}, limit=5,
                    allowed_account_ids=[1], user_id=1,
                    cursor=_keyset_cursor())
+    s.search.assert_called_once()
+    assert s.search.call_args.kwargs["keyset_cursor"] is not None
 
 
 def test_an_unrelated_value_error_still_escapes_as_itself() -> None:

@@ -381,9 +381,10 @@ def run_search(
             # branch (#331 point 3). Written here, it was applied to
             # everything the branch caught — so a `sort_order` refusal on a
             # request whose cursor was fine would read `cursor: sort_order=
-            # 'asc' is not applicable…`, a category error. Unreachable, and
-            # widening this catch to the whole family would have made it
-            # more so, which is precisely when such wording rots.
+            # 'asc' is not applicable…`, a category error. It stays
+            # unreachable, but widening this catch to the whole family put
+            # *more members* within reach of the mislabel — the wording rots
+            # exactly where nothing can trip over it.
             #
             # Caught by the family, never by bare ValueError — psycopg,
             # datetime and the embedding backends raise that, and
@@ -391,6 +392,14 @@ def run_search(
             # caller to re-send a blameless query.
             raise ValidationFailed(f"{exc.wire_prefix}{exc}") from exc
     else:
+        # No `SearchArgumentRefused` catch here, and that is a fact about this
+        # branch rather than an omission: it never calls `searcher.search`.
+        # `_check_pool_sort` and `_continue_or_grow` reach `get_pool_metadata`
+        # / `continue_page` / `grow_pool`, which raise `CacheMissError`,
+        # `PageOutOfPoolError` and `APIError` subclasses — no family member can
+        # arrive. Route pool continuation through `search()` and this branch
+        # needs the catch its two siblings carry, or #344 returns on the one
+        # branch its fix did not touch.
         parsed = decode_search_cursor(cursor)
         # The **raw** arguments, not the plan's resolved ones: a resolved
         # default would read as a contradiction against a pool built the

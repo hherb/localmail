@@ -3891,6 +3891,49 @@ for the full design.
         scope without this test being edited, which a hand-written list
         cannot be. A `_family()` that silently returned `[]` would make the
         parametrised half vacuous, so that is its own negative control.
+        `_family()` is restricted to classes defined in `argument_errors`,
+        because `__subclasses__` is process-global while `@parametrize` is
+        evaluated at import — unfiltered, the case set depends on collection
+        order the day any file defines a local subclass as a control.
+      - **Three pins were added in review, each closing a hole the others
+        made invisible.** (1) The parametrised branch tests asserted only
+        `pytest.raises(ValidationFailed)`, which `run_search` raises from at
+        least three sites that never touch the searcher — mutating
+        `elif plan.mode == "keyset"` to `elif False` left all four keyset
+        cases green, control falling through to the pool branch where
+        `decode_search_cursor` raises a *different* `ValidationFailed` over
+        the same cursor. They assert `search.assert_called_once()` and the
+        presence or absence of `keyset_cursor` now. (2) **Nothing observed
+        the 400 at the transport**: every other `status_code == 400` in
+        `test_serve_search_route.py` is paired with
+        `search.assert_not_called()`, so the family's entire justification —
+        an uncaught member is a 500, `serve.app` handling `APIError` only —
+        was argued in four docstrings and never run. A parametrised route
+        test drives all four members through a searcher that raises, with an
+        unrelated `ValueError` beside it as the control; note that control
+        does **not** catch a widening to bare `ValueError` (the widened
+        handler then dies on `exc.wire_prefix`, still a 500) — that mutation
+        is caught one layer down, and the docstring says so rather than
+        claiming the stronger property. (3) **`KeysetOrderMismatch`'s raise
+        site was untested** — replacing its condition with `if False:` left
+        the *whole suite* green (3180 passed), its wire-layer sibling being
+        covered instead. It is pinned in `test_searcher_guard_precedence.py`,
+        where it doubles as a precedence assertion: it is decided above
+        `parse_query`, so it outranks both guards that file is about.
+      - **What the family still does not confer, filed rather than fixed.**
+        The structural pin filters on `__module__`, so a fifth guard written
+        `class Foo(ValueError)` in `searcher.py` reproduces #344 verbatim with
+        every test green — the reverse cross-check `pool_constructor_calls`
+        and `acceptance_coverage_error` exist for, **#347**. Both catch sites
+        wrap the whole `searcher.search(...)` call, so what makes the widening
+        safe is that all five raise sites are **pre-IO**, which was stated
+        nowhere and is pinned per member by hand — **#349**. `run_search`
+        never checks `sort`/`sort_order` membership, so the plain-`ValueError`
+        exclusion rests on an obligation on transports rather than a property
+        of the value, and an invalid axis with an empty ACL is reported as a
+        **200** — **#348**. And `wire_prefix` keeps its `": "` separator
+        inside the value while the join is restated at each boundary —
+        **#350**, to be done with #305's CLI catch, the third consumer.
       - **They moved out of `searcher.py` rather than gaining a base in
         place**, the `sort_axes.py`/`keyset_walk.py` call: the family is the
         contract *between* the Searcher and every boundary that maps it, and
@@ -3898,10 +3941,15 @@ for the full design.
         `searcher.py` re-exports the four, so
         `from localmail.search.searcher import KeysetCursorUnusable` keeps
         resolving; the base is new and has no legacy path, so boundaries
-        import it from `argument_errors`. `searcher.py` went **1439 → 1391**
-        (the four classes were 73 lines; the re-export and the hoisted
-        guard's rationale account for the difference — measured, because the
-        first draft of this line asserted 73 and was wrong).
+        import it from `argument_errors`. **`SearchArgumentRefused` is also
+        exported from `localmail.search`**, beside the `RewriteParseError`
+        trio: the family's own docstring names library callers as its
+        audience, and that audience had no supported path to the one class it
+        is told to catch. `searcher.py` went **1439 → 1393** (`+44/-90`); the
+        four classes were 73 removed lines, and the re-export plus the hoisted
+        guard's rationale account for the rest. Read the number off
+        `git diff --numstat`, not off an estimate — this line has now been
+        wrong twice, first at 73 and then at 1391.
       - **The membership checks on `sort`/`sort_order` deliberately stay
         outside the family.** They raise a plain `ValueError` because HTTP
         and MCP both declare those as `Literal`s, so a bad value cannot
@@ -3973,8 +4021,12 @@ for the full design.
           `cli.py` work rather than left as its own issue. Widen that catch
           to **`SearchArgumentRefused`**, never to bare `ValueError` — the
           family is the point, so a fifth guard must not need the catch
-          edited. Adding either sort flag makes all four members reachable
-          from the CLI at once.
+          edited. A sort flag makes **two** members reachable, not four:
+          `KeysetOrderMismatch` and `KeysetCursorUnusable` both raise only
+          under `keyset_cursor is not None`, and `cli.py` passes no cursor,
+          so those need a *cursor* flag. (This entry and #305's own comment
+          both said four; the table in that comment contradicted the sentence
+          above it.)
     - **The keyset cursor carries its own direction, and the Searcher reads
       it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
       else, so `Searcher.search` paired a directionless cursor with a

@@ -17,6 +17,7 @@ arm to those accounts. Multi-user callers must pass the caller's grants.
 
 from __future__ import annotations
 
+from localmail.search.argument_errors import SearchArgumentRefused
 from localmail.search.query import ParsedQuery, QueryParseError, SearchFilters
 from localmail.search.rewriter import QueryRewriter, RewriteParseError, RewriteResult
 from localmail.search.rewriter_backends import (
@@ -46,6 +47,14 @@ __all__ = [
     "MissingApiKey",
     "InvalidRewriterUrl",
     "RewriteParseError",
+    # The family `Searcher.search` raises when it refuses a stated argument
+    # (#344). Its own docstring names library callers as the audience, and
+    # until this was exported that audience had no supported path to the one
+    # class it is told to catch — while the rewriter trio above had one all
+    # along. The four members stay reachable through
+    # `localmail.search.searcher`, which is where every existing caller
+    # already imports them from.
+    "SearchArgumentRefused",
 ]
 
 _UNSET = object()  # sentinel: caller did not provide the argument

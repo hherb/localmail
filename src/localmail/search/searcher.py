@@ -1170,14 +1170,23 @@ class Searcher:
         # #322 added.
         #
         # It runs **ahead of the two sort guards** (#344). Both rules are
-        # true of `search("", keyset_cursor=<text-walk>, sort="rank")` and
-        # both recommend the same remedy, so this is about which diagnosis
-        # the caller is shown — and the api boundary has always shown the
-        # cursor one, `resolve_cursor_plan` never consulting the textless
-        # rule once a cursor is present. Ordered the other way here, one
-        # shape was answered differently over HTTP than from a library
-        # call: the two-layers-wording-one-rule-differently defect this
-        # cluster keeps filing.
+        # true of `search("", keyset_cursor=<text-walk>, sort="rank")`, so
+        # this is about which diagnosis the caller is shown — and the api
+        # boundary has always shown the cursor one, `resolve_cursor_plan`
+        # never consulting the textless rule once a cursor is present.
+        # Ordered the other way here, one shape was answered differently
+        # over HTTP than from a library call: the
+        # two-layers-wording-one-rule-differently defect this cluster keeps
+        # filing.
+        #
+        # The two remedies read alike and do not end alike, which is the
+        # better reason to prefer this one: acting on the textless message
+        # (drop `sort`, or pass `sort="date"`) leaves the cursor's real
+        # problem in place, while acting on this one — re-send the query —
+        # makes `free_text` non-blank, so `resolve_sort` returns `rank`, the
+        # hybrid branch is taken, and the caller meets `KeysetCursorUnusable`
+        # a second time from the guard below. Two round trips either way for
+        # that shape; the cursor diagnosis is at least the root cause.
         #
         # Reading `parsed.free_text` before the smart rewrite and the ACL
         # clamp is safe for the reason spelled out below — neither touches

@@ -79,7 +79,7 @@ from the two issues filed against the #342 review.
 
 - **The family is
   [src/localmail/search/argument_errors.py](src/localmail/search/argument_errors.py)`::SearchArgumentRefused`**,
-  with the four subclasses **moved out of `searcher.py`** (1439 → 1391 lines)
+  with the four subclasses **moved out of `searcher.py`** (1439 → 1393 lines)
   the way `sort_axes`/`keyset_walk` were. It is the contract *between* the
   Searcher and every boundary that maps it, and stating the rule a new guard
   must join needs somewhere to state it. `searcher.py` re-exports the four, so

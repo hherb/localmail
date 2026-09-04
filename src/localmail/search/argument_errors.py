@@ -15,9 +15,10 @@ enforced by everyone remembering rather than by construction. A fifth guard
 added without widening a tuple is an operator-facing **500**, because
 ``serve.app`` registers a handler for ``APIError`` only — and it is not
 hypothetical, since #342 shipped with ``SortNotApplicable`` missing from the
-keyset tuple. Its safety rested on ``KEYSET_SORT`` and ``TEXTLESS_SORT``
-being two independently declared ``"date"`` literals, i.e. on a decision
-made in a different module.
+keyset tuple. Its safety rested on ``KEYSET_SORT is TEXTLESS_SORT``, an
+aliasing decision made in a different module — the two have never been
+independently declared literals, since #342 introduced the alias and the
+hole in the same commit.
 
 ``SearchArgumentRefused`` is the family, and both boundaries catch *it*. The
 named subclasses stay, because the point is not to collapse the diagnoses —
@@ -35,10 +36,21 @@ resolving; the base is new and has no legacy path, so boundaries import it
 from here.
 
 **Not every refusal belongs here.** ``Searcher.search``'s membership checks
-on ``sort``/``sort_order`` raise a plain ``ValueError`` on purpose: HTTP and
-MCP both declare those as ``Literal``s, so a bad value cannot arrive from
-the wire and there is no api/ mapping for it to be caught by. Adding it to
-this family would claim a wire audience it does not have.
+on ``sort``/``sort_order`` raise a plain ``ValueError`` on purpose, and the
+line between them and the family is not *audience* — both are raised at
+library callers, as ``SortNotApplicable`` below says of itself. It is that a
+membership error is a **type** error a well-typed caller cannot make, where
+every member here is a **cross-argument** error a perfectly well-typed caller
+makes routinely: ``sort="Date"`` is unspellable at every declared boundary,
+while ``sort="rank"`` on a textless query is spellable at all of them.
+
+That distinction rests on an obligation on *transports*, not on a property of
+the value: ``run_search`` type-hints both axes and checks neither at runtime,
+so every transport reaching it must declare them as ``Literal``s or inherit a
+500 with nothing failing at review time. HTTP (``serve/routes/search.py``) and
+MCP (``mcp/server.py``) both do; #348 tracks moving the check into
+``run_search`` so a third consumer cannot forget, and revisits whether these
+two then join the family.
 """
 from __future__ import annotations
 
@@ -49,6 +61,15 @@ class SearchArgumentRefused(ValueError):
     Every member maps to HTTP 400 at the api boundary. Subclass this rather
     than ``ValueError`` for any new guard over a *stated* argument, and the
     boundaries need no edit.
+
+    **A member must be raised before any IO**, and that is a contract rather
+    than an accident of where the five current guards sit. Both catch sites
+    wrap the whole ``searcher.search(...)`` call — DB, embedding, reranking —
+    so a member raised after retrieval began would have a genuine backend
+    failure relabelled a caller 400, which is this family's own purpose
+    inverted. A refusal detectable only after retrieval does not belong here.
+    #349 tracks pinning that the way the 400-mapping is pinned: derived from
+    the type, not hand-written per member.
 
     A ``ValueError`` subclass so nothing that already catches one changes
     behaviour; narrower than ``ValueError`` so a boundary catching this
@@ -70,6 +91,13 @@ class SearchArgumentRefused(ValueError):
     #: forced remedy: a member that forgets to set one loses a word of
     #: context, where a member that inherits a *wrong* one makes a false
     #: claim. This default fails in the harmless direction.
+    #:
+    #: **The ``": "`` separator lives in the value, which this type does not
+    #: own** — ``wire_prefix = "cursor"`` renders ``cursorthis cursor…`` and
+    #: nothing checks the shape, since the tests pin the two literals rather
+    #: than the form. #350 tracks moving the join onto the type (a ``label``
+    #: plus an owned separator, the ``APIError.to_problem`` shape), which also
+    #: settles what a member with no message should render.
     wire_prefix: str = ""
 
 
@@ -109,9 +137,13 @@ class SortOrderNotApplicable(SearchArgumentRefused):
     so a ``sort_order="asc"`` the gate cleared against its resolved ``date``
     meets a resolved ``rank`` here. The catch is live.
 
-    The CLI reaches this guard directly too — note ``cli.py``'s search
-    command catches ``RuntimeError`` only, so a ``--sort-order`` flag added
-    there must widen that catch to ``SearchArgumentRefused``. Tracked in
+    The CLI is **not** in that audience today, exactly as
+    ``SortNotApplicable`` above is not: ``localmail search`` has no
+    ``--sort-order`` option and passes none, so ``effective_order`` is always
+    ``DEFAULT_SORT_ORDER`` and rank+asc cannot hold. If one is ever added,
+    note that ``cli.py``'s ``search`` catches only ``RuntimeError``, so this
+    would traceback rather than exit cleanly — widen that catch to
+    ``SearchArgumentRefused``, never to bare ``ValueError``. Tracked in
     **#305** with the rest of the ``cli.py`` work (#331, where it began, is
     closed).
     """

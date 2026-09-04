@@ -19,12 +19,18 @@ direction inside the Searcher — which is why it survived review of the PR
 that created it.
 
 **What moving the guard does not buy.** An earlier draft of this change
-claimed it also saves a smart-rewrite round trip on a caller error. That
-is false and was measured rather than assumed: ``Searcher.search`` runs the
-rewriter only under ``parsed.free_text.strip()``, and the walk guard fires
-only when that string is *blank*, so no rewrite was ever paid for on this
-path. The guard's own docstring claim ("before any connection is opened")
+claimed it also saves a smart-rewrite round trip on a caller error. That is
+false: ``Searcher.search`` runs the rewriter only under
+``parsed.free_text.strip()``, and the walk guard fires only when that string
+is *blank*, so no rewrite was ever paid for on this path — before the move or
+after it. The guard's own docstring claim ("before any connection is opened")
 was already true.
+
+The refutation is **asserted rather than argued** —
+``test_the_reorder_buys_no_rewrite_round_trip`` hands the Searcher a rewriter
+that raises if touched — because "measured" is a word this tree reserves for
+something it has actually run, and the first draft of this docstring used it
+for a code reading.
 """
 from __future__ import annotations
 
@@ -35,7 +41,7 @@ import pytest
 
 from localmail.config import SearchConfig
 from localmail.search.argument_errors import (
-    KeysetCursorUnusable, SortNotApplicable,
+    KeysetCursorUnusable, KeysetOrderMismatch, SortNotApplicable,
 )
 from localmail.search.searcher import KeysetCursor, Searcher
 
@@ -67,21 +73,32 @@ _TEXT_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
                             id=100, order="desc", walk="text")
 _ARCHIVE_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
                                id=100, order="desc", walk="archive")
+_ASCENDING_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
+                                 id=100, order="asc", walk="archive")
+
+
+class _ExplodingRewriter:
+    """A rewriter that fails the test if the smart path is ever entered."""
+
+    def rewrite(self, text: str):  # pragma: no cover - never reached
+        raise AssertionError("no rewrite may be attempted")
 
 
 def test_a_cursor_problem_outranks_the_textless_rule() -> None:
     """The shape the two layers used to answer differently.
 
-    ``KeysetCursorUnusable`` is a strict subclass of nothing the textless
-    guard raises, so asserting the *type* is what makes this a precedence
-    pin rather than a "some refusal happened" one.
+    Naming the *type* in ``pytest.raises`` is the whole pin, and it is
+    sufficient: with the walk guard back below the sort guards this shape
+    raises ``SortNotApplicable``, which ``pytest.raises`` rejects. An
+    ``assert not isinstance(exc.value, SortNotApplicable)`` used to sit here
+    arguing that role; it was vacuous, the two being siblings, so no change
+    that keeps them siblings could fail it.
     """
     searcher, pool = _searcher()
-    with pytest.raises(KeysetCursorUnusable) as exc:
+    with pytest.raises(KeysetCursorUnusable, match="continues a text search"):
         searcher.search("", allowed_account_ids=None, sort="rank",
                         keyset_cursor=_TEXT_CURSOR)
     pool.connection.assert_not_called()
-    assert not isinstance(exc.value, SortNotApplicable)
 
 
 def test_the_textless_rule_still_fires_when_no_cursor_competes() -> None:
@@ -114,3 +131,61 @@ def test_a_text_cursor_with_its_query_back_reaches_retrieval() -> None:
         searcher.search("invoice", allowed_account_ids=None, sort="date",
                         keyset_cursor=_TEXT_CURSOR)
     pool.connection.assert_called()
+
+
+def test_the_order_mismatch_guard_outranks_every_other() -> None:
+    """``KeysetOrderMismatch``'s raise site, which nothing exercised (#344).
+
+    It is decided above ``parse_query``, so it outranks both guards this file
+    is otherwise about — and until now it was reachable only in theory from a
+    library caller: replacing its condition with ``if False:`` left the
+    **entire** suite green (3180 passed, i.e. every test that existed before
+    this one). Its wire-layer sibling
+    (``_reject_order_mismatch``) is covered end to end in
+    ``test_serve_search_route.py``, which is why the library half went
+    unnoticed.
+
+    Stated *and* contradicting is the only shape refused; the request below
+    also has no free text and a ``rank`` sort, so it satisfies the textless
+    rule too, which is what makes this a precedence assertion rather than
+    merely a raise-site one.
+    """
+    searcher, pool = _searcher()
+    with pytest.raises(KeysetOrderMismatch, match="contradicts the cursor"):
+        searcher.search("", allowed_account_ids=None, sort="rank",
+                        sort_order="desc", keyset_cursor=_ASCENDING_CURSOR)
+    pool.connection.assert_not_called()
+
+
+def test_an_omitted_sort_order_inherits_the_cursor_rather_than_refusing() -> None:
+    """The positive control: only a *stated* contradiction is refused.
+
+    A guard that fired on the cursor's direction alone would break the paging
+    idiom the docs prescribe — state the order once, then send only the
+    cursor back — which is the defect ``KeysetCursor.order`` was added for.
+    """
+    searcher, pool = _searcher()
+    with pytest.raises(AssertionError, match="no connection"):
+        searcher.search("invoice", allowed_account_ids=None, sort="date",
+                        keyset_cursor=_ASCENDING_CURSOR)
+    pool.connection.assert_called()
+
+
+def test_the_reorder_buys_no_rewrite_round_trip() -> None:
+    """The refuted claim, asserted instead of argued (see the module docstring).
+
+    Hoisting the walk guard was said to save a smart rewrite on a caller
+    error. It does not, and the reason is not the hoist: the rewriter is
+    gated on ``parsed.free_text.strip()`` and this guard fires only when that
+    string is blank, so the two are mutually exclusive on *either* ordering.
+    Pinning it here keeps the docstring's correction honest, and would catch a
+    future change that moved the rewrite above the guard.
+    """
+    pool = MagicMock()
+    pool.connection.side_effect = AssertionError("no connection may be opened")
+    searcher = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_Embeddings(),
+                        reranker=None, rewriter=_ExplodingRewriter())
+    with pytest.raises(KeysetCursorUnusable):
+        searcher.search("", allowed_account_ids=None, sort="rank",
+                        keyset_cursor=_TEXT_CURSOR, smart=True)
+    pool.connection.assert_not_called()

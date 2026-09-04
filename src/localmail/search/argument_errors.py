@@ -111,7 +111,9 @@ class SortOrderNotApplicable(SearchArgumentRefused):
 
     The CLI reaches this guard directly too — note ``cli.py``'s search
     command catches ``RuntimeError`` only, so a ``--sort-order`` flag added
-    there must widen that catch (#331 point 2, still open).
+    there must widen that catch to ``SearchArgumentRefused``. Tracked in
+    **#305** with the rest of the ``cli.py`` work (#331, where it began, is
+    closed).
     """
 
 

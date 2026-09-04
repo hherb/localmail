@@ -3932,9 +3932,10 @@ for the full design.
           and this guard fires only when that string is blank, so no smart
           rewrite was ever paid for on the path. Measured, not reasoned —
           the claim was written down and then refuted before it shipped.
-      - **#331's points 1, 3 and 4 landed with it; point 2 stays open.**
-        Point 4 *is* #344 — the issue asked for a `SearchRequestError` base
-        in the same words — so it was already being done. The other two live
+      - **#331's points 1, 3 and 4 landed with it; #331 is closed and its
+        point 2 is folded into #305.** Point 4 *is* #344 — the issue asked
+        for a `SearchRequestError` base in the same words — so it was
+        already being done. The other two live
         in the very docstrings and handler this change rewrites, and leaving
         a known-false claim in a file one is authoring is not a smaller
         change, it is a worse one.
@@ -3968,7 +3969,12 @@ for the full design.
             on that same branch is *not* labelled a cursor problem.
         - **Point 2 — `cli.py`'s search catches `RuntimeError` only**, so a
           `--sort-order` flag added there would traceback. Latent (no such
-          flag exists) and left open; it belongs with the `cli.py` refactor.
+          flag exists), and **folded into #305** with the rest of the
+          `cli.py` work rather than left as its own issue. Widen that catch
+          to **`SearchArgumentRefused`**, never to bare `ValueError` — the
+          family is the point, so a fifth guard must not need the catch
+          edited. Adding either sort flag makes all four members reachable
+          from the CLI at once.
     - **The keyset cursor carries its own direction, and the Searcher reads
       it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
       else, so `Searcher.search` paired a directionless cursor with a

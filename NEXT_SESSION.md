@@ -52,8 +52,9 @@
 > before it shipped — the claim is now recorded *as refuted* in both the code
 > comment and CLAUDE.md, so nobody re-derives it.
 >
-> **Open issue count is 22, dropping to 21 on merge (#331 stays, trimmed to
-> its point 2). Dependabot stays at 0.**
+> **Open issue count is 21 — #331 was closed by operator decision after the
+> PR was opened, its point 2 folded into #305. It drops to 20 on merge.
+> Dependabot stays at 0.**
 
 ## Project context (1-minute version)
 
@@ -120,9 +121,12 @@ from the two issues filed against the #342 review.
   default is **empty rather than mandatory**, the opposite of `VersionSource`'s
   forced remedy: a forgotten prefix loses a word of context, an inherited wrong
   one makes a false claim.
-- **#331 point 2 stays open** — `cli.py`'s search catches `RuntimeError` only,
-  so a `--sort-order` flag added there would traceback. Latent; belongs with
-  the `cli.py` refactor.
+- **#331 point 2 is folded into #305** (operator decision, taken after the PR
+  was opened; #331 is closed). `cli.py`'s search catches `RuntimeError` only,
+  so a `--sort-order` flag added there would traceback — and adding either
+  sort flag makes **all four** family members reachable from the CLI at once.
+  Acceptance is on #305: widen that catch to `SearchArgumentRefused`, never to
+  bare `ValueError`.
 
 ### The mutation battery — 12 mutations, all caught
 
@@ -185,10 +189,11 @@ The harness was proven to actually run tests *before* it certified anything
    - **No `uv.lock` change**, so neither host needs a dependency sync. The
      Mac's editable install follows the tree, so `git checkout main` there
      after merging (risk 22).
-   - **Decide what to do with #331.** Points 1, 3 and 4 are done; **point 2**
-     (the CLI's `RuntimeError`-only catch) is not. Either trim the issue to
-     point 2 or close it and fold that line into the `cli.py` refactor
-     (#305's item). The PR body does **not** say `Closes #331`, deliberately.
+   - **#331 is already closed** — the operator chose to close it and fold its
+     point 2 into **#305**, which now carries the acceptance criteria. The PR
+     body says only `Closes #344`, so the count moves **21 → 20**, not 22 → 21.
+     If PR #346 changes shape under review, **reopen #331**: its fix lives in
+     that PR, not on `main`.
 
 ### 1. **#345 — the GUI's Relevance radio is inert on a textless search** *(new)*
    Filed from the same review. `SearchBar.svelte` binds a radio to
@@ -220,7 +225,8 @@ The harness was proven to actually run tests *before* it certified anything
    - **#330 is cheaper now**: `sort_axes.py` is the one authority for both
      axes, and `argument_errors.py` has established the pattern of a small
      module the wire layers import from.
-   - **#331 is mostly done** — see item 0.
+   - **#331 is closed** — points 1/3/4 shipped in this PR, point 2 lives on
+     #305 now.
 
 ### 4. **#340 — the harness lock proves a lock was taken, not which database**
    *(carried)*. The AST rule compares call *positions* and never arguments, so
@@ -231,7 +237,8 @@ The harness was proven to actually run tests *before* it certified anything
    `cli.py` imports the daemon at module scope. **Acceptance:** blocking
    `sqlparse` on `sys.meta_path` leaves `localmail --version` printing its line
    and exiting 0. **Do it with the `cli.py` refactor, not before** — `cli.py` is
-   **2177 lines**. #331 point 2 belongs here.
+   **2177 lines**. **#331's point 2 now lives here** — see the issue comment
+   for acceptance: widen `cli.py`'s search catch to `SearchArgumentRefused`.
 
 ### 6. **#285 — ruff, repo-wide** *(carried)*
    **10** pre-existing errors in `src/`, plus **1 F841** in
@@ -265,8 +272,9 @@ The harness was proven to actually run tests *before* it certified anything
 ## Open decisions & risks
 
 1. **One PR is open and yours to merge.** `fix/344-search-argument-refused-base`,
-   based on `main` (`f1a2e34`), closing **#344**. **22 open issues**, dropping
-   to **21**. **Dependabot stays 0.** #331 needs a decision (item 0).
+   based on `main` (`f1a2e34`), closing **#344**. **21 open issues**, dropping
+   to **20** (#331 was closed separately by operator decision, its point 2
+   folded into #305). **Dependabot stays 0.**
 2. **A merge does NOT close issues its subject merely names** *(carried)*. Use
    `Closes #N` in the **PR body** and **check `gh issue list` after the merge**.
 3. **THIS FILE IS NOT THE AUTHORITY — `git` and `gh` are** *(carried, nine
@@ -434,8 +442,8 @@ git log --oneline main..origin/main      # non-empty = a session landed since
 
 # RISK 2 — after any merge, CHECK THE ISSUE ACTUALLY CLOSED.
 gh pr list
-gh issue list --limit 40                 # 22 open; the PR should take it to 21
-gh issue view 331                         # decide: trim to point 2, or close
+gh issue list --limit 40                 # 21 open; the PR should take it to 20
+#   (#331 was closed this session; its point 2 is tracked on #305)
 
 # RISK 11 — expect ZERO, still. Confirm, don't assume.
 gh api repos/hherb/localmail/dependabot/alerts \
@@ -584,4 +592,5 @@ cd gui/src-tauri && cargo test && cargo clippy --locked -- -D warnings \
 on `fix/344-search-argument-refused-base` — `2a5599b` (#344 + #331 points 1/3/4)
 and the handoff commit — closing **#344**. Latest migration
 **`0036_api_keys.sql`**; next free slot `0037_*.sql` (this session adds none).
-**Open issues: 22**, dropping to **21** on merge. **Dependabot: 0.**
+**Open issues: 21** (#331 closed by operator decision after the PR opened),
+dropping to **20** on merge. **Dependabot: 0.**

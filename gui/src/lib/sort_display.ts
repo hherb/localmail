@@ -6,9 +6,11 @@
  * operators — has nothing for the hybrid pool to rank, so it is served
  * date-ordered whatever was asked for. The selector used to render the
  * request, so a textless search showed **Relevance** checked over
- * date-ordered rows, and clicking Relevance re-ran the search and changed
- * nothing — the inert-control pattern #148 names as a defect, here with the
- * label asserting an ordering that was not in effect (#345).
+ * date-ordered rows — the label asserting an ordering that was not in
+ * effect (#345). From an explicit Date selection, clicking Relevance
+ * additionally re-ran the search and changed nothing; from the default
+ * state the click fired no `change` event at all, so the control was inert
+ * in one state and lying in both. Either way it is the pattern #148 names.
  *
  * The server now reports its resolution as `sort_applied`, and these rules
  * turn that into what the selector shows. They live together because
@@ -61,7 +63,16 @@ export function displayedSort(
  * selector both corrects itself and explains why. Judging it earlier means
  * knowing the resolution before asking for it — a second parser, which is
  * what this file exists not to have. Failing this way costs one click and
- * never claims Relevance is unavailable when it is.
+ * never claims Relevance is unavailable when it was available *for the
+ * results on screen*.
+ *
+ * That scoping is the honest form of the guarantee. `applied` deliberately
+ * outlives an edit to the query box (see `displayedSort`), so after a
+ * textless search, typing rankable text leaves Relevance disabled until the
+ * next submit. The flag still describes the displayed rows correctly; it is
+ * only stale with respect to the box, which is why
+ * `RELEVANCE_UNAVAILABLE_REASON` is worded after the rows rather than as an
+ * instruction about the box.
  */
 export function relevanceUnavailable(
   requested: SortMode,
@@ -70,6 +81,29 @@ export function relevanceUnavailable(
   return applied === "date" && requested === "rank";
 }
 
+/**
+ * The applied sort a response reports, or `null` when it reports none.
+ *
+ * The one place the wire value becomes a `SortMode`, so the store's field
+ * and `displayedSort`'s return type are true at runtime rather than merely
+ * declared. Nothing else narrows it: the value crosses Rust as an open
+ * `Option<String>` and reaches JS through `invoke<SearchResponse>`, which
+ * is an unchecked type assertion — so an unrecognised ordering (a `serve`
+ * newer than this client, a third mode) would otherwise be laundered into
+ * a field typed `SortMode` and reach the selector, where it matches
+ * *neither* radio and leaves the control with nothing checked.
+ *
+ * An unknown value is therefore reported as **unknown**, which is the
+ * degradation the absent-key case already has and already tests: show the
+ * request, disable nothing, never a wrong claim. Collapsing the three
+ * response-reading sites onto this one rule is also what stops them
+ * drifting apart.
+ */
+export function asSortMode(value: unknown): SortMode | null {
+  return value === "rank" || value === "date" ? value : null;
+}
+
 /** Why Relevance is disabled. Shown as the control's `title`. */
 export const RELEVANCE_UNAVAILABLE_REASON =
-  "Add search text to rank by relevance — filters alone are ordered by date";
+  "These results have nothing to rank — filters alone are ordered by date. " +
+  "Add search text and search again.";

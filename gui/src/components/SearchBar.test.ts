@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { tick } from "svelte";
 import SearchBar from "./SearchBar.svelte";
 import { search } from "../lib/stores/search.svelte";
 
@@ -132,15 +133,38 @@ describe("SearchBar", () => {
     expect(date.checked).toBe(true);
     expect(relevance.checked).toBe(false);
     expect(relevance.disabled).toBe(true);
-    // Known gap, recorded rather than left silent: reverting the *Relevance*
-    // input's `checked` binding alone to `snapshot.sort` survives every
-    // assertion here, because radio-group exclusivity resolves the conflict
-    // in the Date input's favour and the rendered state is identical.
-    // Reverting the Date binding, or both, is caught (mutation-checked).
-    // What carries the one-sided case is `relevance.disabled` below, which
-    // no group semantics can mask.
-    // Disabled without a reason is just a quieter inert control.
+    // In THIS state a reverted Relevance `checked` binding is masked:
+    // radio-group exclusivity resolves the conflict in Date's favour, so
+    // the rendered result is identical. It is caught in the reversed state
+    // instead — see "keeps showing what ran while a newer Date request is
+    // in flight" below, where reading the request leaves both radios
+    // unchecked. (The PR recorded this mutation as surviving outright; it
+    // survives only this direction.) Reverting the Date binding, or both,
+    // is caught here. Disabled without a reason is a quieter inert control,
+    // so the reason is asserted too.
     expect(relevance.closest("label")?.title ?? "").toMatch(/search text/i);
+  });
+
+  it("keeps showing what ran while a newer Date request is in flight", async () => {
+    // This is the state the PR recorded as unpinnable, and it is only
+    // unpinnable in the (rank, date) direction: there, radio-group
+    // exclusivity resolves the conflict in Date's favour so a reverted
+    // Relevance binding renders identically. Reversed, a binding that reads
+    // the request leaves BOTH radios unchecked, which `checked` can see.
+    //
+    // Real state, not a contrivance: `onSortChange` calls `setSort` and
+    // then awaits `submit()`, so between a Date click and its response the
+    // component renders requested="date" over applied="rank".
+    await serveWith("rank");
+    search.setQuery("invoice");
+    render(SearchBar);
+    await search.submit();
+    search.setSort("date");
+    await tick();
+    const relevance = screen.getByRole("radio", { name: /relevance/i }) as HTMLInputElement;
+    const date = screen.getByRole("radio", { name: /^date$/i }) as HTMLInputElement;
+    expect(relevance.checked).toBe(true);
+    expect(date.checked).toBe(false);
   });
 
   it("leaves Relevance selected and enabled when the server ranked", async () => {

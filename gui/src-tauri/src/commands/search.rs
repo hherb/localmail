@@ -87,9 +87,16 @@ pub struct SearchResponse {
     /// The ordering the server actually ran (#345) — its *resolution* of
     /// `sort`, not the request. They differ for a query with no free text,
     /// which cannot be ranked and is served date-ordered whatever was asked
-    /// for. `#[serde(default)]` so a `serve` predating the field still
-    /// deserialises; the client then falls back to showing the request,
-    /// which is the pre-#345 behaviour rather than a wrong claim.
+    /// for. A `serve` predating the field deserialises to None and the
+    /// client then falls back to showing the request, which is the pre-#345
+    /// behaviour rather than a wrong claim.
+    ///
+    /// `Option<String>` already decodes from an absent key, so the attribute
+    /// is explicit rather than load-bearing — the `version.rs` precedent.
+    /// The type stays open (not a closed enum) deliberately: a closed one
+    /// fails the *whole* response on an ordering this client does not know,
+    /// breaking search outright. `sort_display.ts::asSortMode` is where an
+    /// unrecognised value is narrowed back to an honest "unknown".
     #[serde(default)]
     pub sort_applied: Option<String>,
 }

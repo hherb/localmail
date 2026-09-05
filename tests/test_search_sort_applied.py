@@ -19,7 +19,7 @@ The alternative — inferring it client-side from the returned cursor's
 prefix — was measured against the live archive and rejected: a textless
 search matching fewer rows than the page size returns ``next_cursor: None``,
 so there is no signal at all on exactly the narrow-filter case a user reaches
-deliberately. It would also put a fourth copy of ``_KEYSET_PREFIXES`` in a
+deliberately. It would also put another copy of ``_KEYSET_PREFIXES`` in a
 language that cannot import it.
 """
 from __future__ import annotations
@@ -240,6 +240,30 @@ def test_continue_page_reads_the_pool_s_sort_rather_than_assuming_rank(searcher)
         "user_id": None, "sort": "date", "sort_order": "desc",
     })
     assert searcher.continue_page("tok-date", 1).sort_applied == "date"
+
+
+def test_grow_pool_reads_the_pool_s_sort_rather_than_assuming_rank(searcher):
+    """``grow_pool`` is the third reader of ``entry["sort"]`` and had the
+    argument but not the technique.
+
+    ``test_growing_a_pool_reports_the_pool_s_own_sort`` above grows a
+    *rank*-built pool, so it is satisfied by a hardcoded ``"rank"`` — the
+    exact vacuity its two siblings here were written to avoid. Measured:
+    replacing ``_search_with_parsed``'s stamp with ``"rank"`` left the whole
+    suite green, while the same mutation on ``continue_page`` failed
+    immediately.
+
+    ``grow_pool`` re-runs retrieval, so the entry needs a real parsed query;
+    the pool it *writes* inherits the sort it read, which is what the
+    returned page must report.
+    """
+    searcher._cache.put("tok-grow-date", {
+        "parsed": parse_query("needle"), "hydrated": [], "scores": {},
+        "page_size": 5, "candidates_per_arm": 2, "rerank_pool_size": 20,
+        "user_id": 1, "sort": "date", "sort_order": "desc",
+    })
+    grown = searcher.grow_pool("tok-grow-date", 8, user_id=1)
+    assert grown.sort_applied == "date"
 
 
 def test_a_pool_exhausted_at_the_cap_reports_the_pool_s_sort(searcher):

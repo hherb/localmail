@@ -10,8 +10,9 @@
   // The server resolves `sort` from the query, so a textless one — an empty
   // box with a filter chip, or a box holding only `from:` / `has:` — is
   // served date-ordered whatever was asked for. Binding the radios to the
-  // request made Relevance assert an ordering that was not in effect, and
-  // clicking it re-ran the search and changed nothing.
+  // request made Relevance assert an ordering that was not in effect —
+  // and clicking it either re-ran the search to no effect (from an explicit
+  // Date selection) or fired no event at all (from the default state).
   const shownSort = $derived(
     displayedSort(search.snapshot.sort, search.snapshot.sortApplied),
   );

@@ -235,6 +235,11 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     # Pool-cursor mock — explicit None keeps `_next_cursor` out of the
     # keyset branch (MagicMock's auto-attr would be truthy).
     fake_page.next_keyset = None
+    # Set explicitly for the reason the route-level fakes are (#345): an
+    # unset MagicMock attribute is a value, not an error. This assertion is
+    # api-level so nothing encodes it here, but leaving it auto-mocked is
+    # how the wire-level instance of the same fake went unnoticed.
+    fake_page.sort_applied = "rank"
 
     fake_searcher.search.return_value = fake_page
 

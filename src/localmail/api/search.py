@@ -319,13 +319,21 @@ def run_search(
         # `next_cursor: None`, so an inference has no signal at all, and its
         # empty page is byte-identical to "you have reached the end".
         #
-        # `plan.sort` is exact on the fresh and keyset modes — it is
-        # `resolve_sort`'s own answer, and the cursor's, respectively. On
-        # **pool** mode it is the caller's claim about a pool this branch
-        # never consults (`CursorPlan` says so), and that is accepted only
-        # because no rows come back to be ordered. The rowed path never
-        # relies on it: `page.sort_applied` is stamped from the pool's own
-        # metadata by `continue_page`.
+        # `plan.sort` is exact on the **keyset** mode — it is `KEYSET_SORT`,
+        # which `resolve_sort` returns for any query. On **fresh** mode it is
+        # the *gate's* resolution, which agrees with the branch's for every
+        # query the two parses agree on; they read different strings (this
+        # module's own comments below say so, and the branch guard is the
+        # authority), so an unbalanced quote diverges — measured, both ways:
+        # `from:"` resolves `rank` here and `date` in the Searcher, and `"`
+        # the reverse. On **pool** mode it is the caller's claim about a pool
+        # this branch never consults (`CursorPlan` says so).
+        #
+        # All three are accepted only because **no rows come back**: nothing
+        # is mislabelled, since nothing is labelled. The rowed paths never
+        # rely on this value at all — `page.sort_applied` is stamped by the
+        # branch that produced the rows (`Searcher.search` for fresh and
+        # keyset, `continue_page` from the pool's own metadata for pool).
         return {"results": [], "next_cursor": None, "total_estimate": None,
                 "took_ms": 0.0, "rewrite_skipped": False,
                 "sort_applied": plan.sort,
@@ -535,8 +543,11 @@ def _empty_grown_page(
     """Synthetic 'pool exhausted at cap' page so callers see next_cursor=null.
 
     ``sort_applied`` comes from the exhausted pool's own metadata, not from
-    a default: this page stands in for one ``continue_page`` would have
-    served, so it must report the ordering that pool was built with (#345).
+    a default: it must report the ordering that pool was built with (#345).
+    Nothing could have served this page — it is reached only once
+    ``continue_page`` has raised ``PageOutOfPoolError`` *and* the pool is at
+    ``candidates_per_arm_max`` — but it stands in that pool's place, and the
+    caller is still paging it.
     """
     return SearchPage(
         results=[], page=1, page_size=page_size, pool_size=0,

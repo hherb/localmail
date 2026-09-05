@@ -23,6 +23,7 @@ import { runSearch } from "../tauri";
 import { formatError } from "../format_error";
 import { isSearchCursorExpired } from "../search_cursor_expired";
 import { isCursorRejected, statedSort } from "../search_paging";
+import { asSortMode } from "../sort_display";
 import { settings } from "./settings.svelte";
 
 export type SortMode = "rank" | "date";
@@ -129,7 +130,7 @@ class SearchStore {
       this.#state.tookMs = resp.took_ms;
       this.#state.cursor = resp.next_cursor;
       this.#state.hasMore = resp.next_cursor !== null;
-      this.#state.sortApplied = resp.sort_applied ?? null;
+      this.#state.sortApplied = asSortMode(resp.sort_applied);
     } catch (err: unknown) {
       if (seq !== this.#submitSeq) return;
       // Clear stale results so the UI does not show prior query's matches
@@ -190,14 +191,14 @@ class SearchStore {
         }
         this.#state.cursor = fresh.next_cursor;
         this.#state.hasMore = fresh.next_cursor !== null;
-        this.#state.sortApplied = fresh.sort_applied ?? null;
+        this.#state.sortApplied = asSortMode(fresh.sort_applied);
         return;
       }
       if (seq !== this.#submitSeq) return;
       this.#state.results = [...this.#state.results, ...resp.results];
       this.#state.cursor = resp.next_cursor;
       this.#state.hasMore = resp.next_cursor !== null;
-      this.#state.sortApplied = resp.sort_applied ?? null;
+      this.#state.sortApplied = asSortMode(resp.sort_applied);
     } catch (err: unknown) {
       if (seq !== this.#submitSeq) return;
       if (isCursorRejected(err)) {

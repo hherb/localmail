@@ -282,6 +282,7 @@ def _fake_searcher_for_smart(
     page.candidates_per_arm = 50
     page.page = 1
     page.next_keyset = None
+    page.sort_applied = "rank"
     page.rewrite_status = page_status
     page.rewrite_note = page_note
     page.rewrite_note_code = page_note_code

@@ -69,6 +69,11 @@ def _fake_searcher_returning_one_hit():
     page.rewrite_status = "applied"
     page.rewrite_note = None
     page.rewrite_note_code = None
+    # Explicit for the reason the three above are, and this one is sharper:
+    # `jsonable_encoder` renders an auto-MagicMock as `{}` rather than
+    # raising, so an unset attribute here does not fail the request — it puts
+    # `"sort_applied": {}` on the wire with every test green.
+    page.sort_applied = "rank"
     s.search.return_value = page
     return s
 
@@ -87,6 +92,11 @@ def test_search_returns_results(db_dsn: str, api_token: str, db_conn, api_user) 
     assert len(body["results"]) == 1
     assert body["results"][0]["message_id"] == "7"
     assert body["next_cursor"] is None
+    # The ordering that ran reaches the wire through the real route (#345).
+    # Asserted here rather than only at `run_search`: a response model, or a
+    # `jsonable_encoder` that silently rendered it as `{}`, would leave the
+    # api-level pins green while the client read garbage.
+    assert body["sort_applied"] == "rank"
 
 
 def test_search_sort_param_is_forwarded_to_searcher(

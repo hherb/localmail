@@ -933,8 +933,8 @@ def test_an_unrelated_value_error_from_the_searcher_is_a_500(
 
     It is deliberately *not* claimed to catch a boundary widened to bare
     ``ValueError``: measured, that mutation leaves this test green, because
-    the widened handler then dies on ``exc.wire_prefix`` and the response is
-    a 500 by a different route. The widening is caught one layer down, by
+    the widened handler then dies on ``exc.wire_message()`` and the response
+    is a 500 by a different route. The widening is caught one layer down, by
     ``test_search_argument_errors.py::test_an_unrelated_value_error_still_escapes_as_itself``,
     where the ``AttributeError`` surfaces instead of the expected
     ``ValueError``.

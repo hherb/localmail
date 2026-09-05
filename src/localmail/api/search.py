@@ -375,7 +375,7 @@ def run_search(
             # datetime and the embedding backends raise that, and
             # relabelling a real outage as a caller error would send them
             # to fix a blameless query.
-            raise ValidationFailed(f"{exc.wire_prefix}{exc}") from exc
+            raise ValidationFailed(exc.wire_message()) from exc
     elif plan.mode == "keyset":
         # Keyset cursor → date-keyset continuation. The cursor carries only
         # (ts, id) and the direction it was minted in; the query + filters
@@ -421,7 +421,7 @@ def run_search(
             # datetime and the embedding backends raise that, and
             # relabelling a real outage as a cursor problem would send the
             # caller to re-send a blameless query.
-            raise ValidationFailed(f"{exc.wire_prefix}{exc}") from exc
+            raise ValidationFailed(exc.wire_message()) from exc
     else:
         # No `SearchArgumentRefused` catch here, and that is a fact about this
         # branch rather than an omission: it never calls `searcher.search`.

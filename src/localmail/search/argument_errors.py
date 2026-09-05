@@ -99,29 +99,65 @@ class SearchArgumentRefused(ValueError):
     family does not also swallow a genuine backend failure.
     """
 
-    #: What the refusal is *about*, prepended by the api boundary to the
-    #: message it puts on the wire (#331). It lives on the exception rather
-    #: than on the branch that catches it, because it describes the cause,
-    #: not the request shape: ``run_search``'s keyset branch used to prefix
-    #: ``cursor:`` onto everything it caught, so a ``sort_order`` refusal on
-    #: a request whose cursor was fine would have read
-    #: ``cursor: sort_order='asc' is not applicable…`` — a category error,
-    #: and one that was unreachable, which is exactly when such wording
-    #: rots. Derived, not written beside the raise, for the reason
-    #: ``version_report``'s severity word is (#302).
+    #: What the refusal is *about* — a bare noun (``"cursor"``), never the
+    #: joined form. It lives on the exception rather than on the branch that
+    #: catches it, because it describes the cause, not the request shape:
+    #: ``run_search``'s keyset branch used to prefix ``cursor:`` onto
+    #: everything it caught, so a ``sort_order`` refusal on a request whose
+    #: cursor was fine would have read ``cursor: sort_order='asc' is not
+    #: applicable…`` — a category error, and one that was unreachable, which
+    #: is exactly when such wording rots (#331). Derived, not written beside
+    #: the raise, for the reason ``version_report``'s severity word is (#302).
     #:
     #: The default is empty rather than mandatory, unlike ``VersionSource``'s
     #: forced remedy: a member that forgets to set one loses a word of
     #: context, where a member that inherits a *wrong* one makes a false
     #: claim. This default fails in the harmless direction.
+    label: str = ""
+
+    #: The join, owned here and not by the member (#350). It used to live
+    #: inside the value (``wire_prefix = "cursor: "``), which made the
+    #: correctness of every rendering a property of a member's *spelling*,
+    #: invisible at the join site.
     #:
-    #: **The ``": "`` separator lives in the value, which this type does not
-    #: own** — ``wire_prefix = "cursor"`` renders ``cursorthis cursor…`` and
-    #: nothing checks the shape, since the tests pin the two literals rather
-    #: than the form. #350 tracks moving the join onto the type (a ``label``
-    #: plus an owned separator, the ``APIError.to_problem`` shape), which also
-    #: settles what a member with no message should render.
-    wire_prefix: str = ""
+    #: **The exposure was to a new member, not to the existing two** — #350
+    #: says "nothing catches it", and that is wrong as written; measured,
+    #: dropping the space from a shipped member failed three tests, one of
+    #: them a literal ``== "cursor: "``. What nothing checked was the
+    #: **form**: a fifth member spelled ``"filter"`` and one spelled
+    #: ``"filter: "`` failed the *same two* enumeration tests, which fail
+    #: because the member is new and say nothing about its spelling — so the
+    #: maintainer who updates them to admit it (as they must) gets no signal
+    #: at all. And that member is spelled wrong by default: you have to
+    #: notice a trailing space in a sibling to copy it. Owned here, the
+    #: missing-space form is unspellable rather than merely untested.
+    _SEPARATOR = ": "
+
+    def wire_message(self) -> str:
+        """The message a boundary puts on the wire, label and all.
+
+        On the type rather than at each boundary — ``api/search.py`` wrote
+        the f-string twice and #305's CLI widening is the third — for the
+        reason ``APIError.to_problem`` is: the data being on the type while
+        the rule for using it is not is how two consumers come to disagree.
+
+        A blank message renders the **label alone**, never a dangling
+        ``"cursor: "``, which reads as a detail withheld. Unreachable today
+        (all five raise sites pass a message), and decided here rather than
+        left to rot for that very reason — the call
+        ``ResolvedVersion.__post_init__`` makes, which *rejects* a blank
+        detail; here the refusal is still worth delivering, so the label
+        stands alone instead. Tested on ``.strip()`` rather than truthiness
+        because ``"   "`` is truthy and would sail through a bare ``or`` into
+        the dangling form — ``version_report.unreadable``'s fallback learned
+        the same thing.
+        """
+        detail = str(self)
+        if not self.label:
+            return detail
+        if not detail.strip():
+            return self.label
+        return f"{self.label}{self._SEPARATOR}{detail}"
 
 
 class SortNotApplicable(SearchArgumentRefused):
@@ -181,7 +217,7 @@ class KeysetOrderMismatch(SearchArgumentRefused):
     parameter the caller wrote down (#308, #312).
     """
 
-    wire_prefix = "cursor: "
+    label = "cursor"
 
 
 class KeysetCursorUnusable(SearchArgumentRefused):
@@ -196,4 +232,4 @@ class KeysetCursorUnusable(SearchArgumentRefused):
     has always applied and ``Searcher.search`` now applies too (#344).
     """
 
-    wire_prefix = "cursor: "
+    label = "cursor"

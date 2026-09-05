@@ -28,7 +28,7 @@ The pins here are deliberately two kinds, because either alone has a hole:
   them, which is the property a hand-written list cannot have.
 
 Two tests here *are* hand-written lists, and deliberately: the
-``_KNOWN_MEMBERS`` control and the ``wire_prefix`` mapping both fail on a
+``_KNOWN_MEMBERS`` control and the ``label`` mapping both fail on a
 fifth member, which is how the author is made to decide its prefix rather
 than inherit one silently. So the file does need an edit — the parametrised
 pins do not, and they are the ones that would otherwise pass vacuously.
@@ -258,7 +258,76 @@ def test_only_the_cursor_refusals_carry_a_prefix() -> None:
     *wrong* one makes a false claim, which is why the two cursor members set
     it explicitly rather than the sort members clearing it.
     """
-    carried = {e for e in _family() if e.wire_prefix}
+    carried = {e for e in _family() if e.label}
     assert carried == {KeysetCursorUnusable, KeysetOrderMismatch}
     for exc in carried:
-        assert exc.wire_prefix == "cursor: "
+        assert exc.label == "cursor"
+
+
+# --- the join belongs to the type, not to the member or the boundary (#350) --
+
+def test_the_separator_is_owned_by_the_type_not_written_into_each_label() -> None:
+    """A member declares *what* the refusal is about; the type spells the join.
+
+    ``wire_prefix = "cursor: "`` made the correctness of the join a property
+    of a member's **spelling**, invisible at the join site.
+
+    #350 states that "nothing catches it", and that is **wrong as written** —
+    measured against the pre-#350 tree, dropping the space from a shipped
+    member fails three tests, one of them a literal
+    ``assert exc.wire_prefix == "cursor: "``. The defect it names is real but
+    narrower, and this test is aimed at the narrower one: what nothing
+    checked is the **form**. A fifth member spelled ``"filter"`` and one
+    spelled ``"filter: "`` fail the *same two* enumeration tests
+    (``..._is_exactly_the_four_known_members`` and
+    ``..._only_the_cursor_refusals_carry_a_prefix``), because both fail for
+    being new rather than for being misspelled — so whoever updates those two
+    to admit the member, as they must, gets no signal about the separator.
+    And it is spelled wrong by default: the trailing space in a sibling is
+    the only place the convention is written down.
+    """
+    for exc in _family():
+        assert SearchArgumentRefused._SEPARATOR not in exc.label, (
+            f"{exc.__name__}.label spells the separator itself; the type "
+            "owns it")
+        assert exc.label == exc.label.strip()
+
+
+def test_a_labelled_member_joins_its_label_to_its_message() -> None:
+    """The shipped wire form, asserted against the *rule* rather than a
+    literal, so the two cannot drift apart."""
+    exc = KeysetCursorUnusable("needs its query back")
+    assert exc.wire_message() == (
+        f"{exc.label}{SearchArgumentRefused._SEPARATOR}needs its query back")
+
+
+def test_an_unlabelled_member_renders_its_bare_message() -> None:
+    """No label, no separator — the sort members' shipped form."""
+    exc = SortNotApplicable("sort='rank' is not applicable")
+    assert exc.wire_message() == "sort='rank' is not applicable"
+
+
+@pytest.mark.parametrize("message", ["", "   ", "\t\n"])
+def test_a_labelled_member_with_no_message_renders_no_dangling_separator(
+    message: str,
+) -> None:
+    """``SearchArgumentRefused()`` used to render ``"cursor: "`` — a label
+    with nothing after it, which reads as a detail withheld.
+
+    Unreachable today, since all five raise sites pass a message, which is
+    exactly when such things rot. ``ResolvedVersion.__post_init__`` *rejects*
+    a blank detail for the same reason; here the refusal is still worth
+    delivering, so the label alone is the answer.
+
+    Tested on ``.strip()`` rather than truthiness for the reason
+    ``version_report.unreadable``'s fallback is: ``"   "`` is truthy and
+    would sail through a bare ``or`` into the dangling form.
+    """
+    assert KeysetCursorUnusable(message).wire_message() == "cursor"
+
+
+def test_a_member_with_neither_label_nor_message_renders_empty() -> None:
+    """The base itself, which no boundary raises. Pinned so the two
+    independent branches of the join are both decided rather than one of
+    them being an accident of the other."""
+    assert SearchArgumentRefused().wire_message() == ""

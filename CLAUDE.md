@@ -3869,6 +3869,72 @@ for the full design.
           regression above), an ordinary text query, `date` surviving, and
           both halves of the 409 recovery — which is a *fresh* request and
           so the second place a sort reaches the wire.
+    - **The response says which ordering ran, and the selector renders that
+      (#345).** `sort` is a request, and since #324 the server resolves it
+      from the query — so the two differ for a textless one, and nothing on
+      the wire said so. The GUI's only rendering of `sort` was a radio bound
+      to the request, so a filter-only search showed **Relevance** checked
+      over date-ordered rows and clicking it changed nothing: #148's inert
+      control, with the label asserting an ordering not in effect.
+      `SearchPage.sort_applied` carries the resolution, `run_search` puts it
+      on the wire, and `gui/src/lib/sort_display.ts` turns it into what the
+      selector shows.
+      - **Stamped by the branch that produced the rows**, the same
+        derive-don't-restate call `next_keyset` makes, so no layer above can
+        report an ordering the walk did not use. **Defaultless**, for the
+        reason `KeysetCursor.order` has none: a page that could claim `rank`
+        by omission is #345 itself. It is declared ahead of `SearchPage`'s
+        defaulted fields for that reason alone.
+      - **#345 preferred inferring it client-side from the returned cursor's
+        prefix, and that was measured and rejected.** Against the live
+        129,009-message archive, `subject:zzzqqqnope` — textless, no
+        matches — returns `next_cursor: None`, so an inference has **no
+        signal at all** on exactly the narrow-filter case a user reaches
+        deliberately; the empty-ACL short-circuit is the same. It would also
+        put a fourth copy of `_KEYSET_PREFIXES` in a language that cannot
+        import it, on a token the docs call opaque — #330's shape. The
+        #278/#295 objection to a new wire key is satisfied instead by
+        landing it *with* its renderer, which is the test that objection
+        actually sets.
+      - **The empty-ACL short-circuit reports `plan.sort`**, exact on the
+        fresh and keyset modes. On **pool** mode it is the caller's claim
+        about a pool that branch never consults (`CursorPlan` says so),
+        accepted only because no rows come back; the rowed path reads the
+        pool's own metadata through `continue_page`, and
+        `_empty_grown_page` takes `meta.sort` rather than a default.
+      - **Relevance is disabled with a reason, not merely re-labelled** —
+        the `action_flags` precedent, removing the inert control rather than
+        quietening it. Disabled only on proof: `statedSort` never sends
+        `rank`, so a rank preference answered `date` means the server found
+        nothing to rank. A `date` *request* proves nothing either way, so an
+        explicit Date selection on a textless query leaves Relevance enabled
+        until clicked once, at which point the selector corrects itself and
+        explains. **Deliberate imprecision** — judging it earlier means
+        knowing the resolution before asking for it, i.e. the second parser
+        `search_paging.ts` exists not to have.
+      - **`sortApplied` keeps describing the rows on screen**, and is not
+        cleared when the query box is edited: clearing would flip the
+        selector back to the request while date-ordered rows are still
+        displayed, which is the mismatch this ends.
+      - **The mock pages were emitting `{}` on the wire, and every test was
+        green.** `test_serve_search_route.py`'s fake page is a `MagicMock`,
+        and `jsonable_encoder` renders an auto-attribute as `{}` rather than
+        raising — so the route shipped `"sort_applied": {}` invisibly. Every
+        mock page sets the field explicitly now, and
+        `test_search_returns_results` asserts it **through the real HTTP
+        route**: the defaultless type stops a real construction omitting it,
+        but a mock bypasses that by definition, so the route assertion is
+        the one that carries it. Mutation-checked (dropping the key fails it
+        with a `KeyError`).
+      - **One surviving mutation is recorded rather than smoothed over.**
+        Reverting the *Relevance* input's `checked` binding alone is masked
+        by radio-group exclusivity — the rendered state is identical, so no
+        assertion can see it. Reverting the Date binding, or both, is
+        caught, and `relevance.disabled` carries the one-sided case. The
+        Rust struct has its own pin for the same class of reason: every
+        frontend test mocks `runSearch`, so a field dropped from
+        `SearchResponse` would be discarded at the Tauri hop with the whole
+        vitest suite green (#278's shape).
     - **Every argument the Searcher refuses is one family, caught as one
       (#344).** `Searcher.search` raises four sibling exceptions whose whole
       purpose is "map me to a 400", and they derived straight from
@@ -4730,6 +4796,12 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   `lib/search_paging.ts` (`statedSort`/`isCursorRejected`) is the third, and
   `admin_error.httpStatusOf` gained its first non-admin consumer through it —
   see the #311 bullets under **Browse & search pagination**.
+  `lib/sort_display.ts` (`displayedSort`/`relevanceUnavailable`) is the
+  fourth: what the sort selector shows, read off the server's own
+  `sort_applied` rather than the request (#345). Like `search_paging.ts`,
+  **neither rule inspects the query** — the server decides "textless" only
+  after lifting filter operators out, so reproducing `parse_query` in the
+  client is the thing both files exist to avoid.
 - **Deliberately absent — do not "finish" without backend work first:**
   Gmail **Connect**. `POST /v1/admin/accounts/{id}/oauth/start` lives in
   `oauth_router.py`, which #203 did *not* swap to `require_admin()`, so it is

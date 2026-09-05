@@ -62,6 +62,12 @@ export interface SearchResponse {
   next_cursor: string | null;
   total_estimate: number | null;
   took_ms: number;
+  // The ordering that actually ran (#345) — the server's *resolution* of
+  // `sort`, not the request. They differ for a query with no free text,
+  // which is served date-ordered whatever was asked for. Optional so a
+  // `serve` predating the field still decodes; absent reads as "unknown"
+  // and the selector falls back to showing the request.
+  sort_applied?: "rank" | "date";
   // Phase-4 smart rewrite outcome (#176). The GUI does not consume these;
   // they are present on every wire response. Optional here so existing
   // fixtures need no change.

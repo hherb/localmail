@@ -2,7 +2,8 @@
 //!
 //! Body: {"query": "...", "filters": {...}, "limit": N, "cursor": null|"..."}
 //! Response: {"results": [SearchResultRow], "next_cursor": str|null,
-//!            "total_estimate": int|null, "took_ms": float}.
+//!            "total_estimate": int|null, "took_ms": float,
+//!            "sort_applied": "rank"|"date"}.
 
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +84,14 @@ pub struct SearchResponse {
     pub next_cursor: Option<String>,
     pub total_estimate: Option<i64>,
     pub took_ms: f64,
+    /// The ordering the server actually ran (#345) — its *resolution* of
+    /// `sort`, not the request. They differ for a query with no free text,
+    /// which cannot be ranked and is served date-ordered whatever was asked
+    /// for. `#[serde(default)]` so a `serve` predating the field still
+    /// deserialises; the client then falls back to showing the request,
+    /// which is the pre-#345 behaviour rather than a wrong claim.
+    #[serde(default)]
+    pub sort_applied: Option<String>,
 }
 
 pub async fn run_search(
@@ -187,5 +196,20 @@ mod tests {
         assert!(resp.results.is_empty());
         assert!(resp.next_cursor.is_none());
         assert_eq!(resp.took_ms, 4.25);
+        // A `serve` predating #345 omits the ordering; the client then falls
+        // back to showing the request rather than making a wrong claim.
+        assert!(resp.sort_applied.is_none());
+    }
+
+    #[test]
+    fn search_response_carries_the_applied_sort_across_the_tauri_hop() {
+        // Every frontend test for #345 mocks `runSearch`, so a field dropped
+        // from this struct would be silently discarded here with the whole
+        // vitest suite still green — the #278 shape, where four test files
+        // made a field nothing emitted look covered.
+        let json = r#"{"results":[],"next_cursor":null,"total_estimate":null,
+                       "took_ms":1.0,"sort_applied":"date"}"#;
+        let resp: SearchResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.sort_applied.as_deref(), Some("date"));
     }
 }

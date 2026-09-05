@@ -79,7 +79,14 @@ _ASCENDING_CURSOR = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc),
 
 
 class _ExplodingRewriter:
-    """A rewriter that fails the test if the smart path is ever entered."""
+    """A rewriter that fails the test if the smart path is ever entered.
+
+    ``name``/``model`` satisfy the ``QueryRewriter`` protocol; the Searcher
+    reads them only when a rewrite is reported, which must never happen here.
+    """
+
+    name = "s"
+    model = "s"
 
     def rewrite(self, text: str):  # pragma: no cover - never reached
         raise AssertionError("no rewrite may be attempted")
@@ -192,8 +199,16 @@ def test_the_reorder_buys_no_rewrite_round_trip() -> None:
     pool.connection.assert_not_called()
 
 
+# Every row must reach a *cursor* guard once the membership check is removed,
+# or it pins something else under this test's name. Row 0 shipped as
+# ``("sort", "Date", _ASCENDING_CURSOR)`` and reached none: with a blank query
+# ``resolve_sort`` returns ``date`` so the hybrid guard cannot fire, the walk
+# is ``archive`` so #326's cannot, and ``KeysetOrderMismatch`` needs a stated
+# ``sort_order``. It pinned membership above ``sort_applicability_error`` —
+# true, and not what the name claims. Measured against three positional
+# mutations; every row below fails at least one.
 @pytest.mark.parametrize("axis,bad,cursor", [
-    ("sort", "Date", _ASCENDING_CURSOR),
+    ("sort", "Date", _TEXT_CURSOR),
     ("sort", "rank ", _TEXT_CURSOR),
     ("sort_order", "ASC", _ASCENDING_CURSOR),
     ("sort_order", "DESC", _TEXT_CURSOR),
@@ -217,7 +232,8 @@ def test_membership_outranks_every_cursor_guard(
     searcher, pool = _searcher()
     with pytest.raises(ValueError, match=f"unknown {axis} {bad!r}"):
         searcher.search("", allowed_account_ids=None,
-                        keyset_cursor=cursor, **{axis: bad})
+                        keyset_cursor=cursor,
+                        **{axis: bad})  # type: ignore[arg-type]
     pool.connection.assert_not_called()
 
 
@@ -229,14 +245,20 @@ def test_a_membership_refusal_is_not_a_search_argument_refused(
 
     A membership error is a **type** error a well-typed caller cannot make,
     where every ``SearchArgumentRefused`` member is a **cross-argument**
-    error a well-typed caller makes routinely. Since ``run_search`` now
-    refuses these at the boundary, the family would gain a member no wire
-    caller can reach — claiming an audience it does not have.
+    error a well-typed caller makes routinely. And since ``run_search`` now
+    refuses these at the boundary, membership would be **inert at both catch
+    sites** — the catch could never see one.
+
+    Not, as an earlier wording had it, that the family would gain a member
+    "no wire caller can reach": the Searcher is public API and
+    ``SortNotApplicable``'s own docstring names library callers as its
+    audience, which is the whole reason this check exists.
 
     Pinned rather than left to the docstring because both are ``ValueError``
     subclasses, so nothing else here would notice the reclassification.
     """
     searcher, _ = _searcher()
     with pytest.raises(ValueError) as exc:
-        searcher.search("invoice", allowed_account_ids=None, **{axis: bad})
+        searcher.search("invoice", allowed_account_ids=None,
+                        **{axis: bad})  # type: ignore[arg-type]
     assert not isinstance(exc.value, SearchArgumentRefused)

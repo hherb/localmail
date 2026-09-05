@@ -62,13 +62,13 @@ it). Three reasons, in the order they bind:
 * The type-vs-cross-argument line above is unchanged by the fix. ``sort="Date"``
   is unspellable at every declared boundary; ``sort="rank"`` on a textless
   query is spellable at all of them.
-* Admitting them would give the family a member **no wire caller can reach**,
-  since the boundary now refuses them ahead of the Searcher — claiming an
-  audience it does not have, which is the defect ``SortOrderNotApplicable``'s
-  docstring was corrected for.
-* They would fall under the pre-IO contract below for no gain, and the
-  ``_family()``-derived pins would start asserting 400-mapping for two
-  exceptions no api boundary maps.
+* Since #348 the boundary refuses them ahead of the Searcher, so family
+  membership would be **inert at both catch sites** — the catch could never
+  see one. That is the same class of defect ``SortOrderNotApplicable``'s
+  docstring was corrected for (#331), an audience claim a docstring cannot
+  check for itself; note the correction there ran the *other* way, restoring
+  an audience the wording denied.
+* They would fall under the pre-IO contract below for no gain.
 
 The rule itself is the pure ``sort_axes.sort_membership_error``, shared by
 ``run_search`` and ``Searcher.search`` so one rule cannot be worded two ways —
@@ -76,6 +76,42 @@ and ordered **ahead of every guard here at both layers**, because a value that
 is not a value cannot meaningfully contradict a cursor or a query.
 """
 from __future__ import annotations
+
+
+#: Quoted by ``reject_malformed_label``'s message so the remedy shows the
+#: shape it wants. A real member's label rather than an invented one, so it
+#: cannot describe a spelling the tree does not actually use.
+FAMILY_LABEL_EXAMPLE = "cursor"
+
+
+def reject_malformed_label(name: str, label: str) -> str:
+    """Return ``label``, or raise if it is not a bare noun.
+
+    A **module-level function rather than an inline check** so the rule can
+    be driven against a label no member has — the ``reject_empty_diagnostic``
+    arrangement (#291). There the indirection was forced, enum machinery
+    replacing ``__new__`` after class creation; here ``__init_subclass__`` is
+    reachable from a test by writing a subclass, so this is belt-and-braces
+    and the naming stays consistent rather than novel.
+
+    Only a **stated** label is judged: the empty default is deliberate and
+    #350 argued it correctly — a member that forgets a label loses a word of
+    context, where one that inherits a *wrong* one makes a false claim. That
+    argument defends the default, not the absence of a check on a value
+    someone did write, and the second has no harmless direction: no member
+    legitimately wants ``"filter:"``, ``"cursor: "`` or ``"  "``.
+    """
+    if not label:
+        return label
+    separator = SearchArgumentRefused._SEPARATOR
+    if (label != label.strip() or separator in label
+            or not label[-1].isalnum()):
+        raise ValueError(
+            f"{name}.label must be a bare noun naming the subject "
+            f"({FAMILY_LABEL_EXAMPLE!r}), not the joined form: the type owns "
+            f"the separator {separator!r}; got {label!r}"
+        )
+    return label
 
 
 class SearchArgumentRefused(ValueError):
@@ -146,9 +182,44 @@ class SearchArgumentRefused(ValueError):
     #: because the member is new and say nothing about its spelling — so the
     #: maintainer who updates them to admit it (as they must) gets no signal
     #: at all. And that member is spelled wrong by default: you have to
-    #: notice a trailing space in a sibling to copy it. Owned here, the
-    #: missing-space form is unspellable rather than merely untested.
+    #: notice a trailing space in a sibling to copy it.
+    #:
+    #: **Ownership is enforced, not merely declared** (#350 review). #350's
+    #: own wording here claimed the missing-space form was "unspellable
+    #: rather than merely untested"; it was spellable two ways, both against
+    #: a green suite — ``label = "filter:"`` (``": " not in "filter:"``, so
+    #: the form assertions pass) and a subclass declaring its own
+    #: ``_SEPARATOR`` (those assertions read the *base's*, so the override
+    #: defeats rule and test together). One underscore is a convention, not
+    #: ownership. ``__init_subclass__`` below is what makes the claim true.
     _SEPARATOR = ": "
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Enforce at class creation what #350 claimed and did not check.
+
+        Two rules, and the second is the one that made the ownership claim
+        false. ``label`` must be a bare noun — ``"filter:"`` rendered
+        ``filter:: …`` and passed both form assertions in
+        ``test_search_argument_errors.py``, since ``": " not in "filter:"``.
+        And a subclass may not declare its own ``_SEPARATOR``: both of those
+        assertions read the **base's** value, so an override defeated the
+        rule and its test together, restoring the exact pre-#350 form.
+
+        A ``TypeError`` for the override and a ``ValueError`` for the label,
+        because they are different faults: the first is a subclass reaching
+        for something the type owns, the second a bad value. Raised at class
+        creation rather than at render time, so a member that gets it wrong
+        cannot be imported — the ``VersionSource`` call (#291), which this
+        family already cites for its *empty*-payload rule.
+        """
+        super().__init_subclass__(**kwargs)  # type: ignore[arg-type]
+        if "_SEPARATOR" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} declares its own separator; "
+                f"{SearchArgumentRefused.__name__} owns the join so every "
+                "member renders alike — state only `label`"
+            )
+        reject_malformed_label(cls.__name__, cls.label)
 
     def wire_message(self) -> str:
         """The message a boundary puts on the wire, label and all.
@@ -164,16 +235,32 @@ class SearchArgumentRefused(ValueError):
         left to rot for that very reason — the call
         ``ResolvedVersion.__post_init__`` makes, which *rejects* a blank
         detail; here the refusal is still worth delivering, so the label
-        stands alone instead. Tested on ``.strip()`` rather than truthiness
-        because ``"   "`` is truthy and would sail through a bare ``or`` into
-        the dangling form — ``version_report.unreadable``'s fallback learned
-        the same thing.
+        stands alone instead. Blankness is judged on ``.strip()`` rather than
+        truthiness because ``"   "`` is truthy and would sail through a bare
+        ``or`` into the dangling form — ``version_report.unreadable``'s
+        fallback learned the same thing.
+
+        **The result is never empty** (#350 review). An *unlabelled* member
+        with a blank message returned ``""``, so ``run_search`` raised
+        ``ValidationFailed("")`` and the wire carried problem+json with an
+        empty ``detail`` — the failure this method exists to avoid, one
+        branch over and worse, since the dangling form at least named a
+        subject. It falls back to the class name, which says which guard
+        fired. ``label`` needs no ``.strip()`` of its own: since #350's
+        review ``__init_subclass__`` admits only ``""`` or a stripped noun.
         """
         detail = str(self)
+        if not detail.strip():
+            # Never an empty string: `run_search` would raise
+            # `ValidationFailed("")` and the wire would carry problem+json
+            # with an empty `detail` — strictly worse than the dangling
+            # `"cursor: "` this method exists to avoid, which at least named
+            # a subject. A labelled member still renders its label alone,
+            # which is #350's decision and is not revisited here; only the
+            # unlabelled case, which had no floor at all, gains one.
+            return self.label or type(self).__name__
         if not self.label:
             return detail
-        if not detail.strip():
-            return self.label
         return f"{self.label}{self._SEPARATOR}{detail}"
 
 

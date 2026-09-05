@@ -204,6 +204,138 @@ def test_a_raise_outside_search_is_out_of_scope() -> None:
     assert foreign_refusal_error(src, family=_FAMILY) is None
 
 
+def test_a_qualified_raise_is_reported() -> None:
+    """``raise argument_errors.SomethingRefused(...)`` — the ``ast.Attribute``
+    arm of ``_raised_name``.
+
+    Untested until the #350 review, and deleting that arm left the file
+    green, so the import style decided whether the rule applied. The
+    *location* rule has had ``test_a_qualified_base_is_reported`` for the
+    identical case in ``_base_names`` since #347; this is its counterpart.
+    """
+    problem = foreign_refusal_error(
+        _searcher_source('        raise argument_errors.SomethingRefused("x")\n'),
+        family=_FAMILY)
+    assert problem is not None
+    assert "SomethingRefused" in problem
+
+
+def test_a_raise_of_a_bare_class_is_reported() -> None:
+    """``raise SomethingRefused`` — no parentheses, so ``node.exc`` is a
+    ``Name`` rather than a ``Call``. Python instantiates it for you, so it is
+    a raise of that class in every sense that matters here; deleting the
+    non-``Call`` arm of ``_raised_name`` left the file green."""
+    problem = foreign_refusal_error(
+        _searcher_source("        raise SomethingRefused\n"), family=_FAMILY)
+    assert problem is not None
+    assert "SomethingRefused" in problem
+
+
+def test_an_expression_naming_no_identifier_is_not_guessed_at() -> None:
+    """The genuine ``None`` arm. ``raise errs[0]`` names no class this rule
+    can resolve, and guessing would be a binding analysis."""
+    assert foreign_refusal_error(
+        _searcher_source("        raise errs[0]\n"), family=_FAMILY) is None
+
+
+def test_a_guard_extracted_into_a_helper_is_still_in_scope() -> None:
+    """The hole #347 shipped with: reading ``search`` alone (#350 review).
+
+    "Extract the guards" is the most natural refactor of a 300-line method,
+    and ``_harness_lock`` already found a harness that had exactly that
+    shape. A non-member raised from ``Searcher._check_cursor`` is #344
+    verbatim — a 500 at both boundaries — and the rule was green for it.
+    """
+    src = ("class Searcher:\n"
+           "    def search(self):\n"
+           "        self._check_cursor()\n"
+           "    def _check_cursor(self):\n"
+           "        raise SomethingRefused('nope')\n")
+    problem = foreign_refusal_error(src, family=_FAMILY)
+    assert problem is not None
+    assert "SomethingRefused" in problem
+    assert "_check_cursor" in problem
+
+
+def test_a_family_member_raised_from_a_helper_is_fine() -> None:
+    """The control: following helpers must not report the compliant form of
+    the same refactor, or the rule buys a false positive rather than a
+    closed hole."""
+    src = ("class Searcher:\n"
+           "    def search(self):\n"
+           "        self._check_cursor()\n"
+           "    def _check_cursor(self):\n"
+           "        raise KeysetCursorUnusable('refused')\n")
+    assert foreign_refusal_error(src, family=_FAMILY) is None
+
+
+def test_a_helper_no_one_calls_from_search_stays_out_of_scope() -> None:
+    """The other control. ``continue_page``'s helpers are as out of scope as
+    ``continue_page`` — reachability is the rule, not "any private method"."""
+    src = ("class Searcher:\n"
+           "    def search(self):\n"
+           "        pass\n"
+           "    def continue_page(self):\n"
+           "        self._evict()\n"
+           "    def _evict(self):\n"
+           "        raise CacheMissError('evicted')\n")
+    assert foreign_refusal_error(src, family=_FAMILY) is None
+
+
+def test_mutually_recursive_helpers_terminate() -> None:
+    """``seen`` bounds the walk; without it this hangs rather than fails."""
+    src = ("class Searcher:\n"
+           "    def search(self):\n"
+           "        self._a()\n"
+           "    def _a(self):\n"
+           "        self._b()\n"
+           "    def _b(self):\n"
+           "        self._a()\n"
+           "        raise SomethingRefused('nope')\n")
+    problem = foreign_refusal_error(src, family=_FAMILY)
+    assert problem is not None
+    assert "SomethingRefused" in problem
+
+
+def test_the_last_binding_of_search_is_the_one_audited() -> None:
+    """Python binds the last ``def``; auditing the first means auditing a
+    method that never runs.
+
+    ``_harness_lock._local_functions`` records this lesson on ``def main``
+    and this rule shipped with the bug it was fixed for.
+    """
+    src = ("class Searcher:\n"
+           "    def search(self):\n"
+           "        pass\n"
+           "    def search(self):\n"
+           "        raise SomethingRefused('nope')\n")
+    problem = foreign_refusal_error(src, family=_FAMILY)
+    assert problem is not None
+    assert "SomethingRefused" in problem
+
+
+def test_a_two_hop_chain_inside_the_family_module_is_a_member() -> None:
+    """``family_names`` closes over inheritance *within* the module, and that
+    closure was a single pass' worth of untested: no fixture had a two-hop
+    chain inside the family module, so collapsing it to a base-only read left
+    the file green.
+
+    ``misplaced_member_error`` has ``test_a_two_hop_chain_outside_the_module_
+    is_reported`` for the cross-file fixpoint; this is the in-module half.
+
+    **Declared innermost-first, which is the whole point.** With the chain
+    written base-downwards a single pass over the classes finds all three in
+    declaration order, so the fixpoint mutation survives — measured. It is
+    order-independence that ``while changed`` buys, and only a hostile order
+    demonstrates it.
+    """
+    src = ("class KeysetWalkUnusable(KeysetCursorUnusable):\n    pass\n"
+           "class KeysetCursorUnusable(SearchArgumentRefused):\n    pass\n"
+           "class SearchArgumentRefused(ValueError):\n    pass\n")
+    assert family_names(src) == frozenset({
+        "SearchArgumentRefused", "KeysetCursorUnusable", "KeysetWalkUnusable"})
+
+
 def test_a_bare_reraise_is_not_a_declaration() -> None:
     """``raise`` with no expression re-raises the active exception; reading it
     as a violation would forbid every ``except ...: raise`` in the method."""

@@ -234,9 +234,10 @@ def run_search(
     # And it is decided before the empty-ACL short-circuit below, which
     # answers with an empty page indistinguishable from "you have reached
     # the end" — so `sort="Date"` from a grant-nothing caller was reported
-    # as a *completed* request. Every other gate in this function is already
-    # placed ahead of that branch for exactly this reason; this axis was the
-    # one that was not.
+    # as a *completed* request. Every other gate over a *stated argument* is
+    # already placed ahead of that branch for exactly this reason; this axis
+    # was the one that was not. (`_check_pool_sort` sits deliberately after
+    # it, being a probe of the cached pool rather than of an argument.)
     #
     # Ahead of `resolve_cursor_plan` too, because a value that is not a value
     # cannot meaningfully contradict a cursor: that resolver interpolates the

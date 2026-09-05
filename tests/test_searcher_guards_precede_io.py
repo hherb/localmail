@@ -42,6 +42,8 @@ drifts untested.
 """
 from __future__ import annotations
 
+import pathlib
+
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
@@ -56,14 +58,29 @@ from localmail.search.argument_errors import (
     SortNotApplicable,
     SortOrderNotApplicable,
 )
+from localmail.search import argument_errors, searcher
 from localmail.search.searcher import KeysetCursor, Searcher
+from tests._search_family_rules import (
+    family_names, family_raise_sites,
+)
 from tests.test_search_argument_errors import _family
 
 
 class _Embeddings:
-    """Fails the test if retrieval is reached by the embedding route rather
-    than the pool — ``search`` embeds before it opens a connection on some
-    branches, so the pool alone is not a complete IO tripwire."""
+    """Needed to construct the ``Searcher``; a tripwire only in principle.
+
+    An earlier docstring here justified it as a second IO route — "``search``
+    embeds before it opens a connection on some branches". Measured, that is
+    false: the only ``embed_query`` call is inside ``_retrieve_pool``, whose
+    two call sites are both under ``with self._pool.connection()``, so the
+    pool tripwire always fires first and this one cannot. The genuine second
+    route is the **rewriter** below, and that one *is* load-bearing — moving
+    the #308 guard back under the smart rewrite fails exactly one test in
+    this file, via ``_Rewriter``.
+
+    Kept raising rather than made inert, so a future branch that does embed
+    before connecting is caught rather than waved through.
+    """
 
     name = "s"
     model = "s"
@@ -137,6 +154,34 @@ def test_every_member_has_a_provocation() -> None:
     )
 
 
+def test_every_raise_site_has_its_own_provocation() -> None:
+    """The *site*-keyed half, which the type-keyed check above cannot give.
+
+    This file's docstring makes site-keying its central design claim —
+    ``KeysetCursorUnusable`` has two sites and the deeper one is the one that
+    drifted — yet ``test_every_member_has_a_provocation`` compares types, so
+    a **sixth** site of an already-provoked member would join no parametrised
+    case and nothing would fail. Coverage shrinking with every test green,
+    which is the shape #347 files against the declaration rule.
+
+    Counted from the source rather than listed here, so the property holds
+    for a site added later without this test being edited — and the count
+    follows a guard extracted into a helper, since ``family_raise_sites``
+    walks the same reachable set the raise rule does.
+    """
+    searcher_src = (pathlib.Path(searcher.__file__)).read_text()
+    family = family_names(
+        pathlib.Path(argument_errors.__file__).read_text())
+    sites = family_raise_sites(searcher_src, family=family)
+    provoked: dict[str, int] = {}
+    for member, _why, _kw in _PROVOCATIONS:
+        provoked[member.__name__] = provoked.get(member.__name__, 0) + 1
+    assert sites == provoked, (
+        "every raise site of a family member needs its own _PROVOCATIONS "
+        "entry, so it is proven pre-IO rather than covered by a sibling"
+    )
+
+
 @pytest.mark.parametrize(
     "member,kwargs",
     [(m, kw) for m, _, kw in _PROVOCATIONS],
@@ -171,3 +216,25 @@ def test_the_tripwires_actually_fire_when_retrieval_is_reached() -> None:
     with pytest.raises(AssertionError, match="no connection may be opened"):
         searcher.search("invoice", allowed_account_ids=None, sort="date")
     pool.connection.assert_called()
+
+
+def test_the_rewriter_tripwire_is_reachable_too() -> None:
+    """The control the one above does not give, and the one that matters.
+
+    ``test_the_tripwires_actually_fire_when_retrieval_is_reached`` drives
+    ``smart`` unset, so it exercises the **pool** alone — yet the rewriter is
+    the route the whole #349 finding turns on, a guard below the rewrite
+    leaving the pool perfectly clean. It is live today only because
+    ``search`` still calls ``self._rewriter.rewrite(...)``; if that stopped
+    being on the fixture's path the pre-IO property would quietly stop being
+    proven, with every assertion in this file still green.
+
+    The rewrite runs ahead of the pool, so this asserts the rewriter's own
+    message rather than the connection's — which is exactly what makes it a
+    different control.
+    """
+    searcher, pool = _searcher()
+    with pytest.raises(AssertionError, match="no rewrite may be attempted"):
+        searcher.search("invoice", allowed_account_ids=None, sort="date",
+                        smart=True)
+    pool.connection.assert_not_called()

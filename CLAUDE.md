@@ -834,8 +834,9 @@ src/localmail/
                     #   needs its query back (#326)
     argument_errors.py # SearchArgumentRefused + its four subclasses — the
                     #   one family every api boundary maps to 400 (#344);
-                    #   owns the wire label's join (#350) and states the
-                    #   pre-IO contract (#349)
+                    #   owns the wire label's join and enforces its form at
+                    #   class creation (#350), states the pre-IO contract
+                    #   (#349)
 migrations/         # 0001_init.sql … 0036_api_keys.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
@@ -849,8 +850,9 @@ tests/
   _gated_supervisor.py  # DaemonSupervisor whose stop() parks — busy-guard pins
                     #   hold their window open instead of racing a timer (#299)
   _search_family_rules.py  # pure AST rules: a SearchArgumentRefused member is
-                    #   declared in argument_errors.py, and every named
-                    #   exception Searcher.search raises is one (#347)
+                    #   declared in argument_errors.py, every named exception
+                    #   Searcher.search (and its helpers) raises is one, and
+                    #   every family raise site has its own provocation (#347)
   _multilingual_corpus.py  # synthetic 50-message corpus for multilingual eval
   fixtures/         # multilingual_queries.example.json
   test_*.py
@@ -4021,10 +4023,14 @@ for the full design.
           IO route. The #308 hybrid-branch guard sat *below* the smart
           rewrite — pre-pool, post-LLM — so on the smart path a caller paid a
           full round trip to be told their cursor was unusable. The guard is
-          hoisted above the rewrite; the move is **exactly** equivalent, since
-          reaching the old site meant `effective_sort != "date"` (the date
-          branch returns) and `effective_sort` is never reassigned after
-          resolution. Unlike the walk guard — whose identical-looking
+          hoisted above the rewrite; the move is equivalent **in condition**
+          and deliberately earlier in effect, since reaching the old site
+          meant `effective_sort != "date"` (the date branch returns) and
+          `effective_sort` is never reassigned after resolution. (It shipped
+          claiming "**exactly** equivalent", which is more than that reason
+          supports: an *uncaught* rewriter failure used to surface instead of
+          this refusal and now does not — the intended direction, but a
+          change.) Unlike the walk guard — whose identical-looking
           round-trip claim #344 refuted, it firing only on blank text — this
           one does save the call, firing on a non-empty query. No wire
           behaviour changes.
@@ -4046,12 +4052,16 @@ for the full design.
         names the subject (`"cursor"`, never the joined form), `_SEPARATOR` is
         owned by the base, and `wire_message()` does the join, so both
         boundaries read `raise ValidationFailed(exc.wire_message()) from exc`
-        and a fourth cannot re-decide it — the `APIError.to_problem` shape. A
+        — the `APIError.to_problem` shape. A
         member with a blank message renders the **label alone**, decided here
         because it is unreachable today and that is when such things rot;
         tested on `.strip()`, not truthiness, since `"   "` is truthy and
         would sail through into the dangling form
-        (`version_report.unreadable`'s lesson).
+        (`version_report.unreadable`'s lesson). **Two claims in the shipped
+        wording were false and are corrected below**: that a fourth consumer
+        could not re-decide the join (`api/search_cursor.py` did), and that
+        the missing-space form was thereby unspellable (it was spellable two
+        ways).
         - **The issue's premise is overstated, and the correction is recorded
           in place rather than propagated.** It says the missing-space form is
           caught by nothing. Measured against the pre-#350 tree, dropping the
@@ -4065,6 +4075,109 @@ for the full design.
         - `test_the_keyset_branch_keeps_naming_the_cursor` is **unchanged**,
           as #350 asks: its exact wording is the pin that nothing moved on the
           wire.
+      - **The review of #351 closed six more, and one was a live regression
+        the round itself introduced.** The pattern repeats one level down:
+        each of #347–#350 stated a property in the prose of the thing that was
+        supposed to enforce it.
+        - **#348's hoist dropped the cursor's own direction, and its comment
+          asserted that it could not.** Moving the membership check above the
+          cursor block changed its *subject* from the **resolved**
+          `effective_order` to the **stated** `sort_order` — and with a cursor
+          in hand and `sort_order` unstated, the resolved value is
+          `keyset_cursor.order`, a **third** source neither reading covers.
+          A/B'd against `main`: `KeysetCursor(order="ASC")` was refused pre-IO
+          before and reached `self._pool.connection()` after, `date_keyset`
+          catching it in the same words one connection later — losing exactly
+          the "wording **and the cost**" property
+          `test_an_unknown_sort_order_is_refused_on_the_date_path` is named
+          for, and #349's own pre-IO contract, in the PR that established it.
+          Not wire-reachable (both transports decode through the import-checked
+          prefix table), which is what made it latent; the comment justifying
+          the move said the substitutions "cannot be wrong" because the
+          direction is *decoded*, which holds for `decode_keyset_cursor` and
+          not for `KeysetCursor`, a plain frozen dataclass any library caller
+          builds by hand. The cursor block asks the same pure rule a second
+          time now, **ahead of `KeysetOrderMismatch`** for the reason the
+          stated reading is ahead of everything: paired with
+          `sort_order='asc'` the mismatch guard fired first and answered
+          "pass `sort_order='ASC'`" — quoting the invalid value back as the
+          remedy. Both directions mutation-pinned.
+        - **`label`'s form is enforced at class creation, not asserted over
+          the four that exist.** `__init_subclass__` rejects a label that is
+          not a bare noun and a subclass that declares its own `_SEPARATOR`.
+          Both were spellable against a green suite: `label = "filter:"`
+          renders `filter:: …` and passes both form assertions (`": " not in
+          "filter:"`), and an override renders the exact pre-#350
+          missing-space form while defeating the assertions that police it,
+          since both read the **base's** value. One underscore is a
+          convention, not ownership. `reject_malformed_label` is module-level
+          for `reject_empty_diagnostic`'s reason, though here the indirection
+          is belt-and-braces — unlike enum `__new__`, `__init_subclass__` is
+          reachable from a test. The empty **default** stays: #350 argued that
+          correctly, and the argument defends the default rather than the
+          absence of a check on a value someone wrote.
+        - **`wire_message()` never returns the empty string.** An *unlabelled*
+          member with a blank message returned `""`, so `run_search` raised
+          `ValidationFailed("")` and the wire carried problem+json with an
+          empty `detail` — the failure this method exists to prevent, one
+          branch over and worse, the dangling form at least naming a subject.
+          It falls back to the class name. The labelled-blank case still
+          renders the label alone; that decision is #350's and is untouched.
+        - **`foreign_refusal_error` follows `Searcher.search` into its
+          helpers.** Reading the method alone left the rule blind to the most
+          natural refactor of a 300-line method — extract the guards — so a
+          non-member raised from `Searcher._check_hybrid_cursor` was #344
+          verbatim with the rule green. `_harness_lock.harness_lock_error`
+          follows `main` into helpers for exactly this reason, having found a
+          harness that already had the shape. Measured before landing: the six
+          helpers reachable from `search` raise nothing named, so it reports
+          nothing new. `_searcher_methods` also keeps the **last** binding, the
+          `_local_functions` lesson this rule had shipped the bug of.
+        - **The provocation table is cross-checked by *site*, which is the
+          claim it already made.** `test_every_member_has_a_provocation`
+          compares types, so a sixth raise site of an already-provoked member
+          joined no case and nothing failed — `missing_seam_error`'s "asks
+          only whether a name is present" half. `family_raise_sites` counts
+          them off the source over the same reachable set, so a site added
+          later is in scope without the test being edited.
+        - **Three comments that argued a real gap away.** `_raised_name`
+          claimed `raise err` on a local returns `None`; it returns `"err"`
+          and is reported — left as it is (it fails closed, and judging
+          otherwise means a second binding analysis) but now documented as the
+          imprecision it is. `_Embeddings` in the pre-IO file claimed `search`
+          "embeds before it opens a connection on some branches"; the only
+          `embed_query` sits inside `_retrieve_pool`, whose two call sites are
+          both under `with self._pool.connection()`, so that tripwire can
+          never fire first — the **rewriter** is the real second route, and it
+          gained the positive control the pool already had. And
+          `argument_errors`' third reason for keeping the membership checks
+          out of the family asserted that the `_family()`-derived pins "would
+          start asserting 400-mapping for two exceptions no api boundary
+          maps"; those pins inject into a `MagicMock` and pass `sort=None`, so
+          they would pass, and #348's change *is* the boundary mapping them.
+          The reason is now that membership would be **inert at both catch
+          sites** — the audience claim it replaced was wrong in the other
+          direction too, the Searcher being public API whose library callers
+          `SortNotApplicable`'s own docstring names.
+        - **Smaller pins that read stronger than they were.**
+          `api/search_cursor.py`'s walk-error branch hand-wrote
+          `f"cursor: {walk_error}"` for the one message whose two renderings
+          must agree, so it renders through `KeysetCursorUnusable(...)
+          .wire_message()` now (the file's seven other `cursor: ` literals are
+          codec errors with no member behind them, and stay).
+          `test_a_labelled_member_joins_its_label_to_its_message` read
+          `_SEPARATOR` on both sides — a tautology that survived changing it
+          to `" | "` — and asserts the literal wire form now.
+          `sort_membership_error` had no unit test and was imported by no test
+          file, so freezing its `get_args` derivation to a literal tuple
+          survived the suite; `test_sort_axes.py` covers it, asserting against
+          `get_args` so widening a `Literal` needs no edit. `family_names`'
+          fixpoint was pinned only by a fixture whose declaration order a
+          single pass also satisfies — it is declared innermost-first now. And
+          row 0 of `test_membership_outranks_every_cursor_guard` reached no
+          cursor guard at all (blank query resolves to `date`, archive walk,
+          no stated order), so it pinned membership above
+          `sort_applicability_error` under a name claiming otherwise.
       - **They moved out of `searcher.py` rather than gaining a base in
         place**, the `sort_axes.py`/`keyset_walk.py` call: the family is the
         contract *between* the Searcher and every boundary that maps it, and

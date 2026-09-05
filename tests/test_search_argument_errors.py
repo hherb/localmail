@@ -28,10 +28,14 @@ The pins here are deliberately two kinds, because either alone has a hole:
   them, which is the property a hand-written list cannot have.
 
 Two tests here *are* hand-written lists, and deliberately: the
-``_KNOWN_MEMBERS`` control and the ``label`` mapping both fail on a
-fifth member, which is how the author is made to decide its prefix rather
-than inherit one silently. So the file does need an edit — the parametrised
-pins do not, and they are the ones that would otherwise pass vacuously.
+``_KNOWN_MEMBERS`` control and the ``label`` mapping. The control fails on
+any fifth member; the mapping fails on one that sets a **non-empty** label
+(measured — a member taking the empty default passes it), which is how the
+author is made to decide the label rather than inherit one silently. So the
+file does need an edit — the parametrised pins do not, and they are the ones
+that would otherwise pass vacuously. The *form* of a label is not left to
+either list: ``__init_subclass__`` rejects a malformed one at class creation
+(#350 review).
 
 **What none of this reaches** is a fifth member written *outside*
 ``argument_errors``: the structural pin filters on ``__module__``, so a
@@ -55,6 +59,7 @@ from localmail.search.argument_errors import (
     SearchArgumentRefused,
     SortNotApplicable,
     SortOrderNotApplicable,
+    reject_malformed_label,
 )
 from localmail.search.searcher import KeysetCursor
 
@@ -294,11 +299,21 @@ def test_the_separator_is_owned_by_the_type_not_written_into_each_label() -> Non
 
 
 def test_a_labelled_member_joins_its_label_to_its_message() -> None:
-    """The shipped wire form, asserted against the *rule* rather than a
-    literal, so the two cannot drift apart."""
+    """The shipped wire form, asserted as a **literal**.
+
+    It used to read ``f"{exc.label}{SearchArgumentRefused._SEPARATOR}…"``,
+    with a docstring calling that "asserted against the rule rather than a
+    literal, so the two cannot drift apart" — a tautology, since both sides
+    read the two values ``wire_message()`` reads. Measured: changing
+    ``_SEPARATOR`` to ``" | "`` left all four #350 tests green, and only the
+    two api-boundary tests noticed. The ``BUSY_EXIT_CODE`` /
+    ``DEFAULT_LOCK_TIMEOUT_S`` trap, one file over.
+
+    A literal is what a wire form wants anyway: the point is that this exact
+    string reaches a caller, not that two expressions agree.
+    """
     exc = KeysetCursorUnusable("needs its query back")
-    assert exc.wire_message() == (
-        f"{exc.label}{SearchArgumentRefused._SEPARATOR}needs its query back")
+    assert exc.wire_message() == "cursor: needs its query back"
 
 
 def test_an_unlabelled_member_renders_its_bare_message() -> None:
@@ -326,8 +341,85 @@ def test_a_labelled_member_with_no_message_renders_no_dangling_separator(
     assert KeysetCursorUnusable(message).wire_message() == "cursor"
 
 
-def test_a_member_with_neither_label_nor_message_renders_empty() -> None:
-    """The base itself, which no boundary raises. Pinned so the two
-    independent branches of the join are both decided rather than one of
-    them being an accident of the other."""
-    assert SearchArgumentRefused().wire_message() == ""
+# --- the form of a label is enforced at class creation (#350 review) --------
+
+def test_a_label_that_spells_its_own_separator_is_rejected() -> None:
+    """``label = "filter:"`` renders ``filter:: …`` and passed both form
+    assertions above, since ``": " not in "filter:"``.
+
+    #350's fix moved the join onto the type and its comment claimed the
+    missing-space form was thereby "unspellable rather than merely untested".
+    It was not: the doubled form, and the ``_SEPARATOR`` override below, both
+    produced a malformed wire message against a green suite. A test over the
+    four shipped members cannot catch a fifth that is never written; class
+    creation can, which is the ``reject_empty_diagnostic`` call (#291).
+    """
+    with pytest.raises(ValueError, match="bare noun"):
+        class FilterRefused(SearchArgumentRefused):
+            label = "filter:"
+
+
+@pytest.mark.parametrize("label", ["cursor ", " cursor", "cursor: "])
+def test_a_label_carrying_the_join_or_padding_is_rejected(label: str) -> None:
+    """The whole point of owning the separator is that a member states the
+    subject and nothing else."""
+    with pytest.raises(ValueError, match="bare noun"):
+        type("Padded", (SearchArgumentRefused,), {"label": label})
+
+
+def test_a_subclass_may_not_re_decide_the_separator() -> None:
+    """Both form assertions read ``SearchArgumentRefused._SEPARATOR`` — the
+    *base's* — so a subclass declaring its own defeated the rule and the test
+    that enforces it in one line, reproducing exactly the pre-#350 form
+    (``filter:lang is empty``). One underscore is a convention, not
+    ownership.
+    """
+    with pytest.raises(TypeError, match="separator"):
+        type("OwnJoin", (SearchArgumentRefused,),
+             {"label": "filter", "_SEPARATOR": ":"})
+
+
+def test_an_empty_label_stays_legal() -> None:
+    """The positive control, and the decision #350 got right: the default is
+    empty rather than mandatory, because a member that forgets a label loses
+    a word of context where one that inherits a wrong one makes a false
+    claim. Only a *stated* label is judged."""
+    unlabelled = type("Unlabelled", (SearchArgumentRefused,), {})
+    assert unlabelled("refused").wire_message() == "refused"
+
+
+def test_the_shipped_members_satisfy_the_rule_they_are_created_under() -> None:
+    """A rule that rejected the real four would fail at import, so this is
+    less a pin than a statement of what the rule is calibrated to."""
+    for exc in _family():
+        assert reject_malformed_label(exc.__name__, exc.label) == exc.label
+
+
+@pytest.mark.parametrize("label",
+                         ["filter:", "cursor ", "a: b", "", "folder_ids"])
+def test_the_label_rule_is_reachable_for_a_member_that_does_not_exist_yet(
+    label: str,
+) -> None:
+    """Module-level rather than inlined, so it can be driven against a label
+    no member has — the ``reject_empty_diagnostic`` arrangement. Unlike that
+    one, ``__init_subclass__`` *is* reachable from a test, so this is
+    belt-and-braces rather than the only way in."""
+    if label in ("", "folder_ids"):
+        assert reject_malformed_label("Future", label) == label
+    else:
+        with pytest.raises(ValueError, match="bare noun"):
+            reject_malformed_label("Future", label)
+
+
+def test_a_member_with_neither_label_nor_message_names_itself() -> None:
+    """``wire_message()`` must never hand a boundary an empty string.
+
+    It used to: no label and no message returned ``""``, so
+    ``run_search`` raised ``ValidationFailed("")`` and the wire carried
+    problem+json with an empty ``detail`` — strictly worse than the dangling
+    ``"cursor: "`` the method was written to avoid, which at least named a
+    subject. The labelled-blank case still renders the label alone, which is
+    the decision #350 took and this does not revisit.
+    """
+    assert SearchArgumentRefused().wire_message() == "SearchArgumentRefused"
+    assert SortNotApplicable("   ").wire_message() == "SortNotApplicable"

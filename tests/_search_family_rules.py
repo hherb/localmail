@@ -72,6 +72,16 @@ SEARCH_METHOD = "search"
 #: live uses are #333's membership checks (``ValueError``, kept outside the
 #: family by #348) and ``--smart`` with no rewriter configured
 #: (``RuntimeError``).
+#:
+#: **The exemption is conditional, and this constant cannot express the
+#: condition.** Both live uses are safe only because a boundary answers them
+#: first — ``run_search`` mirrors the same membership rule ahead of the call,
+#: and computes ``effective_smart = smart and searcher.smart_available`` — so
+#: neither reaches a catch site. A *new* guard spelled ``raise
+#: ValueError(...)``, which is the shape both live examples model, passes
+#: this rule and is an unhandled 500 at both boundaries, exactly as the
+#: message below says. Adding a name here means checking that a boundary
+#: refuses it first; the rule reads spelling and cannot check that for you.
 ALLOWED_BARE_RAISES = frozenset({"ValueError", "RuntimeError"})
 
 
@@ -167,14 +177,68 @@ def misplaced_member_error(
     )
 
 
-def _search_method(tree: ast.Module) -> ast.FunctionDef | None:
+def _searcher_methods(tree: ast.Module) -> dict[str, ast.FunctionDef]:
+    """Every method of ``SEARCH_CLASS``, keyed by name, **last binding wins**.
+
+    Last rather than first, because that is what Python binds:
+    ``_harness_lock._local_functions`` learned this on ``def main`` and the
+    first version of this rule had the bug it was fixed for — a redefinition
+    (a merge artefact, a conditional definition, a stub kept above the real
+    one) meant auditing a method that never runs and reporting the tree
+    healthy. Classes are folded the same way for the same reason.
+    """
+    methods: dict[str, ast.FunctionDef] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == SEARCH_CLASS:
             for item in node.body:
-                if (isinstance(item, ast.FunctionDef)
-                        and item.name == SEARCH_METHOD):
-                    return item
-    return None
+                if isinstance(item, ast.FunctionDef):
+                    methods[item.name] = item
+    return methods
+
+
+def _self_call_names(fn: ast.FunctionDef) -> set[str]:
+    """The ``self.foo(...)`` methods ``fn`` calls."""
+    return {
+        node.func.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    }
+
+
+def _reachable_from_search(
+    methods: Mapping[str, ast.FunctionDef],
+) -> list[ast.FunctionDef]:
+    """``SEARCH_METHOD`` and every method it transitively calls on ``self``.
+
+    **Following helpers is the rule, not a refinement of it.** Reading
+    ``search`` alone leaves the rule blind to the most natural refactor there
+    is — extract the guards — and ``Searcher.search`` is 300+ lines, so that
+    refactor is a matter of when. A guard moved into
+    ``Searcher._check_hybrid_cursor`` raising a non-member is #344 verbatim,
+    and the rule written to end it would have reported the tree healthy.
+    ``_harness_lock.harness_lock_error`` follows ``main`` into its helpers
+    for exactly this reason, having found a harness that already had the
+    shape.
+
+    Bounded by ``seen``, so mutual recursion terminates. Measured against the
+    real tree when this landed: the six helpers reachable from ``search``
+    raise nothing named, so following them reports nothing new — it closes
+    the door before anyone walks through it.
+    """
+    seen: set[str] = set()
+    order: list[ast.FunctionDef] = []
+    stack = [SEARCH_METHOD]
+    while stack:
+        name = stack.pop()
+        if name in seen or name not in methods:
+            continue
+        seen.add(name)
+        order.append(methods[name])
+        stack.extend(_self_call_names(methods[name]))
+    return order
 
 
 def _raised_name(node: ast.Raise) -> str | None:
@@ -182,9 +246,21 @@ def _raised_name(node: ast.Raise) -> str | None:
 
     ``None`` covers the two shapes that declare no type: a bare ``raise``
     (re-raising the active exception, which reading as a violation would
-    forbid every ``except ...: raise`` in the method) and a raise of
-    something that is not a plain or dotted name — ``raise err`` on a local,
-    say, which this rule cannot resolve and does not guess at.
+    forbid every ``except ...: raise`` in the method) and a raise of an
+    expression naming no identifier at all — ``raise errs[0]``, say, which
+    this rule cannot resolve and does not guess at.
+
+    **Known imprecision, deliberate**: ``raise err`` on a local *is* an
+    ``ast.Name``, so it reads as the class name ``err`` and is reported. An
+    earlier wording here claimed the opposite. Left as it is because it
+    fails closed — a spurious report, never a missed one — and because
+    judging otherwise means resolving names, a second binding analysis to
+    keep in step with Python's. Rename the local or raise the class.
+
+    Both a ``Call`` and a bare class are read (``raise Foo("x")`` and
+    ``raise Foo``), and a dotted spelling folds to its attribute
+    (``raise argument_errors.Foo``) so the import style does not decide
+    whether the rule applies — the ``_base_names`` arrangement.
 
     One function rather than two conditions at the call site: the second was
     redundant with the first, so no mutation could distinguish them, and an
@@ -201,10 +277,46 @@ def _raised_name(node: ast.Raise) -> str | None:
     return None
 
 
+def family_raise_sites(
+    searcher_source: str, *, family: frozenset[str],
+) -> dict[str, int]:
+    """How many times each family member is raised, reachable from ``search``.
+
+    The *site*-keyed counterpart to ``foreign_refusal_error``'s name-keyed
+    question, and the reverse cross-check
+    ``test_searcher_guards_precede_io.py``'s provocation table needs. That
+    file makes site-keying its central claim — ``KeysetCursorUnusable`` has
+    two raise sites and "covering the type once would leave the site that
+    most plausibly drifts untested" — but its own completeness check compares
+    *types*, so a sixth site of an already-provoked member joins nothing and
+    nothing fails. ``missing_seam_error``'s "asks only whether a name is
+    present" half, one file over.
+
+    Same reachable set as the raise rule, so a guard extracted into a helper
+    still counts. Returns data rather than a message because the caller's
+    question is "do these two agree", which only it can answer.
+    """
+    tree = ast.parse(searcher_source)
+    methods = _searcher_methods(tree)
+    counts: dict[str, int] = {}
+    for fn in _reachable_from_search(methods):
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Raise):
+                continue
+            name = _raised_name(node)
+            if name is not None and name in family:
+                counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def foreign_refusal_error(
     searcher_source: str, *, family: frozenset[str],
 ) -> str | None:
     """Report a named non-member raised from ``Searcher.search``, or ``None``.
+
+    "From ``search``" means the method **and every method it transitively
+    calls on ``self``** — see ``_reachable_from_search`` for why reading the
+    method alone is not the rule but a hole in it.
 
     A bare ``raise`` (re-raising the active exception) declares no type and is
     ignored; so is any name in ``ALLOWED_BARE_RAISES``.
@@ -216,20 +328,23 @@ def foreign_refusal_error(
     with negative controls rather than only positive ones.
     """
     tree = ast.parse(searcher_source)
-    method = _search_method(tree)
-    if method is None:
+    methods = _searcher_methods(tree)
+    if SEARCH_METHOD not in methods:
         return (f"{SEARCH_CLASS}.{SEARCH_METHOD} was not found, so this rule "
                 "inspected nothing; update SEARCH_CLASS/SEARCH_METHOD if the "
                 "guards moved")
 
     offenders: list[str] = []
-    for node in ast.walk(method):
-        if not isinstance(node, ast.Raise):
-            continue
-        name = _raised_name(node)
-        if name is None or name in ALLOWED_BARE_RAISES or name in family:
-            continue
-        offenders.append(f"{name} (line {node.lineno})")
+    for fn in _reachable_from_search(methods):
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Raise):
+                continue
+            name = _raised_name(node)
+            if name is None or name in ALLOWED_BARE_RAISES or name in family:
+                continue
+            where = ("" if fn.name == SEARCH_METHOD
+                     else f", via {SEARCH_CLASS}.{fn.name}")
+            offenders.append(f"{name} (line {node.lineno}{where})")
     if not offenders:
         return None
     return (

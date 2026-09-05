@@ -1119,11 +1119,17 @@ class Searcher:
         # #324 rule: a textless query resolves to `TEXTLESS_SORT` whatever
         # arrived, so a misspelling would be swallowed on exactly the branch
         # that used to swallow it. For `sort_order` it is what lets this
-        # precede the cursor block — and it costs nothing, since the only
-        # values the resolution can substitute are the cursor's own decoded
-        # direction and a module constant, neither of which can be wrong.
-        # An unstated axis is likewise not a claim that can be wrong, so the
-        # `is not None` guards cost no coverage.
+        # precede the cursor block. An unstated axis is likewise not a
+        # claim that can be wrong, so the `is not None` guards cost no
+        # coverage.
+        #
+        # Reading the stated value leaves one substitution unseen — a
+        # `keyset_cursor`'s own `order`, which is neither the caller's value
+        # nor a module constant — so the cursor block below asks the same
+        # rule a second time for it. An earlier wording here claimed that
+        # substitution "cannot be wrong" because the direction is *decoded*;
+        # that holds for `decode_keyset_cursor` and not for `KeysetCursor`,
+        # which any library caller may construct by hand.
         #
         # Above `KeysetOrderMismatch` because a value that is not a value
         # cannot meaningfully contradict a cursor: that guard would report a
@@ -1136,9 +1142,9 @@ class Searcher:
         # A plain `ValueError`, not a `SearchArgumentRefused`: a membership
         # error is a *type* error a well-typed caller cannot make, where
         # every member of that family is a *cross-argument* error a
-        # well-typed caller makes routinely. Since #348 `run_search` refuses
-        # these at the boundary, so admitting them would give the family a
-        # member no wire caller can reach. The rule itself is the pure
+        # well-typed caller makes routinely. And since #348 `run_search`
+        # refuses these at the boundary, membership would be inert at both
+        # catch sites — the catch could never see one. The rule is the pure
         # `sort_axes.sort_membership_error`, shared with that boundary so one
         # rule cannot be worded two ways.
         membership_error = sort_membership_error(sort=sort,
@@ -1146,6 +1152,30 @@ class Searcher:
         if membership_error is not None:
             raise ValueError(membership_error)
         if keyset_cursor is not None:
+            # The cursor's direction is the resolution's **third** source,
+            # and the stated reading above cannot see it (#348 review). With
+            # `sort_order` unstated this is what `effective_order` becomes,
+            # so without this reading nothing validates it: `date_keyset`
+            # still refuses it in the same words, but only after a connection
+            # is opened and, on the smart path, after a full rewrite round
+            # trip — the "wording *and the cost*" property
+            # `test_an_unknown_sort_order_is_refused_on_the_date_path` is
+            # named for, and the pre-IO contract this family rests on.
+            #
+            # `KeysetCursor` is a plain frozen dataclass, so a *decoded*
+            # direction is a property of `decode_keyset_cursor`, not of the
+            # type. HTTP and MCP always decode; the library and CLI callers
+            # these runtime checks exist for construct one directly.
+            #
+            # Ahead of the mismatch guard for the reason the stated reading
+            # is ahead of everything: a direction that is not a direction
+            # cannot be contradicted. Against `sort_order='asc'` that guard
+            # fired first and answered "pass sort_order='ASC'" — quoting the
+            # invalid value back as the remedy.
+            cursor_error = sort_membership_error(
+                sort=None, sort_order=keyset_cursor.order)
+            if cursor_error is not None:
+                raise ValueError(f"keyset_cursor: {cursor_error}")
             if sort_order is not None and sort_order != keyset_cursor.order:
                 raise KeysetOrderMismatch(
                     f"sort_order={sort_order!r} contradicts the cursor, which "
@@ -1279,10 +1309,16 @@ class Searcher:
         # as verified; it was verified against `pool.connection` alone, and
         # the rewriter is a second IO route.
         #
-        # The hoist is exactly equivalent, not merely close: reaching the old
-        # site meant `effective_sort != "date"` (the date branch returns) and
-        # `effective_sort` is never reassigned after it is resolved, so the
-        # condition is fully determined here. Unlike the walk guard above —
+        # The hoist is equivalent **in condition**, and deliberately earlier
+        # in effect: reaching the old site meant `effective_sort != "date"`
+        # (the date branch returns) and `effective_sort` is never reassigned
+        # after it is resolved, so the condition is fully determined here.
+        # What does change is what wins a race with it — an *uncaught*
+        # rewriter failure (anything outside the three types the rewrite
+        # block catches) used to surface instead of this refusal, and now
+        # does not. That is the intended direction, and "exactly equivalent",
+        # as this comment first read, claimed more than the reason below
+        # supports. Unlike the walk guard above —
         # whose identical-looking claim was refuted, since it fires only on
         # blank text and the rewriter is gated on non-blank — this one *does*
         # save the round trip, because it fires on a non-empty query.

@@ -36,6 +36,7 @@ from localmail.search.rewrite_status import (
     rewrite_skipped_for_status,
 )
 from localmail.search.argument_errors import SearchArgumentRefused
+from localmail.search.sort_axes import sort_membership_error
 from localmail.search.searcher import (
     SearchPage,
     SearchResult,
@@ -219,6 +220,36 @@ def run_search(
     when there is no note). ``rewrite_skipped`` stays True only when a requested
     rewrite did not happen (rewriter unavailable, or the rewrite call failed).
     """
+    # Membership first, ahead of every other gate here (#348). Two reasons,
+    # and the second is why this is not merely tidy.
+    #
+    # It closes the transport hole: `Searcher.search` checks both axes and
+    # raises a plain `ValueError`, which `serve/app.py` — a handler for
+    # `APIError` only — answers as an unhandled 500. HTTP and MCP both
+    # declare `Literal`s so neither can reach it, but that made the property
+    # an obligation on every transport rather than one this boundary holds,
+    # and a third consumer (#305's CLI flags, a queue, a new route) inherits
+    # the 500 with nothing failing at review time.
+    #
+    # And it is decided before the empty-ACL short-circuit below, which
+    # answers with an empty page indistinguishable from "you have reached
+    # the end" — so `sort="Date"` from a grant-nothing caller was reported
+    # as a *completed* request. Every other gate in this function is already
+    # placed ahead of that branch for exactly this reason; this axis was the
+    # one that was not.
+    #
+    # Ahead of `resolve_cursor_plan` too, because a value that is not a value
+    # cannot meaningfully contradict a cursor: that resolver interpolates the
+    # offending string into a sentence asserting what the cursor continues
+    # ("this cursor continues a date-sorted search ... (got 'Date')"), which
+    # sends a caller who made a typo to their paging logic — and the sentence
+    # is a coincidence of which cursor was in hand. `Searcher.search` orders
+    # these two the same way, so the layers cannot answer one input
+    # differently.
+    membership_error = sort_membership_error(sort=sort, sort_order=sort_order)
+    if membership_error is not None:
+        raise ValidationFailed(membership_error)
+
     # Resolved before the ACL short-circuit below, because that branch answers
     # with an empty page — indistinguishable from "you have reached the end".
     # A malformed paging request must be a 400 whatever the caller was granted.

@@ -44,13 +44,36 @@ every member here is a **cross-argument** error a perfectly well-typed caller
 makes routinely: ``sort="Date"`` is unspellable at every declared boundary,
 while ``sort="rank"`` on a textless query is spellable at all of them.
 
-That distinction rests on an obligation on *transports*, not on a property of
-the value: ``run_search`` type-hints both axes and checks neither at runtime,
-so every transport reaching it must declare them as ``Literal``s or inherit a
-500 with nothing failing at review time. HTTP (``serve/routes/search.py``) and
-MCP (``mcp/server.py``) both do; #348 tracks moving the check into
-``run_search`` so a third consumer cannot forget, and revisits whether these
-two then join the family.
+That distinction used to rest on an obligation on *transports* rather than on
+a property of the boundary: ``run_search`` type-hinted both axes and checked
+neither, so every transport reaching it had to declare them as ``Literal``s or
+inherit an unhandled 500 — ``serve/app.py`` registers a handler for
+``APIError`` only. HTTP (``serve/routes/search.py``) and MCP
+(``mcp/server.py``) both do declare them, so the premise held; what did not
+hold is that a **third** consumer inherited the 500 with nothing failing at
+review time, and that the empty-ACL short-circuit returned before the Searcher
+ever validated — answering ``sort="Date"`` from a grant-nothing caller with a
+**200 and an empty page**.
+
+**#348 closed both halves in ``run_search``, and the membership checks stay
+outside this family** (operator decision, recorded here because #348 asked for
+it). Three reasons, in the order they bind:
+
+* The type-vs-cross-argument line above is unchanged by the fix. ``sort="Date"``
+  is unspellable at every declared boundary; ``sort="rank"`` on a textless
+  query is spellable at all of them.
+* Admitting them would give the family a member **no wire caller can reach**,
+  since the boundary now refuses them ahead of the Searcher — claiming an
+  audience it does not have, which is the defect ``SortOrderNotApplicable``'s
+  docstring was corrected for.
+* They would fall under the pre-IO contract below for no gain, and the
+  ``_family()``-derived pins would start asserting 400-mapping for two
+  exceptions no api boundary maps.
+
+The rule itself is the pure ``sort_axes.sort_membership_error``, shared by
+``run_search`` and ``Searcher.search`` so one rule cannot be worded two ways —
+and ordered **ahead of every guard here at both layers**, because a value that
+is not a value cannot meaningfully contradict a cursor or a query.
 """
 from __future__ import annotations
 

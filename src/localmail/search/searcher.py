@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import MINYEAR, datetime, timezone
-from typing import Any, Literal, get_args
+from typing import Any, Literal
 
 import httpx
 import psycopg
@@ -55,6 +55,7 @@ from localmail.search.sort_axes import (
     SortOrder,
     resolve_sort,
     sort_applicability_error,
+    sort_membership_error,
 )
 from localmail.search.keyset_walk import (
     KeysetWalk,
@@ -1100,19 +1101,9 @@ class Searcher:
         # cursor reaching the hybrid branch is already refused below by
         # `KeysetCursorUnusable`, and inferring it here would silently retire
         # that guard.
-        if keyset_cursor is not None:
-            if sort_order is not None and sort_order != keyset_cursor.order:
-                raise KeysetOrderMismatch(
-                    f"sort_order={sort_order!r} contradicts the cursor, which "
-                    f"continues a {keyset_cursor.order}ending walk; pass "
-                    f"sort_order={keyset_cursor.order!r} or omit it"
-                )
-            effective_order: SortOrder = keyset_cursor.order
-        else:
-            effective_order = (
-                DEFAULT_SORT_ORDER if sort_order is None else sort_order
-            )
-        # Both axes are membership-checked here, once, before either is read.
+        # Both axes are membership-checked here, once, before either is read
+        # and ahead of every guard below — including the cursor's, which is
+        # why this sits above the block that reads `keyset_cursor.order`.
         #
         # `date_keyset` already reasons that CI runs no mypy step, so a wrong
         # literal from a library caller has to be caught at runtime — but its
@@ -1124,25 +1115,47 @@ class Searcher:
         # `sort_order="ASC"` missed the exact-match refusal just below, so
         # the rank path neither honoured, validated, nor reported it.
         #
-        # `sort` is checked as *stated*, not as resolved: since #324 a
-        # textless query resolves to `TEXTLESS_SORT` whatever arrived, so a
-        # misspelling would be swallowed on exactly the branch that used to
-        # swallow it. An unstated sort is a module constant and cannot be
-        # wrong, so the `is not None` guard costs no coverage.
+        # Both axes are checked as *stated* (#348). For `sort` that is the
+        # #324 rule: a textless query resolves to `TEXTLESS_SORT` whatever
+        # arrived, so a misspelling would be swallowed on exactly the branch
+        # that used to swallow it. For `sort_order` it is what lets this
+        # precede the cursor block — and it costs nothing, since the only
+        # values the resolution can substitute are the cursor's own decoded
+        # direction and a module constant, neither of which can be wrong.
+        # An unstated axis is likewise not a claim that can be wrong, so the
+        # `is not None` guards cost no coverage.
         #
-        # A plain `ValueError`, not a named subclass: HTTP and MCP both
-        # declare these as `Literal`s, so this cannot arrive from the wire
-        # and there is no api/ mapping for it to be caught by. Worded like
-        # `date_keyset`'s sibling checks so the two cannot drift.
-        if sort is not None and sort not in get_args(SortMode):
-            raise ValueError(
-                f"unknown sort {sort!r}; expected one of "
-                f"{sorted(get_args(SortMode))}"
-            )
-        if effective_order not in get_args(SortOrder):
-            raise ValueError(
-                f"unknown sort_order {effective_order!r}; expected one of "
-                f"{sorted(get_args(SortOrder))}"
+        # Above `KeysetOrderMismatch` because a value that is not a value
+        # cannot meaningfully contradict a cursor: that guard would report a
+        # typo as a paging disagreement, in wording that is a coincidence of
+        # which cursor was in hand ("pass sort_order='asc'" against an
+        # ascending one, "'desc'" against a descending one). `run_search`
+        # orders the two the same way, so the layers cannot answer one input
+        # differently — the #344 lesson.
+        #
+        # A plain `ValueError`, not a `SearchArgumentRefused`: a membership
+        # error is a *type* error a well-typed caller cannot make, where
+        # every member of that family is a *cross-argument* error a
+        # well-typed caller makes routinely. Since #348 `run_search` refuses
+        # these at the boundary, so admitting them would give the family a
+        # member no wire caller can reach. The rule itself is the pure
+        # `sort_axes.sort_membership_error`, shared with that boundary so one
+        # rule cannot be worded two ways.
+        membership_error = sort_membership_error(sort=sort,
+                                                 sort_order=sort_order)
+        if membership_error is not None:
+            raise ValueError(membership_error)
+        if keyset_cursor is not None:
+            if sort_order is not None and sort_order != keyset_cursor.order:
+                raise KeysetOrderMismatch(
+                    f"sort_order={sort_order!r} contradicts the cursor, which "
+                    f"continues a {keyset_cursor.order}ending walk; pass "
+                    f"sort_order={keyset_cursor.order!r} or omit it"
+                )
+            effective_order: SortOrder = keyset_cursor.order
+        else:
+            effective_order = (
+                DEFAULT_SORT_ORDER if sort_order is None else sort_order
             )
         cfg = self._cfg
         effective_page_size: int = min(page_size or cfg.page_size_default,

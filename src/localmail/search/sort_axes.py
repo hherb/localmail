@@ -25,7 +25,7 @@ unchanged; only the address is. ``searcher.py`` imports these names, so
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 from localmail.search.keyset_walk import walk_for_text
 
@@ -101,3 +101,43 @@ def sort_applicability_error(
         "has:attachment) leave no terms — so such a query is always answered "
         "date-ordered."
     )
+
+
+def sort_membership_error(
+    *, sort: str | None, sort_order: str | None,
+) -> str | None:
+    """Why either axis is not a value of its own type, or ``None``.
+
+    The vocabulary check, and the most fundamental of the three rules here:
+    ``resolve_sort`` says what a value *means* and
+    ``sort_applicability_error`` says whether this query can serve it, and
+    both are nonsense questions about a value that is not one. So callers
+    ask this first — see the precedence note on each of them.
+
+    ``None`` means "unstated, nothing to check" for either axis, so a caller
+    passes whichever it actually means: ``Searcher.search`` checks ``sort``
+    as *stated* (since #324 a textless query resolves to ``TEXTLESS_SORT``
+    whatever arrived, so a misspelling would be swallowed on exactly the
+    branch that used to swallow it) and ``sort_order`` as *resolved* (the
+    resolution is either the caller's own value or a module constant).
+
+    Shaped like its two siblings — a message, or ``None`` — so the caller
+    decides what an error *is*: ``ValidationFailed`` at the api boundary
+    (#348), a plain ``ValueError`` inside the Searcher. That split is why
+    the rule is stated once here rather than inlined at each: the two
+    layers must not word one rule differently, which is what
+    ``run_search`` inheriting an unhandled 500 amounted to.
+
+    Deliberately **not** a ``SearchArgumentRefused``: a membership error is
+    a *type* error a well-typed caller cannot make, where every member of
+    that family is a *cross-argument* error a well-typed caller makes
+    routinely. See ``argument_errors``' module docstring, which records the
+    decision this function's existence prompted.
+    """
+    if sort is not None and sort not in get_args(SortMode):
+        return (f"unknown sort {sort!r}; expected one of "
+                f"{sorted(get_args(SortMode))}")
+    if sort_order is not None and sort_order not in get_args(SortOrder):
+        return (f"unknown sort_order {sort_order!r}; expected one of "
+                f"{sorted(get_args(SortOrder))}")
+    return None

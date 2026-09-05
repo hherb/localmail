@@ -312,8 +312,23 @@ def run_search(
         # total_estimate is "estimate not computed" — uniformly None across
         # every branch (#175). No rewrite was performed, so the empty-ACL
         # short-circuit reports not_requested (#176).
+        #
+        # `sort_applied` is present here rather than omitted, which is the
+        # whole reason this key exists rather than the client inferring the
+        # ordering from the returned cursor (#345): this branch returns
+        # `next_cursor: None`, so an inference has no signal at all, and its
+        # empty page is byte-identical to "you have reached the end".
+        #
+        # `plan.sort` is exact on the fresh and keyset modes — it is
+        # `resolve_sort`'s own answer, and the cursor's, respectively. On
+        # **pool** mode it is the caller's claim about a pool this branch
+        # never consults (`CursorPlan` says so), and that is accepted only
+        # because no rows come back to be ordered. The rowed path never
+        # relies on it: `page.sort_applied` is stamped from the pool's own
+        # metadata by `continue_page`.
         return {"results": [], "next_cursor": None, "total_estimate": None,
                 "took_ms": 0.0, "rewrite_skipped": False,
+                "sort_applied": plan.sort,
                 "rewrite_status": NOT_REQUESTED, "rewrite_note": None,
                 "rewrite_note_code": None}
 
@@ -463,6 +478,10 @@ def run_search(
         "next_cursor": next_cursor,
         "total_estimate": None,
         "took_ms": page.timing_ms.get("total", 0.0),
+        # Read off the page, never re-derived here: the branch that produced
+        # the rows stamped it, so this layer cannot report an ordering the
+        # walk did not use (#345). Same call as `_next_cursor`'s direction.
+        "sort_applied": page.sort_applied,
         "rewrite_skipped": rewrite_skipped_for_status(status),
         "rewrite_status": status,
         "rewrite_note": note,
@@ -504,17 +523,26 @@ def _continue_or_grow(
         if meta is None:
             raise SearchCursorExpired(f"cursor {parsed.token!r} not found")
         if meta.candidates_per_arm >= cfg.candidates_per_arm_max:
-            return _empty_grown_page(parsed.token, page_size=meta.page_size)
+            return _empty_grown_page(parsed.token, page_size=meta.page_size,
+                                     sort_applied=meta.sort)
         new_cpa = min(meta.candidates_per_arm * 2, cfg.candidates_per_arm_max)
         return searcher.grow_pool(parsed.token, new_cpa, user_id=user_id)
 
 
-def _empty_grown_page(token: str, *, page_size: int) -> Any:
-    """Synthetic 'pool exhausted at cap' page so callers see next_cursor=null."""
+def _empty_grown_page(
+    token: str, *, page_size: int, sort_applied: SortMode,
+) -> Any:
+    """Synthetic 'pool exhausted at cap' page so callers see next_cursor=null.
+
+    ``sort_applied`` comes from the exhausted pool's own metadata, not from
+    a default: this page stands in for one ``continue_page`` would have
+    served, so it must report the ordering that pool was built with (#345).
+    """
     return SearchPage(
         results=[], page=1, page_size=page_size, pool_size=0,
         candidates_per_arm=0, has_more_in_pool=False, can_grow_pool=False,
         search_token=token, query=parse_query(""), timing_ms={"total": 0.0},
+        sort_applied=sort_applied,
     )
 
 

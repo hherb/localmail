@@ -346,6 +346,10 @@ def test_run_search_empty_acl_short_circuit_includes_rewrite_status():
                      allowed_account_ids=[], user_id=9, smart=True)
     assert out == {"results": [], "next_cursor": None, "total_estimate": None,
                    "took_ms": 0.0, "rewrite_skipped": False,
+                   # Present here rather than omitted (#345): this branch has
+                   # no cursor to infer an ordering from, and its empty page
+                   # is byte-identical to "you have reached the end".
+                   "sort_applied": "rank",
                    "rewrite_status": "not_requested", "rewrite_note": None,
                    "rewrite_note_code": None}
     s.search.assert_not_called()

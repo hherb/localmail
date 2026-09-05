@@ -79,6 +79,7 @@ def test_search_prints_notice_when_rewrite_skipped(monkeypatch, cli_config):
         results=[], page=1, page_size=10, pool_size=0, candidates_per_arm=50,
         has_more_in_pool=False, can_grow_pool=False, search_token=None,
         query=ParsedQuery(free_text="x"), timing_ms={},
+        sort_applied="rank",
         rewrite_status="failed",
         rewrite_note="could not reach the rewriter service",
     )

@@ -121,6 +121,9 @@ def test_tool_search_empty_grants_returns_empty(db_dsn, db_conn):
         searcher._pool.close()
     assert page == {"results": [], "next_cursor": None, "total_estimate": None,
                     "took_ms": 0.0, "rewrite_skipped": False,
+                    # The sort this caller stated, reported even though no
+                    # grant let it run (#345).
+                    "sort_applied": "date",
                     "rewrite_status": "not_requested", "rewrite_note": None,
                     "rewrite_note_code": None}
 

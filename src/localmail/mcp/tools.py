@@ -58,6 +58,12 @@ def tool_search(
     and a `sort="rank"` stated for one is itself refused (#324), because
     there is nothing to rank.
 
+    The response reports the ordering that actually ran as `sort_applied`
+    (`rank` or `date`). That is the *resolution*, not the request: an unset
+    `sort` resolves from the query, so a textless one comes back
+    `sort_applied="date"` however it was asked for. Read it rather than
+    assuming the request was honoured.
+
     `smart` opts into an LLM query rewrite (page 1 only). The response carries
     `rewrite_status` (one of `applied`, `unavailable`, `failed`,
     `not_attempted`, `not_requested`), an optional curated human `rewrite_note`,

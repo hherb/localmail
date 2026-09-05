@@ -35,16 +35,13 @@ from localmail.search.rewrite_status import (
     note_for_code,
     rewrite_skipped_for_status,
 )
+from localmail.search.argument_errors import SearchArgumentRefused
 from localmail.search.searcher import (
-    KeysetCursorUnusable,
-    KeysetOrderMismatch,
     SearchPage,
     SearchResult,
     Searcher,
     SortMode,
-    SortNotApplicable,
     SortOrder,
-    SortOrderNotApplicable,
 )
 
 
@@ -323,31 +320,31 @@ def run_search(
                                    sort=sort, sort_order=sort_order,
                                    smart=effective_smart,
                                    allowed_account_ids=allowed_account_ids)
-        except (SortNotApplicable, SortOrderNotApplicable) as exc:
-            # The residual of #324's two guards, and a **live** path rather
-            # than a backstop. The gate above parses the raw request field;
-            # the Searcher parses the ACL-composed query, and `parse_query`
-            # is not compositional across an unbalanced quote: `from:"`
-            # leaves `'from:'` as free text on its own and nothing once a
-            # trailing `account_id:` token joins it. So the gate reads the
-            # query as rankable, the branch reads it as textless, and
-            # without this catch the caller's error escapes as an
-            # operator-facing 500 on a query the boundary had already
-            # cleared.
+        except SearchArgumentRefused as exc:
+            # The whole family, not the members this branch can name (#344).
+            # It used to enumerate `(SortNotApplicable,
+            # SortOrderNotApplicable)`, with the keyset branch below naming
+            # a different three — so a fifth guard added without widening a
+            # tuple was an operator-facing 500, `serve.app` handling only
+            # `APIError`. #342 shipped exactly that hole one branch over.
             #
-            # `SortOrderNotApplicable` rides along because the divergence
-            # runs both ways: `'"'` is textless to the gate and text once
-            # the ACL token is composed in, so a `sort_order="asc"` the gate
-            # cleared against its resolved `date` can meet a resolved `rank`
-            # in the Searcher. Unreachable while the gate forwarded its own
-            # resolution — which is exactly why passing the raw axes above
-            # requires widening this.
+            # This is a **live** path rather than a backstop. The gate above
+            # parses the raw request field; the Searcher parses the
+            # ACL-composed query, and `parse_query` is not compositional
+            # across an unbalanced quote: `from:"` leaves `'from:'` as free
+            # text on its own and nothing once a trailing `account_id:`
+            # token joins it. So the gate reads the query as rankable, the
+            # branch reads it as textless, and without this catch the
+            # caller's error escapes as a 500 on a query the boundary had
+            # already cleared. The divergence runs both ways, which is why
+            # the order axis reaches here too: `'"'` is textless to the gate
+            # and text once the ACL token is composed in.
             #
-            # Caught by named subclasses, never by bare ValueError —
-            # psycopg, datetime and the embedding backends raise that, and
+            # Caught by the family, never by bare ValueError — psycopg,
+            # datetime and the embedding backends raise that, and
             # relabelling a real outage as a caller error would send them
             # to fix a blameless query.
-            raise ValidationFailed(str(exc)) from exc
+            raise ValidationFailed(f"{exc.wire_prefix}{exc}") from exc
     elif plan.mode == "keyset":
         # Keyset cursor → date-keyset continuation. The cursor carries only
         # (ts, id) and the direction it was minted in; the query + filters
@@ -363,31 +360,46 @@ def run_search(
                                    sort=plan.sort, sort_order=plan.sort_order,
                                    keyset_cursor=keyset,
                                    allowed_account_ids=allowed_account_ids)
-        except (KeysetCursorUnusable, SortOrderNotApplicable,
-                KeysetOrderMismatch) as exc:
-            # `SortOrderNotApplicable` and `KeysetOrderMismatch` are the
-            # *dispatch* guards, and those two really are unreachable here:
-            # the plan pins a keyset request to sort="date", so
-            # Searcher.search takes the date branch, which reads the cursor
-            # and honours either order.
+        except SearchArgumentRefused as exc:
+            # The same family as the fresh branch (#344). It used to name
+            # three members and argue, per member, which were unreachable
+            # here — an argument that goes stale silently and had already:
+            # `SortNotApplicable` was absent, and the omission was safe only
+            # because `KEYSET_SORT is TEXTLESS_SORT`, a decision made in
+            # `search_cursor.py`. Catching the family retires the reasoning
+            # along with the enumeration.
             #
-            # `KeysetCursorUnusable` is **not** in that group and **is**
-            # reachable — this comment used to say "neither guard can fire"
-            # and cover all three. It is #326's walk guard, and it asks its
-            # question of a *different string* than the gate above does
-            # (raw request field there, composed query here — see that
-            # gate's comment). The two agree only because
-            # `build_query_string` is free-text-neutral; an unbalanced quote
-            # (`from:"`) is enough to separate them, and then this catch is
-            # what keeps a caller error a 400 instead of an operator-facing
-            # 500 traceback.
+            # #326's walk guard is the reachable member: it asks its
+            # question of a *different string* than the gate above does (raw
+            # request field there, composed query here — see that gate's
+            # comment). The two agree only because `build_query_string` is
+            # free-text-neutral; an unbalanced quote (`from:"`) separates
+            # them, and then this catch is what keeps a caller error a 400
+            # instead of an operator-facing 500 traceback.
             #
-            # Caught by named subclass, never by bare ValueError — psycopg,
+            # The `cursor:` prefix comes off the *exception*, not off this
+            # branch (#331 point 3). Written here, it was applied to
+            # everything the branch caught — so a `sort_order` refusal on a
+            # request whose cursor was fine would read `cursor: sort_order=
+            # 'asc' is not applicable…`, a category error. It stays
+            # unreachable, but widening this catch to the whole family put
+            # *more members* within reach of the mislabel — the wording rots
+            # exactly where nothing can trip over it.
+            #
+            # Caught by the family, never by bare ValueError — psycopg,
             # datetime and the embedding backends raise that, and
             # relabelling a real outage as a cursor problem would send the
             # caller to re-send a blameless query.
-            raise ValidationFailed(f"cursor: {exc}") from exc
+            raise ValidationFailed(f"{exc.wire_prefix}{exc}") from exc
     else:
+        # No `SearchArgumentRefused` catch here, and that is a fact about this
+        # branch rather than an omission: it never calls `searcher.search`.
+        # `_check_pool_sort` and `_continue_or_grow` reach `get_pool_metadata`
+        # / `continue_page` / `grow_pool`, which raise `CacheMissError`,
+        # `PageOutOfPoolError` and `APIError` subclasses — no family member can
+        # arrive. Route pool continuation through `search()` and this branch
+        # needs the catch its two siblings carry, or #344 returns on the one
+        # branch its fix did not touch.
         parsed = decode_search_cursor(cursor)
         # The **raw** arguments, not the plan's resolved ones: a resolved
         # default would read as a contradiction against a pool built the

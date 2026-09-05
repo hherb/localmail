@@ -86,7 +86,13 @@ def test_a_pool_cursor_is_not_judged_by_the_textless_rule() -> None:
 def test_a_keyset_cursor_keeps_reporting_the_cursor_as_the_reason() -> None:
     """A stated ``rank`` alongside a keyset cursor is refused by the cursor
     guard, whose message names the cursor. That is the more specific
-    diagnosis and must not be displaced by the textless one."""
+    diagnosis and must not be displaced by the textless one.
+
+    The rule is stated here as a rule, and until #344 it held **only at
+    this boundary**: ``Searcher.search`` ran the textless guard ahead of
+    its walk guard, so one shape was diagnosed differently over HTTP than
+    from a library call. Both layers apply it now —
+    ``tests/test_searcher_guard_precedence.py`` is the other half."""
     from localmail.api.search_cursor import encode_keyset_cursor
     raw = encode_keyset_cursor(
         KeysetCursor(ts=None, id=7, order="desc", walk="archive")

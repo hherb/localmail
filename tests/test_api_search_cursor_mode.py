@@ -125,9 +125,14 @@ def test_a_query_of_only_filter_operators_continues_the_walk_too(query: str) -> 
 
     It used to be a rejection for the same reason and stops being one for
     the same reason: the branch that serves it reads the cursor now. What
-    must not come back is the Searcher's own ``KeysetCursorUnusable`` — a
-    caller error surfacing as a 500 — on the input class that shape was
-    hardest to see on.
+    must not come back is the Searcher's own ``KeysetCursorUnusable``, on the
+    input class that shape was hardest to see on.
+
+    That refusal is a clean 400 today rather than the 500 this docstring used
+    to name — #333 added it to the keyset branch's catch and #344 replaced the
+    enumeration with the ``SearchArgumentRefused`` family. The point stands
+    either way: a request that must be *served* is not improved by being
+    refused politely.
     """
     s = _searcher()
     incoming, cursor = _keyset_cursor()

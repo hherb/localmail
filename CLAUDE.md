@@ -830,6 +830,8 @@ src/localmail/
                     #   undated top-up and the one SQL emitter (#323)
     keyset_walk.py  # pure: walk_for_text / keyset_walk_error — a text cursor
                     #   needs its query back (#326)
+    argument_errors.py # SearchArgumentRefused + its four subclasses — the
+                    #   one family every api boundary maps to 400 (#344)
 migrations/         # 0001_init.sql … 0036_api_keys.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
@@ -3806,11 +3808,15 @@ for the full design.
           checking either: page 1 accepts `sort=TEXTLESS_SORT` and mints a
           keyset cursor that `_reject_sort_mismatch` compares against
           `KEYSET_SORT` (a divergence is #324's own accepted-then-refused
-          shape), and `run_search`'s keyset branch omits `SortNotApplicable`
-          from its catch, which is safe only because
+          shape), and `run_search`'s keyset branch *used to* omit
+          `SortNotApplicable` from its catch, which was safe only because
           `sort_applicability_error` returns `None` for `TEXTLESS_SORT` (a
-          divergence is a 500 on every keyset continuation of a blank-query
-          walk). They are one fact seen from two ends — the walk a textless
+          divergence was a 500 on every keyset continuation of a blank-query
+          walk). **The second property no longer rests on the alias** —
+          since #344 both branches catch the `SearchArgumentRefused` family
+          rather than naming members, so that omission is not expressible;
+          the first still does, which is why the alias stays. They are one
+          fact seen from two ends — the walk a textless
           query resolves to *is* the walk that mints those cursors — so the
           alias makes drift impossible and `test_sort_axes.py` asserts the
           property so that un-aliasing fails there rather than silently later.
@@ -3854,6 +3860,173 @@ for the full design.
           regression above), an ordinary text query, `date` surviving, and
           both halves of the 409 recovery — which is a *fresh* request and
           so the second place a sort reaches the wire.
+    - **Every argument the Searcher refuses is one family, caught as one
+      (#344).** `Searcher.search` raises four sibling exceptions whose whole
+      purpose is "map me to a 400", and they derived straight from
+      `ValueError` with no shared base — so `api/search.py` enumerated them
+      by name, in **two different tuples on two branches**, each carrying a
+      per-member argument about which were unreachable there. A fifth guard
+      added without widening a tuple is an operator-facing **500**
+      (`serve.app` handles `APIError` only), and that is not hypothetical:
+      #342 shipped with `SortNotApplicable` absent from the keyset tuple,
+      safe only by the `KEYSET_SORT is TEXTLESS_SORT` aliasing decided in
+      another module. The rule is
+      [src/localmail/search/argument_errors.py](src/localmail/search/argument_errors.py)`::SearchArgumentRefused`;
+      both boundaries catch **it**, and the per-member reachability
+      arguments are retired with the enumeration.
+      - **The named subclasses stay.** The point is not to collapse the
+        diagnoses — each still tells the caller a different thing — but to
+        let api/ catch precisely this family without also catching the
+        `ValueError` psycopg, `datetime` and the embedding backends raise,
+        which would relabel a real outage as a caller error. Pinned by a
+        positive control asserting a bare `ValueError` still escapes as
+        itself; a boundary widened to `ValueError` passes every other test
+        in the file.
+      - **The pins are two kinds, because either alone has a hole.**
+        Structural: every exception class in `argument_errors` inherits the
+        base, so a fifth guard *written in the right place* joins by
+        construction. Behavioural: the family is enumerated from the
+        **type** (`__subclasses__`, transitively) and every member is driven
+        through *both* `run_search` branches — so a member added later is in
+        scope without this test being edited, which a hand-written list
+        cannot be. A `_family()` that silently returned `[]` would make the
+        parametrised half vacuous, so that is its own negative control.
+        `_family()` is restricted to classes defined in `argument_errors`,
+        because `__subclasses__` is process-global while `@parametrize` is
+        evaluated at import — unfiltered, the case set depends on collection
+        order the day any file defines a local subclass as a control.
+      - **Three pins were added in review, each closing a hole the others
+        made invisible.** (1) The parametrised branch tests asserted only
+        `pytest.raises(ValidationFailed)`, which `run_search` raises from at
+        least three sites that never touch the searcher — mutating
+        `elif plan.mode == "keyset"` to `elif False` left all four keyset
+        cases green, control falling through to the pool branch where
+        `decode_search_cursor` raises a *different* `ValidationFailed` over
+        the same cursor. They assert `search.assert_called_once()` and the
+        presence or absence of `keyset_cursor` now. (2) **Nothing observed
+        the 400 at the transport**: every other `status_code == 400` in
+        `test_serve_search_route.py` is paired with
+        `search.assert_not_called()`, so the family's entire justification —
+        an uncaught member is a 500, `serve.app` handling `APIError` only —
+        was argued in four docstrings and never run. A parametrised route
+        test drives all four members through a searcher that raises, with an
+        unrelated `ValueError` beside it as the control; note that control
+        does **not** catch a widening to bare `ValueError` (the widened
+        handler then dies on `exc.wire_prefix`, still a 500) — that mutation
+        is caught one layer down, and the docstring says so rather than
+        claiming the stronger property. (3) **`KeysetOrderMismatch`'s raise
+        site was untested** — replacing its condition with `if False:` left
+        the *whole suite* green (3180 passed), its wire-layer sibling being
+        covered instead. It is pinned in `test_searcher_guard_precedence.py`,
+        where it doubles as a precedence assertion: it is decided above
+        `parse_query`, so it outranks both guards that file is about.
+      - **What the family still does not confer, filed rather than fixed.**
+        The structural pin filters on `__module__`, so a fifth guard written
+        `class Foo(ValueError)` in `searcher.py` reproduces #344 verbatim with
+        every test green — the reverse cross-check `pool_constructor_calls`
+        and `acceptance_coverage_error` exist for, **#347**. Both catch sites
+        wrap the whole `searcher.search(...)` call, so what makes the widening
+        safe is that all five raise sites are **pre-IO**, which was stated
+        nowhere and is pinned per member by hand — **#349**. `run_search`
+        never checks `sort`/`sort_order` membership, so the plain-`ValueError`
+        exclusion rests on an obligation on transports rather than a property
+        of the value, and an invalid axis with an empty ACL is reported as a
+        **200** — **#348**. And `wire_prefix` keeps its `": "` separator
+        inside the value while the join is restated at each boundary —
+        **#350**, to be done with #305's CLI catch, the third consumer.
+      - **They moved out of `searcher.py` rather than gaining a base in
+        place**, the `sort_axes.py`/`keyset_walk.py` call: the family is the
+        contract *between* the Searcher and every boundary that maps it, and
+        stating the rule a new guard must join needs somewhere to state it.
+        `searcher.py` re-exports the four, so
+        `from localmail.search.searcher import KeysetCursorUnusable` keeps
+        resolving; the base is new and has no legacy path, so boundaries
+        import it from `argument_errors`. **`SearchArgumentRefused` is also
+        exported from `localmail.search`**, beside the `RewriteParseError`
+        trio: the family's own docstring names library callers as its
+        audience, and that audience had no supported path to the one class it
+        is told to catch. `searcher.py` went **1439 → 1393** (`+44/-90`); the
+        four classes were 73 removed lines, and the re-export plus the hoisted
+        guard's rationale account for the rest. Read the number off
+        `git diff --numstat`, not off an estimate — this line has now been
+        wrong twice, first at 73 and then at 1391.
+      - **The membership checks on `sort`/`sort_order` deliberately stay
+        outside the family.** They raise a plain `ValueError` because HTTP
+        and MCP both declare those as `Literal`s, so a bad value cannot
+        arrive from the wire and there is no api/ mapping to be caught by.
+        Admitting them would claim a wire audience they do not have.
+      - **A cursor problem outranks the textless rule, now at both layers.**
+        `test_api_search_rank_without_text.py` states that as a *rule* ("the
+        more specific diagnosis … must not be displaced by the textless
+        one") and it held only at the api boundary, where
+        `resolve_cursor_plan` never consults the textless rule once a cursor
+        is present. Inside the Searcher the order was inverted, so
+        `search("", keyset_cursor=<text-walk>, sort="rank")` was answered
+        differently over HTTP than from a library call — the
+        two-layers-wording-one-rule-differently shape, untested in either
+        direction there, which is how it survived the review that created
+        it. The walk guard moved ahead of the two sort guards; both
+        directions are pinned, plus positive controls for each guard so a
+        hoist that *swallowed* the textless rule fails too.
+        - **No wire behaviour changed** — the api boundary already reported
+          the cursor, and the widened catches are unreachable on the branch
+          that gained them (the fresh branch passes no cursor; the keyset
+          branch passes `sort="date"`, for which
+          `sort_applicability_error` is `None`). Only a direct
+          `Searcher.search` caller sees a different message, and both
+          messages recommend the same remedy.
+        - **It buys no IO, and the first draft of this entry claimed it
+          did.** The rewriter runs only under `parsed.free_text.strip()`
+          and this guard fires only when that string is blank, so no smart
+          rewrite was ever paid for on the path. Measured, not reasoned —
+          the claim was written down and then refuted before it shipped.
+      - **#331's points 1, 3 and 4 landed with it; #331 is closed and its
+        point 2 is folded into #305.** Point 4 *is* #344 — the issue asked
+        for a `SearchRequestError` base in the same words — so it was
+        already being done. The other two live
+        in the very docstrings and handler this change rewrites, and leaving
+        a known-false claim in a file one is authoring is not a smaller
+        change, it is a worse one.
+        - **Point 1 — `SortOrderNotApplicable`'s audience.** Its docstring
+          said the api/ catch "is a backstop for a future dispatch change
+          rather than a live path". That was true when written and **#324
+          falsified it**: the gate and the Searcher judge different strings,
+          and `'"'` is textless to the gate and text once the ACL token is
+          composed in, so the gate can clear a `sort_order="asc"` against a
+          resolved `date` that the Searcher resolves to `rank`. Corrected in
+          place.
+        - **Point 3 — `cursor:` was the branch's word, not the cause's.**
+          The keyset branch wrote the prefix into its own f-string, so it
+          labelled everything it caught: a `sort_order` refusal on a request
+          whose cursor was fine would have read `cursor: sort_order='asc' is
+          not applicable…`. Unreachable, and **widening the catch to the
+          whole family makes it more so** — the category error arriving via
+          its own fix. `SearchArgumentRefused.wire_prefix` now carries it and
+          both boundaries interpolate, so it follows the cause: the same
+          derive-don't-restate call as `version_report`'s severity word.
+          - **The default is empty, not mandatory** — the opposite of
+            `VersionSource`'s forced remedy, and deliberately so. A member
+            that forgets a prefix loses a word of context; one that inherits
+            a *wrong* prefix makes a false claim. The default fails in the
+            harmless direction, and the mapping is pinned anyway so a new
+            member has to decide.
+          - **No reachable message changed**, which is the point: the only
+            member reachable on the keyset branch is `KeysetCursorUnusable`,
+            which sets `cursor: `. Pinned by a test asserting the shipped
+            wording verbatim, beside the one asserting a sort refusal caught
+            on that same branch is *not* labelled a cursor problem.
+        - **Point 2 — `cli.py`'s search catches `RuntimeError` only**, so a
+          `--sort-order` flag added there would traceback. Latent (no such
+          flag exists), and **folded into #305** with the rest of the
+          `cli.py` work rather than left as its own issue. Widen that catch
+          to **`SearchArgumentRefused`**, never to bare `ValueError` — the
+          family is the point, so a fifth guard must not need the catch
+          edited. A sort flag makes **two** members reachable, not four:
+          `KeysetOrderMismatch` and `KeysetCursorUnusable` both raise only
+          under `keyset_cursor is not None`, and `cli.py` passes no cursor,
+          so those need a *cursor* flag. (This entry and #305's own comment
+          both said four; the table in that comment contradicted the sentence
+          above it.)
     - **The keyset cursor carries its own direction, and the Searcher reads
       it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
       else, so `Searcher.search` paired a directionless cursor with a

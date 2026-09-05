@@ -5,8 +5,15 @@ from dataclasses import replace
 from unittest.mock import MagicMock
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
+from localmail.search.argument_errors import (
+    KeysetCursorUnusable,
+    KeysetOrderMismatch,
+    SortNotApplicable,
+    SortOrderNotApplicable,
+)
 from localmail.serve.app import create_app
 
 
@@ -400,11 +407,16 @@ def test_search_serves_a_cursor_whose_query_is_only_filter_operators(
     reduces to an empty free text. That used to be a 400: the blank-query
     branch dropped the cursor, so continuing was impossible. It paginates
     now, so the request is served — and the Searcher must be handed the
-    cursor rather than raising ``KeysetCursorUnusable``, whose bare
-    ``ValueError`` is not an ``APIError`` and would go out as ``500
-    Internal Server Error`` with no problem+json body. Only the transport
-    shows that, which is why this test is here and not beside its
+    cursor rather than raising ``KeysetCursorUnusable``. Only the transport
+    shows the consequence, which is why this test is here and not beside its
     api-level sibling.
+
+    That consequence is no longer a 500, and this docstring claimed it was
+    long after it stopped being true: #333 put ``KeysetCursorUnusable`` in the
+    keyset branch's catch, and #344 replaced that enumeration with the
+    ``SearchArgumentRefused`` family, so the refusal maps to a clean 400. What
+    the test still pins is that the request is **served at all** — a 400 here,
+    however well formed, is the pagination #322 added going missing.
 
     The cursor is an **archive**-walk one (#326), which is what such a
     query actually mints: the operators are lifted out by ``parse_query``,
@@ -438,12 +450,16 @@ def test_a_text_cursor_without_its_query_is_a_400_not_a_500(
     """#326's refusal, seen from the transport — the other half of the pair.
 
     The sibling above proves an *archive* cursor is served; this proves a
-    *text* one with no free text is refused, and refused as a clean 400
-    with a problem+json body rather than as the bare ``ValueError`` the
-    Searcher's own guard raises. ``ValidationFailed`` is an ``APIError`` so
-    the mapping is generic — which is exactly the argument the sibling's
-    docstring rejects for itself ("only the transport shows that"), and it
-    applies unchanged to a refusal added later.
+    *text* one with no free text is refused, and refused as a clean 400 with a
+    problem+json body rather than escaping as the ``ValueError`` subclass the
+    Searcher's own guard raises. ``ValidationFailed`` is an ``APIError`` so the
+    mapping is generic — which is exactly the argument the sibling's docstring
+    rejects for itself ("only the transport shows that"), and it applies
+    unchanged to a refusal added later.
+
+    Note this shape is refused by the api **gate**, before the Searcher is
+    reached. The refusal the *Searcher* raises, mapped by the branch catches,
+    is pinned separately at the foot of this file (#344).
 
     ``subject:invoice`` rather than ``""`` so the test also covers the
     request field that is non-blank and still leaves no free text — the
@@ -871,3 +887,68 @@ def test_search_honours_ascending_alone_for_a_query_it_cannot_rank(
     # The Searcher is handed the caller's own axes and resolves them itself
     # (#324's review); what matters on the wire is that `asc` survived.
     assert fake.search.call_args.kwargs["sort_order"] == "asc"
+
+
+# --- a Searcher-raised refusal on the wire (#344) -------------------------
+#
+# Every other `status_code == 400` assertion in this file is paired with
+# `fake.search.assert_not_called()` — they all exercise the api *gate*. The
+# family's whole justification is that an uncaught member is a 500, because
+# `serve.app` registers a handler for `APIError` only, and that claim was
+# argued in four docstrings and observed nowhere. These two tests are the
+# observation, in both directions.
+
+@pytest.mark.parametrize(
+    "exc_type",
+    [SortNotApplicable, SortOrderNotApplicable,
+     KeysetOrderMismatch, KeysetCursorUnusable],
+    ids=lambda t: t.__name__,
+)
+def test_a_refusal_raised_by_the_searcher_reaches_the_wire_as_a_400(
+    exc_type, db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    fake.search.side_effect = exc_type("refused")
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["type"] == "/problems/validation-failed"
+    fake.search.assert_called_once()
+
+
+def test_an_unrelated_value_error_from_the_searcher_is_a_500(
+    db_dsn: str, api_token: str, db_conn, api_user,
+) -> None:
+    """The negative control, and the premise the family rests on.
+
+    A psycopg / embedding-backend failure must NOT be relabelled a caller
+    error, and this is where that is observed rather than argued.
+
+    It is deliberately *not* claimed to catch a boundary widened to bare
+    ``ValueError``: measured, that mutation leaves this test green, because
+    the widened handler then dies on ``exc.wire_prefix`` and the response is
+    a 500 by a different route. The widening is caught one layer down, by
+    ``test_search_argument_errors.py::test_an_unrelated_value_error_still_escapes_as_itself``,
+    where the ``AttributeError`` surfaces instead of the expected
+    ``ValueError``.
+    """
+    _seed_acct_and_grant(db_conn, api_user.id)
+    fake = _fake_searcher_returning_one_hit()
+    fake.search.side_effect = ValueError("the backend fell over")
+    app = create_app(db_dsn=db_dsn, searcher=fake)
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.post(
+        "/v1/search",
+        json={"query": "hello", "filters": {}, "limit": 20},
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 500
+    assert not r.headers["content-type"].startswith("application/problem+json")
+

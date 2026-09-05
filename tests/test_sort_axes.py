@@ -59,17 +59,21 @@ def test_the_keyset_cursor_s_sort_is_the_textless_one() -> None:
 
     ``KEYSET_SORT`` is now ``TEXTLESS_SORT`` by construction, which is the
     real protection; this pins the *property* so that un-aliasing it back to
-    a second ``"date"`` literal fails here rather than silently later. Two
-    things rest on it, neither of them local:
+    a second ``"date"`` literal fails here rather than silently later.
 
-    1. Page 1 accepts ``sort=TEXTLESS_SORT`` for a textless query and mints a
-       keyset cursor; page 2's ``_reject_sort_mismatch`` compares the stated
-       sort against ``KEYSET_SORT``. A divergence is #324's own shape —
-       accepted on page 1, refused on page 2.
-    2. ``run_search``'s keyset branch omits ``SortNotApplicable`` from its
-       catch, which is safe only because ``sort_applicability_error`` returns
-       ``None`` for ``TEXTLESS_SORT``. A divergence turns every keyset
-       continuation of a blank-query walk into a 500.
+    **One** non-local thing rests on it, and it used to be two. What remains:
+    page 1 accepts ``sort=TEXTLESS_SORT`` for a textless query and mints a
+    keyset cursor; page 2's ``_reject_sort_mismatch`` compares the stated sort
+    against ``KEYSET_SORT``. A divergence is #324's own shape — accepted on
+    page 1, refused on page 2.
+
+    What has gone: ``run_search``'s keyset branch *used to* omit
+    ``SortNotApplicable`` from its catch, safe only because
+    ``sort_applicability_error`` returns ``None`` for ``TEXTLESS_SORT``. Since
+    #344 both branches catch the ``SearchArgumentRefused`` family rather than
+    naming members, so that omission is not expressible and the divergence
+    would now be a 400 rather than a 500. The assertion below is unchanged and
+    still earns its keep on the first property alone.
     """
     from localmail.api.search_cursor import KEYSET_SORT
 

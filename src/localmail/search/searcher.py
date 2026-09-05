@@ -24,6 +24,16 @@ import psycopg
 from psycopg_pool import ConnectionPool
 
 from localmail.config import SearchConfig
+# Re-exported, not merely used: these four were defined here until #344 gave
+# them a shared base, and `from localmail.search.searcher import ...` is how
+# every caller and test already reaches them. The base itself is new, so it
+# has no legacy path to keep alive — import it from `argument_errors`.
+from localmail.search.argument_errors import (
+    KeysetCursorUnusable,
+    KeysetOrderMismatch,
+    SortNotApplicable,
+    SortOrderNotApplicable,
+)
 from localmail.search.embeddings import EmbeddingBackend
 from localmail.search.page_cache import (
     CacheMissError, PageCache, PageOutOfPoolError,
@@ -59,52 +69,6 @@ from localmail.search.date_keyset import (
     needs_undated_top_up,
 )
 
-
-
-class SortNotApplicable(ValueError):
-    """A stated ``sort`` cannot be served by the query it arrived with (#324).
-
-    Today that is ``sort="rank"`` on a query with no free text: the hybrid
-    pool has nothing to rank against, so the date-ordered walk has always
-    answered such a query — silently, until #322 gave that walk a cursor
-    recording ``date`` and the drop became a contradiction the caller could
-    see one page later.
-
-    A named subclass rather than a bare ``ValueError`` for the reason its
-    three siblings are: the api/ boundary maps exactly this to a 400, and
-    catching bare ``ValueError`` there would also catch what psycopg,
-    ``datetime`` and the embedding backends raise, relabelling a real
-    outage as a caller error.
-
-    **Its audience is library callers**, plus every wire caller whose query
-    the two layers read differently. ``api.run_search`` refuses the same
-    shape at its own boundary, ahead of the empty-ACL short-circuit — but
-    the two guards read *different strings* (the raw request field there,
-    the ACL-composed query here), so this is not merely a backstop; see
-    ``run_search``'s catch, which maps it to a 400.
-
-    The CLI is **not** in that audience today: ``localmail search`` has no
-    ``--sort`` option and passes none, so this cannot be raised from it. If
-    one is ever added, note that ``cli.py``'s ``search`` catches only
-    ``RuntimeError``, so this would traceback rather than exit cleanly.
-    """
-
-
-class SortOrderNotApplicable(ValueError):
-    """``sort_order="asc"`` was asked for on a sort that cannot serve it.
-
-    A named subclass rather than a bare ``ValueError`` so a boundary can
-    map exactly this to a 400 without also catching what psycopg,
-    ``datetime`` and the embedding backends raise — which would relabel a
-    real outage as a caller error and send them to fix a blameless query.
-
-    **Its audience is library callers**, not the api/ layer: ``run_search``
-    refuses rank+asc itself before ever reaching ``Searcher.search``, so
-    the catch there is a backstop for a future dispatch change rather than
-    a live path. The CLI and any embedder reach this guard directly — note
-    ``cli.py``'s search command catches ``RuntimeError`` only, so a
-    ``--sort-order`` flag added there must widen that catch (#331).
-    """
 
 
 # Sentinel for "no usable date" — sorts strictly older than any real
@@ -406,33 +370,6 @@ class KeysetCursor:
     #: ``keyset_walk.walk_for_text``, the same call that picks the branch,
     #: so a cursor cannot claim a walk its query did not take.
     walk: KeysetWalk
-
-
-class KeysetOrderMismatch(ValueError):
-    """A stated ``sort_order`` contradicts the direction its cursor carries.
-
-    A named subclass rather than a bare ``ValueError`` for the reason
-    ``SortOrderNotApplicable`` is one: the api/ boundary maps exactly this
-    to a 400, and catching bare ``ValueError`` there would also catch what
-    psycopg, ``datetime`` and the embedding backends raise, relabelling a
-    real outage as a caller error.
-
-    Refused rather than resolved either way, because both resolutions are
-    silent: honouring the stated order walks the cursor's position in a
-    direction it was not minted for, and honouring the cursor ignores a
-    parameter the caller wrote down (#308, #312).
-    """
-
-
-class KeysetCursorUnusable(ValueError):
-    """A ``keyset_cursor`` reached a retrieval branch that will not read it.
-
-    A subclass rather than a bare ``ValueError`` so the api/ layer can map
-    exactly this to a 400 without also catching the ``ValueError`` psycopg,
-    ``datetime`` and the embedding backends raise — which would relabel a
-    real outage as a cursor problem and send the caller to re-send a query
-    that was never the fault.
-    """
 
 
 @dataclass(frozen=True)
@@ -1220,6 +1157,49 @@ class Searcher:
         parsed = parse_query(query)
         timing["parse"] = (time.monotonic() - t) * 1000
 
+        # A text-walk cursor needs its query back (#326). The walk that
+        # minted it rebuilds its FTS predicate from the re-sent query; with
+        # none, the branch below would answer from the archive walk and
+        # hand back the next page of everything, presented as a
+        # continuation of the search. Judged on ``parsed.free_text`` rather
+        # than the caller's raw argument, which is where #308's follow-up
+        # defect lived: ``subject:invoice`` is a non-empty request field
+        # that parses down to nothing. Before any connection is opened, so
+        # a caller error costs no IO. An archive-walk cursor is accepted
+        # with any query — refusing it would forbid the blank-query paging
+        # #322 added.
+        #
+        # It runs **ahead of the two sort guards** (#344). Both rules are
+        # true of `search("", keyset_cursor=<text-walk>, sort="rank")`, so
+        # this is about which diagnosis the caller is shown — and the api
+        # boundary has always shown the cursor one, `resolve_cursor_plan`
+        # never consulting the textless rule once a cursor is present.
+        # Ordered the other way here, one shape was answered differently
+        # over HTTP than from a library call: the
+        # two-layers-wording-one-rule-differently defect this cluster keeps
+        # filing.
+        #
+        # The two remedies read alike and do not end alike, which is the
+        # better reason to prefer this one: acting on the textless message
+        # (drop `sort`, or pass `sort="date"`) leaves the cursor's real
+        # problem in place, while acting on this one — re-send the query —
+        # makes `free_text` non-blank, so `resolve_sort` returns `rank`, the
+        # hybrid branch is taken, and the caller meets `KeysetCursorUnusable`
+        # a second time from the guard below. Two round trips either way for
+        # that shape; the cursor diagnosis is at least the root cause.
+        #
+        # Reading `parsed.free_text` before the smart rewrite and the ACL
+        # clamp is safe for the reason spelled out below — neither touches
+        # it. It saves no *extra* IO, though, and an earlier draft of this
+        # comment claimed it did: the rewriter runs only under
+        # `parsed.free_text.strip()`, and this guard fires only when that
+        # string is blank, so no rewrite was ever paid for on this path.
+        if keyset_cursor is not None:
+            walk_error = keyset_walk_error(cursor_walk=keyset_cursor.walk,
+                                           free_text=parsed.free_text)
+            if walk_error is not None:
+                raise KeysetCursorUnusable(walk_error)
+
         # `sort` resolves *here* because it reads the query (#324). A query
         # with no free text has nothing for the hybrid pool to rank against,
         # so the date walk is the only branch that can serve it — which it
@@ -1295,23 +1275,6 @@ class Searcher:
         # continuation pages stay scoped too. None (CLI / local callers) is a
         # no-op inside the helper, so this call is unconditional.
         parsed = _clamp_account_ids_to_acl(parsed, allowed_account_ids)
-
-        # A text-walk cursor needs its query back (#326). The walk that
-        # minted it rebuilds its FTS predicate from the re-sent query; with
-        # none, the branch below would answer from the archive walk and
-        # hand back the next page of everything, presented as a
-        # continuation of the search. Judged on ``parsed.free_text`` rather
-        # than the caller's raw argument, which is where #308's follow-up
-        # defect lived: ``subject:invoice`` is a non-empty request field
-        # that parses down to nothing. Before any connection is opened, so
-        # a caller error costs no IO. An archive-walk cursor is accepted
-        # with any query — refusing it would forbid the blank-query paging
-        # #322 added.
-        if keyset_cursor is not None:
-            walk_error = keyset_walk_error(cursor_walk=keyset_cursor.walk,
-                                           free_text=parsed.free_text)
-            if walk_error is not None:
-                raise KeysetCursorUnusable(walk_error)
 
         # The date-ordered keyset walk serves two intents that are one query.
         #

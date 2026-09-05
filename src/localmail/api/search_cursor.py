@@ -120,10 +120,14 @@ if len(_TABLE_KEYSET_PAIRS) != len(_KEYSET_PREFIXES):
 #: them — (1) page 1 accepts ``sort=TEXTLESS_SORT`` and mints a keyset cursor
 #: that ``_reject_sort_mismatch`` then compares against ``KEYSET_SORT``, so a
 #: divergence is #324's own shape (accepted on page 1, refused on page 2);
-#: and (2) ``run_search``'s keyset branch omits ``SortNotApplicable`` from its
-#: catch, which is safe only because ``sort_applicability_error`` returns
-#: ``None`` for ``TEXTLESS_SORT`` — so a divergence turns every keyset
-#: continuation of a blank-query walk into a 500.
+#: and (2) ``run_search``'s keyset branch used to omit ``SortNotApplicable``
+#: from its catch, which was safe only because ``sort_applicability_error``
+#: returns ``None`` for ``TEXTLESS_SORT`` — so a divergence turned every
+#: keyset continuation of a blank-query walk into a 500. **Property (2) no
+#: longer rests on this alias**: since #344 both branches catch the
+#: ``SearchArgumentRefused`` family rather than naming members, so the
+#: omission it described is not expressible. Property (1) still does, and
+#: is why the alias stays.
 KEYSET_SORT: SortMode = TEXTLESS_SORT
 
 CursorMode = Literal["fresh", "pool", "keyset"]

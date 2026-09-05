@@ -80,7 +80,14 @@ class _Embeddings:
 
 
 class _Rewriter:
-    """Likewise for the smart path: an LLM round trip is IO too."""
+    """Likewise for the smart path: an LLM round trip is IO too.
+
+    ``name``/``model`` satisfy the ``QueryRewriter`` protocol; the Searcher
+    reads them only when a rewrite is reported, which must never happen here.
+    """
+
+    name = "s"
+    model = "s"
 
     def rewrite(self, text: str):  # pragma: no cover - never reached
         raise AssertionError("no rewrite may be attempted")

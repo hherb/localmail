@@ -85,14 +85,31 @@ class SearchArgumentRefused(ValueError):
     than ``ValueError`` for any new guard over a *stated* argument, and the
     boundaries need no edit.
 
-    **A member must be raised before any IO**, and that is a contract rather
-    than an accident of where the five current guards sit. Both catch sites
-    wrap the whole ``searcher.search(...)`` call — DB, embedding, reranking —
-    so a member raised after retrieval began would have a genuine backend
-    failure relabelled a caller 400, which is this family's own purpose
-    inverted. A refusal detectable only after retrieval does not belong here.
-    #349 tracks pinning that the way the 400-mapping is pinned: derived from
-    the type, not hand-written per member.
+    **A member must be raised before any IO** — part of the contract, not an
+    accident of where the current guards sit, and the reason the boundaries
+    may catch the whole family at once. Both catch sites wrap the entire
+    ``searcher.search(...)`` call — DB, embedding, reranking, and the smart
+    rewrite's LLM round trip — so a member raised after retrieval began would
+    have a genuine backend failure relabelled a caller 400, which is this
+    family's own purpose inverted. **A refusal detectable only after
+    retrieval does not belong in this family**; give it its own type and map
+    it deliberately.
+
+    Pinned by ``tests/test_searcher_guards_precede_io.py``, which provokes
+    every raise site for real and asserts that the pool, the embedding
+    backend and the rewriter are all untouched. A member with no provocation
+    fails that file rather than being silently skipped — the reverse
+    cross-check ``_pool_leaks.pool_constructor_calls`` and
+    ``_harness_lock.acceptance_coverage_error`` exist for.
+
+    **The contract was already false when #349 filed it as safe.** That issue
+    reports all five raise sites verified pre-IO; the verification used a
+    ``pool.connection`` tripwire only, and the #308 hybrid-branch guard sat
+    *below* the smart rewrite — pre-pool, post-LLM — so a caller on the smart
+    path paid a full round trip to be told their cursor was unusable. Found
+    by writing the pin rather than by reading the code, which is the argument
+    for deriving it from the type. The guard is hoisted; see its comment in
+    ``searcher.py`` for why the move is exactly equivalent.
 
     A ``ValueError`` subclass so nothing that already catches one changes
     behaviour; narrower than ``ValueError`` so a boundary catching this

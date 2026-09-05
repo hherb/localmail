@@ -1259,6 +1259,40 @@ class Searcher:
                 "the least relevant of the top hits, not of the archive."
             )
 
+        # The date branch below is the only reader of ``keyset_cursor``
+        # (#308), so a cursor surviving to here selected the hybrid pool,
+        # whose page 1 would go back as if it continued the walk — a restart
+        # wearing a continuation's clothes. Raise rather than answer the
+        # wrong question quietly. A named error, not an assert: asserts
+        # vanish under ``python -O``.
+        #
+        # The blank-query shape used to land here too. It no longer does:
+        # that branch honours the cursor now, so rejecting it would forbid
+        # exactly the paging that reachability change adds.
+        #
+        # **Decided here rather than beside the branch it guards (#349).**
+        # It used to sit immediately above `self._pool.connection()`, which
+        # is pre-*pool* and post-*rewrite* — so on the smart path a caller
+        # paid a full LLM round trip before being told their cursor was
+        # unusable, and the family's "raised before any IO" contract was
+        # already false where it is load-bearing. #349 reports that property
+        # as verified; it was verified against `pool.connection` alone, and
+        # the rewriter is a second IO route.
+        #
+        # The hoist is exactly equivalent, not merely close: reaching the old
+        # site meant `effective_sort != "date"` (the date branch returns) and
+        # `effective_sort` is never reassigned after it is resolved, so the
+        # condition is fully determined here. Unlike the walk guard above —
+        # whose identical-looking claim was refuted, since it fires only on
+        # blank text and the rewriter is gated on non-blank — this one *does*
+        # save the round trip, because it fires on a non-empty query.
+        if effective_sort != "date" and keyset_cursor is not None:
+            raise KeysetCursorUnusable(
+                "keyset_cursor is not readable by the hybrid pool branch; it "
+                f"requires sort='date' or a blank query, got "
+                f"sort={effective_sort!r} with a non-empty query"
+            )
+
         rewrite_status = NOT_REQUESTED
         rewrite_note: str | None = None
         rewrite_note_code: str | None = None
@@ -1332,23 +1366,6 @@ class Searcher:
                 rewrite_status=rewrite_status,
                 rewrite_note=rewrite_note,
                 rewrite_note_code=rewrite_note_code,
-            )
-
-        # The branch above is the only reader of ``keyset_cursor`` (#308).
-        # Reaching here means the caller's (sort, query) selected the hybrid
-        # pool, whose page 1 would go back as if it continued the walk — a
-        # restart wearing a continuation's clothes. Raise rather than answer
-        # the wrong question quietly. A named error, not an assert: asserts
-        # vanish under ``python -O``.
-        #
-        # The blank-query shape used to land here too. It no longer does:
-        # that branch honours the cursor now, so rejecting it would forbid
-        # exactly the paging this reachability change adds.
-        if keyset_cursor is not None:
-            raise KeysetCursorUnusable(
-                "keyset_cursor is not readable by the hybrid pool branch; it "
-                f"requires sort='date' or a blank query, got "
-                f"sort={effective_sort!r} with a non-empty query"
             )
 
         with self._pool.connection() as conn:

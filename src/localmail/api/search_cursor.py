@@ -37,6 +37,7 @@ from localmail.api.browse_cursor import (
     BrowseCursor, decode_browse_cursor, encode_browse_cursor,
 )
 from localmail.api.errors import ValidationFailed
+from localmail.search.argument_errors import KeysetCursorUnusable
 from localmail.search.keyset_walk import KeysetWalk, keyset_walk_error
 from localmail.search.searcher import KeysetCursor
 from localmail.search.sort_axes import (
@@ -335,7 +336,16 @@ def resolve_cursor_plan(
                                cursor_order=ks.order)
         walk_error = keyset_walk_error(cursor_walk=ks.walk, free_text=free_text)
         if walk_error is not None:
-            raise ValidationFailed(f"cursor: {walk_error}")
+            # Rendered through the exception the Searcher raises for this
+            # very rule, not through a second f-string (#350 review). Both
+            # ends judge `keyset_walk_error` and both must word it alike, so
+            # a hand-written `f"cursor: "` here is the join re-decided one
+            # module away from the type that owns it — and #350's own note
+            # claimed "a fourth cannot re-decide it" while this line did.
+            # Constructing the exception to render it is the point: it *is*
+            # the refusal, reported early.
+            raise ValidationFailed(
+                KeysetCursorUnusable(walk_error).wire_message())
         return CursorPlan(mode="keyset", sort=KEYSET_SORT, sort_order=ks.order)
     return CursorPlan(
         mode="pool",

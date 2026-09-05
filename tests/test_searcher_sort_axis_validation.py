@@ -31,7 +31,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from localmail.config import SearchConfig
-from localmail.search.searcher import Searcher
+from localmail.search.searcher import KeysetCursor, Searcher
 
 
 class _Embeddings:
@@ -128,4 +128,51 @@ def test_an_unknown_sort_is_refused_on_a_textless_query_too(sort: str) -> None:
     searcher, pool = _searcher()
     with pytest.raises(ValueError, match=f"unknown sort {sort!r}"):
         searcher.search("", allowed_account_ids=None, sort=sort)  # type: ignore[arg-type]
+    pool.connection.assert_not_called()
+
+
+@pytest.mark.parametrize("order", ["ASC", "ascending", ""])
+def test_an_unknown_order_carried_by_the_cursor_is_refused_too(
+    order: str,
+) -> None:
+    """The cursor's own direction needs its own reading (#348 review).
+
+    Hoisting the membership check above the cursor block changed what it
+    reads from the **resolved** order to the **stated** one. With a cursor in
+    hand and ``sort_order`` unstated, the resolved value is
+    ``keyset_cursor.order`` — a third source the stated reading cannot see,
+    and the one the case above is named for: ``date_keyset`` still refuses it
+    with the same wording, but only after a connection is opened and, on the
+    smart path, after a full rewrite round trip. Exactly the "wording **and
+    the cost**" property, lost for the one input that does not state the axis.
+
+    ``KeysetCursor`` is a plain frozen dataclass, so "the cursor's *decoded*
+    direction" is a property of ``decode_keyset_cursor`` rather than of the
+    type — and library callers, the audience these runtime checks exist for,
+    construct one directly.
+    """
+    searcher, pool = _searcher()
+    cursor = KeysetCursor(ts=None, id=7, order=order, walk="archive")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=f"unknown sort_order {order!r}"):
+        searcher.search("invoice", allowed_account_ids=None, sort="date",
+                        keyset_cursor=cursor)
+    pool.connection.assert_not_called()
+
+
+def test_a_cursor_carrying_a_direction_is_not_told_it_contradicts_itself(
+) -> None:
+    """The membership reading precedes ``KeysetOrderMismatch``, for the same
+    reason it precedes every other guard (#348).
+
+    A cursor whose direction is not a direction cannot meaningfully be
+    contradicted: paired with a stated ``sort_order='asc'`` the mismatch
+    guard would fire first and recommend ``sort_order='ASC'`` — the invalid
+    value, quoted back as the remedy.
+    """
+    searcher, pool = _searcher()
+    cursor = KeysetCursor(ts=None, id=7, order="ASC", walk="archive")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown sort_order 'ASC'") as exc:
+        searcher.search("invoice", allowed_account_ids=None, sort="date",
+                        sort_order="asc", keyset_cursor=cursor)
+    assert "contradicts the cursor" not in str(exc.value)
     pool.connection.assert_not_called()

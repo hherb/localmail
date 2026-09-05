@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import MINYEAR, datetime, timezone
-from typing import Any, Literal, get_args
+from typing import Any, Literal
 
 import httpx
 import psycopg
@@ -55,6 +55,7 @@ from localmail.search.sort_axes import (
     SortOrder,
     resolve_sort,
     sort_applicability_error,
+    sort_membership_error,
 )
 from localmail.search.keyset_walk import (
     KeysetWalk,
@@ -1100,19 +1101,9 @@ class Searcher:
         # cursor reaching the hybrid branch is already refused below by
         # `KeysetCursorUnusable`, and inferring it here would silently retire
         # that guard.
-        if keyset_cursor is not None:
-            if sort_order is not None and sort_order != keyset_cursor.order:
-                raise KeysetOrderMismatch(
-                    f"sort_order={sort_order!r} contradicts the cursor, which "
-                    f"continues a {keyset_cursor.order}ending walk; pass "
-                    f"sort_order={keyset_cursor.order!r} or omit it"
-                )
-            effective_order: SortOrder = keyset_cursor.order
-        else:
-            effective_order = (
-                DEFAULT_SORT_ORDER if sort_order is None else sort_order
-            )
-        # Both axes are membership-checked here, once, before either is read.
+        # Both axes are membership-checked here, once, before either is read
+        # and ahead of every guard below — including the cursor's, which is
+        # why this sits above the block that reads `keyset_cursor.order`.
         #
         # `date_keyset` already reasons that CI runs no mypy step, so a wrong
         # literal from a library caller has to be caught at runtime — but its
@@ -1124,25 +1115,77 @@ class Searcher:
         # `sort_order="ASC"` missed the exact-match refusal just below, so
         # the rank path neither honoured, validated, nor reported it.
         #
-        # `sort` is checked as *stated*, not as resolved: since #324 a
-        # textless query resolves to `TEXTLESS_SORT` whatever arrived, so a
-        # misspelling would be swallowed on exactly the branch that used to
-        # swallow it. An unstated sort is a module constant and cannot be
-        # wrong, so the `is not None` guard costs no coverage.
+        # Both axes are checked as *stated* (#348). For `sort` that is the
+        # #324 rule: a textless query resolves to `TEXTLESS_SORT` whatever
+        # arrived, so a misspelling would be swallowed on exactly the branch
+        # that used to swallow it. For `sort_order` it is what lets this
+        # precede the cursor block. An unstated axis is likewise not a
+        # claim that can be wrong, so the `is not None` guards cost no
+        # coverage.
         #
-        # A plain `ValueError`, not a named subclass: HTTP and MCP both
-        # declare these as `Literal`s, so this cannot arrive from the wire
-        # and there is no api/ mapping for it to be caught by. Worded like
-        # `date_keyset`'s sibling checks so the two cannot drift.
-        if sort is not None and sort not in get_args(SortMode):
-            raise ValueError(
-                f"unknown sort {sort!r}; expected one of "
-                f"{sorted(get_args(SortMode))}"
-            )
-        if effective_order not in get_args(SortOrder):
-            raise ValueError(
-                f"unknown sort_order {effective_order!r}; expected one of "
-                f"{sorted(get_args(SortOrder))}"
+        # Reading the stated value leaves one substitution unseen — a
+        # `keyset_cursor`'s own `order`, which is neither the caller's value
+        # nor a module constant — so the cursor block below asks the same
+        # rule a second time for it. An earlier wording here claimed that
+        # substitution "cannot be wrong" because the direction is *decoded*;
+        # that holds for `decode_keyset_cursor` and not for `KeysetCursor`,
+        # which any library caller may construct by hand.
+        #
+        # Above `KeysetOrderMismatch` because a value that is not a value
+        # cannot meaningfully contradict a cursor: that guard would report a
+        # typo as a paging disagreement, in wording that is a coincidence of
+        # which cursor was in hand ("pass sort_order='asc'" against an
+        # ascending one, "'desc'" against a descending one). `run_search`
+        # orders the two the same way, so the layers cannot answer one input
+        # differently — the #344 lesson.
+        #
+        # A plain `ValueError`, not a `SearchArgumentRefused`: a membership
+        # error is a *type* error a well-typed caller cannot make, where
+        # every member of that family is a *cross-argument* error a
+        # well-typed caller makes routinely. And since #348 `run_search`
+        # refuses these at the boundary, membership would be inert at both
+        # catch sites — the catch could never see one. The rule is the pure
+        # `sort_axes.sort_membership_error`, shared with that boundary so one
+        # rule cannot be worded two ways.
+        membership_error = sort_membership_error(sort=sort,
+                                                 sort_order=sort_order)
+        if membership_error is not None:
+            raise ValueError(membership_error)
+        if keyset_cursor is not None:
+            # The cursor's direction is the resolution's **third** source,
+            # and the stated reading above cannot see it (#348 review). With
+            # `sort_order` unstated this is what `effective_order` becomes,
+            # so without this reading nothing validates it: `date_keyset`
+            # still refuses it in the same words, but only after a connection
+            # is opened and, on the smart path, after a full rewrite round
+            # trip — the "wording *and the cost*" property
+            # `test_an_unknown_sort_order_is_refused_on_the_date_path` is
+            # named for, and the pre-IO contract this family rests on.
+            #
+            # `KeysetCursor` is a plain frozen dataclass, so a *decoded*
+            # direction is a property of `decode_keyset_cursor`, not of the
+            # type. HTTP and MCP always decode; the library and CLI callers
+            # these runtime checks exist for construct one directly.
+            #
+            # Ahead of the mismatch guard for the reason the stated reading
+            # is ahead of everything: a direction that is not a direction
+            # cannot be contradicted. Against `sort_order='asc'` that guard
+            # fired first and answered "pass sort_order='ASC'" — quoting the
+            # invalid value back as the remedy.
+            cursor_error = sort_membership_error(
+                sort=None, sort_order=keyset_cursor.order)
+            if cursor_error is not None:
+                raise ValueError(f"keyset_cursor: {cursor_error}")
+            if sort_order is not None and sort_order != keyset_cursor.order:
+                raise KeysetOrderMismatch(
+                    f"sort_order={sort_order!r} contradicts the cursor, which "
+                    f"continues a {keyset_cursor.order}ending walk; pass "
+                    f"sort_order={keyset_cursor.order!r} or omit it"
+                )
+            effective_order: SortOrder = keyset_cursor.order
+        else:
+            effective_order = (
+                DEFAULT_SORT_ORDER if sort_order is None else sort_order
             )
         cfg = self._cfg
         effective_page_size: int = min(page_size or cfg.page_size_default,
@@ -1246,6 +1289,46 @@ class Searcher:
                 "the least relevant of the top hits, not of the archive."
             )
 
+        # The date branch below is the only reader of ``keyset_cursor``
+        # (#308), so a cursor surviving to here selected the hybrid pool,
+        # whose page 1 would go back as if it continued the walk — a restart
+        # wearing a continuation's clothes. Raise rather than answer the
+        # wrong question quietly. A named error, not an assert: asserts
+        # vanish under ``python -O``.
+        #
+        # The blank-query shape used to land here too. It no longer does:
+        # that branch honours the cursor now, so rejecting it would forbid
+        # exactly the paging that reachability change adds.
+        #
+        # **Decided here rather than beside the branch it guards (#349).**
+        # It used to sit immediately above `self._pool.connection()`, which
+        # is pre-*pool* and post-*rewrite* — so on the smart path a caller
+        # paid a full LLM round trip before being told their cursor was
+        # unusable, and the family's "raised before any IO" contract was
+        # already false where it is load-bearing. #349 reports that property
+        # as verified; it was verified against `pool.connection` alone, and
+        # the rewriter is a second IO route.
+        #
+        # The hoist is equivalent **in condition**, and deliberately earlier
+        # in effect: reaching the old site meant `effective_sort != "date"`
+        # (the date branch returns) and `effective_sort` is never reassigned
+        # after it is resolved, so the condition is fully determined here.
+        # What does change is what wins a race with it — an *uncaught*
+        # rewriter failure (anything outside the three types the rewrite
+        # block catches) used to surface instead of this refusal, and now
+        # does not. That is the intended direction, and "exactly equivalent",
+        # as this comment first read, claimed more than the reason below
+        # supports. Unlike the walk guard above —
+        # whose identical-looking claim was refuted, since it fires only on
+        # blank text and the rewriter is gated on non-blank — this one *does*
+        # save the round trip, because it fires on a non-empty query.
+        if effective_sort != "date" and keyset_cursor is not None:
+            raise KeysetCursorUnusable(
+                "keyset_cursor is not readable by the hybrid pool branch; it "
+                f"requires sort='date' or a blank query, got "
+                f"sort={effective_sort!r} with a non-empty query"
+            )
+
         rewrite_status = NOT_REQUESTED
         rewrite_note: str | None = None
         rewrite_note_code: str | None = None
@@ -1319,23 +1402,6 @@ class Searcher:
                 rewrite_status=rewrite_status,
                 rewrite_note=rewrite_note,
                 rewrite_note_code=rewrite_note_code,
-            )
-
-        # The branch above is the only reader of ``keyset_cursor`` (#308).
-        # Reaching here means the caller's (sort, query) selected the hybrid
-        # pool, whose page 1 would go back as if it continued the walk — a
-        # restart wearing a continuation's clothes. Raise rather than answer
-        # the wrong question quietly. A named error, not an assert: asserts
-        # vanish under ``python -O``.
-        #
-        # The blank-query shape used to land here too. It no longer does:
-        # that branch honours the cursor now, so rejecting it would forbid
-        # exactly the paging this reachability change adds.
-        if keyset_cursor is not None:
-            raise KeysetCursorUnusable(
-                "keyset_cursor is not readable by the hybrid pool branch; it "
-                f"requires sort='date' or a blank query, got "
-                f"sort={effective_sort!r} with a non-empty query"
             )
 
         with self._pool.connection() as conn:

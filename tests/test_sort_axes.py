@@ -22,6 +22,8 @@ follow-up defect.
 """
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 
 from localmail.search.sort_axes import (
@@ -29,8 +31,10 @@ from localmail.search.sort_axes import (
     DEFAULT_SORT_ORDER,
     TEXTLESS_SORT,
     SortMode,
+    SortOrder,
     resolve_sort,
     sort_applicability_error,
+    sort_membership_error,
 )
 
 #: Queries whose ``parse_query(...).free_text`` is empty. The callers pass
@@ -148,3 +152,76 @@ def test_resolve_sort_reports_what_will_run_even_for_a_refused_request() -> None
     exception types for one rule and put the wording in two places.
     """
     assert resolve_sort(requested="rank", free_text="") == TEXTLESS_SORT
+
+
+# --- the vocabulary rule (#348, pinned by its review) ----------------------
+
+def test_a_well_formed_pair_is_accepted() -> None:
+    """The positive control. A rule that refused everything would satisfy
+    every negative below, and the ``get_args`` derivation is what makes this
+    hold for a member added to either ``Literal`` tomorrow."""
+    for sort in (None, *get_args(SortMode)):
+        for order in (None, *get_args(SortOrder)):
+            assert sort_membership_error(sort=sort, sort_order=order) is None
+
+
+def test_the_vocabulary_is_derived_from_the_literals_not_restated() -> None:
+    """Freezing either list to a hard-coded tuple survived the whole suite
+    when this function shipped, because nothing here imported it — a future
+    ``SortMode`` member would then be silently refused, which is the failure
+    ``date_keyset.DATE_ORDER_BY_SQL``'s import-time completeness check exists
+    to prevent one module over.
+
+    Asserted against ``get_args`` rather than against ``["asc", "desc"]``, so
+    widening a ``Literal`` does not need this test edited — the property is
+    "the rule ranges over the type", not "the rule allows these two".
+    """
+    for member in get_args(SortMode):
+        assert sort_membership_error(sort=member, sort_order=None) is None
+        assert sort_membership_error(sort=member.upper() + "_",
+                                     sort_order=None) is not None
+    for member in get_args(SortOrder):
+        assert sort_membership_error(sort=None, sort_order=member) is None
+        assert sort_membership_error(sort=None,
+                                     sort_order=member.upper() + "_") is not None
+
+
+@pytest.mark.parametrize("sort", ["Date", "DATE", "dat", "relevance", ""])
+def test_an_unknown_sort_is_named_with_its_vocabulary(sort: str) -> None:
+    """The message quotes the offending value and lists the alternatives —
+    it is the whole remedy a caller gets, at both layers."""
+    problem = sort_membership_error(sort=sort, sort_order=None)
+    assert problem is not None
+    assert repr(sort) in problem
+    assert "date" in problem and "rank" in problem
+
+
+@pytest.mark.parametrize("order", ["ASC", "ascending", ""])
+def test_an_unknown_sort_order_is_named_with_its_vocabulary(order: str) -> None:
+    problem = sort_membership_error(sort=None, sort_order=order)
+    assert problem is not None
+    assert repr(order) in problem
+    assert "asc" in problem and "desc" in problem
+
+
+def test_an_unstated_axis_is_not_a_claim_that_can_be_wrong() -> None:
+    """``None`` means "nothing to check", which is what lets ``Searcher.search``
+    read both axes as *stated* and so decide them above the cursor block that
+    resolves them."""
+    assert sort_membership_error(sort=None, sort_order=None) is None
+    assert sort_membership_error(sort=None, sort_order="asc") is None
+    assert sort_membership_error(sort="date", sort_order=None) is None
+
+
+def test_sort_is_reported_before_sort_order_when_both_are_wrong() -> None:
+    """One message, not two, and ``sort`` wins — so a caller who misspelled
+    both is told about ``sort`` first and meets the second on their retry.
+
+    Pinned because it is unspecified otherwise, and because the alternative
+    (reporting both) is a real option someone may reach for: this records
+    that the sequential shape is the decision, not an accident.
+    """
+    problem = sort_membership_error(sort="Date", sort_order="ASC")
+    assert problem is not None
+    assert "unknown sort 'Date'" in problem
+    assert "sort_order" not in problem

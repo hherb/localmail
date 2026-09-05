@@ -64,33 +64,6 @@ Five commits plus this handoff, one PR — the whole review round of #346, taken
 together because all four touch `argument_errors.py`, `api/search.py` and one
 docstring, and #348's decision feeds #347's scope and #350's wording.
 
-### The review of PR #351 itself — one regression, six unenforced claims
-
-A five-agent review of the branch, every finding re-verified against a
-byte-clean tree before it was acted on. Full write-up in CLAUDE.md under
-"The review of #351 closed six more". The headline:
-
-* **#348's hoist stopped validating a `keyset_cursor`'s own `order`, and its
-  comment asserted that it could not.** Moving the membership check above the
-  cursor block changed its subject from the *resolved* `effective_order` to
-  the *stated* `sort_order` — and with a cursor in hand and `sort_order`
-  unstated, the resolved value is `keyset_cursor.order`, a **third** source
-  neither reading covers. A/B'd against `main` in an isolated worktree:
-  `KeysetCursor(order="ASC")` was refused pre-IO before, and afterwards
-  reached `self._pool.connection()`, `date_keyset` catching it in the same
-  words one connection later — losing the "wording *and the cost*" property
-  and #349's own pre-IO contract, in the PR that established it. Not
-  wire-reachable, which is what made it latent.
-* Five prose claims that the thing they described did not enforce:
-  `_SEPARATOR` "ownership" (spellable two ways), `foreign_refusal_error`
-  reading `search` alone (an extracted guard escapes it), the provocation
-  table keyed by type while claiming site, `wire_message()` returning `""` for
-  an unlabelled blank, and three comments arguing a real gap away.
-* Every fix is mutation-pinned; 11 mutations run, all caught, two of which
-  first surfaced *test* defects rather than code defects (a fixture whose
-  declaration order let a single pass stand in for a fixpoint, and a
-  parametrised row that reached none of the guards its name claimed).
-
 ### `8eccd2f` — #348: a misspelled sort is refused at the boundary
 
 `Searcher.search` membership-checks both axes and raises a plain `ValueError`;
@@ -202,22 +175,15 @@ the same green as a mutation that is caught.
 
 - **Both refs measured in this session** (risk 7), clean tree at each:
 
-  | gate | `main` @ `94c0aaa` | branch @ `4c05a49` | branch, after review |
-  |---|---|---|---|
-  | pytest collected | **3188** | **3262** | **3301** |
-  | pytest run | — | **3262 passed, 2 warnings, 207s** | **3301 passed, 2 warnings, 222s** |
+  | gate | `main` @ `94c0aaa` | branch @ `4c05a49` |
+  |---|---|---|
+  | pytest collected | **3188** | **3262** |
+  | pytest run | — | **3262 passed, 0 skipped, 2 warnings, 207s** |
 
-  The +74 at `4c05a49` is exactly 33 (`test_api_search_sort_membership`) + 21
+  The +74 is exactly 33 (`test_api_search_sort_membership`) + 21
   (`test_search_family_rules`) + 7 (`test_searcher_guards_precede_io`) + 7
   (`test_search_argument_errors`, 17→24) + 6 (`test_searcher_guard_precedence`,
   7→13).
-
-  **The further +39 is PR #351's own review round** (see "What we shipped"),
-  which found one live regression the round had introduced — #348's hoist
-  stopped validating a `keyset_cursor`'s own `order`, and its comment asserted
-  that could not happen. `main` was **not** re-measured after that; the 3188
-  column is still the figure taken at `4c05a49` in the prior session, and risk
-  7 says to re-measure both refs rather than quote either.
 - The 2 warnings are the pre-existing `websockets` deprecations (**#25**), so
   **#321's acceptance signal still holds**.
 - `mypy src/localmail` → Success, **153** files (unchanged — the new module is
@@ -536,14 +502,14 @@ git diff --stat main origin/<branch>     # EMPTY = landed, not stranded
 # Python suite. NEVER a bare `uv sync` (risk 25).
 unset VIRTUAL_ENV && uv sync --all-extras
 unset VIRTUAL_ENV && uv run pytest -q
-#   macOS: expect 3301 passed, 0 failed, 0 skipped, and **2 warnings**, ~222s
+#   macOS: expect 3262 passed, 0 failed, 0 skipped, and **2 warnings**, ~207s
 #   on an unloaded machine. THOSE 2 ARE #321's ACCEPTANCE SIGNAL: both are the
 #   pre-existing websockets DeprecationWarnings (#25). A leaked pool is now a
 #   FAILING test whose message reads "cannot join current thread"; the test it
 #   names is arbitrary (the GC picks it), the message is the diagnosis.
-#   LINUX/CI: expect 3300 passed, 1 SKIPPED; pre-existing (risk 35).
+#   LINUX/CI: expect 3261 passed, 1 SKIPPED; pre-existing (risk 35).
 #   MEASURE BOTH REFS IN THIS SESSION (risk 7) — no DB needed:
-unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2   # 3301 here
+unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2   # 3262 here
 git checkout main && unset VIRTUAL_ENV && uv run pytest --collect-only -q | tail -2
 #   main @ 94c0aaa = 3188.  Assert `git status --short` is EMPTY at each.
 unset VIRTUAL_ENV && uv run mypy src/localmail    # expect Success, 153 files

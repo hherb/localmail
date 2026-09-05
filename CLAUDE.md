@@ -826,12 +826,16 @@ src/localmail/
     sort_axes.py    # pure: SortMode/SortOrder, their defaults, and
                     #   resolve_sort/sort_applicability_error — one
                     #   authority per axis (#312, #324)
+                    #   + sort_membership_error, shared by run_search and
+                    #   Searcher.search so one rule is worded once (#348)
     date_keyset.py  # pure: the date walk's ORDER BY, keyset predicates,
                     #   undated top-up and the one SQL emitter (#323)
     keyset_walk.py  # pure: walk_for_text / keyset_walk_error — a text cursor
                     #   needs its query back (#326)
     argument_errors.py # SearchArgumentRefused + its four subclasses — the
-                    #   one family every api boundary maps to 400 (#344)
+                    #   one family every api boundary maps to 400 (#344);
+                    #   owns the wire label's join (#350) and states the
+                    #   pre-IO contract (#349)
 migrations/         # 0001_init.sql … 0036_api_keys.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
@@ -844,6 +848,9 @@ tests/
   _fake_imap.py     # in-memory IMAP fake with IDLE support
   _gated_supervisor.py  # DaemonSupervisor whose stop() parks — busy-guard pins
                     #   hold their window open instead of racing a timer (#299)
+  _search_family_rules.py  # pure AST rules: a SearchArgumentRefused member is
+                    #   declared in argument_errors.py, and every named
+                    #   exception Searcher.search raises is one (#347)
   _multilingual_corpus.py  # synthetic 50-message corpus for multilingual eval
   fixtures/         # multilingual_queries.example.json
   test_*.py
@@ -3912,7 +3919,7 @@ for the full design.
         test drives all four members through a searcher that raises, with an
         unrelated `ValueError` beside it as the control; note that control
         does **not** catch a widening to bare `ValueError` (the widened
-        handler then dies on `exc.wire_prefix`, still a 500) — that mutation
+        handler then dies on `exc.wire_message()`, still a 500) — that mutation
         is caught one layer down, and the docstring says so rather than
         claiming the stronger property. (3) **`KeysetOrderMismatch`'s raise
         site was untested** — replacing its condition with `if False:` left
@@ -3920,20 +3927,144 @@ for the full design.
         covered instead. It is pinned in `test_searcher_guard_precedence.py`,
         where it doubles as a precedence assertion: it is decided above
         `parse_query`, so it outranks both guards that file is about.
-      - **What the family still does not confer, filed rather than fixed.**
-        The structural pin filters on `__module__`, so a fifth guard written
-        `class Foo(ValueError)` in `searcher.py` reproduces #344 verbatim with
-        every test green — the reverse cross-check `pool_constructor_calls`
-        and `acceptance_coverage_error` exist for, **#347**. Both catch sites
-        wrap the whole `searcher.search(...)` call, so what makes the widening
-        safe is that all five raise sites are **pre-IO**, which was stated
-        nowhere and is pinned per member by hand — **#349**. `run_search`
-        never checks `sort`/`sort_order` membership, so the plain-`ValueError`
-        exclusion rests on an obligation on transports rather than a property
-        of the value, and an invalid axis with an empty ACL is reported as a
-        **200** — **#348**. And `wire_prefix` keeps its `": "` separator
-        inside the value while the join is restated at each boundary —
-        **#350**, to be done with #305's CLI catch, the third consumer.
+      - **What the family did not confer, all four closed by its review round
+        (#347, #348, #349, #350).** Each is written up below; the pattern
+        across them is that #344 established the family and left the rules
+        *about* the family stated in prose rather than enforced, which is the
+        same convention-not-construction shape one level up.
+      - **#347 — the family is enforced against `src/`, not only against
+        itself.** `_family()` filters on `__module__ == argument_errors`, so
+        it asks only about classes *already* declared there — the
+        `missing_seam_error` half `pool_constructor_calls` and
+        `acceptance_coverage_error` both exist to complete. The rules are the
+        pure [tests/_search_family_rules.py](tests/_search_family_rules.py),
+        AST-walking for `_mentions_version_option`'s reason: every forbidden
+        shape is named in prose in the rule module, the tests, the issue and
+        the family docstring.
+        - **The issue's title and body name different defects, and only one
+          is #344.** Measured: a fifth member that *inherits the base* but
+          lives in `searcher.py` is mapped to **400** by both boundaries
+          exactly as intended, so "reproduces #344" is wrong. What it costs is
+          the derived pins — probed directly, such a class is absent from
+          `_family()`, so it joins neither the 400-mapping cases nor #349's
+          pre-IO ones. The shape that *is* #344 is `class Foo(ValueError)`,
+          and the acceptance #347 states (a location rule over classes
+          inheriting the base) does not catch it. Hence **two** rules:
+          `misplaced_member_error` for the first, `foreign_refusal_error` for
+          the second.
+        - **The raise rule judges spelling, never a decision.** #347 warns it
+          must not become "a second authority on which `ValueError`s are
+          deliberately outside the family". It is not: a raise spelled with a
+          **bare builtin** (`ValueError`, `RuntimeError`) is out of scope by
+          construction, and one spelled with a **named** class must be a
+          member. #348's decision lives in `argument_errors`' docstring; the
+          rule reads the spelling that decision produced.
+        - **Scoped to `Searcher.search`, not the whole class**, because
+          `continue_page`/`grow_pool` raise `CacheMissError` and
+          `PageOutOfPoolError` on purpose — a 409 with its own mapping.
+        - **Both rules report rather than pass when they would inspect
+          nothing** — a missing `Searcher.search`, a missing family module, an
+          empty family. That is the `_family()`-returning-`[]` trap one file
+          over, and it is what stops a rename from silently retiring the rule.
+        - **Two of the seven mutations found test defects, not code defects.**
+          The out-of-scope fixture listed `search` first, so deleting
+          `item.name == SEARCH_METHOD` left the file green — it lists
+          `continue_page` first now. And the bare-re-raise guard was redundant
+          with the unnameable-callee guard, so no mutation could tell them
+          apart; they are collapsed into `_raised_name`, since an arm no test
+          can reach is one to remove rather than document.
+      - **#348 — a misspelled axis is refused at the boundary, not 500'd, and
+        not answered 200.** `Searcher.search` membership-checks both axes and
+        raises a plain `ValueError`; `serve/app.py` handles `APIError` only,
+        so `run_search` passed it out as an unhandled 500. HTTP and MCP both
+        declare `Literal`s (verified, not assumed), so neither can reach it —
+        which made the property an obligation on every transport rather than
+        one the boundary holds, and a third consumer (#305's CLI flags, a
+        queue, a new route) inherits the 500 with nothing failing at review
+        time.
+        - **One half was wire-visible already.** The empty-ACL short-circuit
+          returns *before* the Searcher ever validates, so `sort="Date"` from
+          a grant-nothing caller was answered **200 with an empty page** —
+          byte-identical to "you have reached the end of your results". Every
+          other gate in `run_search` is placed ahead of that branch for
+          exactly this reason; this axis was the one that was not.
+        - The rule is the pure `sort_axes.sort_membership_error`, shared by
+          both layers so one rule cannot be worded two ways — the
+          `sort_applicability_error` / `keyset_walk_error` shape, a message or
+          `None`, with the caller deciding what an error *is*.
+        - **Ordered ahead of every other guard, at BOTH layers.** A value that
+          is not a value cannot meaningfully contradict a cursor:
+          `resolve_cursor_plan` and `KeysetOrderMismatch` both interpolated
+          the offending string into a sentence asserting what the cursor
+          continues ("pass `sort_order='asc'`"), sending a caller who made a
+          typo to their paging logic — in wording that is a coincidence of
+          which cursor was in hand. Hoisting the Searcher's check above its
+          cursor block is what keeps the two layers answering one input the
+          same way.
+        - **The membership checks stay OUTSIDE the family** (operator
+          decision, recorded in `argument_errors`' docstring as the issue
+          asked). The type-vs-cross-argument line is unchanged by the fix;
+          admitting them would give the family a member **no wire caller can
+          reach**, and would put them under #349's pre-IO contract for no
+          gain.
+      - **#349 — "raised before any IO" is the contract the widened catch
+        rests on, and it was already false.** Both boundaries wrap the entire
+        `searcher.search(...)` call, so a member raised after retrieval began
+        would relabel a backend outage as a caller 400. Nothing stated or
+        pinned it, and the base's docstring invited the opposite. The suite's
+        asymmetry was the giveaway: the 400-mapping pins derive their cases
+        from the type, while the pre-IO ones were hand-written per member
+        across four files and a fifth member joined none.
+        - **Writing the pin found the contract broken.** #349 reports all five
+          raise sites verified pre-IO; that verification used a
+          `pool.connection` tripwire **alone**, and the rewriter is a second
+          IO route. The #308 hybrid-branch guard sat *below* the smart
+          rewrite — pre-pool, post-LLM — so on the smart path a caller paid a
+          full round trip to be told their cursor was unusable. The guard is
+          hoisted above the rewrite; the move is **exactly** equivalent, since
+          reaching the old site meant `effective_sort != "date"` (the date
+          branch returns) and `effective_sort` is never reassigned after
+          resolution. Unlike the walk guard — whose identical-looking
+          round-trip claim #344 refuted, it firing only on blank text — this
+          one does save the call, firing on a non-empty query. No wire
+          behaviour changes.
+        - The pin
+          ([tests/test_searcher_guards_precede_io.py](tests/test_searcher_guards_precede_io.py))
+          provokes every raise site **for real** and asserts the pool, the
+          embedding backend **and** the rewriter are all untouched — three
+          tripwires, because a guard below the rewrite still leaves the pool
+          clean, which is exactly how this went unnoticed. Keyed by raise
+          **site** rather than by type, since `KeysetCursorUnusable` has two
+          and the deeper one is the one that drifted.
+        - **A provocation table is the listing #349 objects to, so
+          `test_every_member_has_a_provocation` is what makes it safe**: a
+          member with no recipe fails rather than being skipped. The
+          400-mapping pins need no table because they *inject* the exception
+          into a mock searcher and never reach a raise site; this property is
+          about the raise sites, so each member must be provoked genuinely.
+      - **#350 — the wire label's separator belongs to the type.** `label`
+        names the subject (`"cursor"`, never the joined form), `_SEPARATOR` is
+        owned by the base, and `wire_message()` does the join, so both
+        boundaries read `raise ValidationFailed(exc.wire_message()) from exc`
+        and a fourth cannot re-decide it — the `APIError.to_problem` shape. A
+        member with a blank message renders the **label alone**, decided here
+        because it is unreachable today and that is when such things rot;
+        tested on `.strip()`, not truthiness, since `"   "` is truthy and
+        would sail through into the dangling form
+        (`version_report.unreadable`'s lesson).
+        - **The issue's premise is overstated, and the correction is recorded
+          in place rather than propagated.** It says the missing-space form is
+          caught by nothing. Measured against the pre-#350 tree, dropping the
+          space from a *shipped* member fails **three** tests, one a literal
+          `== "cursor: "`. The real exposure is a **new** member: spelled
+          `"filter"` and spelled `"filter: "` it fails the *same two*
+          enumeration tests, which fail for the member being new and say
+          nothing about its spelling — so whoever updates them to admit it, as
+          they must, gets no signal at all. That narrower claim is what the
+          new test asserts.
+        - `test_the_keyset_branch_keeps_naming_the_cursor` is **unchanged**,
+          as #350 asks: its exact wording is the pin that nothing moved on the
+          wire.
       - **They moved out of `searcher.py` rather than gaining a base in
         place**, the `sort_axes.py`/`keyset_walk.py` call: the family is the
         contract *between* the Searcher and every boundary that maps it, and
@@ -4001,9 +4132,10 @@ for the full design.
           whose cursor was fine would have read `cursor: sort_order='asc' is
           not applicable…`. Unreachable, and **widening the catch to the
           whole family makes it more so** — the category error arriving via
-          its own fix. `SearchArgumentRefused.wire_prefix` now carries it and
-          both boundaries interpolate, so it follows the cause: the same
-          derive-don't-restate call as `version_report`'s severity word.
+          its own fix. `SearchArgumentRefused` carries it — as `label` since
+          #350, with the base owning the separator and `wire_message()` doing
+          the join — so it follows the cause: the same derive-don't-restate
+          call as `version_report`'s severity word.
           - **The default is empty, not mandatory** — the opposite of
             `VersionSource`'s forced remedy, and deliberately so. A member
             that forgets a prefix loses a word of context; one that inherits

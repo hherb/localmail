@@ -62,6 +62,16 @@ export interface SearchResponse {
   next_cursor: string | null;
   total_estimate: number | null;
   took_ms: number;
+  // The ordering that actually ran (#345) — the server's *resolution* of
+  // `sort`, not the request. They differ for a query with no free text,
+  // which is served date-ordered whatever was asked for.
+  //
+  // `| null` is not decoration: the consumer is the Tauri hop, whose
+  // `Option<String>` carries no skip_serializing_if, so a `serve` predating
+  // the field arrives as an explicit `null` rather than an absent key.
+  // Both read as "unknown" — `sort_display.ts::asSortMode` is the one place
+  // that decides, and it also rejects an ordering this client does not know.
+  sort_applied?: "rank" | "date" | null;
   // Phase-4 smart rewrite outcome (#176). The GUI does not consume these;
   // they are present on every wire response. Optional here so existing
   // fixtures need no change.

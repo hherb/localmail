@@ -449,3 +449,127 @@ describe("search store: the sort it states (#324)", () => {
     expect(spy.mock.calls[2][0].sort).toBe("date");
   });
 });
+
+/**
+ * #345 — the ordering the store *displays* is the one the server ran.
+ *
+ * `sort` is a request and the server resolves it from the query, so the two
+ * differ for a textless search. The store therefore records `sort_applied`
+ * off every response; `sort_display.ts` unit-tests what the selector then
+ * shows. These pin that the field reaches the store at all, and that it keeps
+ * describing the rows currently on screen.
+ */
+describe("search store: the ordering that ran (#345)", () => {
+  const page = (sortApplied: string | undefined, cursor: string | null = null) => ({
+    results: [], next_cursor: cursor, total_estimate: null, took_ms: 1,
+    ...(sortApplied === undefined ? {} : { sort_applied: sortApplied }),
+  });
+
+  it("records the applied sort from a fresh search", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page("date"));
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(search.snapshot.sortApplied).toBe("date");
+  });
+
+  it("records rank when the server ranked", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page("rank"));
+    search.setQuery("invoice");
+    await search.submit();
+    expect(search.snapshot.sortApplied).toBe("rank");
+  });
+
+  it("reads null from a server that does not send the key", async () => {
+    // Graceful degradation, the `is_admin` precedent: an older `serve` leaves
+    // the field absent and the selector falls back to showing the request,
+    // which is exactly the pre-#345 behaviour rather than a wrong claim.
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page(undefined));
+    search.setQuery("invoice");
+    await search.submit();
+    expect(search.snapshot.sortApplied).toBe(null);
+  });
+
+  it("clears the applied sort when a search fails", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page("date"));
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(search.snapshot.sortApplied).toBe("date");
+    (runSearch as unknown as { mockRejectedValue: (v: unknown) => void })
+      .mockRejectedValue(new Error("boom"));
+    await search.submit();
+    // The rows are gone, so nothing is on screen for it to describe.
+    expect(search.snapshot.sortApplied).toBe(null);
+  });
+
+  it("a continuation page keeps the field describing the rows on screen", async () => {
+    // The two pages must NOT agree, or `submit()`'s own write satisfies the
+    // assertion and the continuation's write is untested — this test was
+    // vacuous while both were "date". Page 1 omits the key so the only way
+    // to reach "date" is for `loadMore` to read the continuation's value.
+    const m = runSearch as unknown as {
+      mockResolvedValueOnce: (v: unknown) => void;
+    };
+    m.mockResolvedValueOnce(page(undefined, "K|abc"));
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(search.snapshot.sortApplied).toBe(null);
+    m.mockResolvedValueOnce(page("date", null));
+    await search.loadMore();
+    expect(search.snapshot.sortApplied).toBe("date");
+  });
+
+  it("the 409 recovery records the fresh search's ordering", async () => {
+    // The recovery re-runs *without* a cursor, so it is the second place an
+    // ordering reaches the store — and the only continuation where a
+    // re-resolution can legitimately change the answer. `search_paging.ts`'s
+    // sort rule is pinned on both halves of this path; this field was not.
+    const m = runSearch as unknown as {
+      mockResolvedValueOnce: (v: unknown) => void;
+      mockRejectedValueOnce: (v: unknown) => void;
+    };
+    m.mockResolvedValueOnce(page(undefined, "tok:2"));
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(search.snapshot.sortApplied).toBe(null);
+    m.mockRejectedValueOnce(new Error(
+      '{"type":"/problems/search-cursor-expired","detail":"gone"}',
+    ));
+    m.mockResolvedValueOnce(page("date", null));
+    await search.loadMore();
+    expect(search.snapshot.sortApplied).toBe("date");
+  });
+
+  it("a 400 that retires the cursor leaves the field alone", async () => {
+    // The rows already fetched stay on screen, so the ordering that
+    // produced them is still what the selector should describe.
+    const m = runSearch as unknown as {
+      mockResolvedValueOnce: (v: unknown) => void;
+      mockRejectedValueOnce: (v: unknown) => void;
+    };
+    m.mockResolvedValueOnce(page("date", "K|abc"));
+    search.setQuery("from:alice");
+    await search.submit();
+    // The nested {kind, detail} shape `httpStatusOf` walks — the same
+    // fixture `search_paging.test.ts` uses for this status.
+    m.mockRejectedValueOnce({
+      kind: "Http",
+      detail: { kind: "HttpStatus", detail: { status: 400, body: "{}" } },
+    });
+    await search.loadMore();
+    expect(search.snapshot.hasMore).toBe(false);
+    expect(search.snapshot.sortApplied).toBe("date");
+  });
+
+  it("reset() forgets it", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page("date"));
+    search.setQuery("from:alice");
+    await search.submit();
+    search.reset();
+    expect(search.snapshot.sortApplied).toBe(null);
+  });
+});

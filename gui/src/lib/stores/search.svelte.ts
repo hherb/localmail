@@ -23,6 +23,7 @@ import { runSearch } from "../tauri";
 import { formatError } from "../format_error";
 import { isSearchCursorExpired } from "../search_cursor_expired";
 import { isCursorRejected, statedSort } from "../search_paging";
+import { asSortMode } from "../sort_display";
 import { settings } from "./settings.svelte";
 
 export type SortMode = "rank" | "date";
@@ -35,6 +36,12 @@ export interface SearchState {
   // COALESCE(internal_date, date_sent) DESC — matches the server's
   // /v1/search `sort` parameter.
   sort: SortMode;
+  // The ordering the server actually ran, off the last response (#345), or
+  // null when nothing has run — or when the server did not report one. The
+  // request above is what the user asked for; the two differ for a query
+  // with no free text, which cannot be ranked. `sort_display.ts` turns this
+  // into what the selector shows.
+  sortApplied: SortMode | null;
   results: SearchResultRow[];
   cursor: string | null;
   hasMore: boolean;
@@ -49,6 +56,7 @@ function initialState(): SearchState {
     query: "",
     filters: emptyFilters(),
     sort: "rank",
+    sortApplied: null,
     results: [],
     cursor: null,
     hasMore: false,
@@ -122,6 +130,7 @@ class SearchStore {
       this.#state.tookMs = resp.took_ms;
       this.#state.cursor = resp.next_cursor;
       this.#state.hasMore = resp.next_cursor !== null;
+      this.#state.sortApplied = asSortMode(resp.sort_applied);
     } catch (err: unknown) {
       if (seq !== this.#submitSeq) return;
       // Clear stale results so the UI does not show prior query's matches
@@ -131,6 +140,8 @@ class SearchStore {
       this.#state.tookMs = null;
       this.#state.cursor = null;
       this.#state.hasMore = false;
+      // Nothing is on screen for it to describe.
+      this.#state.sortApplied = null;
       this.#state.errorMessage = formatError(err);
     } finally {
       if (seq === this.#submitSeq) this.#state.loading = false;
@@ -180,12 +191,14 @@ class SearchStore {
         }
         this.#state.cursor = fresh.next_cursor;
         this.#state.hasMore = fresh.next_cursor !== null;
+        this.#state.sortApplied = asSortMode(fresh.sort_applied);
         return;
       }
       if (seq !== this.#submitSeq) return;
       this.#state.results = [...this.#state.results, ...resp.results];
       this.#state.cursor = resp.next_cursor;
       this.#state.hasMore = resp.next_cursor !== null;
+      this.#state.sortApplied = asSortMode(resp.sort_applied);
     } catch (err: unknown) {
       if (seq !== this.#submitSeq) return;
       if (isCursorRejected(err)) {

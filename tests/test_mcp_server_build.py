@@ -43,6 +43,27 @@ def test_build_disables_dns_rebinding_protection(db_dsn):
     assert security.enable_dns_rebinding_protection is False
 
 
+def test_search_tells_the_agent_the_response_names_the_ordering(db_dsn):
+    """`sort_applied` must be in the *published* description, not only in
+    `tools.py`.
+
+    `mcp/server.py` restates the whole contract for the agent-facing
+    schema; `tools.tool_search` is the transport-free wrapper an agent
+    never sees. #308 is the precedent — its `sort="rank"` default was fixed
+    in `run_search` and had to be fixed here too, because this is the half
+    an agent reads. The `sort` description here already tells agents to
+    omit `sort` and let the server resolve it, so it must also say where
+    the answer comes back.
+    """
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    assert "sort_applied" in (tools["search"].description or "")
+
+
 def test_search_declares_no_sort_default_of_its_own(db_dsn):
     """The MCP tool must not fill in a sort the agent did not ask for.
 

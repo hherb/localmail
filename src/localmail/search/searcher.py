@@ -394,6 +394,17 @@ class SearchPage:
     search_token: str | None
     query: ParsedQuery
     timing_ms: dict[str, float]
+    #: The ordering that actually produced ``results`` — the resolution of
+    #: the caller's ``sort``, not the request (#345). Since #324 the two
+    #: differ for a query with no free text, which is served ``date``
+    #: whatever was asked for; nothing on the wire said so, so the GUI's
+    #: radio asserted an ordering that was not in effect.
+    #:
+    #: **No default**, for the reason ``KeysetCursor.order`` has none: it is
+    #: stamped by the branch that produced the rows, so a construction site
+    #: cannot claim ``rank`` for a date page by forgetting to write it. It
+    #: is declared ahead of the defaulted fields for that reason alone.
+    sort_applied: SortMode
     next_keyset: KeysetCursor | None = None
     rewrite_status: str = NOT_REQUESTED
     rewrite_note: str | None = None
@@ -905,6 +916,7 @@ class Searcher:
             can_grow_pool=True,
             search_token=search_token, query=entry["parsed"],
             timing_ms={"cache_hit": 0.0},
+            sort_applied=sort,
         )
 
     def grow_pool(
@@ -1002,6 +1014,7 @@ class Searcher:
             candidates_per_arm=candidates_per_arm,
             has_more_in_pool=len(hydrated) > page_size, can_grow_pool=True,
             search_token=token, query=parsed, timing_ms=timing,
+            sort_applied=sort,
         )
 
     def search(
@@ -1398,6 +1411,7 @@ class Searcher:
                 has_more_in_pool=next_keyset is not None,
                 can_grow_pool=False,
                 search_token=None, query=parsed, timing_ms=timing,
+                sort_applied=effective_sort,
                 next_keyset=next_keyset,
                 rewrite_status=rewrite_status,
                 rewrite_note=rewrite_note,
@@ -1462,6 +1476,7 @@ class Searcher:
             has_more_in_pool=pool_size > effective_page_size,
             can_grow_pool=True,
             search_token=token, query=parsed, timing_ms=timing,
+            sort_applied=effective_sort,
             rewrite_status=rewrite_status,
             rewrite_note=rewrite_note,
             rewrite_note_code=rewrite_note_code,

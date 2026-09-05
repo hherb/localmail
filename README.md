@@ -909,6 +909,16 @@ actually serves the request (`date` here, `rank` as soon as there is text
 to rank), or to state `sort=date`. Omitting is what every paging client
 already does, and what the desktop GUI does for a filter-only search.
 
+**Every search response reports which ordering ran, as `sort_applied`**
+(`"rank"` or `"date"`). That is the *resolution*, not the request — so a
+client that omits `sort`, as the paragraph above recommends, can still tell
+the user what it got. It is present on every branch, including a page that
+comes back with `next_cursor: null` and the empty page a caller with no
+account grants receives, which is why it is a field rather than something a
+client infers from the cursor's prefix. A `serve` predating it omits the key;
+clients should fall back to showing the request rather than guessing. Closes
+[#345](https://github.com/hherb/localmail/issues/345).
+
 `sort_order=asc` on such a query is consequently **honoured**, not
 refused: with no stated sort the request resolves to `date`, so it walks
 the archive oldest-first and its cursor continues ascending. It used to
@@ -945,7 +955,10 @@ client must retire the cursor rather than let infinite scroll re-fire it behind
 an error banner. The desktop GUI does both, and never states a `sort` it knows
 the server will refuse — not on a request that carries a cursor, and not a
 `rank` on a query with nothing to rank — which is what makes both 400s
-unreachable from it rather than merely handled.
+unreachable from it rather than merely handled. Its sort selector renders
+`sort_applied` rather than the request, and disables **Relevance** with a
+reason when the server has reported that a query has nothing to rank, so the
+control cannot assert an ordering that is not in effect.
 
 Wire `date` on every paginated response (`/v1/messages`, `/v1/search`,
 `/v1/changes`) is `COALESCE(internal_date, date_sent)` — the same key

@@ -255,10 +255,27 @@ def _account_scoped_fake_searcher(account_to_hits: dict[int, list[dict[str, obje
         # auto-MagicMock read as one and was minted into a garbage cursor —
         # harmless only because nothing here asserts on next_cursor.
         page.next_keyset = None
+        # A MagicMock's auto-attribute is rendered by `jsonable_encoder` as
+        # `{}` rather than raising, so an unset field ships garbage on the
+        # wire with every assertion here still green (#345). This fake
+        # reaches the real route, so it must state the applied sort too.
+        page.sort_applied = "rank"
         return page
 
     s.search.side_effect = _search
     return s
+
+
+def _assert_wire_sort_applied(body: dict) -> None:
+    """Every 200 from /v1/search names a real ordering (#345).
+
+    Structural, because setting the field on each fake is discipline and
+    this is what a *new* fake cannot get past: a MagicMock's auto-attribute
+    renders as ``{}`` through ``jsonable_encoder`` rather than raising, so
+    an equality assertion on one test's expected value says nothing about
+    the next fake somebody adds. Membership is what a mock fails.
+    """
+    assert body["sort_applied"] in ("rank", "date"), body["sort_applied"]
 
 
 def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
@@ -275,6 +292,7 @@ def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
                json={"query": "secret", "filters": {}, "limit": 20},
                headers=_h(ctx["alice"]))
     assert r.status_code == 200
+    _assert_wire_sort_applied(r.json())
     seen = {int(hit["account"]["id"]) for hit in r.json()["results"]}
     assert seen == {ctx["a_aid"]}
 
@@ -282,6 +300,7 @@ def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
                json={"query": "secret", "filters": {}, "limit": 20},
                headers=_h(ctx["bob"]))
     assert r.status_code == 200
+    _assert_wire_sort_applied(r.json())
     seen = {int(hit["account"]["id"]) for hit in r.json()["results"]}
     assert seen == {ctx["b_aid"]}
 

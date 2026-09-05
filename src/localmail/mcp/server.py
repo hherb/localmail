@@ -238,6 +238,10 @@ def build_mcp_server(
         nothing to rank, so it is always date-ordered and `sort="rank"` for
         one is rejected rather than dropped; omit `sort` there, which also
         lets `sort_order="asc"` alone mean oldest-first.
+        The response reports the ordering that actually ran as
+        `sort_applied` (`rank` or `date`) — the *resolution*, not the
+        request, so an omitted `sort` comes back naming the branch that
+        served it. Read it rather than assuming the request was honoured.
         Page forward by calling again with the same `query` and filters plus
         the returned `next_cursor` in `cursor`, and leave `sort` and
         `sort_order` unset — the cursor carries the ordering it continues,

@@ -235,6 +235,11 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     # Pool-cursor mock — explicit None keeps `_next_cursor` out of the
     # keyset branch (MagicMock's auto-attr would be truthy).
     fake_page.next_keyset = None
+    # Set explicitly for the reason the route-level fakes are (#345): an
+    # unset MagicMock attribute is a value, not an error. This assertion is
+    # api-level so nothing encodes it here, but leaving it auto-mocked is
+    # how the wire-level instance of the same fake went unnoticed.
+    fake_page.sort_applied = "rank"
 
     fake_searcher.search.return_value = fake_page
 
@@ -282,6 +287,7 @@ def _fake_searcher_for_smart(
     page.candidates_per_arm = 50
     page.page = 1
     page.next_keyset = None
+    page.sort_applied = "rank"
     page.rewrite_status = page_status
     page.rewrite_note = page_note
     page.rewrite_note_code = page_note_code
@@ -346,6 +352,10 @@ def test_run_search_empty_acl_short_circuit_includes_rewrite_status():
                      allowed_account_ids=[], user_id=9, smart=True)
     assert out == {"results": [], "next_cursor": None, "total_estimate": None,
                    "took_ms": 0.0, "rewrite_skipped": False,
+                   # Present here rather than omitted (#345): this branch has
+                   # no cursor to infer an ordering from, and its empty page
+                   # is byte-identical to "you have reached the end".
+                   "sort_applied": "rank",
                    "rewrite_status": "not_requested", "rewrite_note": None,
                    "rewrite_note_code": None}
     s.search.assert_not_called()

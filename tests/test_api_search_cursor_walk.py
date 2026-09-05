@@ -52,6 +52,11 @@ def _page() -> MagicMock:
     p.candidates_per_arm = 50
     p.timing_ms = {"total": 1.0}
     p.next_keyset = None
+    # Explicit for the same reason `next_keyset` is: `run_search` reads it
+    # onto the response (#345), and MagicMock's auto-attr would put a mock
+    # object there rather than failing. Harmless in-process, but a fake that
+    # carries garbage teaches nothing.
+    p.sort_applied = "rank"
     return p
 
 

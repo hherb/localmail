@@ -1,5 +1,24 @@
 <script lang="ts">
   import { search, type SortMode } from "../lib/stores/search.svelte";
+  import {
+    displayedSort,
+    RELEVANCE_UNAVAILABLE_REASON,
+    relevanceUnavailable,
+  } from "../lib/sort_display";
+
+  // The selector renders the ordering that RAN, not the one requested (#345).
+  // The server resolves `sort` from the query, so a textless one — an empty
+  // box with a filter chip, or a box holding only `from:` / `has:` — is
+  // served date-ordered whatever was asked for. Binding the radios to the
+  // request made Relevance assert an ordering that was not in effect —
+  // and clicking it either re-ran the search to no effect (from an explicit
+  // Date selection) or fired no event at all (from the default state).
+  const shownSort = $derived(
+    displayedSort(search.snapshot.sort, search.snapshot.sortApplied),
+  );
+  const rankUnavailable = $derived(
+    relevanceUnavailable(search.snapshot.sort, search.snapshot.sortApplied),
+  );
 
   let popoverOpen = $state(false);
   let popoverEl: HTMLDivElement | undefined = $state();
@@ -62,14 +81,17 @@
     />
   </div>
   <fieldset class="sort" aria-label="Sort results by">
-    <label>
+    <label
+      class:unavailable={rankUnavailable}
+      title={rankUnavailable ? RELEVANCE_UNAVAILABLE_REASON : undefined}
+    >
       <input
         type="radio"
         name="sort"
         value="rank"
-        checked={search.snapshot.sort === "rank"}
+        checked={shownSort === "rank"}
         onchange={() => onSortChange("rank")}
-        disabled={search.snapshot.loading}
+        disabled={search.snapshot.loading || rankUnavailable}
       />
       Relevance
     </label>
@@ -78,7 +100,7 @@
         type="radio"
         name="sort"
         value="date"
-        checked={search.snapshot.sort === "date"}
+        checked={shownSort === "date"}
         onchange={() => onSortChange("date")}
         disabled={search.snapshot.loading}
       />
@@ -156,6 +178,10 @@
     background: var(--surface);
     color: var(--fg);
     box-shadow: var(--shadow-sm);
+  }
+  fieldset.sort label.unavailable {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   fieldset.sort input[type="radio"] {
     position: absolute;

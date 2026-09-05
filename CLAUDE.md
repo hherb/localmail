@@ -3869,6 +3869,131 @@ for the full design.
           regression above), an ordinary text query, `date` surviving, and
           both halves of the 409 recovery — which is a *fresh* request and
           so the second place a sort reaches the wire.
+    - **The response says which ordering ran, and the selector renders that
+      (#345).** `sort` is a request, and since #324 the server resolves it
+      from the query — so the two differ for a textless one, and nothing on
+      the wire said so. The GUI's only rendering of `sort` was a radio bound
+      to the request, so a filter-only search showed **Relevance** checked
+      over date-ordered rows and clicking it changed nothing: #148's inert
+      control, with the label asserting an ordering not in effect.
+      `SearchPage.sort_applied` carries the resolution, `run_search` puts it
+      on the wire, and `gui/src/lib/sort_display.ts` turns it into what the
+      selector shows.
+      - **Stamped by the branch that produced the rows**, the same
+        derive-don't-restate call `next_keyset` makes, so no layer above can
+        report an ordering the walk did not use. **Defaultless**, for the
+        reason `KeysetCursor.order` has none: a page that could claim `rank`
+        by omission is #345 itself. It is declared ahead of `SearchPage`'s
+        defaulted fields for that reason alone.
+      - **#345 preferred inferring it client-side from the returned cursor's
+        prefix, and that was measured and rejected.** Against the live
+        129,009-message archive, `subject:zzzqqqnope` — textless, no
+        matches — returns `next_cursor: None`, so an inference has **no
+        signal at all** on exactly the narrow-filter case a user reaches
+        deliberately; the empty-ACL short-circuit is the same. It would also
+        put another copy of `_KEYSET_PREFIXES` in a language that cannot
+        import it, on a token the docs call opaque — #330's shape. The
+        #278/#295 objection to a new wire key is satisfied instead by
+        landing it *with* its renderer, which is the test that objection
+        actually sets.
+      - **The empty-ACL short-circuit reports `plan.sort`**, which is exact
+        on the **keyset** mode only (`KEYSET_SORT`, which `resolve_sort`
+        returns for any query). On **fresh** mode it is the *gate's*
+        resolution, and the gate parses the raw request field where the
+        Searcher parses the ACL-composed query — the divergence
+        `resolve_cursor_plan` documents reaches this value too. Measured,
+        both directions: `from:"` resolves `rank` at the gate and `date` in
+        the Searcher, `"` the reverse. On **pool** mode it is the caller's
+        claim about a pool that branch never consults (`CursorPlan` says
+        so). All three are accepted only because **no rows come back** —
+        nothing is mislabelled because nothing is labelled. The rowed paths
+        never read it: `Searcher.search` stamps fresh and keyset,
+        `continue_page` reads the pool's own metadata, and
+        `_empty_grown_page` takes `meta.sort` rather than a default. An
+        earlier wording here claimed "exact on the fresh and keyset modes";
+        that was wrong for fresh and is corrected in place.
+      - **Relevance is disabled with a reason, not merely re-labelled** —
+        the `action_flags` precedent, removing the inert control rather than
+        quietening it. Disabled only on proof: `statedSort` never sends
+        `rank`, so a rank preference answered `date` means the server found
+        nothing to rank. A `date` *request* proves nothing either way, so an
+        explicit Date selection on a textless query leaves Relevance enabled
+        until clicked once, at which point the selector corrects itself and
+        explains. **Deliberate imprecision** — judging it earlier means
+        knowing the resolution before asking for it, i.e. the second parser
+        `search_paging.ts` exists not to have.
+      - **`sortApplied` keeps describing the rows on screen**, and is not
+        cleared when the query box is edited: clearing would flip the
+        selector back to the request while date-ordered rows are still
+        displayed, which is the mismatch this ends. The cost is that the
+        disable is stale with respect to the *box* until the next submit, so
+        `RELEVANCE_UNAVAILABLE_REASON` is worded after the rows ("these
+        results have nothing to rank") rather than as an instruction about
+        the box — the earlier "Add search text…" opening told a user who had
+        just typed some to do the thing they had done.
+      - **`asSortMode` is the one place the wire value becomes a
+        `SortMode`.** The value crosses Rust as an open `Option<String>` and
+        reaches JS through `invoke<SearchResponse>`, an **unchecked** type
+        assertion — so without narrowing, an ordering this client does not
+        know (a newer `serve`, a third mode) is laundered into a field typed
+        `SortMode`, matches *neither* radio, and leaves the selector with
+        nothing checked. It degrades to the same honest "unknown" the
+        absent-key case already has. The Rust type stays open deliberately:
+        a closed serde enum would fail the **whole** response on an unknown
+        value, breaking search outright. It also collapses the three
+        response-reading sites (`submit`, the `loadMore` append, and the
+        409 recovery) onto one rule so they cannot drift.
+      - **All four `sortApplied` write sites are pinned**, which two were
+        not: the `loadMore` append and the 409 recovery. The continuation
+        test seeded *both* pages with `date`, so `submit`'s own write
+        satisfied it — vacuous. Page 1 now omits the key, so only the
+        continuation's read can produce the value. The 409 path is the one
+        that matters: it re-runs **without** a cursor, so it is the second
+        place an ordering reaches the store, exactly as `search_paging.ts`'s
+        sort rule is pinned on both halves of that path. The `loadMore` 400
+        branch deliberately leaves the field alone (the rows stay on
+        screen) and is pinned too.
+      - **`mcp/server.py` had to learn it, not just `mcp/tools.py`.** The
+        published agent-facing description lives on `server.py::search`;
+        `tools.tool_search` is the transport-free wrapper no agent reads.
+        That is #308's lesson exactly — its `sort="rank"` default was fixed
+        in `run_search` and still had to be fixed here. Pinned by
+        `test_search_tells_the_agent_the_response_names_the_ordering`, which
+        reads the description off the **published** tool list.
+      - **The mock pages were emitting `{}` on the wire, and every test was
+        green.** `test_serve_search_route.py`'s fake page is a `MagicMock`,
+        and `jsonable_encoder` renders an auto-attribute as `{}` rather than
+        raising — so the route shipped `"sort_applied": {}` invisibly. The
+        defaultless type stops a *real* construction omitting it; a mock
+        bypasses that by definition, so the route assertion is what carries
+        it. Mutation-checked (dropping the key fails it with a `KeyError`).
+        - **Setting the field on each fake is discipline, not
+          construction**, and the first sweep missed one:
+          `test_serve_acl_routes.py`'s `_account_scoped_fake_searcher`
+          reaches the real route and shipped garbage for it. That file
+          already carried a comment about the identical trap for
+          `next_keyset`, which is how thoroughly this hides. The guard is
+          therefore **membership, not equality** —
+          `_assert_wire_sort_applied` demands `in ("rank", "date")` on every
+          200 body, which an unset MagicMock attribute fails and a new fake
+          cannot get past. An equality assertion on one test's expected
+          value says nothing about the next fake somebody adds.
+      - **The "surviving" mutation survives only one direction.** Reverting
+        the *Relevance* input's `checked` binding alone is masked in the
+        `(requested=rank, applied=date)` state — radio-group exclusivity
+        resolves the conflict in Date's favour, so the render is identical.
+        Reversed, it renders **neither** radio checked, which `checked` sees
+        directly. That state is real, not contrived: `onSortChange` calls
+        `setSort` and *then* awaits `submit()`, so the component renders
+        `requested="date"` over `applied="rank"` while the request is in
+        flight. `displayedSort("date", "rank")` is the matching pure input,
+        and was the sixth of six left uncovered. Both are pinned now, and
+        the mutation is caught — do not restore the "recorded as surviving"
+        note. The
+        Rust struct has its own pin for the same class of reason: every
+        frontend test mocks `runSearch`, so a field dropped from
+        `SearchResponse` would be discarded at the Tauri hop with the whole
+        vitest suite green (#278's shape).
     - **Every argument the Searcher refuses is one family, caught as one
       (#344).** `Searcher.search` raises four sibling exceptions whose whole
       purpose is "map me to a 400", and they derived straight from
@@ -4730,6 +4855,12 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   `lib/search_paging.ts` (`statedSort`/`isCursorRejected`) is the third, and
   `admin_error.httpStatusOf` gained its first non-admin consumer through it —
   see the #311 bullets under **Browse & search pagination**.
+  `lib/sort_display.ts` (`displayedSort`/`relevanceUnavailable`) is the
+  fourth: what the sort selector shows, read off the server's own
+  `sort_applied` rather than the request (#345). Like `search_paging.ts`,
+  **neither rule inspects the query** — the server decides "textless" only
+  after lifting filter operators out, so reproducing `parse_query` in the
+  client is the thing both files exist to avoid.
 - **Deliberately absent — do not "finish" without backend work first:**
   Gmail **Connect**. `POST /v1/admin/accounts/{id}/oauth/start` lives in
   `oauth_router.py`, which #203 did *not* swap to `require_admin()`, so it is

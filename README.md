@@ -919,6 +919,15 @@ client infers from the cursor's prefix. A `serve` predating it omits the key;
 clients should fall back to showing the request rather than guessing. Closes
 [#345](https://github.com/hherb/localmail/issues/345).
 
+**Every response also reports whether the query could be ranked at all, as
+`rankable`.** `sort_applied` cannot answer that: a `date` you asked for and a
+`date` imposed on a textless query are the same value there. Read `rankable`
+if you offer the user a choice of ordering — it is what tells you whether
+relevance is genuinely unavailable for this query or was merely not chosen.
+Like `sort_applied` it is present on every branch and absent from a `serve`
+predating it, in which case assume nothing rather than guessing. Closes
+[#353](https://github.com/hherb/localmail/issues/353).
+
 `sort_order=asc` on such a query is consequently **honoured**, not
 refused: with no stated sort the request resolves to `date`, so it walks
 the archive oldest-first and its cursor continues ascending. It used to
@@ -956,9 +965,14 @@ an error banner. The desktop GUI does both, and never states a `sort` it knows
 the server will refuse — not on a request that carries a cursor, and not a
 `rank` on a query with nothing to rank — which is what makes both 400s
 unreachable from it rather than merely handled. Its sort selector renders
-`sort_applied` rather than the request, and disables **Relevance** with a
-reason when the server has reported that a query has nothing to rank, so the
-control cannot assert an ordering that is not in effect.
+`sort_applied` rather than the request, and disables **Relevance** when the
+server reports the query is not `rankable`, so the control cannot assert an
+ordering that is not in effect. The reason is rendered as text beside the
+selector — not a tooltip, which a disabled control cannot make reachable by
+keyboard — and clicking the ordering already on screen still records it as
+your preference for the next search
+([#354](https://github.com/hherb/localmail/issues/354),
+[#353](https://github.com/hherb/localmail/issues/353)).
 
 Wire `date` on every paginated response (`/v1/messages`, `/v1/search`,
 `/v1/changes`) is `COALESCE(internal_date, date_sent)` — the same key

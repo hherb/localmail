@@ -3974,9 +3974,10 @@ for the full design.
           already carried a comment about the identical trap for
           `next_keyset`, which is how thoroughly this hides. The guard is
           therefore **membership, not equality** —
-          `_assert_wire_sort_applied` demands `in ("rank", "date")` on every
-          200 body, which an unset MagicMock attribute fails and a new fake
-          cannot get past. An equality assertion on one test's expected
+          `_assert_wire_ordering_fields` (named `_assert_wire_sort_applied`
+          until #353 gave it a second field) demands `in ("rank", "date")` on
+          every 200 body, which an unset MagicMock attribute fails and a new
+          fake cannot get past. An equality assertion on one test's expected
           value says nothing about the next fake somebody adds.
       - **The "surviving" mutation survives only one direction.** Reverting
         the *Relevance* input's `checked` binding alone is masked in the
@@ -3994,6 +3995,105 @@ for the full design.
         frontend test mocks `runSearch`, so a field dropped from
         `SearchResponse` would be discarded at the Tauri hop with the whole
         vitest suite green (#278's shape).
+    - **The ordering that ran cannot say whether ranking was possible, so
+      the response says that too (#353), and the reason a control is
+      disabled is rendered rather than hovered (#354).** Both are review
+      follow-ups to #352 and both were filed as design calls rather than
+      fixed there.
+      - **`sort_applied` is exact only for a caller that states nothing.** A
+        stated `date` is honoured for every query, so `sort_applied ==
+        "date"` covers both "there was nothing to rank" and "rank was
+        available and not chosen". `relevanceUnavailable` inferred the first
+        from the second (`applied === "date" && requested === "rank"`),
+        which was the best reading available while the server reported only
+        the ordering — and stopped being sound the moment a click could
+        change the request.
+      - **#353 is what that cost.** The radios render what *ran* while
+        `onSortChange`'s guard compared the stored *preference*, so in the
+        state #345 introduces they disagree: Date is checked over a
+        preference of `rank`. A radio already checked fires **no `change`
+        event**, so clicking it recorded nothing, and the user's next text
+        search came back rank-ordered under a control that had said Date.
+        The #148 inert-control shape, relocated into a different cell of the
+        matrix rather than removed.
+      - **The issue offered four options; three of them are one fix.**
+        Recording on `click` (option 1) is necessary — no guard change
+        reaches a handler that is never invoked, which is why option 2 is
+        not an alternative to it — and alone it re-enables Relevance on an
+        unrankable query, because recording makes `requested` become
+        `"date"` and flips the inference. `rankable` on the wire (option 3)
+        removes that *and* the imprecision #345 documented, but fixes
+        nothing by itself. The operator chose 1+3.
+      - **`sort_axes.is_rankable` is the rule, and `resolve_sort` asks it**
+        rather than repeating the `walk_for_text` test — so a response
+        cannot carry `rankable=False` beside `sort_applied="rank"`. The
+        one-authority call `resolve_sort`/`sort_applicability_error` already
+        make one function over.
+      - **`SearchPage.rankable` is stamped, not derived — and one site
+        proves why.** `api.search._empty_grown_page` builds
+        `query=parse_query("")` as a stand-in for an exhausted pool, so a
+        property computed from `page.query` would report that pool
+        **unrankable** when a pool is rankable by construction. It reads
+        `meta.rankable` instead. Defaultless for `sort_applied`'s reason.
+      - **The three pool readers derive it; the pool *branch* cannot be
+        pinned and that is not the same thing.** `continue_page`,
+        `grow_pool` and `get_pool_metadata` read `entry["parsed"]`, and
+        hardcoding `True` in each survived until pinned with a **textless
+        pool put straight into the cache** — the technique
+        `test_search_sort_applied.py` uses for `sort`, and for the reason
+        `PoolMetadata.sort_order`'s comment gives: encoding "pool ⟹
+        rankable" in a reader makes a future dispatch change silently wrong.
+        The pool branch of `Searcher.search` is different: it sits under
+        `if effective_sort == "date": return`, and `resolve_sort` returns
+        `"rank"` only for a rankable query, so hardcoding it **there** is an
+        **equivalent mutation** no input can separate. Recorded in the test
+        file with its proof, because a reader who conflates the two cases
+        deletes pins that are load-bearing.
+      - **The empty-ACL short-circuit reports it exactly**, unlike
+        `sort_applied` beside it: rankability is a property of the query
+        alone, so the gate's own parse answers it without needing to agree
+        with a branch the request never reaches. The
+        divergent-parse caveat that field carries does not apply here.
+      - **`click`, not `change`, and not both.** A radio fires no `change`
+        when already checked — the #353 state — and fires `click` either
+        way, for pointer and keyboard activation alike, so `click` is the
+        strict superset. Binding **both** was tried first and double-fired
+        every real change of mind: `shownSort` only moves when the response
+        lands, so the second handler still saw a disagreement and submitted
+        again. Measured, not reasoned; pinned by a test that fires both.
+      - **`sortClick` splits one guard into the two questions it was
+        answering with one field** — record iff the click disagrees with the
+        preference, re-run iff it disagrees with the rows on screen. So
+        affirming Date on a date-ordered page is recorded without a wasted
+        round trip. It takes an **object**, not three positional
+        `SortMode`s, for the reason `statedSort` shed its third parameter: a
+        transposition would type-check.
+      - **`asRankable` narrows the wire value, and truthiness would be wrong
+        in both directions.** `invoke<SearchResponse>` is an unchecked
+        assertion, so `"false"` (truthy) would read as rankable and `0`
+        (falsy) would silently disable a working control. Unknown → `null`,
+        which disables nothing — `asSortMode`'s degradation.
+      - **#354: the reason is markup, and the codebase already said so.**
+        The issue posed `aria-describedby` versus visible text as an
+        either/or; `AccountForm.svelte`'s `.hint` span and
+        `DaemonPanel.svelte`'s `.note` paragraph both already render a
+        server-disabled control's reason into the markup, so that is the
+        precedent and the tooltip was the outlier. A **disabled input leaves
+        the tab order**, so a `title` could not be reached by keyboard at
+        all, and it is announced inconsistently and hover-only otherwise.
+        Both are done: visible text plus `aria-describedby`.
+        - **The issue's scope note asked whether other controls need the
+          same sweep. They do not** — `grep title= gui/src/components/admin`
+          is empty, so this control was the only one hiding its reason.
+          Checked rather than assumed, and recorded so it is not re-opened.
+      - **The MagicMock trap fired again, and the garbage is not a
+        constant.** `page.rankable` unset reached the wire as **`[]`** where
+        `sort_applied` had rendered as `{}`. So do not look for a particular
+        wrong value; the rule is that an unset attribute *serialises*
+        instead of failing. `_assert_wire_ordering_fields` now checks
+        `isinstance(body["rankable"], bool)` beside the membership test, and
+        that is the half a new fake cannot get past — mutation-proven by
+        deleting the fake's own assignment.
     - **Every argument the Searcher refuses is one family, caught as one
       (#344).** `Searcher.search` raises four sibling exceptions whose whole
       purpose is "map me to a 400", and they derived straight from
@@ -4855,12 +4955,14 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   `lib/search_paging.ts` (`statedSort`/`isCursorRejected`) is the third, and
   `admin_error.httpStatusOf` gained its first non-admin consumer through it —
   see the #311 bullets under **Browse & search pagination**.
-  `lib/sort_display.ts` (`displayedSort`/`relevanceUnavailable`) is the
-  fourth: what the sort selector shows, read off the server's own
-  `sort_applied` rather than the request (#345). Like `search_paging.ts`,
-  **neither rule inspects the query** — the server decides "textless" only
-  after lifting filter operators out, so reproducing `parse_query` in the
-  client is the thing both files exist to avoid.
+  `lib/sort_display.ts`
+  (`displayedSort`/`relevanceUnavailable`/`sortClick` + the two narrowers
+  `asSortMode`/`asRankable`) is the fourth: what the sort selector shows,
+  what it offers, and what a click on it means — all read off the server's
+  own `sort_applied` and `rankable` rather than the request (#345, #353).
+  Like `search_paging.ts`, **no rule there inspects the query** — the server
+  decides "textless" only after lifting filter operators out, so reproducing
+  `parse_query` in the client is the thing both files exist to avoid.
 - **Deliberately absent — do not "finish" without backend work first:**
   Gmail **Connect**. `POST /v1/admin/accounts/{id}/oauth/start` lives in
   `oauth_router.py`, which #203 did *not* swap to `require_admin()`, so it is

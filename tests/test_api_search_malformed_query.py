@@ -61,7 +61,7 @@ def test_a_malformed_operator_is_a_400_on_a_pool_continuation(
     searcher = _searcher()
     searcher.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=10, rerank_pool_size=10,
-        pool_size=10, sort="rank", sort_order="desc",
+        pool_size=10, sort="rank", sort_order="desc", rankable=True,
     )
     cursor = encode_search_cursor(SearchCursor(token="t", page=2))
     with pytest.raises(ValidationFailed):

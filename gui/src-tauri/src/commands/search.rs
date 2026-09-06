@@ -3,7 +3,7 @@
 //! Body: {"query": "...", "filters": {...}, "limit": N, "cursor": null|"..."}
 //! Response: {"results": [SearchResultRow], "next_cursor": str|null,
 //!            "total_estimate": int|null, "took_ms": float,
-//!            "sort_applied": "rank"|"date"}.
+//!            "sort_applied": "rank"|"date", "rankable": bool}.
 
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +99,20 @@ pub struct SearchResponse {
     /// unrecognised value is narrowed back to an honest "unknown".
     #[serde(default)]
     pub sort_applied: Option<String>,
+    /// Whether the query had anything to rank at all (#353).
+    ///
+    /// Not recoverable from `sort_applied`: a `date` the caller chose and a
+    /// `date` imposed on a textless query are the same value there, and the
+    /// selector inferring one from the other is the defect. Absent (a
+    /// `serve` predating the field) means "unknown", which disables nothing
+    /// — the same honest degradation `sort_applied` has for *absence*.
+    /// Not for a type mismatch: `Option<String>` is open, so an ordering
+    /// this client does not know still deserialises and is narrowed in TS,
+    /// whereas a non-boolean here fails the whole `SearchResponse`. The
+    /// server controls the value and it is a Python `bool`, so the envelope
+    /// is narrower than the sibling's rather than equal to it.
+    #[serde(default)]
+    pub rankable: Option<bool>,
 }
 
 pub async fn run_search(
@@ -206,6 +220,8 @@ mod tests {
         // A `serve` predating #345 omits the ordering; the client then falls
         // back to showing the request rather than making a wrong claim.
         assert!(resp.sort_applied.is_none());
+        // Likewise #353: absent means "unknown", which disables nothing.
+        assert!(resp.rankable.is_none());
     }
 
     #[test]
@@ -218,5 +234,18 @@ mod tests {
                        "took_ms":1.0,"sort_applied":"date"}"#;
         let resp: SearchResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.sort_applied.as_deref(), Some("date"));
+    }
+
+    #[test]
+    fn search_response_carries_rankability_across_the_tauri_hop() {
+        // Its own test beside the sibling above, and for the same reason:
+        // every frontend test mocks `runSearch`, so a field dropped here is
+        // discarded with the vitest suite green. The pair in this fixture is
+        // the discriminating one — `date` was chosen, not imposed.
+        let json = r#"{"results":[],"next_cursor":null,"total_estimate":null,
+                       "took_ms":1.0,"sort_applied":"date","rankable":true}"#;
+        let resp: SearchResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.sort_applied.as_deref(), Some("date"));
+        assert_eq!(resp.rankable, Some(true));
     }
 }

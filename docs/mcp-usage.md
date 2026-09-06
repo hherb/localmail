@@ -265,7 +265,7 @@ accounts the token's user has been granted.
 
 | Tool | Parameters | When to use |
 | --- | --- | --- |
-| `search` | `query`, `sort="rank"\|"date"`, `sort_order="asc"\|"desc"` (omit both when paging), `limit`, `cursor`, `account_ids`, `folder_ids`, `date_from`, `date_to`, `from_addr`, `to`, `subject`, `has_attachment`, `lang`, `smart` | Hybrid lexical + vector search over the archive. The default entry point for "find mail about X". Rank-ordered by default; pass `sort="date"` for strictly newest-first, and `sort_order="asc"` alongside it for oldest-first — pairing `sort_order="asc"` with the rank ordering is rejected, since the rank path searches a bounded candidate pool and reversing it would surface the least relevant of the top hits rather than of the archive. A query with no free text (blank, or only filter operators) cannot be ranked at all, so `sort="rank"` for one is rejected too — omit `sort` and it resolves to the ordering that will actually serve the request — the response reports which one ran as `sort_applied`. Pass `smart=true` for a local LLM query rewrite (page 1 only). The response carries `rewrite_status` (`applied`, `unavailable`, `failed`, `not_attempted`, or `not_requested`) and an optional curated `rewrite_note` with an actionable detail; `rewrite_skipped` (kept for back-compat) is true only for `unavailable`/`failed`. On a continuation page `smart` is ignored and the status is `not_attempted`. |
+| `search` | `query`, `sort="rank"\|"date"`, `sort_order="asc"\|"desc"` (omit both when paging), `limit`, `cursor`, `account_ids`, `folder_ids`, `date_from`, `date_to`, `from_addr`, `to`, `subject`, `has_attachment`, `lang`, `smart` | Hybrid lexical + vector search over the archive. The default entry point for "find mail about X". Rank-ordered by default; pass `sort="date"` for strictly newest-first, and `sort_order="asc"` alongside it for oldest-first — pairing `sort_order="asc"` with the rank ordering is rejected, since the rank path searches a bounded candidate pool and reversing it would surface the least relevant of the top hits rather than of the archive. A query with no free text (blank, or only filter operators) cannot be ranked at all, so `sort="rank"` for one is rejected too — omit `sort` and it resolves to the ordering that will actually serve the request — the response reports which one ran as `sort_applied`, and whether ranking was possible at all as `rankable`. Pass `smart=true` for a local LLM query rewrite (page 1 only). The response carries `rewrite_status` (`applied`, `unavailable`, `failed`, `not_attempted`, or `not_requested`) and an optional curated `rewrite_note` with an actionable detail; `rewrite_skipped` (kept for back-compat) is true only for `unavailable`/`failed`. On a continuation page `smart` is ignored and the status is `not_attempted`. |
 | `get_message` | `message_id`, `full_headers=False` | Fetch one message's headers, body, and attachment list once search/browse has surfaced its ID. Each attachment entry carries `filename`, `sha256`, `content_type` (stored MIME type), and `size` (decoded bytes) — enough to decide text-vs-original retrieval and size a download before fetching. |
 | `get_attachment` | `sha256`, `mode="text"\|"metadata"` | Read an attachment's **extracted text** or its metadata. Never returns raw bytes. |
 | `list_messages` | `account_ids`, `folder_ids`, `limit`, `cursor` | Keyset date-ordered browse (newest first) when there's no query — "show me recent mail". |
@@ -320,6 +320,13 @@ Two rules for a `search` cursor. Both are enforced, the first only partly:
   present on every branch, including a page that comes back with no cursor at
   all — which is why it exists rather than leaving a client to infer the
   ordering from the cursor's prefix.
+* **Read `rankable` if you explain the ordering.** `sort_applied` says which
+  ordering ran; `rankable` says whether relevance was ever an option for this
+  query. They are different questions, and the ordering cannot answer the
+  second: a `sort="date"` you asked for and a `date` imposed on a textless
+  query both come back `sort_applied="date"`. So "sorted by date because you
+  asked" and "sorted by date because there was nothing to rank" are
+  distinguishable only by this field.
 
 If a `search` cursor has expired (its underlying result pool was evicted from
 the in-process cache — TTL, LRU, or a `serve` restart), the tool returns a

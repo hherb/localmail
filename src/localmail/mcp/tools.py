@@ -62,7 +62,9 @@ def tool_search(
     (`rank` or `date`). That is the *resolution*, not the request: an unset
     `sort` resolves from the query, so a textless one comes back
     `sort_applied="date"` however it was asked for. Read it rather than
-    assuming the request was honoured.
+    assuming the request was honoured. `rankable` reports whether ranking
+    was possible for this query at all — the question `sort_applied` cannot
+    answer, since a chosen `date` and an imposed one look identical there.
 
     `smart` opts into an LLM query rewrite (page 1 only). The response carries
     `rewrite_status` (one of `applied`, `unavailable`, `failed`,

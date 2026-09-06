@@ -23,7 +23,7 @@ import { runSearch } from "../tauri";
 import { formatError } from "../format_error";
 import { isSearchCursorExpired } from "../search_cursor_expired";
 import { isCursorRejected, statedSort } from "../search_paging";
-import { asSortMode } from "../sort_display";
+import { asRankable, asSortMode } from "../sort_display";
 import { settings } from "./settings.svelte";
 
 export type SortMode = "rank" | "date";
@@ -42,6 +42,12 @@ export interface SearchState {
   // with no free text, which cannot be ranked. `sort_display.ts` turns this
   // into what the selector shows.
   sortApplied: SortMode | null;
+  // Whether the server could have ranked this query at all (#353), or null
+  // when it said nothing. Not recoverable from `sortApplied`: a `date` the
+  // user chose and a `date` imposed on a textless query are the same value
+  // there, and inferring one from the other is what let a recorded Date
+  // click re-enable Relevance on an unrankable query.
+  rankable: boolean | null;
   results: SearchResultRow[];
   cursor: string | null;
   hasMore: boolean;
@@ -57,6 +63,7 @@ function initialState(): SearchState {
     filters: emptyFilters(),
     sort: "rank",
     sortApplied: null,
+    rankable: null,
     results: [],
     cursor: null,
     hasMore: false,
@@ -131,6 +138,7 @@ class SearchStore {
       this.#state.cursor = resp.next_cursor;
       this.#state.hasMore = resp.next_cursor !== null;
       this.#state.sortApplied = asSortMode(resp.sort_applied);
+      this.#state.rankable = asRankable(resp.rankable);
     } catch (err: unknown) {
       if (seq !== this.#submitSeq) return;
       // Clear stale results so the UI does not show prior query's matches
@@ -142,6 +150,7 @@ class SearchStore {
       this.#state.hasMore = false;
       // Nothing is on screen for it to describe.
       this.#state.sortApplied = null;
+      this.#state.rankable = null;
       this.#state.errorMessage = formatError(err);
     } finally {
       if (seq === this.#submitSeq) this.#state.loading = false;
@@ -192,6 +201,7 @@ class SearchStore {
         this.#state.cursor = fresh.next_cursor;
         this.#state.hasMore = fresh.next_cursor !== null;
         this.#state.sortApplied = asSortMode(fresh.sort_applied);
+        this.#state.rankable = asRankable(fresh.rankable);
         return;
       }
       if (seq !== this.#submitSeq) return;
@@ -199,6 +209,7 @@ class SearchStore {
       this.#state.cursor = resp.next_cursor;
       this.#state.hasMore = resp.next_cursor !== null;
       this.#state.sortApplied = asSortMode(resp.sort_applied);
+      this.#state.rankable = asRankable(resp.rankable);
     } catch (err: unknown) {
       if (seq !== this.#submitSeq) return;
       if (isCursorRejected(err)) {

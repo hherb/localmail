@@ -64,6 +64,24 @@ def test_search_tells_the_agent_the_response_names_the_ordering(db_dsn):
     assert "sort_applied" in (tools["search"].description or "")
 
 
+def test_search_tells_the_agent_when_ranking_was_possible_at_all(db_dsn):
+    """`rankable` must be in the *published* description too (#353).
+
+    Same rule as the sibling above, and the reason it needs its own pin:
+    `sort_applied` alone cannot answer "was rank ever available", because a
+    stated `date` is honoured for every query. An agent that renders the
+    ordering — the audience the sibling was written for — reads the wrong
+    thing without this, which is exactly what the GUI did.
+    """
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    assert "rankable" in (tools["search"].description or "")
+
+
 def test_search_declares_no_sort_default_of_its_own(db_dsn):
     """The MCP tool must not fill in a sort the agent did not ask for.
 

@@ -49,6 +49,39 @@ SortOrder = Literal["asc", "desc"]
 DEFAULT_SORT_ORDER: SortOrder = "desc"
 
 
+def is_rankable(*, free_text: str) -> bool:
+    """Whether this query has anything for the hybrid pool to rank against.
+
+    ``free_text`` must already be ``parse_query(...).free_text``, exactly as
+    for :func:`resolve_sort` — the filter operators are lifted out by then,
+    so ``subject:invoice`` correctly reads as unrankable despite being a
+    non-empty request field.
+
+    This is the same classification ``resolve_sort`` turns into an ordering,
+    named separately because the *answer* is not recoverable from the
+    ordering. ``sort_applied`` (#345) is exact only for a caller that stated
+    nothing: a stated ``date`` is honoured for any query, so
+    ``sort_applied == "date"`` cannot tell "nothing to rank" from "rank was
+    available and not chosen". The GUI's sort selector inferred the first
+    from the second, which is #353 — clicking Date on an unrankable query
+    re-enabled Relevance for it.
+
+    ``resolve_sort`` below calls this rather than repeating the test, so the
+    two *derivations* cannot disagree. That is not by itself the wire
+    guarantee, and reading it as one is what let the contradictory pair ship:
+    ``api.search.run_search``'s empty-ACL branch took ``sort_applied`` from
+    ``plan.sort`` raw, and ``resolve_cursor_plan``'s pool arm never consults
+    this function — so a pool cursor with a textless query answered
+    ``sort_applied="rank"`` beside ``rankable=False``. What holds the pairing
+    is that **every** emitter goes through this pair on one string: the two
+    ``Searcher.search`` stamps, the three pool readers, and (since that fix)
+    the empty-ACL branch. Nothing rejects the pair at construction —
+    ``SearchPage`` has no ``__post_init__`` — so a new emitter must join that
+    list rather than assume it is protected.
+    """
+    return walk_for_text(free_text) == "text"
+
+
 def resolve_sort(*, requested: SortMode | None, free_text: str) -> SortMode:
     """The sort that will actually serve this request.
 
@@ -69,7 +102,7 @@ def resolve_sort(*, requested: SortMode | None, free_text: str) -> SortMode:
     ``ValueError`` inside the Searcher) — the split
     ``keyset_walk.keyset_walk_error`` already avoids.
     """
-    if walk_for_text(free_text) == "archive":
+    if not is_rankable(free_text=free_text):
         return TEXTLESS_SORT
     return DEFAULT_SORT if requested is None else requested
 

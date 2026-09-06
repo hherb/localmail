@@ -242,6 +242,10 @@ def build_mcp_server(
         `sort_applied` (`rank` or `date`) — the *resolution*, not the
         request, so an omitted `sort` comes back naming the branch that
         served it. Read it rather than assuming the request was honoured.
+        `rankable` (true/false) says whether the query had anything to rank
+        at all, which `sort_applied` cannot: a `sort="date"` you asked for
+        and a `date` imposed on a textless query are the same value there.
+        Use `rankable` if you tell a user why the ordering is what it is.
         Page forward by calling again with the same `query` and filters plus
         the returned `next_cursor` in `cursor`, and leave `sort` and
         `sort_order` unset — the cursor carries the ordering it continues,

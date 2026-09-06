@@ -320,6 +320,13 @@ Two rules for a `search` cursor. Both are enforced, the first only partly:
   present on every branch, including a page that comes back with no cursor at
   all — which is why it exists rather than leaving a client to infer the
   ordering from the cursor's prefix.
+* **Read `rankable` if you explain the ordering.** `sort_applied` says which
+  ordering ran; `rankable` says whether relevance was ever an option for this
+  query. They are different questions, and the ordering cannot answer the
+  second: a `sort="date"` you asked for and a `date` imposed on a textless
+  query both come back `sort_applied="date"`. So "sorted by date because you
+  asked" and "sorted by date because there was nothing to rank" are
+  distinguishable only by this field.
 
 If a `search` cursor has expired (its underlying result pool was evicted from
 the in-process cache — TTL, LRU, or a `serve` restart), the tool returns a

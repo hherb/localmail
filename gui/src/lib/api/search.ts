@@ -72,6 +72,10 @@ export interface SearchResponse {
   // Both read as "unknown" — `sort_display.ts::asSortMode` is the one place
   // that decides, and it also rejects an ordering this client does not know.
   sort_applied?: "rank" | "date" | null;
+  // Whether the query had anything to rank (#353). Optional for the reason
+  // `sort_applied` is: a `serve` predating the field omits it, and
+  // `asRankable` narrows the unchecked value the Tauri hop delivers.
+  rankable?: boolean | null;
   // Phase-4 smart rewrite outcome (#176). The GUI does not consume these;
   // they are present on every wire response. Optional here so existing
   // fixtures need no change.

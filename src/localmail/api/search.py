@@ -36,7 +36,11 @@ from localmail.search.rewrite_status import (
     rewrite_skipped_for_status,
 )
 from localmail.search.argument_errors import SearchArgumentRefused
-from localmail.search.sort_axes import sort_membership_error
+from localmail.search.sort_axes import (
+    is_rankable,
+    resolve_sort,
+    sort_membership_error,
+)
 from localmail.search.searcher import (
     SearchPage,
     SearchResult,
@@ -268,9 +272,17 @@ def run_search(
     # predicate is actually built from; this one exists to answer before any
     # work is done, and before the empty-ACL branch can report a
     # contradictory request as a completed one.
+    #
+    # Bound to a local because the empty-ACL branch below reports both
+    # `sort_applied` and `rankable` from it. That branch returns before the
+    # Searcher, so it has no page to read either field off. Reading them from
+    # one string is what keeps the pair self-consistent; it does **not** make
+    # either exact, since this is the gate's parse and the rowed branches
+    # read the composed query (see that branch's own comment).
+    parsed_free_text = _gate_free_text(free_text)
     plan = resolve_cursor_plan(cursor=cursor, requested_sort=sort,
                                requested_sort_order=sort_order,
-                               free_text=_gate_free_text(free_text))
+                               free_text=parsed_free_text)
     # Refused here as well as in the Searcher so the caller gets a clean 400
     # before any work; the Searcher's own guard is what covers CLI and
     # library callers, who never reach this function. Ahead of the empty-ACL
@@ -319,24 +331,40 @@ def run_search(
         # `next_cursor: None`, so an inference has no signal at all, and its
         # empty page is byte-identical to "you have reached the end".
         #
-        # `plan.sort` is exact on the **keyset** mode — it is `KEYSET_SORT`,
-        # which `resolve_sort` returns for any query. On **fresh** mode it is
-        # the *gate's* resolution, which agrees with the branch's for every
-        # query the two parses agree on; they read different strings (this
-        # module's own comments below say so, and the branch guard is the
-        # authority), so an unbalanced quote diverges — measured, both ways:
-        # `from:"` resolves `rank` here and `date` in the Searcher, and `"`
-        # the reverse. On **pool** mode it is the caller's claim about a pool
-        # this branch never consults (`CursorPlan` says so).
+        # Both fields are resolved from the **same** string, through the same
+        # `resolve_sort`/`is_rankable` pair the Searcher uses, so they cannot
+        # contradict each other. `sort_applied` used to be `plan.sort` raw,
+        # and `resolve_cursor_plan`'s pool arm never consults `is_rankable` —
+        # so a pool cursor presented with a textless query reported
+        # `sort_applied="rank"` beside `rankable=False`, the one combination
+        # `is_rankable`'s docstring calls impossible, and the pair the GUI
+        # renders as a checked-*and*-disabled Relevance radio above a note
+        # saying there is nothing to rank. `resolve_sort` is idempotent on
+        # the other two modes — fresh is already its own resolution, keyset
+        # is `KEYSET_SORT`, which it returns for any query — so that pair is
+        # the only value this changes.
         #
-        # All three are accepted only because **no rows come back**: nothing
-        # is mislabelled, since nothing is labelled. The rowed paths never
-        # rely on this value at all — `page.sort_applied` is stamped by the
-        # branch that produced the rows (`Searcher.search` for fresh and
-        # keyset, `continue_page` from the pool's own metadata for pool).
+        # Neither field is *exact*, and they share one caveat rather than
+        # `rankable` being exempt from it: both read the **gate's** parse of
+        # the raw request field, while the rowed branches read the composed
+        # `build_query_string(...)`. Measured, both ways: `from:"` reads
+        # rankable here and textless in the Searcher, and `"` the reverse.
+        # On **pool** mode both describe a pool this branch never consults
+        # (`CursorPlan` says so).
+        #
+        # Accepted only because **no rows come back**: nothing is
+        # mislabelled, since nothing is labelled. The rowed paths never rely
+        # on either value — `page.sort_applied` and `page.rankable` are
+        # stamped by the branch that produced the rows (`Searcher.search` for
+        # fresh and keyset, `continue_page` from the pool's own metadata).
         return {"results": [], "next_cursor": None, "total_estimate": None,
                 "took_ms": 0.0, "rewrite_skipped": False,
-                "sort_applied": plan.sort,
+                "sort_applied": resolve_sort(requested=plan.sort,
+                                             free_text=parsed_free_text),
+                # Present for the reason `sort_applied` is — this branch
+                # returns `next_cursor: None`, so a client that inferred
+                # would have nothing to infer from.
+                "rankable": is_rankable(free_text=parsed_free_text),
                 "rewrite_status": NOT_REQUESTED, "rewrite_note": None,
                 "rewrite_note_code": None}
 
@@ -490,6 +518,12 @@ def run_search(
         # the rows stamped it, so this layer cannot report an ordering the
         # walk did not use (#345). Same call as `_next_cursor`'s direction.
         "sort_applied": page.sort_applied,
+        # Read off the page for the same reason, and answering the question
+        # `sort_applied` cannot (#353): a stated `date` is honoured for any
+        # query, so the ordering alone cannot say whether rank was ever
+        # available. The GUI's sort selector inferred it and re-enabled
+        # Relevance on queries that have nothing to rank.
+        "rankable": page.rankable,
         "rewrite_skipped": rewrite_skipped_for_status(status),
         "rewrite_status": status,
         "rewrite_note": note,
@@ -532,18 +566,22 @@ def _continue_or_grow(
             raise SearchCursorExpired(f"cursor {parsed.token!r} not found")
         if meta.candidates_per_arm >= cfg.candidates_per_arm_max:
             return _empty_grown_page(parsed.token, page_size=meta.page_size,
-                                     sort_applied=meta.sort)
+                                     sort_applied=meta.sort,
+                                     rankable=meta.rankable)
         new_cpa = min(meta.candidates_per_arm * 2, cfg.candidates_per_arm_max)
         return searcher.grow_pool(parsed.token, new_cpa, user_id=user_id)
 
 
 def _empty_grown_page(
-    token: str, *, page_size: int, sort_applied: SortMode,
+    token: str, *, page_size: int, sort_applied: SortMode, rankable: bool,
 ) -> Any:
     """Synthetic 'pool exhausted at cap' page so callers see next_cursor=null.
 
     ``sort_applied`` comes from the exhausted pool's own metadata, not from
     a default: it must report the ordering that pool was built with (#345).
+    ``rankable`` comes from there too, and *must* — this page's ``query`` is
+    a synthetic ``parse_query("")``, so anything derived from it would
+    report the pool unrankable when a pool is rankable by construction.
     Nothing could have served this page — it is reached only once
     ``continue_page`` has raised ``PageOutOfPoolError`` *and* the pool is at
     ``candidates_per_arm_max`` — but it stands in that pool's place, and the
@@ -553,7 +591,7 @@ def _empty_grown_page(
         results=[], page=1, page_size=page_size, pool_size=0,
         candidates_per_arm=0, has_more_in_pool=False, can_grow_pool=False,
         search_token=token, query=parse_query(""), timing_ms={"total": 0.0},
-        sort_applied=sort_applied,
+        sort_applied=sort_applied, rankable=rankable,
     )
 
 

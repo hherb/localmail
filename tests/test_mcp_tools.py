@@ -122,8 +122,11 @@ def test_tool_search_empty_grants_returns_empty(db_dsn, db_conn):
     assert page == {"results": [], "next_cursor": None, "total_estimate": None,
                     "took_ms": 0.0, "rewrite_skipped": False,
                     # The sort this caller stated, reported even though no
-                    # grant let it run (#345).
+                    # grant let it run (#345). `rankable` is True beside it:
+                    # "invoice" has text to rank, and the caller simply chose
+                    # date — the pair `sort_applied` alone cannot express.
                     "sort_applied": "date",
+                    "rankable": True,
                     "rewrite_status": "not_requested", "rewrite_note": None,
                     "rewrite_note_code": None}
 

@@ -74,6 +74,11 @@ def _fake_searcher_returning_one_hit():
     # raising, so an unset attribute here does not fail the request — it puts
     # `"sort_applied": {}` on the wire with every test green.
     page.sort_applied = "rank"
+    # Same trap, same remedy (#353). Observed garbage differs by field —
+    # this one rendered as `[]` where `sort_applied` rendered as `{}` — so
+    # do not go looking for a particular wrong value; the rule is that an
+    # unset attribute serialises to *something* rather than failing.
+    page.rankable = True
     s.search.return_value = page
     return s
 
@@ -97,6 +102,9 @@ def test_search_returns_results(db_dsn: str, api_token: str, db_conn, api_user) 
     # `jsonable_encoder` that silently rendered it as `{}`, would leave the
     # api-level pins green while the client read garbage.
     assert body["sort_applied"] == "rank"
+    # And rankability beside it (#353), through the same real route and for
+    # the same reason — this is the key the client stops inferring from.
+    assert body["rankable"] is True
 
 
 def test_search_sort_param_is_forwarded_to_searcher(

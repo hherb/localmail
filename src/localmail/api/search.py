@@ -36,7 +36,7 @@ from localmail.search.rewrite_status import (
     rewrite_skipped_for_status,
 )
 from localmail.search.argument_errors import SearchArgumentRefused
-from localmail.search.sort_axes import sort_membership_error
+from localmail.search.sort_axes import is_rankable, sort_membership_error
 from localmail.search.searcher import (
     SearchPage,
     SearchResult,
@@ -268,9 +268,16 @@ def run_search(
     # predicate is actually built from; this one exists to answer before any
     # work is done, and before the empty-ACL branch can report a
     # contradictory request as a completed one.
+    #
+    # Bound to a local because the empty-ACL branch below reports
+    # `rankable` from it. That branch returns before the Searcher, so it
+    # has no page to read the field off — and unlike `sort_applied` beside
+    # it, `rankable` is a property of the query alone, so the gate's parse
+    # answers it exactly rather than merely agreeing where the two parses do.
+    parsed_free_text = _gate_free_text(free_text)
     plan = resolve_cursor_plan(cursor=cursor, requested_sort=sort,
                                requested_sort_order=sort_order,
-                               free_text=_gate_free_text(free_text))
+                               free_text=parsed_free_text)
     # Refused here as well as in the Searcher so the caller gets a clean 400
     # before any work; the Searcher's own guard is what covers CLI and
     # library callers, who never reach this function. Ahead of the empty-ACL
@@ -337,6 +344,14 @@ def run_search(
         return {"results": [], "next_cursor": None, "total_estimate": None,
                 "took_ms": 0.0, "rewrite_skipped": False,
                 "sort_applied": plan.sort,
+                # `rankable` is exact on every mode here, unlike
+                # `sort_applied` above: it is a property of the query alone,
+                # so the gate's own parse answers it without needing to
+                # agree with a branch this request never reaches. Present
+                # for the reason `sort_applied` is — this branch returns
+                # `next_cursor: None`, so a client that inferred would have
+                # nothing to infer from.
+                "rankable": is_rankable(free_text=parsed_free_text),
                 "rewrite_status": NOT_REQUESTED, "rewrite_note": None,
                 "rewrite_note_code": None}
 
@@ -490,6 +505,12 @@ def run_search(
         # the rows stamped it, so this layer cannot report an ordering the
         # walk did not use (#345). Same call as `_next_cursor`'s direction.
         "sort_applied": page.sort_applied,
+        # Read off the page for the same reason, and answering the question
+        # `sort_applied` cannot (#353): a stated `date` is honoured for any
+        # query, so the ordering alone cannot say whether rank was ever
+        # available. The GUI's sort selector inferred it and re-enabled
+        # Relevance on queries that have nothing to rank.
+        "rankable": page.rankable,
         "rewrite_skipped": rewrite_skipped_for_status(status),
         "rewrite_status": status,
         "rewrite_note": note,
@@ -532,18 +553,22 @@ def _continue_or_grow(
             raise SearchCursorExpired(f"cursor {parsed.token!r} not found")
         if meta.candidates_per_arm >= cfg.candidates_per_arm_max:
             return _empty_grown_page(parsed.token, page_size=meta.page_size,
-                                     sort_applied=meta.sort)
+                                     sort_applied=meta.sort,
+                                     rankable=meta.rankable)
         new_cpa = min(meta.candidates_per_arm * 2, cfg.candidates_per_arm_max)
         return searcher.grow_pool(parsed.token, new_cpa, user_id=user_id)
 
 
 def _empty_grown_page(
-    token: str, *, page_size: int, sort_applied: SortMode,
+    token: str, *, page_size: int, sort_applied: SortMode, rankable: bool,
 ) -> Any:
     """Synthetic 'pool exhausted at cap' page so callers see next_cursor=null.
 
     ``sort_applied`` comes from the exhausted pool's own metadata, not from
     a default: it must report the ordering that pool was built with (#345).
+    ``rankable`` comes from there too, and *must* — this page's ``query`` is
+    a synthetic ``parse_query("")``, so anything derived from it would
+    report the pool unrankable when a pool is rankable by construction.
     Nothing could have served this page — it is reached only once
     ``continue_page`` has raised ``PageOutOfPoolError`` *and* the pool is at
     ``candidates_per_arm_max`` — but it stands in that pool's place, and the
@@ -553,7 +578,7 @@ def _empty_grown_page(
         results=[], page=1, page_size=page_size, pool_size=0,
         candidates_per_arm=0, has_more_in_pool=False, can_grow_pool=False,
         search_token=token, query=parse_query(""), timing_ms={"total": 0.0},
-        sort_applied=sort_applied,
+        sort_applied=sort_applied, rankable=rankable,
     )
 
 

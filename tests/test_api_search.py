@@ -356,6 +356,9 @@ def test_run_search_empty_acl_short_circuit_includes_rewrite_status():
                    # no cursor to infer an ordering from, and its empty page
                    # is byte-identical to "you have reached the end".
                    "sort_applied": "rank",
+                   # And `rankable` beside it (#353) — exact on every mode
+                   # here, being a property of the query alone.
+                   "rankable": True,
                    "rewrite_status": "not_requested", "rewrite_note": None,
                    "rewrite_note_code": None}
     s.search.assert_not_called()

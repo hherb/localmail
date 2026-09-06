@@ -260,22 +260,26 @@ def _account_scoped_fake_searcher(account_to_hits: dict[int, list[dict[str, obje
         # wire with every assertion here still green (#345). This fake
         # reaches the real route, so it must state the applied sort too.
         page.sort_applied = "rank"
+        page.rankable = True
         return page
 
     s.search.side_effect = _search
     return s
 
 
-def _assert_wire_sort_applied(body: dict) -> None:
-    """Every 200 from /v1/search names a real ordering (#345).
+def _assert_wire_ordering_fields(body: dict) -> None:
+    """Every 200 from /v1/search names a real ordering (#345) and says
+    whether it could have ranked (#353).
 
-    Structural, because setting the field on each fake is discipline and
+    Structural, because setting the fields on each fake is discipline and
     this is what a *new* fake cannot get past: a MagicMock's auto-attribute
-    renders as ``{}`` through ``jsonable_encoder`` rather than raising, so
-    an equality assertion on one test's expected value says nothing about
-    the next fake somebody adds. Membership is what a mock fails.
+    is serialised rather than raising — as ``{}`` for one field and ``[]``
+    for another, so the wrong value is not even a constant — and an equality
+    assertion on one test's expected value says nothing about the next fake
+    somebody adds. Type and membership are what a mock fails.
     """
     assert body["sort_applied"] in ("rank", "date"), body["sort_applied"]
+    assert isinstance(body["rankable"], bool), body["rankable"]
 
 
 def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
@@ -292,7 +296,7 @@ def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
                json={"query": "secret", "filters": {}, "limit": 20},
                headers=_h(ctx["alice"]))
     assert r.status_code == 200
-    _assert_wire_sort_applied(r.json())
+    _assert_wire_ordering_fields(r.json())
     seen = {int(hit["account"]["id"]) for hit in r.json()["results"]}
     assert seen == {ctx["a_aid"]}
 
@@ -300,7 +304,7 @@ def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
                json={"query": "secret", "filters": {}, "limit": 20},
                headers=_h(ctx["bob"]))
     assert r.status_code == 200
-    _assert_wire_sort_applied(r.json())
+    _assert_wire_ordering_fields(r.json())
     seen = {int(hit["account"]["id"]) for hit in r.json()["results"]}
     assert seen == {ctx["b_aid"]}
 

@@ -8,13 +8,29 @@ vi.mock("../lib/tauri", () => ({ runSearch: vi.fn(async () => ({
   results: [], next_cursor: null, total_estimate: null, took_ms: 0,
 })) }));
 
-/** Make the next search come back reporting `sortApplied` as the ordering. */
-async function serveWith(sortApplied: "rank" | "date"): Promise<void> {
+/**
+ * Make the next search report `sortApplied` as the ordering that ran and
+ * `rankable` as whether it could have ranked at all (#353).
+ *
+ * `rankable` defaults to `true` — "rank was available" — because that is
+ * the value which disables nothing, so a test about ordering alone is not
+ * silently also a test about availability.
+ */
+async function serveWith(
+  sortApplied: "rank" | "date",
+  rankable = true,
+): Promise<void> {
   const { runSearch } = await import("../lib/tauri");
   (runSearch as ReturnType<typeof vi.fn>).mockResolvedValue({
     results: [], next_cursor: null, total_estimate: null, took_ms: 1,
-    sort_applied: sortApplied,
+    sort_applied: sortApplied, rankable,
   });
+}
+
+/** The visible reason, if the component is rendering one (#354). */
+function reasonText(): string | null {
+  const el = document.querySelector("[data-testid='relevance-unavailable']");
+  return el ? (el.textContent ?? "") : null;
 }
 
 afterEach(() => { search.reset(); vi.clearAllMocks(); });
@@ -124,7 +140,7 @@ describe("SearchBar", () => {
   it("reflects date order after a textless search, and says why", async () => {
     // The defect: `from:alice` is textless to the server, so it is served
     // date-ordered while the radio asserted Relevance.
-    await serveWith("date");
+    await serveWith("date", false);
     search.setQuery("from:alice");
     render(SearchBar);
     await search.submit();
@@ -141,8 +157,10 @@ describe("SearchBar", () => {
     // unchecked. (The PR recorded this mutation as surviving outright; it
     // survives only this direction.) Reverting the Date binding, or both,
     // is caught here. Disabled without a reason is a quieter inert control,
-    // so the reason is asserted too.
-    expect(relevance.closest("label")?.title ?? "").toMatch(/search text/i);
+    // so the reason is asserted too — now as text in the markup rather
+    // than a `title`, which #354 showed is unreachable by keyboard (a
+    // disabled input leaves the tab order) and announced inconsistently.
+    expect(reasonText() ?? "").toMatch(/search text/i);
   });
 
   it("keeps showing what ran while a newer Date request is in flight", async () => {
@@ -178,9 +196,11 @@ describe("SearchBar", () => {
   });
 
   it("keeps Relevance available after an explicit Date search", async () => {
-    // A date *request* proves nothing about whether rank was available, so
-    // the control must not be disabled on the strength of it.
-    await serveWith("date");
+    // Unchanged outcome, and since #353 it holds for the right reason: the
+    // server reports this query rankable, so a date *request* cannot
+    // disable the control. It used to rest on the request not being
+    // "rank" — which is what recording a Date click then broke.
+    await serveWith("date", true);
     search.setQuery("invoice");
     search.setSort("date");
     render(SearchBar);
@@ -211,5 +231,124 @@ describe("SearchBar", () => {
     const relevance = screen.getByRole("radio", { name: /relevance/i }) as HTMLInputElement;
     expect(relevance.checked).toBe(true);
     expect(relevance.disabled).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------
+  // #353 — a click on the selector records a preference, always.
+  // ---------------------------------------------------------------------
+
+  it("records a click on the already-checked Date radio", async () => {
+    // The reported defect. The radios show what *ran*, so after a textless
+    // search Date is checked while the stored preference is still `rank`.
+    // Clicking it fires no `change` event, so the preference was never
+    // recorded — and the user's next text search came back rank-ordered
+    // under a control that said Date.
+    await serveWith("date", false);
+    search.setQuery("from:alice");
+    render(SearchBar);
+    await search.submit();
+    const date = screen.getByRole("radio", { name: /^date$/i }) as HTMLInputElement;
+    expect(date.checked).toBe(true);
+    expect(search.snapshot.sort).toBe("rank");
+    await fireEvent.click(date);
+    expect(search.snapshot.sort).toBe("date");
+  });
+
+  it("does not re-run the search when only the preference moved", async () => {
+    // The rows on screen are already date-ordered, so re-running would be a
+    // wasted round trip. Recording and re-running are separate questions.
+    await serveWith("date", false);
+    search.setQuery("from:alice");
+    render(SearchBar);
+    await search.submit();
+    const { runSearch } = await import("../lib/tauri");
+    (runSearch as ReturnType<typeof vi.fn>).mockClear();
+    await fireEvent.click(screen.getByRole("radio", { name: /^date$/i }));
+    expect(runSearch).not.toHaveBeenCalled();
+  });
+
+  it("recording that click does NOT re-enable Relevance", async () => {
+    // The reason #353 needed `rankable` rather than only an `onclick`.
+    // While availability was inferred from the request, recording the click
+    // made the request "date" and flipped the inference — re-enabling
+    // Relevance on a query that genuinely cannot be ranked. Rankability is
+    // a property of the query, so the preference cannot move it.
+    await serveWith("date", false);
+    search.setQuery("from:alice");
+    render(SearchBar);
+    await search.submit();
+    await fireEvent.click(screen.getByRole("radio", { name: /^date$/i }));
+    await tick();
+    const relevance = screen.getByRole("radio", { name: /relevance/i }) as HTMLInputElement;
+    expect(relevance.disabled).toBe(true);
+    expect(reasonText() ?? "").toMatch(/search text/i);
+  });
+
+  it("still records and re-runs an ordinary change of mind", async () => {
+    // The positive control: the pre-existing behaviour must survive, or the
+    // fix above has merely broken the selector a different way.
+    await serveWith("rank", true);
+    search.setQuery("invoice");
+    render(SearchBar);
+    await search.submit();
+    const { runSearch } = await import("../lib/tauri");
+    (runSearch as ReturnType<typeof vi.fn>).mockClear();
+    await fireEvent.click(screen.getByRole("radio", { name: /^date$/i }));
+    expect(search.snapshot.sort).toBe("date");
+    expect(runSearch).toHaveBeenCalledOnce();
+  });
+
+  it("re-runs exactly once for a real change, not twice", async () => {
+    // Only `click` is bound, and this is why. A radio that actually changes
+    // fires `change` *and* `click`, so binding both double-fired a real
+    // change of mind — `shownSort` only moves when the response lands, so
+    // the second handler still saw a disagreement and submitted again. A
+    // radio already checked fires no `change` at all, which is the #353
+    // state, so `click` is the strict superset and the right one to bind.
+    await serveWith("rank", true);
+    search.setQuery("invoice");
+    render(SearchBar);
+    await search.submit();
+    const { runSearch } = await import("../lib/tauri");
+    (runSearch as ReturnType<typeof vi.fn>).mockClear();
+    const date = screen.getByRole("radio", { name: /^date$/i }) as HTMLInputElement;
+    await fireEvent.click(date);
+    await fireEvent.change(date);
+    expect(runSearch).toHaveBeenCalledOnce();
+  });
+
+  // ---------------------------------------------------------------------
+  // #354 — the disable reason is reachable, not hidden in a tooltip.
+  // ---------------------------------------------------------------------
+
+  it("renders the reason as text and associates it with the control", async () => {
+    // A `title` is hover-only for pointer users and announced
+    // inconsistently by screen readers — and a disabled input is out of the
+    // tab order, so it could not be reached by keyboard at all. Visible
+    // text is the precedent this codebase already sets for a
+    // server-disabled control (AccountForm's `.hint`, DaemonPanel's
+    // `.note`); `aria-describedby` makes the association explicit.
+    await serveWith("date", false);
+    search.setQuery("from:alice");
+    render(SearchBar);
+    await search.submit();
+    const relevance = screen.getByRole("radio", { name: /relevance/i }) as HTMLInputElement;
+    const id = relevance.getAttribute("aria-describedby");
+    expect(id).toBeTruthy();
+    const note = document.getElementById(id as string);
+    expect(note).toBeTruthy();
+    expect(note?.textContent ?? "").toMatch(/search text/i);
+    // And it is no longer only a tooltip.
+    expect(relevance.closest("label")?.getAttribute("title")).toBe(null);
+  });
+
+  it("renders no reason while Relevance is available", async () => {
+    await serveWith("rank", true);
+    search.setQuery("invoice");
+    render(SearchBar);
+    await search.submit();
+    const relevance = screen.getByRole("radio", { name: /relevance/i }) as HTMLInputElement;
+    expect(reasonText()).toBe(null);
+    expect(relevance.getAttribute("aria-describedby")).toBe(null);
   });
 });

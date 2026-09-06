@@ -171,7 +171,7 @@ def test_a_pool_cursor_with_an_ascending_order_is_refused() -> None:
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=100, pool_size=10,
-        sort="rank", sort_order="desc",
+        sort="rank", sort_order="desc", rankable=True,
     )
     with pytest.raises(ValidationFailed, match="sort_order"):
         run_search(searcher=s, free_text="invoice", filters={}, limit=2,
@@ -200,7 +200,7 @@ def test_a_stated_order_reaches_the_pool_guard_and_is_checked_against_it() -> No
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=100, pool_size=10,
-        sort="rank", sort_order="asc",
+        sort="rank", sort_order="asc", rankable=True,
     )
     with pytest.raises(ValidationFailed, match="sort_order"):
         run_search(searcher=s, free_text="invoice", filters={}, limit=2,
@@ -219,7 +219,7 @@ def test_an_order_matching_the_pool_continues_instead_of_refusing() -> None:
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=100, pool_size=10,
-        sort="rank", sort_order="desc",
+        sort="rank", sort_order="desc", rankable=True,
     )
     out = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                      allowed_account_ids=[1], user_id=99, sort_order="desc",

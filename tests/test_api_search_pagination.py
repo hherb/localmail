@@ -119,7 +119,7 @@ def test_pool_exhausted_with_grow_pool_available_triggers_grow_pool() -> None:
     s.continue_page.side_effect = PageOutOfPoolError("past pool")
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
-        sort="rank", sort_order="desc",
+        sort="rank", sort_order="desc", rankable=True,
     )
     s.config.candidates_per_arm = 50
     s.config.candidates_per_arm_max = 800
@@ -156,7 +156,7 @@ def test_pool_at_cap_returns_null_cursor_without_calling_grow_pool() -> None:
     s.continue_page.side_effect = PageOutOfPoolError("past pool")
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=800, page_size=2, rerank_pool_size=100, pool_size=100,
-        sort="rank", sort_order="desc",
+        sort="rank", sort_order="desc", rankable=True,
     )
     s.config.candidates_per_arm = 50
     s.config.candidates_per_arm_max = 800

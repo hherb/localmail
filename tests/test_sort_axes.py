@@ -32,6 +32,7 @@ from localmail.search.sort_axes import (
     TEXTLESS_SORT,
     SortMode,
     SortOrder,
+    is_rankable,
     resolve_sort,
     sort_applicability_error,
     sort_membership_error,
@@ -225,3 +226,57 @@ def test_sort_is_reported_before_sort_order_when_both_are_wrong() -> None:
     assert problem is not None
     assert "unknown sort 'Date'" in problem
     assert "sort_order" not in problem
+
+
+# ---------------------------------------------------------------------------
+# is_rankable — the question the sort selector needs answered (#353)
+# ---------------------------------------------------------------------------
+#
+# `sort_applied` (#345) reports which ordering ran, which is exact only when
+# the caller stated nothing: a stated `date` is honoured for *any* query, so
+# `sort_applied == "date"` cannot distinguish "there was nothing to rank"
+# from "rank was available and not chosen". The GUI inferred the first from
+# the second and paid for it in #353 — a click that re-enabled Relevance on
+# a query that genuinely could not be ranked.
+
+
+@pytest.mark.parametrize("free_text", WITH_TEXT)
+def test_a_query_with_free_text_is_rankable(free_text: str) -> None:
+    assert is_rankable(free_text=free_text) is True
+
+
+@pytest.mark.parametrize("free_text", TEXTLESS)
+def test_a_query_with_no_free_text_is_not_rankable(free_text: str) -> None:
+    assert is_rankable(free_text=free_text) is False
+
+
+@pytest.mark.parametrize("free_text", TEXTLESS + WITH_TEXT)
+@pytest.mark.parametrize("requested", [None, "rank", "date"])
+def test_resolve_sort_returns_rank_exactly_when_the_query_is_rankable(
+    free_text: str, requested: SortMode | None,
+) -> None:
+    """The one-authority pin, and the reason this rule lives here.
+
+    ``resolve_sort`` asks ``is_rankable`` rather than repeating the
+    classification, so a response can never carry ``rankable=False``
+    alongside ``sort_applied="rank"``. Stated over every request shape
+    because the implication only runs one way: a rankable query resolves to
+    ``date`` whenever ``date`` was asked for.
+    """
+    resolved = resolve_sort(requested=requested, free_text=free_text)
+    if resolved == "rank":
+        assert is_rankable(free_text=free_text) is True
+    if not is_rankable(free_text=free_text):
+        assert resolved == TEXTLESS_SORT
+
+
+@pytest.mark.parametrize("free_text", TEXTLESS + WITH_TEXT)
+def test_rankability_is_exactly_what_the_applicability_rule_judges(
+    free_text: str,
+) -> None:
+    """``sort_applicability_error`` refuses a stated ``rank`` on precisely
+    the queries this reports unrankable — the two readings cannot drift."""
+    refused = sort_applicability_error(
+        requested="rank", free_text=free_text,
+    ) is not None
+    assert refused is not is_rankable(free_text=free_text)

@@ -451,6 +451,99 @@ describe("search store: the sort it states (#324)", () => {
 });
 
 /**
+ * #353 — whether ranking was possible at all, which the ordering cannot say.
+ *
+ * `sort_applied` is `date` both for a query the server could not rank and
+ * for a text query whose caller asked for date. The selector inferred the
+ * first from the second and re-enabled Relevance on unrankable queries once
+ * a click could change the request. The store records `rankable` off every
+ * response, at all four sites an ordering reaches it.
+ */
+describe("search store: whether the query could be ranked (#353)", () => {
+  const page = (
+    rankable: boolean | undefined,
+    cursor: string | null = null,
+  ) => ({
+    results: [], next_cursor: cursor, total_estimate: null, took_ms: 1,
+    sort_applied: "date",
+    ...(rankable === undefined ? {} : { rankable }),
+  });
+
+  it("records an unrankable query from a fresh search", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page(false));
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(search.snapshot.rankable).toBe(false);
+  });
+
+  it("records a rankable query whose caller chose date ordering", async () => {
+    // The discriminating pair: `sort_applied` is "date" in both these tests
+    // and only `rankable` separates them.
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page(true));
+    search.setQuery("invoice");
+    await search.submit();
+    expect(search.snapshot.sortApplied).toBe("date");
+    expect(search.snapshot.rankable).toBe(true);
+  });
+
+  it("reads null from a server that does not send the key", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page(undefined));
+    search.setQuery("invoice");
+    await search.submit();
+    expect(search.snapshot.rankable).toBe(null);
+  });
+
+  it("clears it when a search fails", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue(page(false));
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(search.snapshot.rankable).toBe(false);
+    (runSearch as unknown as { mockRejectedValue: (v: unknown) => void })
+      .mockRejectedValue(new Error("boom"));
+    await search.submit();
+    // Nothing on screen for it to describe, so it claims nothing.
+    expect(search.snapshot.rankable).toBe(null);
+  });
+
+  it("a continuation page records it too", async () => {
+    // Page 1 omits the key, so the only way to reach `false` is for
+    // `loadMore` to read the continuation's value — the vacuity trap the
+    // #345 sibling above documents.
+    const m = runSearch as unknown as {
+      mockResolvedValueOnce: (v: unknown) => void;
+    };
+    m.mockResolvedValueOnce(page(undefined, "K|abc"));
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(search.snapshot.rankable).toBe(null);
+    m.mockResolvedValueOnce(page(false, null));
+    await search.loadMore();
+    expect(search.snapshot.rankable).toBe(false);
+  });
+
+  it("the 409 recovery records it as well", async () => {
+    const m = runSearch as unknown as {
+      mockResolvedValueOnce: (v: unknown) => void;
+      mockRejectedValueOnce: (v: unknown) => void;
+    };
+    m.mockResolvedValueOnce(page(undefined, "tok:2"));
+    search.setQuery("from:alice");
+    await search.submit();
+    expect(search.snapshot.rankable).toBe(null);
+    m.mockRejectedValueOnce(new Error(
+      '{"type":"/problems/search-cursor-expired","detail":"gone"}',
+    ));
+    m.mockResolvedValueOnce(page(false, null));
+    await search.loadMore();
+    expect(search.snapshot.rankable).toBe(false);
+  });
+});
+
+/**
  * #345 — the ordering the store *displays* is the one the server ran.
  *
  * `sort` is a request and the server resolves it from the query, so the two

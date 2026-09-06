@@ -53,6 +53,7 @@ from localmail.search.sort_axes import (
     DEFAULT_SORT_ORDER,
     SortMode,
     SortOrder,
+    is_rankable,
     resolve_sort,
     sort_applicability_error,
     sort_membership_error,
@@ -405,6 +406,23 @@ class SearchPage:
     #: cannot claim ``rank`` for a date page by forgetting to write it. It
     #: is declared ahead of the defaulted fields for that reason alone.
     sort_applied: SortMode
+    #: Whether this query had anything for the hybrid pool to rank against
+    #: (#353) — ``sort_axes.is_rankable`` of the query that produced the
+    #: rows, which is the same reading ``resolve_sort`` turns into
+    #: ``sort_applied``.
+    #:
+    #: Not recoverable from ``sort_applied``: a stated ``date`` is honoured
+    #: for any query, so ``sort_applied == "date"`` covers both "nothing to
+    #: rank" and "rank was available and not chosen". The GUI inferred the
+    #: first from the second and re-enabled Relevance on unrankable queries.
+    #:
+    #: **No default**, for the reason ``sort_applied`` has none — and here
+    #: a default would be actively wrong at one site:
+    #: ``api.search._empty_grown_page`` builds ``query=parse_query("")`` as
+    #: a stand-in for an exhausted pool, so this cannot be a property
+    #: derived from ``query`` either. It is stamped, from the pool's own
+    #: metadata there and from the branch's own parse everywhere else.
+    rankable: bool
     next_keyset: KeysetCursor | None = None
     rewrite_status: str = NOT_REQUESTED
     rewrite_note: str | None = None
@@ -436,6 +454,13 @@ class PoolMetadata:
     # the reader is what makes a future dispatch change silently wrong.
     # No default, for the reason ``sort`` has none.
     sort_order: SortOrder
+    # Whether the query this pool was built from could be ranked. Always
+    # ``True`` — a pool is only minted on the rank branch, which
+    # ``resolve_sort`` cannot reach without free text — but derived from the
+    # pool's own parsed query rather than written as that invariant, so the
+    # reader cannot outlive it. ``_empty_grown_page`` is the consumer: it
+    # stands in for a page of this pool and has no query of its own.
+    rankable: bool
 
 
 class Searcher:
@@ -513,6 +538,7 @@ class Searcher:
             pool_size=len(entry["hydrated"]),
             sort=entry["sort"],
             sort_order=entry["sort_order"],
+            rankable=is_rankable(free_text=entry["parsed"].free_text),
         )
 
     def _maybe_warn_unpopulated_body_lang(
@@ -917,6 +943,7 @@ class Searcher:
             search_token=search_token, query=entry["parsed"],
             timing_ms={"cache_hit": 0.0},
             sort_applied=sort,
+            rankable=is_rankable(free_text=entry["parsed"].free_text),
         )
 
     def grow_pool(
@@ -1015,6 +1042,7 @@ class Searcher:
             has_more_in_pool=len(hydrated) > page_size, can_grow_pool=True,
             search_token=token, query=parsed, timing_ms=timing,
             sort_applied=sort,
+            rankable=is_rankable(free_text=parsed.free_text),
         )
 
     def search(
@@ -1280,6 +1308,12 @@ class Searcher:
             raise SortNotApplicable(sort_error)
         effective_sort: SortMode = resolve_sort(requested=sort,
                                                 free_text=parsed.free_text)
+        # Read once, from the same string `effective_sort` was resolved
+        # from, and stamped on whichever branch below answers. Reporting it
+        # is what lets a client stop inferring rankability from the
+        # ordering — `sort_applied` is `date` both for a query with nothing
+        # to rank and for a text query whose caller asked for date (#353).
+        rankable = is_rankable(free_text=parsed.free_text)
         # Refused rather than honoured: the rank path serves a bounded
         # candidate pool, so reversing it returns the least relevant of the
         # top hits rather than of the archive — an artifact of where the
@@ -1412,6 +1446,7 @@ class Searcher:
                 can_grow_pool=False,
                 search_token=None, query=parsed, timing_ms=timing,
                 sort_applied=effective_sort,
+                rankable=rankable,
                 next_keyset=next_keyset,
                 rewrite_status=rewrite_status,
                 rewrite_note=rewrite_note,
@@ -1477,6 +1512,7 @@ class Searcher:
             can_grow_pool=True,
             search_token=token, query=parsed, timing_ms=timing,
             sort_applied=effective_sort,
+            rankable=rankable,
             rewrite_status=rewrite_status,
             rewrite_note=rewrite_note,
             rewrite_note_code=rewrite_note_code,

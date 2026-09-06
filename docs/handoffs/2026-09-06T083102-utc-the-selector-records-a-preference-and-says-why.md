@@ -121,8 +121,10 @@ and the `click`-vs-`change` finding, and **corrects the now-stale
   | rust `#[test]` (static) | **40** | **41** |
 
   The +52 python is 30 (`test_sort_axes.py`) + 21 (`test_search_rankable.py`)
-  + 1 (`test_mcp_server_build.py`). The +22 vitest is 11 (`sort_display`) +
-  5 (SearchBar) + 6 (store).
+  + 1 (`test_mcp_server_build.py`). The +22 vitest is 9 (`sort_display`) +
+  7 (SearchBar) + 6 (store). **Both breakdowns were measured per file against
+  a `main` worktree**, not derived — the first draft of this line guessed
+  11/5/6 for vitest and was wrong on two of the three.
 - The 2 warnings are the pre-existing `websockets` deprecations (**#25**), so
   **#321's acceptance signal still holds**.
 - `cargo test` → **109 passed** on the branch. `main` was **not** re-run; 108

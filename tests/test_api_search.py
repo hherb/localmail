@@ -240,6 +240,7 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     # api-level so nothing encodes it here, but leaving it auto-mocked is
     # how the wire-level instance of the same fake went unnoticed.
     fake_page.sort_applied = "rank"
+    fake_page.rankable = True
 
     fake_searcher.search.return_value = fake_page
 
@@ -288,6 +289,7 @@ def _fake_searcher_for_smart(
     page.page = 1
     page.next_keyset = None
     page.sort_applied = "rank"
+    page.rankable = True
     page.rewrite_status = page_status
     page.rewrite_note = page_note
     page.rewrite_note_code = page_note_code
@@ -356,8 +358,11 @@ def test_run_search_empty_acl_short_circuit_includes_rewrite_status():
                    # no cursor to infer an ordering from, and its empty page
                    # is byte-identical to "you have reached the end".
                    "sort_applied": "rank",
-                   # And `rankable` beside it (#353) — exact on every mode
-                   # here, being a property of the query alone.
+                   # And `rankable` beside it (#353), resolved from the same
+                   # string as `sort_applied` so the pair cannot contradict
+                   # itself. Neither is *exact*: both read the gate's parse
+                   # of the raw request field, where the rowed branches read
+                   # the composed query. Accepted because no rows come back.
                    "rankable": True,
                    "rewrite_status": "not_requested", "rewrite_note": None,
                    "rewrite_note_code": None}

@@ -1,5 +1,24 @@
 # NEXT_SESSION.md — localmail handoff
 
+> **Superseded in three places by the review round on the same PR (#355).**
+> Left otherwise as written — it records what that pass believed. The
+> corrections, with their measurements, are in CLAUDE.md's #353/#354 entry:
+>
+> 1. *"a response cannot carry `rankable=False` beside `sort_applied="rank"`"*
+>    — reachable via a **pool cursor** on the empty-ACL branch, which took
+>    `sort_applied` from `plan.sort` raw. That branch resolves both fields
+>    from one string now.
+> 2. *"The empty-ACL short-circuit reports it **exactly**"* — it shares
+>    `sort_applied`'s divergent-parse caveat; the gate and the rowed branches
+>    parse different strings, and `from:"` / `"` disagree in opposite
+>    directions.
+> 3. *"the garbage is not a constant"* — the `{}`/`[]` difference belongs to
+>    the serialisation path, not the field.
+>
+> Two behavioural gaps were also closed: `relevanceUnavailable` keeps the
+> #345 inference as a fallback for a `serve` that reports no `rankable`, and
+> the Relevance radio gained the behavioural test it never had.
+
 > **Status as of 2026-09-06 (session 43).** `main` was **`be678f3`** at the
 > start — PR #352 merged by the operator, **#345 closed**, **Dependabot still
 > 0**. This session opened **one PR** (#355) on `fix/353-354-sort-selector`,

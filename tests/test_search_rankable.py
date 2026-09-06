@@ -166,12 +166,16 @@ def test_a_cached_pool_reports_itself_rankable(searcher):
     built on the rank branch, which is unreachable without free text. It is
     what makes ``_empty_grown_page`` able to stand in for one.
 
-    It is also the only pin the *pool branch of* ``Searcher.search`` can
-    have. That branch sits under ``if effective_sort == "date": return``, so
+    The *pool branch of* ``Searcher.search`` cannot be pinned against a
+    hardcode at all. That branch sits under ``if effective_sort == "date":
+    return``, so
     it runs only with ``effective_sort == "rank"`` — which ``resolve_sort``
     returns only when the query is rankable. Hardcoding ``True`` at that
     stamp is therefore an **equivalent mutation**, and it survives: no input
-    can separate the two. Recorded rather than papered over, because the
+    can separate the two. (This test does not reach that stamp — it asserts
+    ``meta.rankable``, which ``get_pool_metadata`` derives independently;
+    ``test_a_query_with_text_is_rankable`` is what exercises the stamp.)
+    Recorded rather than papered over, because the
     three *pool readers* below are a different case — their entry is
     independent input, hardcoding there survived until they were pinned, and
     a reader who conflates the two will delete pins that are load-bearing.
@@ -224,6 +228,32 @@ def test_pool_metadata_derives_rankability_from_the_pool_s_query(searcher):
     meta = searcher.get_pool_metadata("tok-blank-meta")
     assert meta is not None
     assert meta.rankable is False
+
+
+def test_the_exhausted_pool_page_derives_rankability_from_the_pool_too(
+    searcher,
+):
+    """``_empty_grown_page`` is the **fourth** pool reader, and was pinned in
+    only one direction.
+
+    ``test_a_pool_exhausted_at_the_cap_reports_the_pool_as_rankable`` catches
+    a derivation from ``page.query`` (which would read ``False`` for a
+    rankable pool), but hardcoding ``rankable=True`` there survived the whole
+    suite — every pool a real dispatch builds is rankable, so nothing
+    separated the reader from the invariant. Same technique and same reason as
+    the three above: a textless pool put straight into the cache, because
+    encoding "pool ⟹ rankable" in a reader is what a future dispatch change
+    makes silently wrong.
+    """
+    cfg = searcher.config
+    _textless_pool(searcher, "tok-blank-capped",
+                   candidates_per_arm=cfg.candidates_per_arm_max, user_id=1)
+    out = run_search(searcher=searcher, free_text="", filters={},
+                     limit=5, allowed_account_ids=[1], user_id=1,
+                     cursor=encode_search_cursor(
+                         SearchCursor(token="tok-blank-capped", page=2)))
+    assert out["next_cursor"] is None
+    assert out["rankable"] is False
 
 
 # --------------------------------------------------------------------------
@@ -302,6 +332,46 @@ def test_the_empty_acl_short_circuit_reports_a_textless_query_as_unrankable(
     out = run_search(searcher=searcher, free_text="subject:nothing", filters={},
                      limit=5, allowed_account_ids=[], user_id=1)
     assert out["rankable"] is False
+
+
+@pytest.mark.parametrize("free_text", ["", "subject:nothing"])
+def test_the_empty_acl_branch_never_pairs_rank_with_unrankable(searcher,
+                                                              free_text):
+    """The pairing this module calls impossible, on the one branch that used
+    to produce it.
+
+    ``sort_applied`` here was ``plan.sort`` raw, and ``resolve_cursor_plan``'s
+    pool arm is ``DEFAULT_SORT if requested_sort is None else requested_sort``
+    — it never consults ``is_rankable``. So a **pool cursor** presented with a
+    textless query answered ``sort_applied="rank"`` beside ``rankable=False``:
+    the combination ``is_rankable``'s docstring says cannot occur, and the one
+    the GUI renders as a checked *and* disabled Relevance radio above a note
+    saying there is nothing to rank.
+
+    Both fields go through the same resolution now. The cursor is what makes
+    this reachable — a *fresh* textless request is already resolved to
+    ``date`` — so a pin without one tests nothing.
+    """
+    cursor = encode_search_cursor(SearchCursor(token="tok-gone", page=2))
+    out = run_search(searcher=searcher, free_text=free_text, filters={},
+                     limit=5, allowed_account_ids=[], user_id=1, cursor=cursor)
+    assert out["rankable"] is False
+    assert out["sort_applied"] == "date"
+
+
+def test_the_empty_acl_branch_still_reports_rank_for_a_rankable_query(
+    searcher,
+):
+    """The positive control for the pin above.
+
+    A resolution clamped to ``date`` unconditionally would satisfy it while
+    silently mislabelling every rankable query on this branch.
+    """
+    cursor = encode_search_cursor(SearchCursor(token="tok-gone", page=2))
+    out = run_search(searcher=searcher, free_text="needle", filters={},
+                     limit=5, allowed_account_ids=[], user_id=1, cursor=cursor)
+    assert out["rankable"] is True
+    assert out["sort_applied"] == "rank"
 
 
 def test_a_pool_exhausted_at_the_cap_reports_the_pool_as_rankable(searcher):

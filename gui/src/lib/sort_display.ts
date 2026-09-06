@@ -66,18 +66,42 @@ export function displayedSort(
  * so nothing the user prefers can move it, and both faults go with the
  * inference.
  *
- * `null` is unknown — nothing has run, or a `serve` predating the field —
- * and disables nothing. Never claiming unavailability without proof is the
- * same degradation `asSortMode` gives an unrecognised ordering.
+ * `null` is unknown, and the #345 inference is kept as the fallback for
+ * exactly that case — **not** as a second authority. Two servers report
+ * nothing: one predating #345 (neither field), where the inference is also
+ * `false` and nothing is claimed; and the *intermediate* one that sends
+ * `sort_applied` and not `rankable`, which is what a running `serve` is for
+ * the whole window between rebuilding this client and restarting the daemon.
+ * Reading `rankable === false` alone silently dropped #345's disable there —
+ * measured against that fixture, `main` disabled Relevance and showed the
+ * reason while this file did neither, and the now-clickable radio then cost
+ * a wasted round trip and stuck checked over date-ordered rows.
  *
- * The flag describes the rows **on screen**, not the query box: `rankable`
- * deliberately outlives an edit to the box (see `displayedSort`), so after a
- * textless search, typing rankable text leaves Relevance disabled until the
- * next submit. That is why `RELEVANCE_UNAVAILABLE_REASON` is worded after
- * the rows rather than as an instruction about the box.
+ * The inference's two faults are confined to that window by construction,
+ * since it runs only where the server cannot answer: a recorded Date click
+ * flips `requested` and re-enables Relevance. That is the #353 wobble, and
+ * against a server that cannot tell us either way it is the honest trade —
+ * a claim we can withdraw beats a protection silently lost.
+ *
+ * Never claiming unavailability without proof is the same degradation
+ * `asSortMode` gives an unrecognised ordering; the inference *is* proof
+ * while `statedSort` never sends `rank`, which is what made it right in the
+ * first place and is unchanged.
+ *
+ * The result describes the rows **on screen**, not the query box: both
+ * inputs deliberately outlive an edit to the box (see `displayedSort`), so
+ * after a textless search, typing rankable text leaves Relevance disabled
+ * until the next submit. That is why `RELEVANCE_UNAVAILABLE_REASON` is
+ * worded after the rows rather than as an instruction about the box.
  */
-export function relevanceUnavailable(rankable: boolean | null): boolean {
-  return rankable === false;
+export function relevanceUnavailable(
+  rankable: boolean | null,
+  requested: SortMode,
+  applied: SortMode | null,
+): boolean {
+  return rankable !== null
+    ? rankable === false
+    : applied === "date" && requested === "rank";
 }
 
 /**
@@ -86,7 +110,7 @@ export function relevanceUnavailable(rankable: boolean | null): boolean {
  *
  * The one place the wire value becomes a boolean, for the reason
  * `asSortMode` is the one place the ordering becomes a `SortMode`: the value
- * crosses Rust as an open `Option<bool>` and reaches JS through
+ * crosses Rust as an `Option<bool>` and reaches JS through
  * `invoke<SearchResponse>`, an **unchecked** type assertion.
  *
  * A truthiness test would be wrong in both directions on what an unchecked
@@ -120,8 +144,13 @@ export interface SortClickOutcome {
  * Recording and re-running are genuinely separate: a click that agrees with
  * the rows on screen but not with the stored preference must be *recorded*
  * without re-running (the rows would not change, so the request would be a
- * wasted round trip), and the reverse pairing is reachable too as the
- * transient between a click and its response landing.
+ * wasted round trip). The reverse pairing — agrees with the preference,
+ * disagrees with the rows — is **not** reachable through the component
+ * today: every state where the two disagree leaves the clicked radio either
+ * already checked or `disabled` (`submit()` sets `loading` synchronously, so
+ * no click is dispatched while a response is in flight). It is answered
+ * anyway because the two questions are genuinely independent and the type
+ * must not conflate them — which is the whole of the defect above.
  *
  * Taken as an object rather than three positional `SortMode`s, for the
  * reason `statedSort` shed its third parameter: three same-typed positional
@@ -159,7 +188,11 @@ export function asSortMode(value: unknown): SortMode | null {
   return value === "rank" || value === "date" ? value : null;
 }
 
-/** Why Relevance is disabled. Shown as the control's `title`. */
+/**
+ * Why Relevance is disabled. Rendered as visible text beside the selector
+ * and referenced by its `aria-describedby` (#354) — not a `title`, which
+ * a disabled input puts out of reach of the keyboard entirely.
+ */
 export const RELEVANCE_UNAVAILABLE_REASON =
   "These results have nothing to rank — filters alone are ordered by date. " +
   "Add search text and search again.";

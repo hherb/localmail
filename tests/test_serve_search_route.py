@@ -74,10 +74,12 @@ def _fake_searcher_returning_one_hit():
     # raising, so an unset attribute here does not fail the request — it puts
     # `"sort_applied": {}` on the wire with every test green.
     page.sort_applied = "rank"
-    # Same trap, same remedy (#353). Observed garbage differs by field —
-    # this one rendered as `[]` where `sort_applied` rendered as `{}` — so
-    # do not go looking for a particular wrong value; the rule is that an
-    # unset attribute serialises to *something* rather than failing.
+    # Same trap, same remedy (#353). Do not go looking for a particular wrong
+    # value: what an unset attribute serialises to is a property of the
+    # *path*, not the field. Measured — bare `jsonable_encoder` renders both
+    # of these as `{}`, while the route's `-> dict[str, Any]` response field
+    # renders both as `[]`. The rule is that it serialises to *something*
+    # rather than failing, so assert on type, never on a value.
     page.rankable = True
     s.search.return_value = page
     return s

@@ -43,9 +43,13 @@
 > as unrankable. Found by reading the construction sites before writing the
 > field, and it is why the field is explicit and defaultless.
 >
-> **(3) The MagicMock trap fired again, and the garbage is not a constant.**
-> An unset `page.rankable` reached the wire as **`[]`** where `sort_applied`
-> had rendered as `{}`. Do not go looking for a particular wrong value.
+> **(3) The MagicMock trap fired again, and there is no particular wrong
+> value to look for.** An unset attribute *serialises* instead of failing,
+> and what it serialises to belongs to the **path**, not the field —
+> measured, bare `jsonable_encoder` renders both fields `{}`, the route's
+> `-> dict[str, Any]` renders both `[]`. Assert on type, never on a value.
+> (Corrected in the review round; this first read the difference as
+> per-field.)
 >
 > **Open issue count is 21, dropping to 19 on merge. Dependabot stays 0.**
 
@@ -76,14 +80,18 @@ so **all five frontend gates were run** (risk 35).
 the first from the second, which is #353.
 
 - `sort_axes.is_rankable` is the rule, and **`resolve_sort` asks it** rather
-  than repeating the `walk_for_text` test — so a response cannot carry
-  `rankable=False` beside `sort_applied="rank"`.
+  than repeating the `walk_for_text` test, so the two *derivations* cannot
+  drift. That is not by itself the wire guarantee — the review round found the
+  forbidden pair reachable via a pool cursor on the empty-ACL branch, and what
+  holds it now is that every emitter resolves both fields from one string.
 - `SearchPage.rankable` / `PoolMetadata.rankable`, defaultless, stamped by the
   branch that produced the rows and derived at every site from that page's own
   query. **Never a property** — see finding (2) above.
-- The empty-ACL short-circuit reports it **exactly**, unlike `sort_applied`
-  beside it: rankability is a property of the query alone, so the gate's own
-  parse answers it without needing to agree with a branch never reached.
+- The empty-ACL short-circuit **shares** `sort_applied`'s divergent-parse
+  caveat rather than being exempt from it (corrected in the review round: the
+  gate and the rowed branches parse different strings, so `from:"` and `"`
+  disagree in opposite directions). Both are accepted because no rows come
+  back. Both are resolved from one string, so the pair stays consistent.
 - MCP: both `server.py` (the published description agents read) and `tools.py`,
   with its own pin — #345's lesson.
 

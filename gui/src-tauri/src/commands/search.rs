@@ -105,7 +105,12 @@ pub struct SearchResponse {
     /// `date` imposed on a textless query are the same value there, and the
     /// selector inferring one from the other is the defect. Absent (a
     /// `serve` predating the field) means "unknown", which disables nothing
-    /// — the same honest degradation `sort_applied` has.
+    /// — the same honest degradation `sort_applied` has for *absence*.
+    /// Not for a type mismatch: `Option<String>` is open, so an ordering
+    /// this client does not know still deserialises and is narrowed in TS,
+    /// whereas a non-boolean here fails the whole `SearchResponse`. The
+    /// server controls the value and it is a Python `bool`, so the envelope
+    /// is narrower than the sibling's rather than equal to it.
     #[serde(default)]
     pub rankable: Option<bool>,
 }

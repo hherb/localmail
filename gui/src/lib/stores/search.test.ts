@@ -512,7 +512,7 @@ describe("search store: whether the query could be ranked (#353)", () => {
   it("a continuation page records it too", async () => {
     // Page 1 omits the key, so the only way to reach `false` is for
     // `loadMore` to read the continuation's value — the vacuity trap the
-    // #345 sibling above documents.
+    // #345 sibling below documents.
     const m = runSearch as unknown as {
       mockResolvedValueOnce: (v: unknown) => void;
     };

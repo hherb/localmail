@@ -271,12 +271,18 @@ def _assert_wire_ordering_fields(body: dict) -> None:
     """Every 200 from /v1/search names a real ordering (#345) and says
     whether it could have ranked (#353).
 
-    Structural, because setting the fields on each fake is discipline and
-    this is what a *new* fake cannot get past: a MagicMock's auto-attribute
-    is serialised rather than raising — as ``{}`` for one field and ``[]``
-    for another, so the wrong value is not even a constant — and an equality
+    Type and membership rather than equality, because a MagicMock's
+    auto-attribute is *serialised* rather than raising, and what it
+    serialises to is a property of the path rather than of the field —
+    measured, bare ``jsonable_encoder`` renders both as ``{}`` while the
+    route's ``-> dict[str, Any]`` response field renders both as ``[]``. So
+    there is no particular wrong value to look for, and an equality
     assertion on one test's expected value says nothing about the next fake
-    somebody adds. Type and membership are what a mock fails.
+    somebody adds.
+
+    It is a helper, not a fixture: it catches only the fakes whose tests
+    call it, and ``test_serve_search_route.py`` drives the same route
+    without it. Setting the fields on each fake remains discipline.
     """
     assert body["sort_applied"] in ("rank", "date"), body["sort_applied"]
     assert isinstance(body["rankable"], bool), body["rankable"]

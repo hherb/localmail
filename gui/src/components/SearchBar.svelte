@@ -24,9 +24,16 @@
   // Read off the server's own answer rather than inferred from the request
   // (#353): `sort_applied` is `date` both for a query with nothing to rank
   // and for a text query whose caller chose date, so inferring re-enabled
-  // Relevance the moment a Date click was recorded.
+  // Relevance the moment a Date click was recorded. The request is still
+  // passed because a `serve` that reports no `rankable` falls back to the
+  // #345 inference — otherwise this control silently loses its disable for
+  // the whole window between shipping this client and restarting the daemon.
   const rankUnavailable = $derived(
-    relevanceUnavailable(search.snapshot.rankable),
+    relevanceUnavailable(
+      search.snapshot.rankable,
+      search.snapshot.sort,
+      search.snapshot.sortApplied,
+    ),
   );
 
   let popoverOpen = $state(false);

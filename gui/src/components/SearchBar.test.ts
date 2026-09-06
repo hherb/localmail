@@ -298,6 +298,57 @@ describe("SearchBar", () => {
     expect(runSearch).toHaveBeenCalledOnce();
   });
 
+  it("records and re-runs a click on RELEVANCE from a date-ordered page",
+     async () => {
+    // The Relevance radio had no behavioural test at all: every radio click
+    // in this file targeted Date, so deleting `onclick` from Relevance —
+    // this PR rewired two radios and pinned one — left all 479 tests green
+    // while the control it exists to fix went inert. Verified as a real
+    // mutation, not an equivalent one: this test fails with
+    // `expected 'date' to be 'rank'` against that deletion.
+    //
+    // The state is `sortClick({preference: "date", shown: "date",
+    // clicked: "rank"})` — the ordinary "switch back to Relevance", and the
+    // only reachable combination that had no component-level test.
+    await serveWith("date", true);
+    search.setQuery("invoice");
+    search.setSort("date");
+    render(SearchBar);
+    await search.submit();
+    const relevance =
+      screen.getByRole("radio", { name: /relevance/i }) as HTMLInputElement;
+    expect(relevance.disabled).toBe(false);
+    const { runSearch } = await import("../lib/tauri");
+    (runSearch as ReturnType<typeof vi.fn>).mockClear();
+    await fireEvent.click(relevance);
+    expect(search.snapshot.sort).toBe("rank");
+    expect(runSearch).toHaveBeenCalledOnce();
+  });
+
+  it("keeps #345's disable against a serve that reports no rankability",
+     async () => {
+    // The INTERMEDIATE serve: #345 (`sort_applied`) without #353
+    // (`rankable`) — what a running daemon is for the whole window between
+    // shipping this client and restarting it. Reading `rankable === false`
+    // alone left Relevance enabled with no reason here, silently un-fixing
+    // #345; the fallback inference restores it. Measured against `main` on
+    // this exact fixture before the fallback existed: `main` disabled the
+    // radio and showed the reason, this file did neither.
+    const { runSearch } = await import("../lib/tauri");
+    (runSearch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      results: [], next_cursor: null, total_estimate: null, took_ms: 1,
+      sort_applied: "date",
+    });
+    search.setQuery("from:alice");
+    render(SearchBar);
+    await search.submit();
+    const relevance =
+      screen.getByRole("radio", { name: /relevance/i }) as HTMLInputElement;
+    expect(search.snapshot.rankable).toBe(null);
+    expect(relevance.disabled).toBe(true);
+    expect(reasonText() ?? "").toMatch(/search text/i);
+  });
+
   it("re-runs exactly once for a real change, not twice", async () => {
     // Only `click` is bound, and this is why. A radio that actually changes
     // fires `change` *and* `click`, so binding both double-fired a real

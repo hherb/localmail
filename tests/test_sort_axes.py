@@ -255,13 +255,23 @@ def test_a_query_with_no_free_text_is_not_rankable(free_text: str) -> None:
 def test_resolve_sort_returns_rank_exactly_when_the_query_is_rankable(
     free_text: str, requested: SortMode | None,
 ) -> None:
-    """The one-authority pin, and the reason this rule lives here.
+    """``resolve_sort`` asks ``is_rankable`` rather than repeating the
+    classification, so the two derivations cannot drift apart.
 
-    ``resolve_sort`` asks ``is_rankable`` rather than repeating the
-    classification, so a response can never carry ``rankable=False``
-    alongside ``sort_applied="rank"``. Stated over every request shape
-    because the implication only runs one way: a rankable query resolves to
-    ``date`` whenever ``date`` was asked for.
+    Stated over every request shape because the implication only runs one
+    way: a rankable query resolves to ``date`` whenever ``date`` was asked
+    for.
+
+    **Both sides move together**, so this cannot detect the classification
+    itself being wrong — hardcoding ``is_rankable`` to either constant leaves
+    every parametrisation green. What it does catch is an inversion *inside*
+    ``resolve_sort``. The classification is pinned by
+    ``test_a_query_with_no_free_text_is_not_rankable`` and cross-checked
+    against an independent reading by
+    ``test_rankability_is_exactly_what_the_applicability_rule_judges``, which
+    reaches ``walk_for_text`` without going through ``is_rankable``. Nor is
+    this the wire pairing — see ``is_rankable``'s own docstring for what
+    holds that, and ``test_search_rankable.py`` for the pin.
     """
     resolved = resolve_sort(requested=requested, free_text=free_text)
     if resolved == "rank":

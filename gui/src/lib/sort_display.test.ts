@@ -36,26 +36,48 @@ describe("displayedSort", () => {
 
 describe("relevanceUnavailable", () => {
   it("is true exactly when the server said the query cannot be ranked", () => {
-    expect(relevanceUnavailable(false)).toBe(true);
+    expect(relevanceUnavailable(false, "rank", "date")).toBe(true);
   });
 
   it("is false when the server said it can be", () => {
-    expect(relevanceUnavailable(true)).toBe(false);
+    expect(relevanceUnavailable(true, "rank", "date")).toBe(false);
   });
 
-  it("is false while nothing has run, and for an older server", () => {
-    // Unknown disables nothing: the same honest degradation the absent
-    // `sort_applied` key already has.
-    expect(relevanceUnavailable(null)).toBe(false);
+  it("ignores the request whenever the server answered", () => {
+    // #353 itself: the old rule was the inference below, so recording a Date
+    // click flipped `requested` and re-enabled Relevance on a query that
+    // genuinely cannot be ranked. Rankability is a property of the query, so
+    // once the server has stated it no preference may move it — both
+    // preferences, against both answers.
+    for (const requested of ["rank", "date"] as const) {
+      expect(relevanceUnavailable(false, requested, "date")).toBe(true);
+      expect(relevanceUnavailable(true, requested, "date")).toBe(false);
+    }
   });
 
-  it("no longer reads the REQUEST, which is what #353 was", () => {
-    // The old rule was `applied === "date" && requested === "rank"`, so
-    // recording a Date click flipped it and re-enabled Relevance on a query
-    // that genuinely cannot be ranked. Rankability is a property of the
-    // query, so the request cannot move it.
-    expect(relevanceUnavailable(false)).toBe(true);
-    // ...and it stays true however the user's preference then changes.
+  it("is false while nothing has run", () => {
+    // Unknown with nothing applied claims nothing: the same honest
+    // degradation the absent `sort_applied` key already has.
+    expect(relevanceUnavailable(null, "rank", null)).toBe(false);
+    expect(relevanceUnavailable(null, "date", null)).toBe(false);
+  });
+
+  it("falls back to the #345 inference for an INTERMEDIATE serve", () => {
+    // A `serve` carrying #345 but not #353 — i.e. what a running daemon is
+    // for the whole window between shipping this client and restarting it.
+    // Reading `rankable === false` alone dropped the disable there, which is
+    // #345 silently un-fixed; the inference is still proof, because
+    // `statedSort` never sends `rank`, so a rank preference answered `date`
+    // means the server found nothing to rank.
+    expect(relevanceUnavailable(null, "rank", "date")).toBe(true);
+  });
+
+  it("claims nothing from the inference when the request was honoured", () => {
+    // The other half of the fallback: a `date` request proves nothing either
+    // way, and a `rank` answer proves rank was available.
+    expect(relevanceUnavailable(null, "date", "date")).toBe(false);
+    expect(relevanceUnavailable(null, "rank", "rank")).toBe(false);
+    expect(relevanceUnavailable(null, "date", "rank")).toBe(false);
   });
 
   it("carries a reason that names the remedy", () => {
@@ -117,8 +139,9 @@ describe("sortClick", () => {
   });
 
   it("re-runs without recording when only the display disagrees", () => {
-    // The transient between a click and its response landing: the
-    // preference is already `date` and the rows on screen are still rank.
+    // Not reachable through the component today — every state where the two
+    // disagree leaves the clicked radio already checked or disabled — but the
+    // two questions are independent and the rule must answer both.
     expect(sortClick({ preference: "date", shown: "rank", clicked: "date" }))
       .toEqual({ record: false, resubmit: true });
   });

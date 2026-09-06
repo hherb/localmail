@@ -3922,6 +3922,13 @@ for the full design.
         explains. **Deliberate imprecision** — judging it earlier means
         knowing the resolution before asking for it, i.e. the second parser
         `search_paging.ts` exists not to have.
+        - **#353 superseded this as the primary rule, and kept it as the
+          fallback.** `relevanceUnavailable` reads the server's own
+          `rankable` whenever there is one; the inference above runs only
+          when there is not, so the imprecision it documents is now scoped
+          to a `serve` that cannot answer. Do not delete it as dead: it is
+          what keeps this disable working against a daemon carrying #345 and
+          not #353 — see the #353 entry below.
       - **`sortApplied` keeps describing the rows on screen**, and is not
         cleared when the query box is edited: clearing would flip the
         selector back to the request while date-ordered rows are still
@@ -4025,10 +4032,40 @@ for the full design.
         removes that *and* the imprecision #345 documented, but fixes
         nothing by itself. The operator chose 1+3.
       - **`sort_axes.is_rankable` is the rule, and `resolve_sort` asks it**
-        rather than repeating the `walk_for_text` test — so a response
-        cannot carry `rankable=False` beside `sort_applied="rank"`. The
-        one-authority call `resolve_sort`/`sort_applicability_error` already
-        make one function over.
+        rather than repeating the `walk_for_text` test, so the two
+        *derivations* cannot drift. The one-authority call
+        `resolve_sort`/`sort_applicability_error` already make one function
+        over.
+        - **That is not by itself the wire guarantee, and reading it as one
+          shipped the pair it forbids** (review of #355). `run_search`'s
+          empty-ACL branch took `sort_applied` from `plan.sort` raw, and
+          `resolve_cursor_plan`'s pool arm is `DEFAULT_SORT if
+          requested_sort is None else requested_sort` — it never consults
+          `is_rankable`. So a **pool cursor with a textless query** answered
+          `sort_applied="rank"` beside `rankable=False`: the one combination
+          declared impossible, and the pair the GUI renders as a checked
+          *and* disabled Relevance radio above a note saying there is
+          nothing to rank. That branch resolves both fields through
+          `resolve_sort`/`is_rankable` on one string now — idempotent on
+          fresh (already its own resolution) and keyset (`KEYSET_SORT`,
+          which `resolve_sort` returns for any query), so that pair is the
+          only value it changes. Pinned by
+          `test_the_empty_acl_branch_never_pairs_rank_with_unrankable`, with
+          a rankable positive control beside it so a blanket clamp to `date`
+          fails too.
+        - **Nothing rejects the pair at construction** — `SearchPage` has no
+          `__post_init__` — so what holds it is that every emitter goes
+          through that pair on one string: the two `Searcher.search` stamps,
+          the three pool readers, and the empty-ACL branch. A new emitter
+          must join that list rather than assume it is protected. **#356 is that, filed not fixed** —
+          and note a `__post_init__` would **not** have caught the defect
+          above, the empty-ACL branch building a raw `dict` rather than a
+          `SearchPage`. Two more were filed from the same round: **#357**
+          (the four sort rules take a bare `str` whose "already parsed"
+          precondition lives only in prose, now that `run_search` holds both
+          strings in one scope under a keyword name matching the wrong one)
+          and **#358** (`run_search -> dict[str, Any]`, which is why two
+          consecutive PRs added a wire field and hit the same MagicMock trap).
       - **`SearchPage.rankable` is stamped, not derived — and one site
         proves why.** `api.search._empty_grown_page` builds
         `query=parse_query("")` as a stand-in for an exhausted pool, so a
@@ -4049,11 +4086,20 @@ for the full design.
         **equivalent mutation** no input can separate. Recorded in the test
         file with its proof, because a reader who conflates the two cases
         deletes pins that are load-bearing.
-      - **The empty-ACL short-circuit reports it exactly**, unlike
-        `sort_applied` beside it: rankability is a property of the query
-        alone, so the gate's own parse answers it without needing to agree
-        with a branch the request never reaches. The
-        divergent-parse caveat that field carries does not apply here.
+      - **The empty-ACL short-circuit shares `sort_applied`'s caveat rather
+        than being exempt from it.** It shipped claiming to be "exact on
+        every mode, unlike `sort_applied`", on the grounds that rankability
+        is a property of the query alone. True of the *function*, and it
+        does not follow: the two layers feed it **different strings**. The
+        gate parses the raw request field, the rowed branches parse
+        `build_query_string(...)`'s composed query, and `parse_query` is not
+        compositional across an unbalanced quote. Measured, both ways:
+        `from:"` reads rankable at the gate and textless in the Searcher,
+        and `"` the reverse. Since `resolve_sort` *is* `is_rankable` plus
+        the caller's `requested`, this is the same divergence `sort_applied`
+        carries, not a second one. Both are accepted for the reason that
+        field already gives — **no rows come back**, so nothing is
+        mislabelled because nothing is labelled.
       - **`click`, not `change`, and not both.** A radio fires no `change`
         when already checked — the #353 state — and fires `click` either
         way, for pointer and keyboard activation alike, so `click` is the
@@ -4073,24 +4119,73 @@ for the full design.
         assertion, so `"false"` (truthy) would read as rankable and `0`
         (falsy) would silently disable a working control. Unknown → `null`,
         which disables nothing — `asSortMode`'s degradation.
+        - **"Unknown disables nothing" was right for a pre-#345 serve and
+          wrong for the one in between** (review of #355). A daemon carrying
+          `sort_applied` and not `rankable` is what a running `serve` *is*
+          for the whole window between shipping a GUI build and restarting
+          it — and reading `rankable === false` alone silently dropped
+          #345's disable there. Measured on that fixture, both refs: `main`
+          disabled Relevance and rendered the reason; the first cut of #353
+          did neither, and the now-clickable radio then cost a wasted round
+          trip and stuck **checked over date-ordered rows** — #345's own
+          defect, restored by its successor. So `relevanceUnavailable` keeps
+          the #345 inference as a **fallback**, used only when `rankable` is
+          `null`.
+          - The inference is still *proof* — `statedSort` never sends
+            `rank`, so a rank preference answered `date` means the server
+            found nothing to rank — which is what made it right in #345 and
+            is unchanged. Its two faults are confined by construction to the
+            window where the server cannot answer, and there a claim that
+            can be withdrawn beats a protection silently lost.
+          - **The DOM desync it exposes is pre-existing, not new**: Svelte's
+            one-way `checked={shownSort === …}` is never re-asserted when
+            the expression holds its value, so a click the browser applied
+            natively stands. `main` merely keeps it unreachable by disabling
+            the radio, which is what the fallback restores. Measured on
+            `main` by force-enabling the radio: same desync, 0 requests.
+      - **The Relevance radio had no behavioural test, and the mutation
+        proved it** (review of #355). #353 rewires **two** radios from
+        `onchange` to `onclick` and pinned one: every `fireEvent.click` on a
+        radio in `SearchBar.test.ts` targeted **Date** — nine of them — so
+        deleting `onclick` from Relevance outright left **479/479 green**,
+        on the control both issues exist to fix. Non-equivalent, proven both
+        ways: the added
+        `records and re-runs a click on RELEVANCE from a date-ordered page`
+        fails that deletion with `expected 'date' to be 'rank'` and passes
+        clean. It is `sortClick({preference: "date", shown: "date", clicked:
+        "rank"})` — the ordinary "switch back to Relevance", and the only
+        reachable combination that had no component test.
       - **#354: the reason is markup, and the codebase already said so.**
         The issue posed `aria-describedby` versus visible text as an
         either/or; `AccountForm.svelte`'s `.hint` span and
         `DaemonPanel.svelte`'s `.note` paragraph both already render a
-        server-disabled control's reason into the markup, so that is the
-        precedent and the tooltip was the outlier. A **disabled input leaves
+        *disabled control's* reason into the markup, so that is the
+        precedent and the tooltip was the outlier. (Only `DaemonPanel`'s is
+        gated on a **server** flag — `AccountForm`'s fires on the client-side
+        `isEdit`. The precedent is the shape, not the source of the flag; an
+        earlier wording here said "server-disabled" of both.) A **disabled input leaves
         the tab order**, so a `title` could not be reached by keyboard at
         all, and it is announced inconsistently and hover-only otherwise.
         Both are done: visible text plus `aria-describedby`.
         - **The issue's scope note asked whether other controls need the
-          same sweep. They do not** — `grep title= gui/src/components/admin`
-          is empty, so this control was the only one hiding its reason.
-          Checked rather than assumed, and recorded so it is not re-opened.
-      - **The MagicMock trap fired again, and the garbage is not a
-        constant.** `page.rankable` unset reached the wire as **`[]`** where
-        `sort_applied` had rendered as `{}`. So do not look for a particular
-        wrong value; the rule is that an unset attribute *serialises*
-        instead of failing. `_assert_wire_ordering_fields` now checks
+          same sweep. They do not**, but the grep first cited for it —
+          `gui/src/components/admin` — excluded the subject, `SearchBar`
+          being nowhere near `admin/`. Re-measured over the real scope: 4
+          hits under `gui/src/components`, 7 under `gui/src`, and every one
+          is a *label* on an enabled control rather than a disable-reason
+          (`AttachmentRow.svelte`, `MainView.svelte`). The conclusion holds;
+          the evidence originally given for it did not.
+      - **The MagicMock trap fired again, and there is no particular wrong
+        value to look for.** An unset attribute *serialises* instead of
+        failing, and what it serialises to is a property of the
+        **serialisation path**, not of the field — measured, bare
+        `jsonable_encoder` renders both `sort_applied` and `rankable` as
+        `{}`, while the route's `-> dict[str, Any]` response field renders
+        both as `[]`. (An earlier wording here read the `{}`/`[]`
+        difference as per-field; it is not, and the pre-existing comments in
+        `test_serve_search_route.py` and `test_serve_acl_routes.py` said the
+        same and are corrected with it.) The rule the guard draws is
+        unchanged: assert on type, never on a value. `_assert_wire_ordering_fields` now checks
         `isinstance(body["rankable"], bool)` beside the membership test, and
         that is the half a new fake cannot get past — mutation-proven by
         deleting the fake's own assignment.

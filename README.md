@@ -1030,6 +1030,8 @@ limitations.
 Five read-only tools:
 
 - `search` — hybrid lexical + vector search; page forward with `next_cursor`.
+  Ranked by relevance, with equally relevant messages ordered newest first;
+  `sort="date"` orders strictly by date instead.
 - `get_message` — one message's headers, body, and attachment list.
 - `get_attachment` — an attachment's extracted **text** or metadata (never raw
   bytes; download those from `GET /v1/attachments/{sha256}`).

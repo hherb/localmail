@@ -4464,6 +4464,79 @@ for the full design.
       code that would be tested against a branch that never runs (#278 is
       this codebase's precedent for a declared-but-unserved surface that
       four test files made look covered).
+    - **Equally relevant rows are ordered newest first, and that is three
+      stages agreeing, not one sort key.** `sort="date"` has always been
+      strict (`date_keyset.DATE_ORDER_BY_SQL` emits `COALESCE(...) DESC
+      NULLS LAST, m.id DESC`); the rank path had no tiebreak at all.
+      `_build_results` sorted on the score alone and Python's sort is
+      stable, so equal scores kept the order fusion produced — which is the
+      sequence the four arms happened to be walked in, and carries no date
+      information. Demonstrated: two messages at the same rank in different
+      arms score identically, and passing the same arms the other way round
+      reversed them.
+      - **Ties are ordinary, not exotic.** An RRF score is a sum of
+        `1 / (k + rank)`, so any two messages hit at the same rank in
+        different arms score identically — and `reranker_enabled` defaults
+        to **false**, so the RRF score *is* the final score on the default
+        path.
+      - The rule is the pure
+        [src/localmail/search/relevance_order.py](src/localmail/search/relevance_order.py)`::relevance_key`
+        — `(score, date_key(when), message_id)` under `reverse=True`. The
+        score leads because the date is a **tiebreak, not the sort**: a key
+        leading with the date turns every relevance search into a date
+        search, which is the opposite failure and much harder to notice
+        (pinned by its own positive control). `message_id` is last because
+        the date tiebreak has ties of its own — a bulk send shares
+        `date_sent` to the second — and without a total order the remainder
+        is input order, i.e. the arbitrary thing this removes.
+      - **All three stages need it, and the middle one is the easy one to
+        miss.** `rrf_fuse` orders; `_retrieve_pool` **cuts** to
+        `rerank_pool_size`, deciding which equally relevant rows are
+        hydrated at all; `_build_results` assembles the page. Fixing only
+        the page orders exactly *what survived the cut* while the cut had
+        already dropped a newer message for an equally relevant older one.
+        Pinned end to end by
+        `test_search_keeps_the_newer_row_when_the_pool_is_cut`.
+      - **`rrf_fuse` breaks ties on `message_id` alone, deliberately.** It
+        is pure and has no connection, and a fused hit is a bare
+        `message_id`. That is enough to stop arm order deciding, and is
+        **not** date-correct; `_cut_pool` applies real dates before the cut.
+        `message_id` is *not* a recency proxy and must not be used as one —
+        it is assigned at sync time, so an archive import gives 2005 mail
+        today's ids.
+      - **The cut skips its query when nothing is dropped** (`len(fused) <=
+        limit`); otherwise it is one `id = ANY(%s)` over at most
+        `4 * candidates_per_arm` ids. A missing id maps to `None` (sorted
+        last) rather than being dropped — it was in the pool, so discarding
+        it there would be a silent second cut.
+        - **Measured, not assumed**, on a 130,000-row table: `Index Scan
+          using messages_pkey`, **0.36 ms** at the default 200 fused ids,
+          1.27 ms at 800, **5.07 ms** at the 3200 the
+          `candidates_per_arm_max=800` ceiling allows (8339 buffer hits).
+          The cut *does* fire at defaults — `rerank_pool_size` is 100
+          against up to 200 fused — so this is on the normal path.
+        - **A boundary-tie fast path was considered and rejected.** The cut
+          only needs the right *set* (`_build_results` re-orders the page),
+          so in principle only a tie straddling the boundary matters and the
+          query could be skipped otherwise. It would rest on exact float
+          equality of RRF sums — `entry["score"] += contrib` accumulates in
+          arm order, and IEEE754 addition is commutative but not associative
+          past two terms — to decide whether to look at all. 0.36 ms on the
+          default path does not buy that reasoning. #5 is this codebase's
+          precedent for closing an optimisation on a measurement rather than
+          shipping it on an intuition.
+      - **`_date_sort_key` now delegates to `relevance_order.date_key`.**
+        The *function* stays dead (see above), but the NULLS-LAST rule it
+        held is live and shared, so the date walk and the rank tiebreak
+        cannot disagree about where an undated row goes. The duplicate
+        `_DATE_SORT_NULL_SENTINEL` is gone.
+      - **The fixtures seed the newer message FIRST, and that is
+        load-bearing.** Ids ascend with insertion, so a fixture seeded
+        oldest-first makes date order and id order agree — and every
+        assertion then also passes for a tiebreak that reads only
+        `message_id` and never looks up a date. Found by mutation:
+        `dates = {}` in `_cut_pool` survived the agreeing fixture and is
+        caught by the contradicting one.
 - **Hard ACL clamp inside the Searcher**: the ACL is enforced in **two**
   places, and both are load-bearing. `api/search.py::_scope_filters_by_acl`
   intersects the caller's *structured* `account_ids` filter and

@@ -16,7 +16,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import MINYEAR, datetime, timezone
+from datetime import datetime
 from typing import Any, Literal
 
 import httpx
@@ -39,6 +39,7 @@ from localmail.search.page_cache import (
     CacheMissError, PageCache, PageOutOfPoolError,
 )
 from localmail.search.query import ParsedQuery, parse_query
+from localmail.search.relevance_order import date_key, relevance_key
 from localmail.search.reranker import Reranker
 from localmail.search.rewrite_status import (
     APPLIED,
@@ -72,12 +73,6 @@ from localmail.search.date_keyset import (
 
 
 
-# Sentinel for "no usable date" — sorts strictly older than any real
-# timestamp so NULLs land at the end of a `sort=date` page under
-# Python's reverse=True ordering.
-_DATE_SORT_NULL_SENTINEL = datetime(MINYEAR, 1, 1, tzinfo=timezone.utc)
-
-
 def _date_sort_key(item: dict) -> tuple[int, datetime]:
     """Key for ``COALESCE(internal_date, date_sent) DESC NULLS LAST``.
 
@@ -93,16 +88,13 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
     change is for. Do **not** add ``sort_order`` handling here "for
     symmetry": it would be tested against a branch that never runs.
 
-    Returned tuple uses (1, dt) for rows with a usable date and (0,
-    sentinel) for NULLs, so Python's default ascending sort puts NULLs
-    first; ``sorted(..., reverse=True)`` then reverses to (newest, ...,
-    older, NULLs-last).
+    The NULLS-LAST rule itself is **not** dead — it moved to
+    ``relevance_order.date_key``, which this delegates to and which the
+    rank path's tiebreak also uses. One authority, so the two orderings
+    cannot disagree about where an undated row goes.
     """
     msg = item.get("msg") or {}
-    dt = msg.get("internal_date") or msg.get("date_sent")
-    if dt is None:
-        return (0, _DATE_SORT_NULL_SENTINEL)
-    return (1, dt)
+    return date_key(msg.get("internal_date") or msg.get("date_sent"))
 
 
 # The date-ordered walk's SQL rules moved to ``search/date_keyset.py``
@@ -254,7 +246,16 @@ def rrf_fuse(arms: list[list[ArmHit]], k: int) -> list[FusedHit]:
             rrf_score=entry["score"],
             contributing_arms=sorted(entry["arms"]),
         ))
-    out.sort(key=lambda h: h.rrf_score, reverse=True)
+    # `message_id` breaks the tie. Two messages hit at the same rank in
+    # different arms score identically, and the order used to come from
+    # `agg` insertion order — i.e. which arm was walked first — so passing
+    # the same arms the other way round silently reversed them.
+    #
+    # This is deterministic, not date-correct: fusion is pure and has no
+    # connection, and every hit here is a bare `message_id`. The date
+    # ordering is applied by `_retrieve_pool` before the cut, where there
+    # is one. See `relevance_order` for why both stages need it.
+    out.sort(key=lambda h: (h.rrf_score, h.message_id), reverse=True)
     return out
 
 
@@ -700,7 +701,62 @@ class Searcher:
         a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
         a4 = arm_vector_attachment_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
         fused = rrf_fuse([a1, a2, a3, a4], k=self._cfg.rrf_k)
-        return fused[:rerank_pool_size]
+        return self._cut_pool(conn, fused, rerank_pool_size)
+
+    def _cut_pool(
+        self, conn: psycopg.Connection, fused: list[FusedHit], limit: int,
+    ) -> list[FusedHit]:
+        """Take the top ``limit`` fused hits, breaking ties by date.
+
+        The cut decides *which* equally relevant rows survive to be
+        hydrated, so applying the date rule only in ``_build_results``
+        would order the page exactly and still drop a newer message in
+        favour of an equally relevant older one before that page existed.
+
+        ``rrf_fuse`` cannot do this itself: it is pure, and a fused hit is
+        a bare ``message_id``. Here there is a connection, so the dates are
+        real rather than proxied through ``message_id`` — which looks like
+        a recency proxy and is not one, being assigned at sync time (an
+        archive import gives 2005 mail today's ids).
+
+        One indexed lookup over at most ``4 * candidates_per_arm`` ids, and
+        skipped entirely when the pool already fits.
+        """
+        if len(fused) <= limit:
+            # Nothing is dropped, so the order the caller sees is decided
+            # by `_build_results` on the same key. Saves the query on the
+            # common small-pool path.
+            return fused
+        dates = self._fetch_sort_dates(conn, [h.message_id for h in fused])
+        fused.sort(
+            key=lambda h: relevance_key(score=h.rrf_score,
+                                        when=dates.get(h.message_id),
+                                        message_id=h.message_id),
+            reverse=True,
+        )
+        return fused[:limit]
+
+    @staticmethod
+    def _fetch_sort_dates(
+        conn: psycopg.Connection, message_ids: list[int],
+    ) -> dict[int, datetime | None]:
+        """``COALESCE(internal_date, date_sent)`` per id, for the pool cut.
+
+        The same expression ``messages_recent_idx`` is built on and the date
+        walk orders by, so the two paths agree on which of two messages is
+        newer. A missing id maps to ``None`` (undated), which
+        ``relevance_key`` sorts last — the row was in the pool, so dropping
+        it here would be a silent second cut.
+        """
+        if not message_ids:
+            return {}
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, COALESCE(internal_date, date_sent) FROM messages"
+                " WHERE id = ANY(%s)",
+                (message_ids,),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
 
     def _hydrate(self, conn: psycopg.Connection, fused: list[FusedHit]) -> list[dict]:
         """Pull message + chunk text for each fused hit, returned in fused order.
@@ -813,9 +869,20 @@ class Searcher:
                 key=lambda x: _date_sort_key(x[0]), reverse=True,
             )
         else:
+            # Equal relevance orders newest first. The score still leads —
+            # the date is a tiebreak, not the sort — and `message_id` closes
+            # the date's own ties so the page is reproducible. One key,
+            # shared with the pool cut in `_retrieve_pool`, or the rule
+            # would hold for the page and not for what reached it.
             ordered = sorted(
                 zip(hydrated, rerank_scores, strict=True),
-                key=lambda x: x[1], reverse=True,
+                key=lambda x: relevance_key(
+                    score=x[1],
+                    when=(x[0]["msg"].get("internal_date")
+                          or x[0]["msg"].get("date_sent")),
+                    message_id=x[0]["fused"].message_id,
+                ),
+                reverse=True,
             )
         start = (page - 1) * page_size
         end = start + page_size

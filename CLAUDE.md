@@ -4659,7 +4659,7 @@ for the full design.
       code that would be tested against a branch that never runs (#278 is
       this codebase's precedent for a declared-but-unserved surface that
       four test files made look covered).
-    - **Equally relevant rows are ordered newest first, and that is three
+    - **Equally relevant rows are ordered newest first, and that is two
       stages agreeing, not one sort key.** `sort="date"` has always been
       strict (`date_keyset.DATE_ORDER_BY_SQL` emits `COALESCE(...) DESC
       NULLS LAST, m.id DESC`); the rank path had no tiebreak at all.
@@ -4684,32 +4684,84 @@ for the full design.
         the date tiebreak has ties of its own — a bulk send shares
         `date_sent` to the second — and without a total order the remainder
         is input order, i.e. the arbitrary thing this removes.
-      - **All three stages need it, and the middle one is the easy one to
-        miss.** `rrf_fuse` orders; `_retrieve_pool` **cuts** to
+      - **Two stages carry it, and the cut is the easy one to miss.**
+        `_cut_pool` (called by `_retrieve_pool`) **cuts** to
         `rerank_pool_size`, deciding which equally relevant rows are
-        hydrated at all; `_build_results` assembles the page. Fixing only
-        the page orders exactly *what survived the cut* while the cut had
-        already dropped a newer message for an equally relevant older one.
-        Pinned end to end by
+        hydrated at all; `_build_results` assembles the page, and
+        `continue_page` re-runs it over the whole cached pool for every
+        later page. Fixing only the page orders exactly *what survived the
+        cut* while the cut had already dropped a newer message for an
+        equally relevant older one. Pinned end to end by
         `test_search_keeps_the_newer_row_when_the_pool_is_cut`.
-      - **`rrf_fuse` breaks ties on `message_id` alone, deliberately.** It
-        is pure and has no connection, and a fused hit is a bare
-        `message_id`. That is enough to stop arm order deciding, and is
-        **not** date-correct; `_cut_pool` applies real dates before the cut.
-        `message_id` is *not* a recency proxy and must not be used as one —
-        it is assigned at sync time, so an archive import gives 2005 mail
-        today's ids.
+      - **`rrf_fuse`'s own tiebreak is defence in depth, NOT a third
+        stage** — the review of #359 corrected this, and the distinction is
+        load-bearing. `relevance_key` is a **total** order (`rrf_fuse`
+        emits one hit per `message_id`, so no two entries tie on all three
+        components), and both stages above re-sort with it, so fused order
+        **cannot reach a caller of `Searcher.search`**. Verified:
+        `_build_results` returns the same page for a pool handed to it in
+        either order. What the tiebreak buys is that `rrf_fuse` is well
+        defined for its direct callers and its own tests. Presenting an
+        unobservable belt as a load-bearing stage is what makes a reader
+        distrust the two that are.
+        - It breaks ties on `message_id` alone because fusion is pure, has
+          no connection, and a fused hit is a bare `message_id`. That is
+          **not** date-correct; `_cut_pool` applies real dates. `message_id`
+          is *not* a recency proxy and must not be used as one — it is
+          assigned at sync time, so an archive import gives 2005 mail
+          today's ids.
+        - **The winner-chunk `max()` in the same function is still decided
+          by arm order on an exact tie, and that one IS observable** — it
+          picks `best_chunk_id`/`best_chunk_table`, hence the snippet,
+          `snippet_source`, `matched_chunk_table` and whether the filename
+          lookup runs. Reproduced: the same message hit at the same rank in
+          two arms yields chunk 101 or 202 depending on which arm list is
+          passed first. Left alone deliberately (which chunk *should* win is
+          a product call, and the obvious one-liner raises `TypeError`
+          comparing a `None` `chunk_id`) — **#360**.
       - **The cut skips its query when nothing is dropped** (`len(fused) <=
         limit`); otherwise it is one `id = ANY(%s)` over at most
-        `4 * candidates_per_arm` ids. A missing id maps to `None` (sorted
-        last) rather than being dropped — it was in the pool, so discarding
-        it there would be a silent second cut.
+        `4 * candidates_per_arm` ids. It takes a `Sequence` and returns a
+        fresh list on **both** paths: with `list` in and `.sort()` inside,
+        the short-circuit handed back the argument untouched while the other
+        branch reordered it, one signature with two aliasing contracts.
+        - **The SQL is composed from `date_keyset.DATE_EXPR_SQL`, never
+          restated.** `_fetch_sort_dates` hand-wrote its own
+          `COALESCE(internal_date, date_sent)` and shipped that way; because
+          the query is keyed on the PK a swapped argument order costs **no
+          plan**, so it would silently order the rank path by the
+          sender-supplied `Date:` header while `sort=date`,
+          `messages_recent_idx`, `/v1/messages` and the wire `date` field
+          all kept the delivery time — the displayed-order-disagrees-with-
+          displayed-date defect this file already pins for the wire field,
+          reopened one path over. Python's counterpart is the one
+          `searcher._msg_date`, shared by `_date_sort_key` and
+          `_build_results`' rank branch, so the `or` chain is spelled once
+          too. **Both swaps survived the entire suite** when found (3388
+          passed, byte-identical to baseline): every fixture populated
+          exactly one date column, so the two spellings returned the same
+          value. `_row(..., internal=)` and `_seed_dated(..., sent=)` now
+          cross the columns, and each swap fails one test.
+        - **`_fetch_sort_dates`' result is total over its input**
+          (`dict.fromkeys`, then `update`), so `_cut_pool` subscripts rather
+          than defaulting. An id absent from `messages` — reachable when a
+          message is deleted between the arms and the cut, two statements
+          under READ COMMITTED — is *undated*, not dropped: it was in the
+          pool, so discarding it is a silent second cut, and a partial map
+          would crash on a row the caller legitimately holds. Deciding it in
+          the function whose docstring argues for it makes it one decision
+          rather than a `.get()` default at a call site. Note this makes
+          `[h for h in fused if h.message_id in dates]` an **equivalent
+          mutant** — the predicate is vacuously true — which is the totality
+          working, not a coverage gap.
         - **Measured, not assumed**, on a 130,000-row table: `Index Scan
           using messages_pkey`, **0.36 ms** at the default 200 fused ids,
           1.27 ms at 800, **5.07 ms** at the 3200 the
           `candidates_per_arm_max=800` ceiling allows (8339 buffer hits).
-          The cut *does* fire at defaults — `rerank_pool_size` is 100
-          against up to 200 fused — so this is on the normal path.
+          The cut *can* fire at defaults — `rerank_pool_size` is 100 against
+          up to 200 fused — whenever the four arms surface more than 100
+          **distinct** messages; a narrow query on which the arms agree
+          fuses to far fewer and never cuts.
         - **A boundary-tie fast path was considered and rejected.** The cut
           only needs the right *set* (`_build_results` re-orders the page),
           so in principle only a tie straddling the boundary matters and the
@@ -4720,11 +4772,34 @@ for the full design.
           default path does not buy that reasoning. #5 is this codebase's
           precedent for closing an optimisation on a measurement rather than
           shipping it on an intuition.
-      - **`_date_sort_key` now delegates to `relevance_order.date_key`.**
-        The *function* stays dead (see above), but the NULLS-LAST rule it
-        held is live and shared, so the date walk and the rank tiebreak
-        cannot disagree about where an undated row goes. The duplicate
-        `_DATE_SORT_NULL_SENTINEL` is gone.
+      - **`_date_sort_key` delegates to `_msg_date` + `date_key`.** The
+        *function* stays dead (see above), but neither rule it is built from
+        is, and both are shared rather than restated, so the dead branch
+        cannot drift from the live one. The duplicate
+        `_DATE_SORT_NULL_SENTINEL` is gone. **It does not follow that the
+        date walk and the rank tiebreak "cannot disagree"** — the shipped
+        wording claimed that and it was wrong. The live walk states
+        NULLS-LAST independently, in SQL; `date_key` is the *Python*
+        statement of the same rule, and the two are bound by a differential
+        test in `tests/test_relevance_order.py`, the `ALLOWLISTED_WHERE_SQL`
+        arrangement, not by sharing an implementation.
+      - **`NULL_DATE_SENTINEL` is padding and is private.** Its comment
+        claimed it "sorts below every real timestamp… rather than merely
+        being a convenient filler", which is exactly backwards: `DateKey` is
+        `(has_date, when)` and the flag decides the placement, so the
+        sentinel's value is never compared — `datetime.min`, `datetime.max`
+        and a naive value all sort identically, and a subclass raising on
+        every comparison never fires. It was also public with **zero**
+        readers, where the `_DATE_SORT_NULL_SENTINEL` it replaced was
+        private; `searcher.py`'s own note on the retired `_DATE_EXPR_SQL`
+        alias makes the same call. Exporting it invites `when ==
+        SENTINEL` to mean "undated", which is wrong for a real message dated
+        year 1 — the thing the flag exists to prevent.
+        - The flag's other claimed guarantee was narrowed too: it stops the
+          *sentinel* meeting a real timestamp, and nothing more. Two **real**
+          timestamps both carry `1` and still meet in slot 1, so a
+          naive/aware pair still raises. What rules that out is the schema
+          (both columns are `TIMESTAMPTZ`), not the construction.
       - **The fixtures seed the newer message FIRST, and that is
         load-bearing.** Ids ascend with insertion, so a fixture seeded
         oldest-first makes date order and id order agree — and every
@@ -4732,6 +4807,16 @@ for the full design.
         `message_id` and never looks up a date. Found by mutation:
         `dates = {}` in `_cut_pool` survived the agreeing fixture and is
         caught by the contradicting one.
+        - **The same trap had already disarmed `test_rrf.py`**, and the
+          fusion tiebreak is what sprang it. `test_rrf_two_arms_sum_contributions`
+          is the only proof anywhere that RRF **sums** per-arm contributions
+          rather than taking a max — and its winner also held the higher id,
+          so `(rrf_score, message_id)` descending produced the expected
+          order whether or not anything was summed. Mutating `+=` to `max()`
+          passed all 3388 tests after #359 and failed that test before it.
+          The winner carries the **lower** id now. A tiebreak added to a
+          function can silently retire an existing pin that ranked on the
+          same axis; check the file it lives in.
 - **Hard ACL clamp inside the Searcher**: the ACL is enforced in **two**
   places, and both are load-bearing. `api/search.py::_scope_filters_by_acl`
   intersects the caller's *structured* `account_ids` filter and

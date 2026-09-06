@@ -43,6 +43,16 @@ def test_fusion_breaks_a_tie_deterministically_not_by_arm_order() -> None:
     The order used to come from ``agg`` insertion order — i.e. which arm
     was walked first — so passing the same two arms the other way round
     silently reversed the result.
+
+    This asserts *that* there is a tiebreak, not *which*: the direction is
+    an **equivalent mutant** here, since both stages downstream re-sort on
+    the total ``relevance_key`` and fused order never reaches a caller of
+    ``Searcher.search``. Do not add a direction assertion to "close" it —
+    it would pin an unobservable, which is what ``relevance_order``'s
+    docstring warns against.
+
+    Scope: ``message_id`` only. ``best_chunk_id`` is *still* decided by arm
+    order on an exact tie, and that one is observable — see #360.
     """
     a, b = [_hit(10, rank=3)], [_hit(20, rank=3)]
     forward = [h.message_id for h in rrf_fuse([a, b], k=60)]
@@ -70,13 +80,24 @@ def _searcher() -> Searcher:
                     reranker=None)
 
 
-def _row(mid: int, when: datetime | None) -> dict:
+def _row(mid: int, when: datetime | None, *,
+         internal: datetime | None = None) -> dict:
+    """A hydrated row. ``when`` populates ``date_sent``, ``internal`` the
+    ``internal_date`` that outranks it.
+
+    Defaulting ``internal`` to ``None`` is **load-bearing**, and so is
+    ``_seed_dated``'s opposite default: between them the two helpers drive
+    both branches of ``_msg_date``'s COALESCE, so dropping either column
+    from the expression fails somewhere. Consolidating the helpers onto one
+    column would silently retire half that coverage. Pass both to test the
+    precedence itself.
+    """
     return {
         "fused": FusedHit(message_id=mid, best_chunk_id=None,
                           best_chunk_table="message", rrf_score=0.5,
                           contributing_arms=[0]),
         "msg": {"account_id": 1, "subject": f"m{mid}", "from_addr": "a@x",
-                "from_name": None, "date_sent": when, "internal_date": None},
+                "from_name": None, "date_sent": when, "internal_date": internal},
         "snippet_source_text": "body text",
     }
 
@@ -107,6 +128,19 @@ def test_a_higher_score_still_outranks_a_newer_date() -> None:
     out = _searcher()._build_results(rows, parse_query("x"), [0.9, 0.1],
                                      page=1, page_size=10)
     assert [r.message_id for r in out] == [20, 10]
+
+
+def test_the_page_ranks_internal_date_above_date_sent() -> None:
+    """The COALESCE argument order on the page, as ``_msg_date`` spells it.
+
+    The columns are crossed, so a swap inverts which row is newer, and the
+    winner carries the LOWER id so the ``message_id`` tiebreak cannot
+    produce this order by itself.
+    """
+    rows = [_row(20, _NEW, internal=_OLD), _row(10, _OLD, internal=_NEW)]
+    out = _searcher()._build_results(rows, parse_query("x"), [0.5, 0.5],
+                                     page=1, page_size=10)
+    assert [r.message_id for r in out] == [10, 20]
 
 
 def test_an_undated_row_sorts_after_a_dated_one_of_equal_relevance() -> None:
@@ -141,20 +175,34 @@ def _fused(mid: int, score: float) -> FusedHit:
                     contributing_arms=[0])
 
 
-def _seed_dated(conn, dates: list[datetime | None]) -> list[int]:
+def _seed_dated(conn, dates: list[datetime | None], *,
+                sent: list[datetime | None] | None = None) -> list[int]:
+    """Seed messages carrying ``internal_date`` from ``dates``.
+
+    ``date_sent`` is left NULL unless ``sent`` is given as a parallel list.
+    That default is the mirror of ``_row``'s — see its docstring — so the
+    two helpers between them exercise both arguments of the COALESCE that
+    ``_fetch_sort_dates`` composes from ``DATE_EXPR_SQL``.
+    """
+    sent_dates: list[datetime | None] = sent if sent is not None else [None] * len(dates)
+    assert len(sent_dates) == len(dates)
     with conn.cursor() as cur:
         cur.execute("INSERT INTO accounts (name,email_address,imap_host,auth_method)"
                     " VALUES ('a','a@x','h','password') RETURNING id")
-        acct = cur.fetchone()[0]
+        row = cur.fetchone()
+        assert row is not None
+        acct = row[0]
         ids = []
-        for i, when in enumerate(dates):
+        for i, (when, when_sent) in enumerate(zip(dates, sent_dates, strict=True)):
             cur.execute(
                 "INSERT INTO messages (account_id, message_id, raw_sha256, subject,"
-                " body_text, internal_date, headers, raw_bytes, size_bytes)"
-                " VALUES (%s,%s,%s,%s,%s,%s,'{}'::jsonb,'r',1) RETURNING id",
-                (acct, f"<t{i}>", bytes([i + 1]) * 32, f"s{i}", "b", when),
+                " body_text, internal_date, date_sent, headers, raw_bytes, size_bytes)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,'{}'::jsonb,'r',1) RETURNING id",
+                (acct, f"<t{i}>", bytes([i + 1]) * 32, f"s{i}", "b", when, when_sent),
             )
-            ids.append(cur.fetchone()[0])
+            got = cur.fetchone()
+            assert got is not None
+            ids.append(got[0])
     conn.commit()
     return ids
 
@@ -201,6 +249,64 @@ def test_an_undated_row_loses_the_cut_to_a_dated_one(db_conn):
     assert [h.message_id for h in kept] == [old_id]
 
 
+def test_the_cut_ranks_internal_date_above_date_sent(db_conn):
+    """The COALESCE *argument order*, which nothing else here constrains.
+
+    Every other fixture populates exactly one of the two columns, so
+    ``COALESCE(internal_date, date_sent)`` and ``COALESCE(date_sent,
+    internal_date)`` return the same value and the swap is invisible —
+    mutation-proven: swapping both new sites survived the entire suite.
+
+    Here the two columns disagree and are crossed, so the swap inverts
+    which row is newer. The winner also carries the LOWER id, so the
+    ``message_id`` tiebreak cannot produce this order on its own.
+    """
+    first_id, second_id = _seed_dated(db_conn, [_NEW, _OLD], sent=[_OLD, _NEW])
+    fused = [_fused(second_id, 0.5), _fused(first_id, 0.5)]
+    kept = _searcher()._cut_pool(db_conn, fused, limit=1)
+    assert [h.message_id for h in kept] == [first_id]
+
+
+def test_a_pool_hit_missing_from_messages_is_kept_as_undated(db_conn):
+    """The documented invariant: a missing id is undated, never dropped.
+
+    ``_fetch_sort_dates``' result is total over its input, so an id absent
+    from ``messages`` — reachable when a message is deleted between the
+    retrieval arms and the cut, two statements under READ COMMITTED — sorts
+    last rather than vanishing. Dropping it would be a silent second cut;
+    subscripting a partial map would be a crash on a row the caller
+    legitimately holds.
+
+    Two ghosts and one real row against ``limit=2``, so *both* failures are
+    observable: discarding the undated rows returns one row where two were
+    asked for, and a non-total map raises ``KeyError``. Both mutations were
+    run and both fail here.
+
+    Note a third shape — ``[h for h in fused if h.message_id in dates]`` —
+    is an **equivalent mutant** and no test can catch it: ``dict.fromkeys``
+    seeds every requested id, so that predicate is vacuously true. That is
+    the totality doing its job, not a coverage gap; do not "fix" it.
+    """
+    (real_id,) = _seed_dated(db_conn, [_OLD])
+    ghost_lo, ghost_hi = real_id + 1000, real_id + 2000
+    fused = [_fused(ghost_lo, 0.5), _fused(real_id, 0.5), _fused(ghost_hi, 0.5)]
+    kept = _searcher()._cut_pool(db_conn, fused, limit=2)
+    # Real row first (dated beats undated); the ghosts tie on date and fall
+    # through to `message_id` descending.
+    assert [h.message_id for h in kept] == [real_id, ghost_hi]
+
+
+def test_the_cut_does_not_reorder_the_caller_s_list(db_conn):
+    """``_cut_pool`` takes a ``Sequence`` and returns a fresh list on both
+    paths, so neither branch reorders the argument as a side effect."""
+    new_id, old_id = _seed_dated(db_conn, [_NEW, _OLD])
+    fused = [_fused(old_id, 0.5), _fused(new_id, 0.5)]
+    before = list(fused)
+    _searcher()._cut_pool(db_conn, fused, limit=1)   # cutting path
+    _searcher()._cut_pool(db_conn, fused, limit=9)   # short-circuit path
+    assert fused == before
+
+
 # --------------------------------------------------------------------------
 # End to end, through the real `Searcher.search`.
 # --------------------------------------------------------------------------
@@ -240,7 +346,14 @@ def _live_searcher(db_dsn: str, **cfg_kw) -> Searcher:
 
 
 def test_search_returns_equally_relevant_rows_newest_first(db_dsn, db_conn):
-    """The whole path: fusion, the cut, then the page."""
+    """The real path: fusion, hydration, then the page.
+
+    Not the cut — ``rerank_pool_size`` defaults to 100 and the stubbed arms
+    produce two fused hits, so ``_cut_pool`` takes its short-circuit.
+    Mutation-proven: reverting the cut to ``fused[:limit]`` does not fail
+    this test. Its sibling below sets ``rerank_pool_size=1`` and is the one
+    that covers the cut end to end.
+    """
     new_id, old_id = _seed_dated(db_conn, [_NEW, _OLD])
     a1, a2, empty = _tied_arms(old_id, new_id)
     searcher = _live_searcher(db_dsn)

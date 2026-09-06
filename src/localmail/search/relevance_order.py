@@ -16,34 +16,59 @@ Ties are ordinary rather than exotic. An RRF score is a sum of
 arms score identically, and with ``reranker_enabled`` false (the default)
 that RRF score *is* the final score.
 
-Three stages have to agree or the rule holds on one page and not the next:
+**Two** stages carry the rule, and both need it:
 
-* ``rrf_fuse`` orders the fused hits. It is pure and has no database, so it
-  breaks ties on ``message_id`` alone — enough to stop arm order deciding,
-  not enough to be date-correct.
-* ``Searcher._retrieve_pool`` cuts to ``rerank_pool_size``, which decides
+* ``Searcher._cut_pool`` cuts to ``rerank_pool_size``, which decides
   *which* equally relevant rows survive at all. It has a connection, so it
-  re-orders on real dates before cutting. Without that the page-level rule
-  below would be exact about rows the cut had already thrown away.
-* ``Searcher._build_results`` assembles the page the caller sees.
+  re-orders on real dates before cutting — when it cuts; a pool that
+  already fits is returned untouched, since the page-level sort below
+  decides the order anyway. Without this stage that page-level rule would
+  be exact about rows the cut had already thrown away.
+* ``Searcher._build_results`` assembles the page the caller sees, and
+  ``continue_page`` re-runs it over the whole cached pool for every later
+  page.
 
-The last two share :func:`relevance_key`, so a change to the rule cannot
-reach one and miss the other. That is the same one-authority call
-``date_keyset`` makes for the date walk's SQL.
+They share :func:`relevance_key`, so a change to the rule cannot reach one
+and miss the other. That is the same one-authority call ``date_keyset``
+makes for the date walk's SQL.
+
+``rrf_fuse`` breaks its own ties on ``message_id`` as well, but that is
+**defence in depth, not a third stage**, and the distinction is worth
+keeping straight. :func:`relevance_key` is a *total* order — ``rrf_fuse``
+emits one hit per ``message_id``, so no two entries can tie on all three
+components — and both stages above re-sort with it, so fusion's output
+order cannot reach a caller of ``Searcher.search``. What the tiebreak buys
+is that ``rrf_fuse`` is a well-defined pure function for its direct callers
+and its own tests, and a backstop should anything later consume fused order
+directly. Do not describe it as load-bearing for the page: an unobservable
+belt presented as a stage is what makes a reader distrust the two that are.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-#: Sorts below every real timestamp, so an undated row lands **last** under
-#: ``reverse=True``. That matches the date walk's ``DESC NULLS LAST`` rather
-#: than merely being a convenient filler: both date columns are nullable and
-#: archive imports really do produce rows with neither, so the two orderings
-#: would otherwise disagree about where those rows go.
-NULL_DATE_SENTINEL = datetime.min.replace(tzinfo=timezone.utc)
+#: Padding, and **only** padding: it exists so the key's second slot is
+#: always a ``datetime`` and the type stays ``tuple[int, datetime]``. Its
+#: *value* is never compared — the ``has_date`` flag below decides the
+#: NULLS-LAST placement, and two undated rows both yield this same object.
+#: Verified rather than argued: ``datetime.min``, ``datetime.max`` and a
+#: naive value all produce identical orderings, and a subclass raising on
+#: every comparison operator sorts a mixed pool without ever firing.
+#:
+#: Private, deliberately. A caller reaching for it would write
+#: ``when == _NULL_DATE_SENTINEL`` to mean "undated" and get the wrong
+#: answer for a real message dated year 1 — which the ``(has_date, when)``
+#: shape exists to make impossible. ``searcher.py``'s own comment on the
+#: retired ``_DATE_EXPR_SQL`` alias makes the same call.
+_NULL_DATE_SENTINEL = datetime.min.replace(tzinfo=timezone.utc)
 
-#: ``(has_date, when)`` — the flag first, so the sentinel can never be
-#: compared against a real timestamp and no naive/aware mismatch can arise.
+#: ``(has_date, when)`` — the flag first, so the *sentinel* can never be
+#: compared against a real timestamp. That is the whole of what the flag
+#: buys: two **real** timestamps both carry ``1`` and still meet in slot 1,
+#: so a naive/aware pair still raises ``TypeError``. What actually rules
+#: that out is the schema — ``messages.date_sent`` and
+#: ``messages.internal_date`` are both ``TIMESTAMPTZ``, so psycopg only
+#: ever yields aware values — not this construction.
 DateKey = tuple[int, datetime]
 
 
@@ -51,9 +76,15 @@ def date_key(when: datetime | None) -> DateKey:
     """Sort key for ``COALESCE(internal_date, date_sent) DESC NULLS LAST``.
 
     Built for ``sorted(..., reverse=True)``: ascending it puts undated rows
-    first, so reversed they land last.
+    first, so reversed they land last. The placement comes from the
+    ``0``/``1`` flag, not from the sentinel's value.
+
+    This is the *Python* statement of the NULLS-LAST rule. The live date
+    walk states it independently in SQL (``date_keyset.DATE_ORDER_BY_SQL``,
+    ``DESC NULLS LAST``); the two are bound by a differential test in
+    ``tests/test_relevance_order.py``, not by sharing an implementation.
     """
-    return (1, when) if when is not None else (0, NULL_DATE_SENTINEL)
+    return (1, when) if when is not None else (0, _NULL_DATE_SENTINEL)
 
 
 def relevance_key(

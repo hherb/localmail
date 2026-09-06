@@ -164,13 +164,66 @@ def test_a_keyset_continuation_of_a_text_walk_stays_rankable(searcher):
 def test_a_cached_pool_reports_itself_rankable(searcher):
     """The invariant, asserted rather than assumed: a pool is only ever
     built on the rank branch, which is unreachable without free text. It is
-    what makes ``_empty_grown_page`` able to stand in for one."""
+    what makes ``_empty_grown_page`` able to stand in for one.
+
+    It is also the only pin the *pool branch of* ``Searcher.search`` can
+    have. That branch sits under ``if effective_sort == "date": return``, so
+    it runs only with ``effective_sort == "rank"`` — which ``resolve_sort``
+    returns only when the query is rankable. Hardcoding ``True`` at that
+    stamp is therefore an **equivalent mutation**, and it survives: no input
+    can separate the two. Recorded rather than papered over, because the
+    three *pool readers* below are a different case — their entry is
+    independent input, hardcoding there survived until they were pinned, and
+    a reader who conflates the two will delete pins that are load-bearing.
+    """
     first = searcher.search("needle", allowed_account_ids=None, user_id=1,
                             page_size=2)
     assert first.search_token is not None
     meta = searcher.get_pool_metadata(first.search_token, user_id=1)
     assert meta is not None
     assert meta.rankable is True
+
+
+# --------------------------------------------------------------------------
+# The three pool readers derive it; they do not restate the invariant.
+# --------------------------------------------------------------------------
+#
+# Every pool a real search can build is rankable, so each of the three
+# assertions above is satisfied by a hardcoded ``True`` — mutation-proven:
+# hardcoding it in ``continue_page`` left the whole file green. Only a pool
+# built from a textless query separates the two, which no dispatch can
+# produce today, so it is put straight into the cache — the technique
+# ``test_search_sort_applied.py`` uses for ``sort`` and for the same reason:
+# encoding "pool ⟹ rankable" in a reader makes a future dispatch change
+# silently wrong, and the invariant is exactly what such a change removes.
+
+
+def _textless_pool(searcher, token, **overrides):
+    entry = {
+        "parsed": parse_query(""), "hydrated": [], "scores": {},
+        "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
+        "user_id": None, "sort": "date", "sort_order": "desc",
+    }
+    entry.update(overrides)
+    searcher._cache.put(token, entry)
+
+
+def test_continue_page_derives_rankability_from_the_pool_s_query(searcher):
+    _textless_pool(searcher, "tok-blank")
+    assert searcher.continue_page("tok-blank", 1).rankable is False
+
+
+def test_grow_pool_derives_rankability_from_the_pool_s_query(searcher):
+    _textless_pool(searcher, "tok-blank-grow")
+    assert searcher.grow_pool("tok-blank-grow", 8).rankable is False
+
+
+def test_pool_metadata_derives_rankability_from_the_pool_s_query(searcher):
+    """The third reader, and the one ``_empty_grown_page`` depends on."""
+    _textless_pool(searcher, "tok-blank-meta")
+    meta = searcher.get_pool_metadata("tok-blank-meta")
+    assert meta is not None
+    assert meta.rankable is False
 
 
 # --------------------------------------------------------------------------

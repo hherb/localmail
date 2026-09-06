@@ -4,7 +4,12 @@
     displayedSort,
     RELEVANCE_UNAVAILABLE_REASON,
     relevanceUnavailable,
+    sortClick,
   } from "../lib/sort_display";
+
+  // Referenced by the Relevance radio's `aria-describedby` when the reason
+  // is on screen (#354). A module constant so the two cannot drift.
+  const REASON_ID = "sort-relevance-unavailable";
 
   // The selector renders the ordering that RAN, not the one requested (#345).
   // The server resolves `sort` from the query, so a textless one — an empty
@@ -16,8 +21,12 @@
   const shownSort = $derived(
     displayedSort(search.snapshot.sort, search.snapshot.sortApplied),
   );
+  // Read off the server's own answer rather than inferred from the request
+  // (#353): `sort_applied` is `date` both for a query with nothing to rank
+  // and for a text query whose caller chose date, so inferring re-enabled
+  // Relevance the moment a Date click was recorded.
   const rankUnavailable = $derived(
-    relevanceUnavailable(search.snapshot.sort, search.snapshot.sortApplied),
+    relevanceUnavailable(search.snapshot.rankable),
   );
 
   let popoverOpen = $state(false);
@@ -36,14 +45,30 @@
     }
   }
 
-  // Switching sort mode only re-runs the search when one is already on
-  // screen (tookMs !== null). Otherwise the toggle just stores the user's
-  // preference for their next submit — toggling pre-search shouldn't fire
-  // a request the user didn't ask for.
+  // A click asks two questions of two different fields, and reading one
+  // field for both is #353: the radios show what *ran* while the guard
+  // compared the stored preference, so clicking the already-checked Date
+  // after a textless search recorded nothing.
+  //
+  // Bound to `click`, not `change`, and that is the whole of the DOM half
+  // of the fix. A radio fires no `change` at all when it is already
+  // checked, which is exactly the #353 state; it fires `click` either way,
+  // for the pointer and for keyboard activation alike. So `click` is a
+  // strict superset and binding **both** is wrong — measured: the two
+  // handlers each see a `shownSort` that only moves when the response
+  // lands, so a real change of mind fired two searches.
+  //
+  // Re-running still only happens when a search is already on screen
+  // (tookMs !== null) — toggling pre-search stores the preference for the
+  // next submit rather than firing a request the user did not ask for.
   async function onSortChange(next: SortMode): Promise<void> {
-    if (search.snapshot.sort === next) return;
-    search.setSort(next);
-    if (search.snapshot.tookMs !== null) {
+    const { record, resubmit } = sortClick({
+      preference: search.snapshot.sort,
+      shown: shownSort,
+      clicked: next,
+    });
+    if (record) search.setSort(next);
+    if (resubmit && search.snapshot.tookMs !== null) {
       await search.submit();
     }
   }
@@ -81,17 +106,15 @@
     />
   </div>
   <fieldset class="sort" aria-label="Sort results by">
-    <label
-      class:unavailable={rankUnavailable}
-      title={rankUnavailable ? RELEVANCE_UNAVAILABLE_REASON : undefined}
-    >
+    <label class:unavailable={rankUnavailable}>
       <input
         type="radio"
         name="sort"
         value="rank"
         checked={shownSort === "rank"}
-        onchange={() => onSortChange("rank")}
+        onclick={() => onSortChange("rank")}
         disabled={search.snapshot.loading || rankUnavailable}
+        aria-describedby={rankUnavailable ? REASON_ID : undefined}
       />
       Relevance
     </label>
@@ -101,7 +124,7 @@
         name="sort"
         value="date"
         checked={shownSort === "date"}
-        onchange={() => onSortChange("date")}
+        onclick={() => onSortChange("date")}
         disabled={search.snapshot.loading}
       />
       Date
@@ -114,6 +137,21 @@
     Filters
   </button>
 </form>
+
+<!--
+  The reason Relevance is disabled, as text rather than a `title` (#354).
+  A disabled input is out of the tab order, so a tooltip could not be
+  reached by keyboard at all, and `title` is announced inconsistently by
+  screen readers and is hover-only for pointer users. This follows the
+  precedent already set for a server-disabled control in this codebase:
+  AccountForm's `.hint` span and DaemonPanel's `.note` paragraph both render
+  their reasons into the markup.
+-->
+{#if rankUnavailable}
+  <p class="sort-note" id={REASON_ID} data-testid="relevance-unavailable">
+    {RELEVANCE_UNAVAILABLE_REASON}
+  </p>
+{/if}
 
 {#if popoverOpen}
   <div class="popover" role="dialog" bind:this={popoverEl}>
@@ -206,6 +244,14 @@
     border-color: #bdbdeb;
     background: var(--accent-soft);
     color: var(--accent-strong);
+  }
+  .sort-note {
+    margin: 0;
+    padding: 6px 14px 8px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--fg-muted);
   }
   .popover {
     position: absolute; right: 14px; top: 108px; background: var(--surface);

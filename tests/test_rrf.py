@@ -22,13 +22,27 @@ def test_rrf_single_arm_orders_by_rank():
 
 
 def test_rrf_two_arms_sum_contributions():
-    a = [_hit(10, 1, "message_chunks", rank=1),
-         _hit(20, 2, "message_chunks", rank=3)]
-    b = [_hit(20, 4, "message_chunks", rank=1),
-         _hit(10, 5, "message_chunks", rank=4)]
+    """Summation, not max — the winner deliberately carries the LOWER id.
+
+    This is the only test anywhere that RRF *sums* per-arm contributions
+    rather than taking the largest, and summation is the whole of fusion: a
+    ``max`` would discard multi-arm agreement, which is what fusing is for.
+
+    Ties are broken on ``message_id`` **descending**, so a fixture whose
+    summation winner also holds the higher id is satisfied by the tiebreak
+    alone and proves nothing. Mutation-proven: replacing ``+=`` with
+    ``max()`` collapses both messages to the same 1/61 and the tiebreak then
+    returns ``[20, 10]``, which this fixture rejects and the id-agreeing one
+    accepted. Same discipline as the newest-first fixtures in
+    ``test_search_relevance_ties.py`` — make the two orders contradict.
+    """
+    a = [_hit(20, 1, "message_chunks", rank=1),
+         _hit(10, 2, "message_chunks", rank=3)]
+    b = [_hit(10, 4, "message_chunks", rank=1),
+         _hit(20, 5, "message_chunks", rank=4)]
     out = rrf_fuse([a, b], k=60)
-    # Message 20: 1/(60+3) + 1/(60+1) = 0.0322  | Message 10: 1/(60+1) + 1/(60+4) = 0.0320
-    assert [h.message_id for h in out] == [20, 10]
+    # Message 10: 1/(60+3) + 1/(60+1) = 0.0322  | Message 20: 1/(60+1) + 1/(60+4) = 0.0320
+    assert [h.message_id for h in out] == [10, 20]
 
 
 def test_rrf_dedupes_to_one_chunk_per_message():

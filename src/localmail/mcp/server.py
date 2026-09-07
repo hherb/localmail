@@ -147,7 +147,8 @@ def build_mcp_server(
             "(date-ordered) — prefer `list_messages` for that intent."))],
         sort: Annotated[Literal["rank", "date"] | None, Field(description=(
             'Result ordering: "rank" (hybrid relevance — what an omitted '
-            '`sort` resolves to whenever the query has text to rank) or '
+            '`sort` resolves to whenever the query has text to rank, with '
+            'equally relevant messages returned newest first) or '
             '"date" (strictly by date — newest first unless '
             '`sort_order` says otherwise). Leave it unset when '
             "paging — a `cursor` already carries the ordering it continues, "

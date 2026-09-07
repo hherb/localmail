@@ -42,9 +42,17 @@ is that ``rrf_fuse`` is a well-defined pure function for its direct callers
 and its own tests, and a backstop should anything later consume fused order
 directly. Do not describe it as load-bearing for the page: an unobservable
 belt presented as a stage is what makes a reader distrust the two that are.
+
+The module also owns what may *enter* that key, because a total order is
+only as total as its slots. :func:`date_key` maps an absent date into one;
+:func:`finite_scores` keeps a non-finite rerank score out of one. Both are
+the same job at different slots, which is why they live together rather
+than beside the code that happens to call them.
 """
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 #: Padding, and **only** padding: it exists so the key's second slot is
@@ -104,3 +112,69 @@ def relevance_key(
     carries no meaning; it is here to make the result reproducible.
     """
     return (score, date_key(when), message_id)
+
+
+@dataclass(frozen=True)
+class FiniteScores:
+    """The sanitised score list, and how many entries were substituted.
+
+    A **dataclass, not a NamedTuple**, deliberately. The count exists so
+    the caller can log it without re-deriving the rule, but a two-field
+    ``NamedTuple`` is an iterable of length 2 — so a caller who forgets
+    ``.scores`` and binds the container is accepted by
+    ``_build_results``' ``zip(hydrated, scores, strict=True)`` whenever
+    the pool happens to hold two rows, and the page is then ordered by a
+    list and an int. Not being iterable turns that slip into a
+    ``TypeError`` at the first zip.
+    """
+
+    scores: list[float]
+    replaced: int
+
+
+def finite_scores(
+    scores: list[float], *, fallback: list[float],
+) -> FiniteScores:
+    """Replace every non-finite score with its row's ``fallback`` value.
+
+    :func:`relevance_key`'s first slot is a ``float`` handed over by the
+    cross-encoder, and a NaN there makes the comparator **inconsistent**:
+    every comparison against NaN is ``False``, so neither of a pair is
+    "less than" the other and Timsort's output depends on input order.
+    The damage is not confined to the NaN row — measured over the shipped
+    key, 9 of the 24 permutations of one four-row pool mis-order the three
+    rows whose scores were perfectly good. This is the slot-0 counterpart
+    of what :func:`date_key`'s flag does for slot 1: keep a value that has
+    no place in a total order out of one.
+
+    ``math.isfinite`` is the predicate, so ±inf is substituted alongside
+    NaN. An infinity does order consistently, so it corrupts nothing —
+    but it pins its row to one end of every page it appears on, which no
+    model can have meant, and the remedy is the same. Wording it as "NaN
+    is bad, inf is tolerable" would be two predicates for one question.
+
+    Substitution is **per row**, matching ``_safe_rerank``'s whole-batch
+    fallback in spirit but not in reach: one unusable value must not
+    discard the scores the model got right. The caller's ``fallback`` is
+    the fused RRF score, finite by construction (a sum of
+    ``1 / (k + rank)`` positives; a pathological ``rrf_k`` raises
+    ``ZeroDivisionError`` rather than yielding a non-finite value).
+
+    ``strict=True`` is load-bearing: a plain ``zip`` would silently
+    truncate to the shorter list and drop rows off the page. Length is
+    otherwise not this function's business — ``FastEmbedReranker.rerank``
+    validates it and ``_safe_rerank`` degrades on the raise.
+
+    Returns a fresh list on **both** paths, so the signature carries one
+    aliasing contract rather than two — the trap ``Searcher._cut_pool``
+    records for its own short-circuit.
+    """
+    out: list[float] = []
+    replaced = 0
+    for score, spare in zip(scores, fallback, strict=True):
+        if math.isfinite(score):
+            out.append(score)
+        else:
+            out.append(spare)
+            replaced += 1
+    return FiniteScores(scores=out, replaced=replaced)

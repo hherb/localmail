@@ -17,10 +17,19 @@ each cost a Postgres round trip.
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 
+import pytest
+
 from localmail.search.date_keyset import DATE_ORDER_BY_SQL
-from localmail.search.relevance_order import DateKey, date_key, relevance_key
+from localmail.search.relevance_order import (
+    DateKey,
+    FiniteScores,
+    date_key,
+    finite_scores,
+    relevance_key,
+)
 
 _OLD = datetime(2020, 1, 1, tzinfo=timezone.utc)
 _NEW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -187,3 +196,74 @@ def test_date_key_annotation_is_the_published_alias() -> None:
     """``DateKey`` is the module's own name for slot 1's type; it is what
     ``relevance_key``'s return annotation is written in terms of."""
     assert DateKey == tuple[int, datetime]
+
+
+# --------------------------------------------------------------------------
+# finite_scores: slot 0's totality, the counterpart of date_key's flag.
+# --------------------------------------------------------------------------
+
+def test_a_non_finite_score_is_replaced_by_its_fallback() -> None:
+    """Positional, so the surviving scores stay attached to their own rows."""
+    out = finite_scores([0.8, float("nan"), 0.2], fallback=[0.03, 0.02, 0.01])
+    assert out.scores == [0.8, 0.02, 0.2]
+
+
+def test_both_infinities_are_replaced_as_well() -> None:
+    """``math.isfinite`` is the predicate. An infinite score orders
+    *consistently* — unlike NaN it does not corrupt its neighbours — but it
+    pins its row to one end of every page, which no model can have meant,
+    and the remedy is the fallback either way. Two predicates for one
+    question is the drift this module exists to avoid."""
+    out = finite_scores([math.inf, -math.inf], fallback=[0.02, 0.01])
+    assert out.scores == [0.02, 0.01]
+
+
+def test_an_all_finite_list_is_returned_unchanged() -> None:
+    """The positive control: a rule that substituted unconditionally would
+    satisfy both assertions above."""
+    out = finite_scores([0.8, 0.5, 0.2], fallback=[0.03, 0.02, 0.01])
+    assert out.scores == [0.8, 0.5, 0.2]
+    assert out.replaced == 0
+
+
+def test_the_count_is_how_many_were_replaced() -> None:
+    """The caller logs it, and a second count taken at the call site would
+    be a second reading of the same rule."""
+    out = finite_scores([float("nan"), 0.5, math.inf], fallback=[0.03, 0.02, 0.01])
+    assert out.replaced == 2
+
+
+def test_the_result_is_a_fresh_list_on_both_paths() -> None:
+    """One signature must not have two aliasing contracts — the trap
+    ``_cut_pool``'s own note records. The all-finite path is the one that
+    would be tempting to short-circuit by returning the argument."""
+    scores = [0.8, 0.5]
+    assert finite_scores(scores, fallback=[0.0, 0.0]).scores is not scores
+    bad = [float("nan"), 0.5]
+    assert finite_scores(bad, fallback=[0.0, 0.0]).scores is not bad
+
+
+def test_a_length_mismatch_raises_rather_than_truncating() -> None:
+    """A silent truncation would drop rows off the page. ``zip`` without
+    ``strict`` does exactly that, so the flag is load-bearing."""
+    with pytest.raises(ValueError):
+        finite_scores([0.8, 0.5, 0.2], fallback=[0.03, 0.02])
+
+
+def test_the_result_is_read_by_field_and_is_not_iterable() -> None:
+    """``FiniteScores`` is a dataclass rather than a ``NamedTuple``, and the
+    difference is a silent failure.
+
+    A caller that forgets ``.scores`` binds the container itself. As a
+    two-field ``NamedTuple`` that is an iterable of length 2, so
+    ``_build_results``' ``zip(hydrated, scores, strict=True)`` **accepts
+    it** whenever the pool happens to hold two rows — a page ordered by a
+    list and an int. A dataclass is not iterable, so the same slip is a
+    ``TypeError`` at the first zip. Loud beats lucky.
+    """
+    out = finite_scores([float("nan")], fallback=[0.5])
+    assert isinstance(out, FiniteScores)
+    assert out.scores == [0.5]
+    assert out.replaced == 1
+    with pytest.raises(TypeError):
+        list(out)

@@ -40,7 +40,7 @@ from localmail.search.page_cache import (
     CacheMissError, PageCache, PageOutOfPoolError,
 )
 from localmail.search.query import ParsedQuery, parse_query
-from localmail.search.relevance_order import date_key, relevance_key
+from localmail.search.relevance_order import date_key, finite_scores, relevance_key
 from localmail.search.reranker import Reranker
 from localmail.search.rewrite_status import (
     APPLIED,
@@ -187,23 +187,46 @@ def _safe_rerank(
     *,
     fallback: list[float],
 ) -> list[float]:
-    """Call the reranker, but degrade to ``fallback`` if it raises.
+    """Call the reranker, degrading to ``fallback`` if it raises or returns
+    a value that has no place in a sort key.
 
     A broken reranker (wrong output shape, missing model file, OOM) should
     not turn a search into a 500 — the RRF-fused scores from the retrieval
     arms are usable on their own. The mismatch is logged as a WARNING so
     ops sees the degraded quality.
+
+    Two guards, at two granularities, because the failures differ. A raise
+    says the reranker is unusable, so the **whole batch** degrades. A
+    non-finite *value* says one score is unusable, so only that **row**
+    does — discarding the scores the model got right would be a worse
+    answer than the one bad number. The value guard is
+    ``relevance_order.finite_scores``, which owns the reasoning: a NaN in
+    ``relevance_key``'s first slot makes the comparator inconsistent and
+    silently reorders rows whose own scores were fine (#361).
+
+    The value guard sits **outside** the ``try`` on purpose. Its only raise
+    is a length mismatch, which is already a hard failure downstream at
+    ``_build_results``' strict ``zip``; catching it here would quietly
+    convert that into a degrade, which is a different fix for a different
+    problem.
     """
+    named = getattr(reranker, "model", type(reranker).__name__)
     try:
-        return reranker.rerank(query, snippets)
+        raw = reranker.rerank(query, snippets)
     except Exception as exc:
         log.warning(
             "reranker %r raised %s: %s — falling back to fused RRF scores",
-            getattr(reranker, "model", type(reranker).__name__),
-            type(exc).__name__,
-            exc,
+            named, type(exc).__name__, exc,
         )
         return fallback
+    checked = finite_scores(raw, fallback=fallback)
+    if checked.replaced:
+        log.warning(
+            "reranker %r returned %d non-finite score(s) of %d — "
+            "using fused RRF scores for those rows",
+            named, checked.replaced, len(checked.scores),
+        )
+    return checked.scores
 
 
 @dataclass(frozen=True)

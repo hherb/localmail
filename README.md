@@ -1441,7 +1441,23 @@ modern laptop. The most likely knobs to touch:
 - `reranker_enabled` (default **false**) — the CPU-bound cross-encoder
   rerank pass overruns request timeouts when the cursor's `grow_pool`
   doubles the pool repeatedly (50 → 100 → 200 → 400 → 800). Flip to
-  `true` on GPU hosts via `config.toml`
+  `true` on GPU hosts via `config.toml`.
+
+  With it on, a reranker that misbehaves degrades rather than failing the
+  search, at two granularities. If it *raises*, the whole batch falls back
+  to the fused RRF scores. If it returns a *non-finite* score (NaN, ±inf),
+  only those rows do — a NaN cannot be ordered, and one in the page's sort
+  key silently reorders rows whose own scores were fine. Either way there
+  is one WARNING on the `localmail.search.searcher` logger naming the model
+  and how many rows were affected, e.g.
+
+  ```
+  reranker 'jinaai/jina-reranker-v2-base-multilingual' returned 1 non-finite
+  score(s) of 100 — using fused RRF scores for those rows
+  ```
+
+  A steady non-zero count there means the model is not usable for this
+  archive; search still works, at fused-RRF quality.
 - `chunk_size_tokens` (default 512) — smaller for short messages
 - `body_lang_enabled` (default true) — set false to skip language detection
 - `body_lang_min_confidence` (default 0.65) — lower to label more messages

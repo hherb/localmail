@@ -35,14 +35,21 @@
 > paths and a mystery 500 on HTTP. The guess is corrected in place in
 > CLAUDE.md rather than quietly dropped.
 >
-> **(2) A `NamedTuple` return here is a silent failure, a dataclass is a loud
-> one.** `FiniteScores` carries `(scores, replaced)`. As a two-field
-> `NamedTuple` it is an iterable of length 2, so a caller who forgets
-> `.scores` and binds the container is **accepted** by `_build_results`'
-> `zip(hydrated, scores, strict=True)` whenever the pool happens to hold two
-> rows — a page ordered by a list and an int. A frozen dataclass is not
-> iterable, so the same slip is a `TypeError` at the first zip. Found while
-> writing the shape test, not after.
+> **(2) A `NamedTuple` return here fails one expression later than a
+> dataclass — NOT silently.** `FiniteScores` carries `(scores, replaced)`.
+> As a two-field `NamedTuple` it is an iterable of length 2, so a caller who
+> forgets `.scores` and binds the container **is** accepted by
+> `_build_results`' `zip(hydrated, scores, strict=True)` on a two-row pool.
+> But the very next expression, the `sorted` on `relevance_key`, then
+> compares a list against an int and raises `TypeError` anyway — and mypy
+> rejects the slip statically besides. **The review round measured both
+> shapes and both raise**; the original wording here ("a silent failure, a
+> dataclass is a loud one") overstated it and is corrected in place. The
+> dataclass is still right — it fails *at the zip*, naming its own type,
+> rather than inside the sort naming neither field nor function — and the
+> one branch where a `NamedTuple` would be genuinely silent is
+> `sort="date"`, whose key never reads the score and which is pinned
+> unreachable.
 >
 > **(3) The filtered assertion alone is not enough, and a mutation proved
 > it.** The property #361 asks for is "the finite rows keep their relative
@@ -100,12 +107,34 @@ row.
   consistently and corrupts nothing, but it pins its row to one end of every
   page, and the remedy is identical. "NaN is bad, inf is tolerable" would be
   two predicates for one question.
-- **The guard sits outside `_safe_rerank`'s `try`.** Its only raise is a length
-  mismatch, already a hard failure downstream at the same strict `zip`;
-  catching it there would quietly convert that into a degrade — a different fix
-  for a different problem, which nothing asked for.
+- **The guard sits outside `_safe_rerank`'s `try`.** It has **two** raises, not
+  one — a length mismatch and a non-numeric score (`math.isfinite` rejects it).
+  Both were already hard failures downstream in `_build_results`, at the strict
+  `zip` and at the `sorted`; catching them there would quietly convert an
+  existing loud failure into a degrade. *(The "only raise is a length mismatch"
+  wording shipped in this session and was corrected in the review round.)*
 - **`_cut_pool` needs no equivalent**: it keys on `fused.rrf_score`, finite by
-  construction. Checked, not assumed.
+  construction — `k` and `rank` are both `int`, so every `1 / (k + rank)` term
+  is bounded by 1. *(Not "a sum of positives": false for a negative `rrf_k`.)*
+
+**REVIEW ROUND — the substitute changed, and this is the headline correction.**
+The rule shipped substituting **that row's fused RRF score** and that was a
+scale error. RRF is positive and never above `1/61`; a cross-encoder returns
+raw logits, routinely negative (fastembed's own example is `[-1.24, -10.6]`).
+Reproduced through the real `_build_results`: `[nan, -3.5, -6.0, -9.1]` put the
+one row the model **could not score** at rank 1 of 4, above three it judged and
+rejected — a deterministic promotion where the pre-fix code had a
+non-deterministic mis-ordering, described in README as "fused-RRF quality". The
+operator's call was to demote: the substitute is now
+`nextafter(min(usable), -inf)`, strictly below every row the model could score,
+with `fallback` read only when the batch cannot be ordered relative to
+itself — nothing usable, or (the edge the review found) a minimum already at
+`-MAX_FLOAT`, where `nextafter` returns `-inf` and the demotion would put a
+non-finite value straight back into the sort key. The first version of that
+edge-case test **passed against the bug**, asserting `< floor` where `-inf <
+floor` is true: assert `isfinite`, never an ordering, when finiteness is the
+property. See CLAUDE.md's #361 entry for the full reasoning; do not restore
+the fused-score substitute.
 
 ### `tests:` — the positive-control docstrings claimed more than they held
 

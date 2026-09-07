@@ -1446,18 +1446,29 @@ modern laptop. The most likely knobs to touch:
   With it on, a reranker that misbehaves degrades rather than failing the
   search, at two granularities. If it *raises*, the whole batch falls back
   to the fused RRF scores. If it returns a *non-finite* score (NaN, ±inf),
-  only those rows do — a NaN cannot be ordered, and one in the page's sort
-  key silently reorders rows whose own scores were fine. Either way there
-  is one WARNING on the `localmail.search.searcher` logger naming the model
-  and how many rows were affected, e.g.
+  only those rows are affected: they are ranked **below every row the model
+  did score**, because a NaN cannot be ordered at all — one in the page's
+  sort key silently reorders rows whose own scores were fine — and
+  "relevance unknown" is not a claim to relevance. They are ranked last
+  rather than given their fused RRF score, which is a different scale
+  entirely (RRF is positive and never above `1/61`; a cross-encoder returns
+  raw logits, routinely negative), so splicing one in would promote the one
+  row the model could not judge above the ones it judged and rejected.
+
+  Either way there is one WARNING on the `localmail.search.searcher` logger
+  naming the model; the non-finite one also says how many rows were
+  affected, e.g.
 
   ```
   reranker 'jinaai/jina-reranker-v2-base-multilingual' returned 1 non-finite
-  score(s) of 100 — using fused RRF scores for those rows
+  score(s) of 100 — ranking those rows below every row it did score
   ```
 
   A steady non-zero count there means the model is not usable for this
-  archive; search still works, at fused-RRF quality.
+  archive. Search still works: the affected rows sink to the bottom of the
+  pool and everything else keeps its cross-encoder ranking. If *no* score in
+  a batch is usable the line reads `returned no usable scores` and that page
+  falls back whole, at fused-RRF quality.
 - `chunk_size_tokens` (default 512) — smaller for short messages
 - `body_lang_enabled` (default true) — set false to skip language detection
 - `body_lang_min_confidence` (default 0.65) — lower to label more messages

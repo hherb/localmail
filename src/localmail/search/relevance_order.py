@@ -118,14 +118,24 @@ def relevance_key(
 class FiniteScores:
     """The sanitised score list, and how many entries were substituted.
 
-    A **dataclass, not a NamedTuple**, deliberately. The count exists so
-    the caller can log it without re-deriving the rule, but a two-field
-    ``NamedTuple`` is an iterable of length 2 — so a caller who forgets
-    ``.scores`` and binds the container is accepted by
-    ``_build_results``' ``zip(hydrated, scores, strict=True)`` whenever
-    the pool happens to hold two rows, and the page is then ordered by a
-    list and an int. Not being iterable turns that slip into a
-    ``TypeError`` at the first zip.
+    A **dataclass, not a NamedTuple**, and the difference is the quality
+    of the failure rather than its presence. A caller who forgets
+    ``.scores`` and binds the container is caught either way, but not in
+    the same place: a two-field ``NamedTuple`` is an iterable of length 2,
+    so it gets *past* ``_build_results``' ``zip(hydrated, scores,
+    strict=True)`` on a two-row pool and dies one expression later inside
+    the sort, as ``'<' not supported between instances of 'list' and
+    'int'`` — naming neither the field nor the function. The dataclass
+    fails at the zip itself, naming the type. (mypy also rejects the slip
+    statically, ``_safe_rerank`` being annotated ``-> list[float]``.)
+
+    The one branch where a ``NamedTuple`` really would be **silent** is
+    ``_build_results``' ``sort="date"``, whose key reads ``x[0]`` and
+    never touches the score — so it would build a page whose
+    ``SearchResult.score`` is a list for one row and an int for another.
+    That branch is documented unreachable and pinned by
+    ``tests/test_searcher_pool_sort_unreachable.py``, which is what keeps
+    this a readability argument rather than a correctness one.
     """
 
     scores: list[float]
@@ -135,7 +145,7 @@ class FiniteScores:
 def finite_scores(
     scores: list[float], *, fallback: list[float],
 ) -> FiniteScores:
-    """Replace every non-finite score with its row's ``fallback`` value.
+    """Rank every row the reranker could not score below every row it could.
 
     :func:`relevance_key`'s first slot is a ``float`` handed over by the
     cross-encoder, and a NaN there makes the comparator **inconsistent**:
@@ -153,28 +163,62 @@ def finite_scores(
     model can have meant, and the remedy is the same. Wording it as "NaN
     is bad, inf is tolerable" would be two predicates for one question.
 
-    Substitution is **per row**, matching ``_safe_rerank``'s whole-batch
-    fallback in spirit but not in reach: one unusable value must not
-    discard the scores the model got right. The caller's ``fallback`` is
-    the fused RRF score, finite by construction (a sum of
-    ``1 / (k + rank)`` positives; a pathological ``rrf_k`` raises
-    ``ZeroDivisionError`` rather than yielding a non-finite value).
+    **The substitute is derived from the batch's own scores, never from
+    the fused RRF score of that row, because the two are not on one
+    scale.** RRF is a sum of ``1 / (k + rank)`` terms — with the default
+    ``rrf_k = 60`` no term exceeds ``1/61``, and every term is positive
+    whenever ``k >= 0``. A cross-encoder returns raw logits, routinely
+    negative (fastembed's own example is ``[-1.24, -10.6]``). Splicing an
+    RRF value into a list of logits therefore places the row at the sign
+    boundary of a distribution it was never measured against: on a query
+    the model rates poorly *the one row it failed to score wins the
+    page*, which inverts the ranking this module exists to get right.
+    Ranking it last is the honest reading of "relevance unknown" — the
+    row is still in the pool, still reachable, and no longer claiming a
+    relevance nothing established.
 
-    ``strict=True`` is load-bearing: a plain ``zip`` would silently
-    truncate to the shorter list and drop rows off the page. Length is
-    otherwise not this function's business — ``FastEmbedReranker.rerank``
-    validates it and ``_safe_rerank`` degrades on the raise.
+    ``nextafter`` rather than ``min(usable) - 1.0`` so the guarantee is
+    "strictly below" for every input: at a score near ``-MAX_FLOAT`` the
+    subtraction is absorbed and the unscored row would *tie* the worst
+    scored one, which the date tiebreak could then resolve upward.
 
-    Returns a fresh list on **both** paths, so the signature carries one
-    aliasing contract rather than two — the trap ``Searcher._cut_pool``
+    **The substitute is then re-checked for finiteness, and that is not
+    ceremony.** ``nextafter(-MAX_FLOAT, -inf)`` is ``-inf``, so at that one
+    input the demotion would put a non-finite value straight back into the
+    sort key — this function's own defect, produced by its own fix, and on
+    HTTP a 500 from the response renderer. There is no finite value below
+    ``-MAX_FLOAT``, so the demotion is simply not representable there.
+
+    ``fallback`` is therefore read on two paths, which the single
+    ``isfinite`` test covers together because they mean the same thing —
+    *this batch cannot be ordered relative to itself*: when **no** score is
+    usable (no batch-relative position to demote to), and when the
+    demotion cannot be expressed. Both degrade to the fused order, which is
+    self-consistent and is what ``_safe_rerank`` gives when the reranker
+    raises — the same event, seen from one layer down.
+
+    Two raises, both of which were already hard failures downstream, so
+    neither is newly fatal: a length mismatch (checked here, and again at
+    ``_build_results``' strict ``zip``), and a non-numeric score
+    (``math.isfinite`` rejects it; ``sorted`` could not order it against
+    a float either). ``FastEmbedReranker.rerank`` validates length itself
+    and ``_safe_rerank`` degrades on that raise, so only a third-party
+    ``Reranker`` reaches these.
+
+    Returns a fresh list on **every** path — the all-finite one included,
+    which is the tempting short-circuit — so the signature carries one
+    aliasing contract rather than three, the trap ``Searcher._cut_pool``
     records for its own short-circuit.
     """
-    out: list[float] = []
-    replaced = 0
-    for score, spare in zip(scores, fallback, strict=True):
-        if math.isfinite(score):
-            out.append(score)
-        else:
-            out.append(spare)
-            replaced += 1
-    return FiniteScores(scores=out, replaced=replaced)
+    if len(scores) != len(fallback):
+        raise ValueError(
+            f"{len(scores)} scores against {len(fallback)} fallback scores"
+        )
+    usable = [score for score in scores if math.isfinite(score)]
+    unscored = math.nextafter(min(usable), -math.inf) if usable else -math.inf
+    if not math.isfinite(unscored):
+        return FiniteScores(scores=list(fallback), replaced=len(scores))
+    return FiniteScores(
+        scores=[s if math.isfinite(s) else unscored for s in scores],
+        replaced=len(scores) - len(usable),
+    )

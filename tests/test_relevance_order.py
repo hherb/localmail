@@ -202,25 +202,91 @@ def test_date_key_annotation_is_the_published_alias() -> None:
 # finite_scores: slot 0's totality, the counterpart of date_key's flag.
 # --------------------------------------------------------------------------
 
-def test_a_non_finite_score_is_replaced_by_its_fallback() -> None:
-    """Positional, so the surviving scores stay attached to their own rows."""
+def test_an_unscored_row_is_ranked_below_every_scored_row() -> None:
+    """Positional, so the surviving scores stay attached to their own rows,
+    and the substitute is strictly below the batch's own minimum — never
+    that row's fused RRF score, which is on a different scale entirely."""
     out = finite_scores([0.8, float("nan"), 0.2], fallback=[0.03, 0.02, 0.01])
-    assert out.scores == [0.8, 0.02, 0.2]
+    assert out.scores[0] == 0.8
+    assert out.scores[2] == 0.2
+    assert out.scores[1] < 0.2, out.scores
 
 
-def test_both_infinities_are_replaced_as_well() -> None:
-    """``math.isfinite`` is the predicate. An infinite score orders
-    *consistently* — unlike NaN it does not corrupt its neighbours — but it
-    pins its row to one end of every page, which no model can have meant,
-    and the remedy is the fallback either way. Two predicates for one
-    question is the drift this module exists to avoid."""
+def test_the_substitute_is_strictly_below_without_arithmetic_absorption() -> None:
+    """``nextafter``, not ``min(usable) - 1.0``: at a large-magnitude score
+    the subtraction is absorbed and the unscored row would *tie* the worst
+    scored one, which the date tiebreak could then resolve upward — the
+    promotion this rule exists to prevent, at the inputs where arithmetic
+    cannot express "just below"."""
+    big = -1.0e300
+    out = finite_scores([float("nan"), big], fallback=[0.02, 0.01])
+    assert out.scores[0] < big, out.scores
+    assert big - 1.0 == big, "fixture no longer exercises absorption"
+
+
+def test_a_substitute_that_would_be_non_finite_degrades_the_batch_instead() -> None:
+    """``nextafter(-MAX_FLOAT, -inf)`` is ``-inf``, so at the float floor the
+    demotion would put a **non-finite value back into the sort key** — this
+    rule's own defect, produced by its own fix, and a 500 from the HTTP
+    response renderer.
+
+    There is no finite value below ``-MAX_FLOAT``, so the demotion is not
+    representable and the batch degrades whole instead. Asserting
+    ``isfinite`` rather than ``< floor`` is the point: ``-inf < floor`` is
+    perfectly true, so an ordering assertion passes while the value is
+    exactly the kind this module exists to exclude."""
+    floor = -1.7976931348623157e308
+    out = finite_scores([float("nan"), floor], fallback=[0.02, 0.01])
+    assert all(math.isfinite(s) for s in out.scores), out.scores
+    assert out.scores == [0.02, 0.01]
+    assert out.replaced == 2
+
+
+def test_no_input_can_make_the_output_non_finite() -> None:
+    """The property the two tests above are instances of, stated once. Slot 0
+    of the sort key must be orderable whatever the reranker returns."""
+    floor = -1.7976931348623157e308
+    hostile = [
+        [float("nan"), 0.5],
+        [float("nan"), floor],
+        [math.inf, -math.inf],
+        [floor, floor],
+        [math.inf, floor],
+        [float("nan"), float("nan")],
+    ]
+    for scores in hostile:
+        out = finite_scores(scores, fallback=[0.02, 0.01])
+        assert all(math.isfinite(s) for s in out.scores), (scores, out.scores)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), math.inf, -math.inf])
+def test_every_non_finite_kind_is_demoted_alike(bad: float) -> None:
+    """``math.isfinite`` is the predicate, so ±inf goes the same way as NaN.
+    An infinity orders *consistently* — unlike NaN it does not corrupt its
+    neighbours — but it pins its row to one end of every page, which no
+    model can have meant, and the remedy is the same. Two predicates for
+    one question is the drift this module exists to avoid.
+
+    ``+inf`` is the case that separates "demote" from "keep": left alone it
+    would take slot 1, which is the promotion this rule exists to prevent."""
+    out = finite_scores([bad, 0.5, 0.2], fallback=[0.03, 0.02, 0.01])
+    assert out.scores[1:] == [0.5, 0.2]
+    assert out.scores[0] < 0.2, out.scores
+
+
+def test_a_batch_with_nothing_usable_falls_back_whole() -> None:
+    """There is no batch-relative position to demote to when every score is
+    unusable, and the fused order is the self-consistent answer — the same
+    one ``_safe_rerank`` gives when the reranker raises, which is the same
+    event. This is the only path on which ``fallback`` is read."""
     out = finite_scores([math.inf, -math.inf], fallback=[0.02, 0.01])
     assert out.scores == [0.02, 0.01]
+    assert out.replaced == 2
 
 
 def test_an_all_finite_list_is_returned_unchanged() -> None:
-    """The positive control for ``test_both_infinities_are_replaced_as_well``
-    above, whose inputs are **all** non-finite — so a rule that substituted
+    """The positive control for the parametrized test above, whose inputs
+    are **all** non-finite in one slot — so a rule that substituted
     unconditionally satisfies it. Not for the test before that one, which
     catches the same mutation because its fallback values differ from its
     inputs; the distinction matters because that is a property of the
@@ -237,33 +303,56 @@ def test_the_count_is_how_many_were_replaced() -> None:
     assert out.replaced == 2
 
 
-def test_the_result_is_a_fresh_list_on_both_paths() -> None:
-    """One signature must not have two aliasing contracts — the trap
+def test_the_result_is_a_fresh_list_on_every_path() -> None:
+    """One signature must not have three aliasing contracts — the trap
     ``_cut_pool``'s own note records. The all-finite path is the one that
-    would be tempting to short-circuit by returning the argument."""
+    would be tempting to short-circuit by returning the argument; the
+    all-unusable path is the one that would be tempting to satisfy by
+    returning ``fallback`` itself."""
     scores = [0.8, 0.5]
     assert finite_scores(scores, fallback=[0.0, 0.0]).scores is not scores
     bad = [float("nan"), 0.5]
     assert finite_scores(bad, fallback=[0.0, 0.0]).scores is not bad
+    spare = [0.02, 0.01]
+    hopeless = [float("nan"), float("nan")]
+    assert finite_scores(hopeless, fallback=spare).scores is not spare
 
 
 def test_a_length_mismatch_raises_rather_than_truncating() -> None:
-    """A silent truncation would drop rows off the page. ``zip`` without
-    ``strict`` does exactly that, so the flag is load-bearing."""
+    """A silent truncation would drop rows off the page, and the whole-batch
+    path would return a ``fallback`` of the wrong length — so the check is
+    explicit rather than a by-product of the substitution walk, which that
+    path does not run."""
     with pytest.raises(ValueError):
         finite_scores([0.8, 0.5, 0.2], fallback=[0.03, 0.02])
+    with pytest.raises(ValueError):
+        finite_scores([float("nan"), float("nan")], fallback=[0.03])
+
+
+def test_a_non_numeric_score_raises_rather_than_being_demoted() -> None:
+    """The second of the two raises the caller's docstring names. A ``None``
+    where a float belongs is a malformed *shape*, not an unusable *value*,
+    and it was a hard failure downstream before this rule existed — at
+    ``_build_results``' ``sorted``, which cannot order ``None`` against a
+    float. Degrading it here would convert that into a quiet wrong page."""
+    with pytest.raises(TypeError):
+        finite_scores([0.8, None], fallback=[0.03, 0.02])  # type: ignore[list-item]
 
 
 def test_the_result_is_read_by_field_and_is_not_iterable() -> None:
     """``FiniteScores`` is a dataclass rather than a ``NamedTuple``, and the
-    difference is a silent failure.
+    difference is *where* the slip lands, not whether it is caught.
 
     A caller that forgets ``.scores`` binds the container itself. As a
     two-field ``NamedTuple`` that is an iterable of length 2, so
     ``_build_results``' ``zip(hydrated, scores, strict=True)`` **accepts
-    it** whenever the pool happens to hold two rows — a page ordered by a
-    list and an int. A dataclass is not iterable, so the same slip is a
-    ``TypeError`` at the first zip. Loud beats lucky.
+    it** on a two-row pool — but the very next expression, the ``sorted``
+    on ``relevance_key``, then compares a list against an int and raises
+    ``TypeError`` anyway. Measured, both shapes raise; the dataclass just
+    fails at the zip and names its own type. (The one branch where the
+    ``NamedTuple`` would be genuinely silent is ``sort="date"``, whose key
+    never reads the score — and that branch is pinned unreachable by
+    ``tests/test_searcher_pool_sort_unreachable.py``.)
     """
     out = finite_scores([float("nan")], fallback=[0.5])
     assert isinstance(out, FiniteScores)

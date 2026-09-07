@@ -40,7 +40,7 @@ from localmail.search.page_cache import (
     CacheMissError, PageCache, PageOutOfPoolError,
 )
 from localmail.search.query import ParsedQuery, parse_query
-from localmail.search.relevance_order import date_key, relevance_key
+from localmail.search.relevance_order import date_key, finite_scores, relevance_key
 from localmail.search.reranker import Reranker
 from localmail.search.rewrite_status import (
     APPLIED,
@@ -187,23 +187,81 @@ def _safe_rerank(
     *,
     fallback: list[float],
 ) -> list[float]:
-    """Call the reranker, but degrade to ``fallback`` if it raises.
+    """Call the reranker, degrading if it raises or returns a value that
+    has no place in a sort key.
 
-    A broken reranker (wrong output shape, missing model file, OOM) should
-    not turn a search into a 500 — the RRF-fused scores from the retrieval
-    arms are usable on their own. The mismatch is logged as a WARNING so
-    ops sees the degraded quality.
+    A reranker that *raises* (missing model file, OOM, a length its own
+    validation rejects) should not turn a search into a 500 — the
+    RRF-fused scores from the retrieval arms are usable on their own. The
+    failure is logged as a WARNING so ops sees the degraded quality.
+
+    Two guards, at two granularities, because the failures differ. A raise
+    says the reranker is unusable, so the **whole batch** degrades. A
+    non-finite *value* says one score is unusable, so only that **row**
+    does — discarding the scores the model got right would be a worse
+    answer than the one bad number. The value guard is
+    ``relevance_order.finite_scores``, which owns the reasoning: a NaN in
+    ``relevance_key``'s first slot makes the comparator inconsistent and
+    silently reorders rows whose own scores were fine (#361), and the
+    substitute has to come from the batch's own scores because a fused RRF
+    value is not on the cross-encoder's scale.
+
+    The value guard sits **outside** the ``try`` on purpose. Its raises —
+    a length mismatch and a non-numeric score — are both already hard
+    failures downstream in ``_build_results``, at the strict ``zip`` and
+    at the ``sorted`` respectively; catching them here would quietly
+    convert an existing loud failure into a degrade, which is a different
+    fix for a different problem. So a genuinely malformed *shape* still
+    surfaces, and only a well-formed list of unusable numbers degrades.
+
+    **Neither WARNING is throttled, and #267's rule deliberately does not
+    transfer here.** ``failure_pacing`` exists because ``embed_worker``'s
+    repetition is *machine*-paced — a broken backend is retried once per
+    poll interval forever, with nobody asking — and because each report
+    costs a traceback. This is *demand*-paced: one line per fresh ranked
+    search, none on a continuation page, so the rate is bounded by user
+    activity; each line reports a **distinct** event (a different pool, a
+    different page, a different caller), where #267 suppresses re-reports
+    of one continuing incident; and there is no traceback to pay for.
+    Suppressing here would mean a specific user's specific search was
+    degraded with nothing said, which is the failure class #216, #251 and
+    #266 are all instances of.
     """
+    named = getattr(reranker, "model", type(reranker).__name__)
     try:
-        return reranker.rerank(query, snippets)
+        raw = reranker.rerank(query, snippets)
     except Exception as exc:
         log.warning(
             "reranker %r raised %s: %s — falling back to fused RRF scores",
-            getattr(reranker, "model", type(reranker).__name__),
-            type(exc).__name__,
-            exc,
+            named, type(exc).__name__, exc,
         )
-        return fallback
+        # A fresh list, so this function has one aliasing contract rather
+        # than two — the rule `finite_scores` states for its own returns.
+        return list(fallback)
+    checked = finite_scores(raw, fallback=fallback)
+    if checked.replaced:
+        # `replaced == len(scores)` is not a second reading of the rule —
+        # it is how the caller tells which of the two things `finite_scores`
+        # documents actually happened, and they need different words.
+        # Nested under `if checked.replaced` so an empty pool, where the
+        # two counts are equally zero, says nothing at all.
+        if checked.replaced == len(checked.scores):
+            # No count here on purpose: `replaced` means "entries of the
+            # returned list that are substitutes", which on this branch is
+            # every row, and quoting it as a non-finite count would be
+            # wrong on the float-floor path `finite_scores` documents.
+            log.warning(
+                "reranker %r returned no usable ordering for this page — "
+                "falling back to fused RRF scores",
+                named,
+            )
+        else:
+            log.warning(
+                "reranker %r returned %d non-finite score(s) of %d — "
+                "ranking those rows below every row it did score",
+                named, checked.replaced, len(checked.scores),
+            )
+    return checked.scores
 
 
 @dataclass(frozen=True)

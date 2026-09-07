@@ -832,6 +832,9 @@ src/localmail/
                     #   undated top-up and the one SQL emitter (#323)
     keyset_walk.py  # pure: walk_for_text / keyset_walk_error — a text cursor
                     #   needs its query back (#326)
+    relevance_order.py # pure: what may ENTER the rank path's sort key and in
+                    #   what order — relevance_key/date_key (#359) +
+                    #   finite_scores, which keeps a NaN out of slot 0 (#361)
     argument_errors.py # SearchArgumentRefused + its four subclasses — the
                     #   one family every api boundary maps to 400 (#344);
                     #   owns the wire label's join and enforces its form at
@@ -853,6 +856,8 @@ tests/
                     #   declared in argument_errors.py, every named exception
                     #   Searcher.search (and its helpers) raises is one, and
                     #   every family raise site has its own provocation (#347)
+  _rerank_wiring_rules.py  # pure AST rule: every .rerank( in src/ goes through
+                    #   _safe_rerank, which holds both degradation guards (#361)
   _multilingual_corpus.py  # synthetic 50-message corpus for multilingual eval
   fixtures/         # multilingual_queries.example.json
   test_*.py
@@ -4817,6 +4822,168 @@ for the full design.
           The winner carries the **lower** id now. A tiebreak added to a
           function can silently retire an existing pin that ranked on the
           same axis; check the file it lives in.
+    - **A non-finite rerank score is kept out of the sort key, per row
+      (#361).** `relevance_key`'s first slot is a `float` straight from the
+      cross-encoder, and a NaN there makes the comparator **inconsistent** —
+      every comparison against NaN is `False`, so neither of a pair is "less
+      than" the other and Timsort's output depends on the order the pool
+      arrived in. **The damage is not confined to the NaN row**: measured
+      over the shipped key with `A=NaN, B=1.0, C=3.0, D=2.0`, **9 of the 24**
+      permutations mis-order the three *finite* rows, and `B (1.0)` outranks
+      `D (2.0)` in some of them. Pre-existing rather than introduced by #359
+      — verified, not assumed: the pre-#359 `key=lambda x: x[1]` mis-orders
+      **the same 9 of 24**.
+      - The rule is the pure
+        [src/localmail/search/relevance_order.py](src/localmail/search/relevance_order.py)`::finite_scores`,
+        and it lives **there** rather than beside its caller because it is
+        the slot-0 counterpart of what `date_key` does for slot 1: keep a
+        value that has no place in a total order out of one. A total order
+        is only as total as its slots, so the module owns both.
+      - **Per row, not per batch**, which is why it is a second guard rather
+        than a widening of the first. A *raise* says the reranker is
+        unusable and the whole batch degrades to fused RRF; one bad *value*
+        says one score is unusable, and discarding the scores the model got
+        right would be a worse answer than the one bad number.
+      - **The substitute comes from the batch's own scores, NEVER from that
+        row's fused RRF score — the two are not on one scale.** This
+        shipped as the fused score and was caught in review. RRF is a sum of
+        `1 / (k + rank)` terms: positive, and never above `1/61` at the
+        default `rrf_k = 60`. A cross-encoder returns raw **logits**,
+        routinely negative — fastembed applies no sigmoid
+        (`relevant_output[:, 0]`) and its own docstring example is
+        `[-1.24, -10.6]`. Splicing an RRF value into a list of logits places
+        the row at the sign boundary of a distribution it was never measured
+        against, so on a query the model rates poorly **the one row it
+        failed to score wins the page**. Reproduced through the real
+        `_build_results`: `[nan, -3.5, -6.0, -9.1]` with fused
+        `[0.0164, …]` returns the unscored row at rank 1 of 4, above three
+        rows the model actively judged. The rule is now
+        `nextafter(min(usable), -inf)` — strictly below every row the model
+        *could* score, which is the honest reading of "relevance unknown"
+        and the one that matches the page's stated ordering (score leads,
+        recency breaks ties among equally relevant rows).
+        - **Not a regression, which is why it was easy to miss**: pre-fix
+          the NaN row's position was arbitrary anyway. What the scale error
+          did was turn a non-deterministic mis-ordering into a
+          *deterministic* promotion, and describe it in the README as
+          "fused-RRF quality".
+        - **`nextafter`, not `min(usable) - 1.0`**: at a large-magnitude
+          score the subtraction is absorbed and the unscored row *ties* the
+          worst scored one, which the date tiebreak can then resolve upward
+          — the promotion the rule exists to prevent, at the inputs where
+          arithmetic cannot express "just below". Pinned, with an assertion
+          that the fixture still exercises absorption (`big - 1.0 == big`),
+          so a "tidier" constant cannot silently retire it.
+        - **The substitute is then re-checked for finiteness, and that is
+          not ceremony**: `nextafter(-MAX_FLOAT, -inf)` is `-inf`, so at the
+          float floor the demotion puts a **non-finite value straight back
+          into the sort key** — this rule's own defect, produced by its own
+          fix, and on HTTP the same 500 from the response renderer. Found by
+          writing the edge-case test, and note the first version of that
+          test **passed against the bug**: it asserted `< floor`, and
+          `-inf < floor` is perfectly true. Assert `isfinite`, never an
+          ordering, when finiteness is the property. One `isfinite` test
+          covers both escapes because they mean the same thing — *this batch
+          cannot be ordered relative to itself* — and both degrade to the
+          fused order.
+        - **`fallback` is read only when NO score is usable.** There is no
+          batch-relative position to demote to, and the fused order is the
+          self-consistent answer — the same one the raise branch gives, for
+          the same event. The two cases are **worded apart in the log**
+          ("ranking those rows below every row it did score" is meaningless
+          when there is no scored row), and that branch is nested under
+          `if checked.replaced` so an empty pool, where the two counts are
+          equally zero, says nothing at all.
+      - **`math.isfinite`, so ±inf goes the same way as NaN.** An infinity
+        orders consistently and corrupts nothing, but it pins its row to one
+        end of every page it appears on, which no model can have meant, and
+        the remedy is identical. "NaN is bad, inf is tolerable" would be two
+        predicates for one question — the drift this file keeps recording.
+      - **`FiniteScores` is a frozen dataclass, NOT a `NamedTuple`** — but
+        this is a *legibility* call, not a silent-failure one, and it
+        shipped claiming otherwise ("Loud beats lucky", in five places).
+        **Measured: both shapes raise.** A two-field `NamedTuple` does get
+        past `_build_results`' `zip(hydrated, scores, strict=True)` on a
+        two-row pool, but the very next expression — the `sorted` on
+        `relevance_key` — compares a list against an int and raises
+        `TypeError` anyway; and mypy rejects the slip statically,
+        `_safe_rerank` being annotated `-> list[float]`. What the dataclass
+        buys is *where* it lands: at the zip, naming the type, rather than
+        inside the sort naming neither the field nor the function. The one
+        branch where a `NamedTuple` would be genuinely silent is
+        `_build_results`' `sort="date"`, whose key never reads the score —
+        and that branch is pinned unreachable, which is what keeps this a
+        readability argument. Do not restore the stronger claim.
+      - **The guard sits outside `_safe_rerank`'s `try`.** It has **two**
+        raises, not one — the shipped wording said "its only raise is a
+        length mismatch" and `math.isfinite` also rejects a non-numeric
+        score (`TypeError: must be real number, not NoneType`). Both were
+        already hard failures downstream in `_build_results`, at the strict
+        `zip` and at the `sorted` respectively, so neither is newly fatal;
+        catching them here would quietly convert an existing loud failure
+        into a degrade. A malformed *shape* still surfaces; only a
+        well-formed list of unusable numbers degrades.
+      - **`_cut_pool` needs no equivalent**: it keys on `fused.rrf_score`,
+        which is finite by construction — `k` and `rank` are both `int`, so
+        every `1 / (k + rank)` term is bounded by 1 and a finite sum of them
+        is finite, while a `k` making `k + rank` zero raises
+        `ZeroDivisionError` rather than yielding a non-finite value.
+        Checked, not assumed. (Do **not** write "a sum of positives": that
+        is false for a negative `rrf_k`, which is unconstrained in config,
+        and the bound is what the conclusion actually rests on.)
+      - **The wiring is pinned now, structurally and behaviourally, and was
+        not.** The whole correctness argument is that one helper covers both
+        call sites "by construction" — and replacing `Searcher.search`'s
+        call with a direct `reranker.rerank(...)`, discarding *both* guards
+        from the primary search path, left the entire suite green (3422
+        passed). Every test of `_safe_rerank` calls it directly, so the
+        helper was covered and its **use** was not: #278's shape. The rules
+        are the pure
+        [tests/_rerank_wiring_rules.py](tests/_rerank_wiring_rules.py)`::rerank_wiring_error`
+        — an AST walk of `src/` reporting any `.rerank(` outside the guard,
+        the `_pool_leaks.pool_constructor_calls` arrangement — plus
+        `tests/test_rerank_end_to_end.py`, which drives a NaN-emitting
+        reranker through a real seeded `Searcher.search`. Both, because
+        either alone has a hole: the rule reads spelling and cannot see a
+        bypass by other means; the end-to-end test drives one call site and
+        cannot see the other. Both fail against the mutation, and the rule
+        names the offending line. Two exemptions, each conditional:
+        `search/reranker.py` *implements* the call, and `cli.py` warms the
+        model and **discards the result** — a warmup that ever fed a page
+        would need the guard like any other caller.
+      - **The degradation is legible to an operator and to nobody else —
+        #363, filed not fixed.** Both branches emit one WARNING and nothing
+        reaches the wire, so `score` carries a substitute indistinguishably
+        from a cross-encoder output — and since the substitute is now
+        deliberately on a *different scale*, a consumer thresholding on
+        `score` cannot tell them apart. Worse per-page than it looks: the
+        sanitised scores are cached, so `continue_page` replays them without
+        re-entering `_safe_rerank` and five pages come off one log line. The
+        rewriter (`rewrite_status` / `rewrite_note_code`) is the structural
+        precedent for making such a thing machine-legible; the reason it was
+        not done here is #278's rule that a new wire key lands **with** its
+        renderer, which is its own slice of work.
+      - **Reachability is narrow and the consequence differed by
+        transport.** It needs `reranker_enabled = true` — not the default —
+        plus a model emitting NaN. `_safe_rerank` guarded the *raise* and
+        `FastEmbedReranker` the *length*; neither looked at the values. On
+        the Searcher, CLI and MCP paths the corruption is silent. On
+        **HTTP it is a 500 from the response renderer**: Starlette's
+        `JSONResponse` renders with `allow_nan=False`, so a surviving NaN in
+        the wire `score` field (`api/search.py`) raises `ValueError: Out of
+        range float values are not JSON compliant` *after* the search
+        succeeded, with nothing naming the reranker. Measured — the earlier
+        guess that it emitted a bare `NaN` token was wrong, though that
+        token would indeed be rejected by `JSON.parse` and every strict
+        parser.
+      - **The headline pin is a permutation sweep, not one input**
+        (`tests/test_rerank_nonfinite_scores.py`). The two orderings a
+        single hand-picked input happens to produce are as likely to be the
+        correct one as not, which is precisely why the defect reads as a
+        data problem. It asserts the **full** page order, not just the
+        finite rows: substituting some *other* constant keeps `C, D, B`
+        intact and moves only the NaN row, so the filtered assertion alone
+        passes for it (mutation-proven with `99.0`).
 - **Hard ACL clamp inside the Searcher**: the ACL is enforced in **two**
   places, and both are load-bearing. `api/search.py::_scope_filters_by_acl`
   intersects the caller's *structured* `account_ids` filter and

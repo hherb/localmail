@@ -219,8 +219,12 @@ def test_both_infinities_are_replaced_as_well() -> None:
 
 
 def test_an_all_finite_list_is_returned_unchanged() -> None:
-    """The positive control: a rule that substituted unconditionally would
-    satisfy both assertions above."""
+    """The positive control for ``test_both_infinities_are_replaced_as_well``
+    above, whose inputs are **all** non-finite — so a rule that substituted
+    unconditionally satisfies it. Not for the test before that one, which
+    catches the same mutation because its fallback values differ from its
+    inputs; the distinction matters because that is a property of the
+    fixture's numbers rather than of the assertion."""
     out = finite_scores([0.8, 0.5, 0.2], fallback=[0.03, 0.02, 0.01])
     assert out.scores == [0.8, 0.5, 0.2]
     assert out.replaced == 0

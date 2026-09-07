@@ -78,7 +78,7 @@ SPDX headers in `src/localmail/`; **not** in `gui/`).
 
 ## What we shipped this session
 
-Two commits plus this handoff, one PR. **`gui/` was not touched**, so the five
+Three commits plus this handoff, one PR. **`gui/` was not touched**, so the five
 frontend gates were correctly *not* run (risk 35 does not apply this session).
 
 ### `3846ff2` — a non-finite rerank score never reaches the page's sort key
@@ -106,6 +106,20 @@ row.
   for a different problem, which nothing asked for.
 - **`_cut_pool` needs no equivalent**: it keys on `fused.rrf_score`, finite by
   construction. Checked, not assumed.
+
+### `tests:` — the positive-control docstrings claimed more than they held
+
+*(The last commit on the branch; it carries this handoff's own edit, so it
+cannot name its own SHA — the same reason earlier handoffs write "and the
+handoff commit".)*
+
+Both said a rule that substituted *unconditionally* "would satisfy every
+assertion above". Measured: it does not — the first assertion in each file
+catches that mutation too, because its fallback values differ from its inputs.
+The control genuinely guards the **parametrized** test, whose inputs are all
+non-finite. The distinction is worth the words: the other test catches it by
+luck of the fixture's numbers, this one by construction. A justification that
+overstates its own reach is how a later reader deletes a pin that matters.
 
 ### `c29b528` — README + CLAUDE.md
 

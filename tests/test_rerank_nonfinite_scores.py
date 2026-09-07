@@ -83,8 +83,13 @@ def test_every_non_finite_score_is_replaced(bad: float) -> None:
 
 
 def test_finite_scores_pass_through_untouched() -> None:
-    """The positive control: a rule that replaced everything would satisfy
-    every assertion above."""
+    """The positive control for the parametrized test above, whose inputs
+    are **all** non-finite — so a rule that substituted unconditionally
+    satisfies it. This is what separates "replaces the bad ones" from
+    "replaces everything". (Measured: the first test above catches that
+    mutation too, because its fallback values differ from its inputs. This
+    is the one that catches it by construction rather than by luck of the
+    fixture's numbers.)"""
     scores = _safe_rerank(
         _Reranker([0.8, 0.5, 0.2]), "q", ["a", "b", "c"],
         fallback=[0.03, 0.02, 0.01],

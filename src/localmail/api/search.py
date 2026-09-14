@@ -120,8 +120,17 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
                 if not s:
                     raise ValidationFailed("lang: empty value not allowed")
                 out.append(f"lang:{s}")
-    if filters.get("has_attachment") is True:
+    has_attachment = filters.get("has_attachment")
+    if has_attachment is True:
         out.append("has:attachment")
+    elif has_attachment is False:
+        # Dropped until #364, though the MCP tool's description promised it
+        # and `_filter_sql` already honoured it.
+        out.append("has:no-attachment")
+    elif has_attachment is not None:
+        raise ValidationFailed(
+            f"has_attachment: expected true, false or null, got {has_attachment!r}"
+        )
     return out
 
 

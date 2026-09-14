@@ -8,7 +8,7 @@ Supported operators (all optional, in any order, anywhere in the query):
     subject:STR               label:STR
     account:NAME              folder:STR / folder:"STR"
     after:YYYY-MM-DD          before:YYYY-MM-DD
-    has:attachment
+    has:attachment / has:no-attachment
 
 Anything not matched by an operator becomes free-text (joined with spaces,
 preserved in encounter order).
@@ -86,6 +86,31 @@ def _parse_date(value: str, field_name: str) -> date:
         raise QueryParseError(f"{field_name}: expected YYYY-MM-DD, got {value!r}") from exc
 
 
+#: ``has:`` values and what each sets ``SearchFilters.has_attachment`` to.
+_HAS_VALUES: dict[str, bool] = {"attachment": True, "no-attachment": False}
+
+
+def _parse_has(value: str, current: bool | None) -> bool:
+    """Resolve one ``has:`` token against any earlier one in the same query.
+
+    An unrecognised value used to vanish from the query entirely — not a
+    filter, and not free text either — so ``has:attachments`` searched the
+    whole archive with a 200 (#364). A contradiction is refused rather than
+    letting the last token win, which would be the same silence one step
+    removed.
+    """
+    key = value.lower()
+    if key not in _HAS_VALUES:
+        expected = " or ".join(repr(v) for v in _HAS_VALUES)
+        raise QueryParseError(f"has: expected {expected}, got {value!r}")
+    wanted = _HAS_VALUES[key]
+    if current is not None and current != wanted:
+        raise QueryParseError(
+            "has: 'attachment' and 'no-attachment' contradict each other"
+        )
+    return wanted
+
+
 def parse_query(query: str) -> ParsedQuery:
     """Decompose a query string into free text + structured filters."""
     free_parts: list[str] = []
@@ -138,8 +163,7 @@ def parse_query(query: str) -> ParsedQuery:
                 elif op_l == "before":
                     f_before = _parse_date(value, "before")
                 elif op_l == "has":
-                    if value.lower() == "attachment":
-                        f_has_attachment = True
+                    f_has_attachment = _parse_has(value, f_has_attachment)
                 continue
         free_parts.append(tok)
 

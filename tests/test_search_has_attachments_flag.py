@@ -13,9 +13,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
-from localmail.api.search import _to_api_result
+from localmail.api.search import _to_api_result, run_search
 from localmail.config import SearchConfig
 from localmail.db import open_pool
 from localmail.search.embed_worker import run_embed_worker_once
@@ -148,3 +149,34 @@ def test_the_flag_reaches_the_wire_through_the_real_route(
     assert r.status_code == 200, r.text
     got = {int(h["message_id"]): h["has_attachments"] for h in r.json()["results"]}
     assert got == {ids["ticket"]: True, ids["lunch"]: False}
+
+
+@pytest.mark.parametrize("free_text", ["", "Berlin"])
+def test_the_filter_selects_exactly_the_flagged_hits(db_dsn, db_conn, free_text) -> None:
+    """One rule, checked by behaviour: the filter and the flag cannot disagree.
+
+    ``""`` drives the date walk and ``"Berlin"`` the hybrid pool, so both
+    places a hit is built are covered.
+    """
+    acct, _ = _seed(db_conn, malformed=False)
+    cfg = SearchConfig()
+    run_embed_worker_once(db_conn, cfg, _Embedder())
+    pool = open_pool(db_dsn)
+    try:
+        searcher = Searcher(pool=pool, cfg=cfg, embeddings=_Embedder(),
+                            reranker=None, rewriter=None)
+
+        def flags(filters: dict) -> dict[str, bool]:
+            page = run_search(searcher=searcher, free_text=free_text, filters=filters,
+                              limit=50, allowed_account_ids=[acct], user_id=1)
+            return {h["message_id"]: h["has_attachments"] for h in page["results"]}
+
+        everything = flags({})
+        with_attachments = flags({"has_attachment": True})
+        without_attachments = flags({"has_attachment": False})
+    finally:
+        pool.close()
+    assert with_attachments and without_attachments, (
+        "both halves must be non-empty, or this proves nothing", everything)
+    assert set(with_attachments) == {m for m, flag in everything.items() if flag}
+    assert set(without_attachments) == {m for m, flag in everything.items() if not flag}

@@ -26,6 +26,19 @@ def test_build_query_string_validates_date_format() -> None:
         build_query_string(free_text="x", filters={"after": "not-a-date"})
 
 
+def test_build_query_string_emits_no_attachment_for_false() -> None:
+    assert build_query_string(
+        free_text="x", filters={"has_attachment": False},
+    ) == "x has:no-attachment"
+
+
+@pytest.mark.parametrize("value", ["yes", "true", 1, 0])
+def test_a_non_boolean_has_attachment_is_refused(value) -> None:
+    with pytest.raises(ValidationFailed,
+                       match="has_attachment: expected true, false or null"):
+        build_query_string(free_text="x", filters={"has_attachment": value})
+
+
 @pytest.mark.parametrize("free_text", [
     "invoice",
     "",
@@ -44,6 +57,7 @@ def test_build_query_string_validates_date_format() -> None:
     {"subject": "  "},
     {"after": "2026-01-01", "before": "2026-02-01"},
     {"has_attachment": True},
+    {"has_attachment": False},
     {"lang": "en"},
     {"to": 'bob "the" builder'},
 ])

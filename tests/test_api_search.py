@@ -111,11 +111,11 @@ def test_filter_value_with_embedded_quote_is_stripped() -> None:
     assert 'subject:"has quotes in it"' in q
 
 
-def test_known_unsupported_filter_keys_is_empty() -> None:
-    """Every v1 spec filter key is wired through to the Searcher."""
-    from localmail.api.search import _KNOWN_UNSUPPORTED_FILTER_KEYS, _SUPPORTED_FILTER_KEYS
-    assert _KNOWN_UNSUPPORTED_FILTER_KEYS == frozenset()
-    assert {"date_from", "date_to", "lang"} <= _SUPPORTED_FILTER_KEYS
+def test_build_query_string_refuses_an_unknown_filter_key() -> None:
+    """Every v1 filter key is wired through; any other key is refused by
+    name rather than ignored (#364)."""
+    with pytest.raises(ValidationFailed, match="unknown key 'label'"):
+        build_query_string(free_text="x", filters={"label": "work"})
 
 
 @pytest.mark.parametrize("key, value, expected_token", [

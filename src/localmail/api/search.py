@@ -9,6 +9,8 @@ flattened into a cursor string.
 """
 from __future__ import annotations
 
+import difflib
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -56,32 +58,44 @@ _SUPPORTED_FILTER_KEYS = frozenset({
     "date_from", "date_to", "lang",
 })
 
-# Empty: every v1 spec filter key now wires through to the Searcher.
-# Kept as a frozenset so the existing "unsupported key" check keeps working
-# without special-casing an empty case at call sites.
-_KNOWN_UNSUPPORTED_FILTER_KEYS: frozenset[str] = frozenset()
+
+def filter_key_error(filters: Mapping[str, object]) -> str | None:
+    """Name every key that is not a filter, or ``None`` when all of them are.
+
+    Refused by name rather than dropped (#364): an ignored key answers a
+    filtered question with unfiltered results and a 200. A key is judged
+    whatever its value, ``null`` included. The suggestion is there because
+    the commonest slip is the hit field's own name, ``has_attachments``,
+    sent back as the filter ``has_attachment``.
+    """
+    unknown = sorted(str(k) for k in filters if k not in _SUPPORTED_FILTER_KEYS)
+    if not unknown:
+        return None
+    supported = sorted(_SUPPORTED_FILTER_KEYS)
+    described = []
+    for key in unknown:
+        close = difflib.get_close_matches(key, supported, n=1, cutoff=0.8)
+        described.append(f"{key!r} (did you mean {close[0]!r}?)" if close else repr(key))
+    noun = "key" if len(unknown) == 1 else "keys"
+    return (f"filters: unknown {noun} {', '.join(described)}; "
+            f"supported: {', '.join(supported)}")
 
 
 def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
     """Compose `free_text` + filter DSL tokens into a single query string.
 
-    Date filters are validated to YYYY-MM-DD. Keys in
-    `_KNOWN_UNSUPPORTED_FILTER_KEYS` raise `ValidationFailed` so the caller
-    sees a clear 400. Other unknown keys are silently ignored (forward
-    compatibility with future filter additions).
+    Raises `ValidationFailed` for a key that is not a filter
+    (`filter_key_error`) and for a malformed value: dates must be YYYY-MM-DD,
+    `lang` non-empty, ids strict digit strings, `has_attachment` a bool.
+    Nothing is silently dropped (#364).
     """
-    for key in _KNOWN_UNSUPPORTED_FILTER_KEYS:
-        if filters.get(key) not in (None, [], "", False):
-            supported = ", ".join(sorted(_SUPPORTED_FILTER_KEYS))
-            raise ValidationFailed(
-                f"filter {key!r} is accepted by the API schema but not yet "
-                f"wired through to the search backend. Supported filters: {supported}"
-            )
+    key_error = filter_key_error(filters)
+    if key_error is not None:
+        raise ValidationFailed(key_error)
     parts: list[str] = []
     if free_text:
         parts.append(free_text)
-    for token in _filter_tokens(filters):
-        parts.append(token)
+    parts.extend(_filter_tokens(filters))
     return " ".join(parts)
 
 
@@ -263,6 +277,15 @@ def run_search(
     membership_error = sort_membership_error(sort=sort, sort_order=sort_order)
     if membership_error is not None:
         raise ValidationFailed(membership_error)
+
+    # Filters next, keys and then values, for the reason the gate above
+    # gives: ahead of the empty-ACL short-circuit, whose empty page reads as
+    # "no results". The value checks used to run only in the
+    # `build_query_string` calls below that branch, so a malformed
+    # `date_from` from a caller granted nothing was answered 200 (#364).
+    # Composed and discarded here; the branches compose it again from the
+    # ACL-scoped filters.
+    build_query_string(free_text=free_text, filters=filters)
 
     # Resolved before the ACL short-circuit below, because that branch answers
     # with an empty page — indistinguishable from "you have reached the end".

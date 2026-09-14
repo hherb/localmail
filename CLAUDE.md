@@ -5000,9 +5000,20 @@ for the full design.
     counts by editing this one constant.
   - **`false`:** `has_attachment: false` compiles to the DSL
     `has:no-attachment`. Any other `has:` value, and the contradictory pair,
-    raise `QueryParseError`, which `_gate_free_text` already maps to a 400.
-    An unknown value used to vanish from the query, not even kept as free
-    text.
+    raise `QueryParseError`. An unknown value used to vanish from the query,
+    not even kept as free text.
+    - **The contradictory pair needed a second gate (found in final
+      review, #364 F1).** A `has:` in `query` that contradicts the
+      structured `has_attachment` filter exists only in the **composed**
+      string — `free_text` and `filters` each parse cleanly alone, so
+      `_gate_free_text(free_text)` never sees it. Unparsed, it first hit
+      `Searcher.search`'s own parse of the ACL-composed query and raised
+      the bare `QueryParseError` there, past both branches' `except
+      SearchArgumentRefused` — an unhandled 500 before this fix. The early
+      filter gate in `run_search` now also parses
+      `build_query_string(free_text, filters)` (result discarded) through
+      `_gate_free_text`, ahead of the empty-ACL short-circuit, so the
+      contradiction is refused at the one place that sees both halves.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.

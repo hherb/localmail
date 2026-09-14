@@ -17,6 +17,24 @@ from tests.test_serve_search_route import (
 )
 
 
+def _searcher_that_parses_before_anything_else():
+    """A fake whose ``.search`` reproduces the one thing that matters for
+    F1: the real ``Searcher.search`` parses its composed query argument
+    before doing anything else, and raises the real ``parse_query``'s bare
+    ``QueryParseError`` on a contradiction. The rest of the mock never runs
+    that far — reaching ``AssertionError`` at all is itself the RED signal
+    of "retrieval must not start", the ``_searcher()`` shape one module
+    over in ``test_api_search_filter_keys.py``."""
+    searcher = _fake_searcher_returning_one_hit()
+
+    def _search(query, *args, **kwargs):
+        parse_query(query)  # raises QueryParseError on a real contradiction
+        raise AssertionError("retrieval must not start")
+
+    searcher.search.side_effect = _search
+    return searcher
+
+
 def _post(db_dsn: str, api_token: str, body: dict):
     searcher = _fake_searcher_returning_one_hit()
     client = TestClient(create_app(db_dsn=db_dsn, searcher=searcher))
@@ -80,6 +98,20 @@ def test_an_unknown_top_level_field_is_a_400_naming_it(
     searcher.search.assert_not_called()
 
 
+def test_several_unknown_top_level_fields_are_all_named(
+    db_dsn, api_token, db_conn, api_user,
+) -> None:
+    _seed_acct_and_grant(db_conn, api_user.id)
+    r, searcher = _post(db_dsn, api_token,
+                        {"query": "flight", "order": "asc", "page": 2})
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == (
+        "unknown fields 'order', 'page'; supported: cursor, filters, limit, "
+        "query, smart, sort, sort_order"
+    )
+    searcher.search.assert_not_called()
+
+
 @pytest.mark.parametrize("body", [
     # The desktop GUI's shape (gui/src-tauri/src/commands/search.rs).
     {"query": "hello", "filters": {"account_ids": ["1"], "has_attachment": True},
@@ -107,9 +139,50 @@ def test_query_may_be_omitted_for_a_filter_only_search(
     assert composed.filters.has_attachment is True
 
 
+def test_has_attachment_false_reaches_the_searcher(
+    db_dsn, api_token, db_conn, api_user,
+) -> None:
+    _seed_acct_and_grant(db_conn, api_user.id)
+    r, searcher = _post(db_dsn, api_token,
+                        {"query": "hello", "filters": {"has_attachment": False}})
+    assert r.status_code == 200, r.text
+    composed = parse_query(searcher.search.call_args.args[0])
+    assert composed.filters.has_attachment is False
+
+
 def test_a_caller_granted_nothing_gets_the_400_not_an_empty_page(
     db_dsn, api_token, api_user,
 ) -> None:
     for filters in ({"has_attachments": True}, {"date_from": "last-week"}):
         r, _ = _post(db_dsn, api_token, {"query": "flight", "filters": filters})
         assert r.status_code == 400, (filters, r.text)
+
+
+def test_a_has_token_in_the_query_contradicting_the_filter_is_a_400(
+    db_dsn, api_token, db_conn, api_user,
+) -> None:
+    """The contradiction exists only in the composed string (#364 F1):
+    `_gate_free_text(free_text)` alone never sees the filter's `has:`
+    token, and neither branch's `except SearchArgumentRefused` catches the
+    bare `QueryParseError` the real `Searcher.search` raises from its own
+    parse of the composed query — it escaped as an unhandled 500 before
+    this fix. The fake reproduces exactly that one behaviour so the RED run
+    shows the real shape rather than a mock artifact.
+
+    `raise_server_exceptions=False` is what lets the RED run of this test
+    show the pre-fix 500 instead of pytest re-raising it.
+    """
+    _seed_acct_and_grant(db_conn, api_user.id)
+    searcher = _searcher_that_parses_before_anything_else()
+    client = TestClient(create_app(db_dsn=db_dsn, searcher=searcher),
+                        raise_server_exceptions=False)
+    r = client.post("/v1/search",
+                    json={"query": "invoice has:attachment",
+                          "filters": {"has_attachment": False}},
+                    headers={"Authorization": f"Bearer {api_token}"})
+    assert r.status_code == 400, r.text
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["detail"] == (
+        "has: 'attachment' and 'no-attachment' contradict each other"
+    )
+    searcher.search.assert_not_called()

@@ -179,11 +179,20 @@ def _gate_free_text(free_text: str) -> str:
     ``ToolError`` mapping covers.
 
     Translating it here rather than at each call site is what makes the fix
-    total: this runs once, unconditionally, at the top of ``run_search``,
-    ahead of the empty-ACL short-circuit and of every retrieval branch. The
-    gate's own parse is what #326 added; the *fresh* path has raised the
-    same bare error since long before, from ``Searcher.search``'s parse, and
-    is covered now by the same translation running first.
+    total. It runs twice now, not once, both ahead of the empty-ACL
+    short-circuit and every retrieval branch: first — since #364 F1 — against
+    the **composed** ``build_query_string(free_text, filters)`` in the filter
+    gate above, result discarded, because a contradiction that spans the free
+    text and a structured filter (a `has:` token against `has_attachment`)
+    exists only in that composed string. Second, against the **raw**
+    ``free_text`` (bound to ``parsed_free_text``, which feeds
+    ``resolve_cursor_plan`` and the empty-ACL branch's
+    ``sort_applied``/``rankable``). Before the composed call was added, a
+    cross-string contradiction reached ``Searcher.search`` unparsed and raised
+    there instead, past both branches' `except SearchArgumentRefused`. The raw
+    call's own parse is what #326 added; the *fresh* path has raised the same
+    bare error since long before, from ``Searcher.search``'s parse, and is
+    covered now by the same translation running first.
 
     ``query="invoice after:last-week"`` is exactly the shape an LLM agent
     emits, which is the audience this cursor cluster is written for.
@@ -285,7 +294,17 @@ def run_search(
     # `date_from` from a caller granted nothing was answered 200 (#364).
     # Composed and discarded here; the branches compose it again from the
     # ACL-scoped filters.
-    build_query_string(free_text=free_text, filters=filters)
+    #
+    # Parsed too (result discarded), not merely composed: a `has:` token in
+    # `query` can contradict the structured `has_attachment` filter, and
+    # that contradiction exists only in the *composed* string — `free_text`
+    # and `filters` each look fine read alone. Left unparsed here, it was
+    # first parsed inside `Searcher.search`, whose bare `QueryParseError`
+    # neither branch's `except SearchArgumentRefused` catches, so it escaped
+    # as an unhandled 500 (found in final review, #364 F1). `_gate_free_text`
+    # is reused for the translation rather than a second `try`/`except`, so
+    # the two parses raise the identical `ValidationFailed` shape.
+    _gate_free_text(build_query_string(free_text=free_text, filters=filters))
 
     # Resolved before the ACL short-circuit below, because that branch answers
     # with an empty page — indistinguishable from "you have reached the end".

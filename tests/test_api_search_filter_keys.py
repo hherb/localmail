@@ -93,3 +93,33 @@ def test_a_well_formed_request_with_an_empty_acl_still_answers_an_empty_page() -
                       limit=10, allowed_account_ids=[], user_id=1)
     assert page["results"] == []
     assert page["next_cursor"] is None
+
+
+@pytest.mark.parametrize("allowed", [[1], []])
+@pytest.mark.parametrize("free_text,filters", [
+    ("invoice has:attachment", {"has_attachment": False}),
+    ("invoice has:no-attachment", {"has_attachment": True}),
+])
+def test_a_has_token_in_the_query_contradicting_the_filter_is_refused(
+    free_text, filters, allowed,
+) -> None:
+    """The contradiction exists only in the composed string (#364 F1): the
+    free-text `has:` token and the structured `has_attachment` filter each
+    look fine in isolation, and only `build_query_string`'s concatenation
+    of the two puts both tokens in front of `parse_query` at once. `[]`
+    matters as much as `[1]` — the empty-ACL branch must not report this
+    as a completed, contentless search."""
+    with pytest.raises(ValidationFailed,
+                       match="has: 'attachment' and 'no-attachment' contradict each other"):
+        run_search(searcher=_searcher(), free_text=free_text, filters=filters,
+                   limit=10, allowed_account_ids=allowed, user_id=1)
+
+
+def test_a_has_token_agreeing_with_the_filter_is_not_refused() -> None:
+    """Positive control: an agreeing `has:` + `has_attachment` pair must
+    still reach the empty-ACL short-circuit rather than being refused."""
+    page = run_search(searcher=_searcher(), free_text="invoice has:attachment",
+                      filters={"has_attachment": True}, limit=10,
+                      allowed_account_ids=[], user_id=1)
+    assert page["results"] == []
+    assert page["next_cursor"] is None

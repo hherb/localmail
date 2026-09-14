@@ -1,7 +1,7 @@
 # Search requests are honoured or refused, never dropped
 
 Date: 2026-09-14
-Status: design approved in outline, awaiting spec review
+Status: approved; implemented on fix/364-search-honesty
 Issue: #364 (slice A of the kastellan request triage; #365 follows it)
 
 ## Problem
@@ -63,7 +63,7 @@ The DSL gains one value: `has:no-attachment`.
 
 - `query.parse_query` sets `has_attachment = False` for it.
 - `has:` with any other value raises `QueryParseError`, naming both valid values. `_gate_free_text` already translates that to a 400 at the top of `run_search`, so no new catch is needed.
-- `has:attachment` together with `has:no-attachment` in one query also raises, instead of the last one winning.
+- `has:attachment` together with `has:no-attachment` in one query also raises, instead of the last one winning. **Correction (found in final review):** a contradiction between the `has:` in `query` and the structured `has_attachment` filter exists only in the *composed* string — `free_text` and `filters` each parse cleanly alone, and `_gate_free_text(free_text)` never sees the filter's token. The early filter gate in `run_search` therefore also parses `build_query_string(free_text, filters)` (result discarded) through `_gate_free_text`, ahead of the empty-ACL short-circuit; see the #364 F1 note in CLAUDE.md.
 - `_filter_tokens` emits `has:no-attachment` for `False`.
 
 **Spelling.** `-has:attachment` (Gmail's) was rejected: negation would then exist for one operator only, and `-from:x` would silently stay free text, the defect this slice removes. A second value on the existing operator needs no tokenizer change.

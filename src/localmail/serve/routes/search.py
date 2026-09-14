@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from localmail.api.acl import allowed_account_ids
-from localmail.api.errors import FeatureUnavailable
+from localmail.api.errors import FeatureUnavailable, ValidationFailed
 from localmail.api.search import run_search
 from localmail.serve.middleware import get_authenticated_user
 
@@ -30,14 +30,25 @@ class SearchFiltersModel(BaseModel):
     after: str | None = None
     before: str | None = None
 
-    model_config = {"populate_by_name": True, "extra": "ignore"}
+    # "allow", never "ignore": an unknown key has to reach `run_search`,
+    # which refuses it by name. Ignored, a planner's `has_attachments` (the
+    # hit field's plural) got unfiltered results and a 200 (#364).
+    model_config = {"populate_by_name": True, "extra": "allow"}
 
 
 SEARCH_LIMIT_MAX = 200
 
 
 class SearchRequest(BaseModel):
-    query: str
+    # "allow" so the route can refuse an unknown field by name rather than
+    # drop it (#364). Pydantic's "forbid" answers 422 with an array `detail`,
+    # which is not problem+json, so a client that renders `detail` (the
+    # kastellan mail worker does) gets nothing it can act on.
+    model_config = {"extra": "allow"}
+
+    # Optional: a filter-only search is a search. A query with no free text
+    # takes the date walk and reports `rankable: false` (#324).
+    query: str = ""
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
     # "rank" orders by rerank relevance; "date" takes the date-ordered
@@ -75,19 +86,44 @@ class SearchRequest(BaseModel):
     smart: bool = False
 
 
+def _unknown_field_error(req: SearchRequest) -> str | None:
+    """Name the request fields this route does not define, or ``None``.
+
+    Checked here rather than in `run_search`, which takes keyword arguments
+    and so cannot be handed one. It matters beyond typos: an older server
+    ignoring a field a newer client relies on returns an answer that looks
+    like the one asked for.
+    """
+    unknown = sorted(req.model_extra or {})
+    if not unknown:
+        return None
+    noun = "field" if len(unknown) == 1 else "fields"
+    supported = ", ".join(sorted(SearchRequest.model_fields))
+    return (f"unknown {noun} {', '.join(repr(k) for k in unknown)}; "
+            f"supported: {supported}")
+
+
 @router.post("")
 def search_endpoint(
     req: SearchRequest,
     request: Request,
     user=Depends(get_authenticated_user),
 ) -> dict[str, Any]:
+    field_error = _unknown_field_error(req)
+    if field_error is not None:
+        raise ValidationFailed(field_error)
     searcher = request.app.state.searcher
     if searcher is None:
         raise FeatureUnavailable("search not configured on this server")
     pool = request.app.state.pool
     with pool.connection() as conn:
         allowed = allowed_account_ids(conn, user.id)
-    filters_dict = req.filters.model_dump(by_alias=True, exclude_none=True)
+    filters_dict = {
+        **req.filters.model_dump(by_alias=True, exclude_none=True),
+        # Unknown keys again, `null` ones included: `exclude_none` drops those,
+        # and a key that is not a filter is a mistake whatever its value.
+        **(req.filters.model_extra or {}),
+    }
     return run_search(
         searcher=searcher,
         free_text=req.query,

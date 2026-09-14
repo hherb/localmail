@@ -1081,8 +1081,13 @@ class Searcher:
                 attachment_filename=attachment_filename,
                 # `m` is `{}` for a message deleted between retrieval and
                 # hydration, the same case `account_id`'s default above covers;
-                # a message that no longer exists carries no attachments.
-                has_attachments=bool(m.get("has_attachments", False)),
+                # a message that no longer exists carries no attachments. A
+                # `.get` default here would let a *present* row missing the
+                # key claim `False` by omission — the defaultless-field
+                # footgun this hydration query cannot actually produce, since
+                # `HAS_ATTACHMENT_SQL` is always selected, but that guarantee
+                # belongs on the row check, not folded into a silent default.
+                has_attachments=m["has_attachments"] if m else False,
                 matched_chunk_id=h.best_chunk_id,
                 matched_chunk_table=h.best_chunk_table,
             ))

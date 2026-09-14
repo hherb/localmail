@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, get_args
 
-from localmail.search.sort_axes import SortOrder
 from localmail.search.attachment_presence import HAS_ATTACHMENT_SQL
+from localmail.search.sort_axes import SortOrder
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from localmail.search.searcher import KeysetCursor

@@ -934,6 +934,21 @@ the archive oldest-first and its cursor continues ascending. It used to
 be a 400 naming `sort=rank`, a path the request would never have taken.
 Both halves closed [#324](https://github.com/hherb/localmail/issues/324).
 
+**Filters are honoured or refused, never dropped.** `query` is optional: a
+request with only `filters` is a search, answered newest first. An unknown
+filter key is a 400 naming it, with a suggestion when one is close
+(`has_attachments` is not `has_attachment`). An unknown top-level field is a
+400 too. Both used to be ignored, which answered a filtered question with
+unfiltered results and a 200. `has_attachment: false` now means "only
+messages without attachments" (DSL `has:no-attachment`) where it used to be
+dropped, and a malformed filter value is a 400 even for a caller with no
+account grants. Every hit's `has_attachments` describes the message; it
+used to report whether the *matched text* came from an attachment. An
+attachment is any non-body MIME part, which still includes images embedded
+in an HTML body — [#365](https://github.com/hherb/localmail/issues/365)
+tracks narrowing that. Closes
+[#364](https://github.com/hherb/localmail/issues/364).
+
 When paging, send the cursor back with the same `query` and filters and
 **leave `sort` and `sort_order` unset**. The cursor already carries the
 ordering it continues, so a stated value that contradicts it on either
@@ -1264,7 +1279,8 @@ uv run localmail search "minutes lang:en before:2025-06-01"   # language + date 
 DSL operators: `from:`, `to:`, `subject:`, `label:`, `account:`, `folder:`,
 `account_id:N`, `folder_id:N`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`,
 `lang:XX` (ISO 639-1 code; matches the `messages.body_lang` column populated
-per-message by `lingua-language-detector`), and `has:attachment`. Each operator
+per-message by `lingua-language-detector`), `has:attachment` and
+`has:no-attachment` (any other `has:` value is refused). Each operator
 may appear multiple times where it makes sense (e.g. multiple `lang:`
 accumulate; `lang:en lang:de` matches either). Bodies shorter than
 `search.body_lang_min_text_chars` (default 20) and detections below

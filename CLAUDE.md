@@ -814,6 +814,8 @@ src/localmail/
                     #   reopen_all (#255)
     lang_text.py    # pure: normalize_for_detection — the one detector-input rule (#255)
     text_empty.py   # pure: is_blank — the one "nothing to index" rule (#266)
+    attachment_presence.py # pure: HAS_ATTACHMENT_SQL — the one "has
+                    #   attachments" rule, filter and hit flag alike (#364)
     page_cache.py   # in-process LRU cache for paginated result pools
     sweep_pacing.py # pure: SweepOutcome + idle-streak/sleep arithmetic (#259)
     failure_pacing.py # pure: how often a repeating batch failure reports (#267)
@@ -4984,6 +4986,33 @@ for the full design.
         finite rows: substituting some *other* constant keeps `C, D, B`
         intact and moves only the NaN row, so the filtered assertion alone
         passes for it (mutation-proven with `99.0`).
+- **Search filters are honoured or refused, never dropped (#364).** Design:
+  [docs/superpowers/specs/2026-09-14-search-request-honesty-design.md](docs/superpowers/specs/2026-09-14-search-request-honesty-design.md);
+  plan: [docs/superpowers/plans/2026-09-14-search-request-honesty.md](docs/superpowers/plans/2026-09-14-search-request-honesty.md).
+  #364 reported `has_attachment` as ignored. **The filter worked; the hit flag
+  did not**: `has_attachments` was `attachment_filename is not None`, i.e.
+  "the matched chunk was an attachment's".
+  - **The rule:** `search/attachment_presence.py::HAS_ATTACHMENT_SQL` is the
+    one rule. It is composed by `_filter_sql` (`NOT` of it for `false`), by
+    `_hydrate`'s SELECT and by `date_keyset.ROW_SQL_TEMPLATE`, so the filter
+    and the flag cannot disagree. A `CASE` guards `jsonb_array_length`, which
+    raises on a non-array, and the column has no CHECK. #365 narrows what
+    counts by editing this one constant.
+  - **`false`:** `has_attachment: false` compiles to the DSL
+    `has:no-attachment`. Any other `has:` value, and the contradictory pair,
+    raise `QueryParseError`, which `_gate_free_text` already maps to a 400.
+    An unknown value used to vanish from the query, not even kept as free
+    text.
+  - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
+    `build_query_string`) and unknown top-level fields (the route, via
+    `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.
+    Pydantic's `forbid` was not used: its 422 carries an array `detail`,
+    which is not problem+json.
+  - **Validation order:** filter values are validated **before** the empty-ACL
+    short-circuit, since `run_search` calls `build_query_string` once early
+    and discards the result. A malformed `date_from` from a grant-nothing
+    caller used to be a 200 empty page.
+  - **`query`:** optional on HTTP and MCP.
 - **Hard ACL clamp inside the Searcher**: the ACL is enforced in **two**
   places, and both are load-bearing. `api/search.py::_scope_filters_by_acl`
   intersects the caller's *structured* `account_ids` filter and

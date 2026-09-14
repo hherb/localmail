@@ -127,7 +127,7 @@ The house rules apply. Fixtures are built with `tests/_eml.py` against the seede
 - A message with attachments matched through its body or subject reports `true`. A message without reports `false`. Both are checked on the hybrid path and on the date walk, blank query included.
 - A differential test over one seeded archive: `has_attachment=true` results equal exactly the unfiltered hits whose flag is `true`, and `false` results equal the rest. That is what "one rule" means, checked by behaviour rather than by grepping for the constant.
 - A row with `attachments = '{}'::jsonb` is returned by a blank-query search with `has_attachments: false`, not an error. The test must fail against the bare expression, and that failure is to be observed, not assumed.
-- `test_serve_search_route.py`'s wire guard gains `isinstance(hit["has_attachments"], bool)` on every 200 body, catching a fake that leaves the attribute unset.
+- The wire check `isinstance(hit["has_attachments"], bool)` runs on every 200 body the route tests produce: a new `_assert_wire_hit_fields` helper beside `test_serve_acl_routes.py::_assert_wire_ordering_fields`, plus a direct assertion in `test_serve_search_route.py::test_search_returns_results`. It catches a fake that leaves the attribute unset.
 
 **`false` and the DSL:**
 - `parse_query` for `has:no-attachment`, an unknown `has:` value, and the contradictory pair.
@@ -142,7 +142,7 @@ The house rules apply. Fixtures are built with `tests/_eml.py` against the seede
 
 **Optional `query`:** omitted over HTTP gives a 200 date walk. The MCP tool is called without `query`.
 
-**Plan tests:** `test_searcher_sort_order_plan.py`, `test_api_browse_plan.py` and `test_date_keyset.py` must stay green with the added column, as must the acceptance library `tests/acceptance/browse_explain_lib.py`, which also composes the template. A projected expression cannot change index eligibility, but the template is shared, so they are run rather than argued.
+**Plan tests:** `test_searcher_sort_order_plan.py` and `test_date_keyset.py` must stay green with the added column; they are the two that compose `date_keyset.ROW_SQL_TEMPLATE`. (`test_api_browse_plan.py` and `tests/acceptance/browse_explain_lib.py` compose the *browse* template, which this slice does not touch.) A projected expression cannot change index eligibility, but the template is shared, so they are run rather than argued.
 
 ## Documentation
 

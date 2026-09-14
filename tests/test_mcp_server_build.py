@@ -195,3 +195,40 @@ def test_search_forwards_an_unstated_sort_order_as_none(db_dsn, monkeypatch):
         pool.close()
     assert "sort_order" in seen
     assert seen["sort_order"] is None
+
+
+def test_search_query_is_optional_for_a_filter_only_search(db_dsn):
+    """An agent asking for "the last messages with attachments" has no free
+    text to send; a required `query` made it invent some (kastellan#698)."""
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    schema = tools["search"].inputSchema or {}
+    assert "query" not in schema.get("required", [])
+    assert schema["properties"]["query"].get("default") == ""
+
+
+def test_search_forwards_an_omitted_query_as_empty(db_dsn, monkeypatch):
+    import localmail.mcp.server as server_mod
+
+    seen: dict = {}
+
+    def _recording_tool_search(**kwargs):
+        seen.update(kwargs)
+        return {"results": [], "next_cursor": None}
+
+    monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
+    monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
+
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=object(),
+                                  config=McpConfig(enabled=True))
+        _search_tool_fn(server)(has_attachment=True)
+    finally:
+        pool.close()
+    assert seen["query"] == ""
+    assert seen["filters"] == {"has_attachment": True}

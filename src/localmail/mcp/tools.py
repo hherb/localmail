@@ -29,7 +29,7 @@ def tool_search(
     searcher: Searcher,
     user_id: int,
     allowed_account_ids: list[int],
-    query: str,
+    query: str = "",
     sort: Literal["rank", "date"] | None = None,
     sort_order: Literal["asc", "desc"] | None = None,
     limit: int = 50,

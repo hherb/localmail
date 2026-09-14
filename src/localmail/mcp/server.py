@@ -143,8 +143,9 @@ def build_mcp_server(
     def search(
         query: Annotated[str, Field(description=(
             "Free-text query matched against message subjects/bodies and "
-            "extracted attachment text. An empty string lists recent mail "
-            "(date-ordered) — prefer `list_messages` for that intent."))],
+            "extracted attachment text. Optional: omit it to search by "
+            "filters alone, newest first — for example `has_attachment=true` "
+            "for recent mail with attachments."))] = "",
         sort: Annotated[Literal["rank", "date"] | None, Field(description=(
             'Result ordering: "rank" (hybrid relevance — what an omitted '
             '`sort` resolves to whenever the query has text to rank, with '
@@ -259,7 +260,7 @@ def build_mcp_server(
         re-run the same query without a cursor and skip rows you already
         hold.
 
-        Use `list_messages` when you have no query and just want recent mail;
+        Use `list_messages` when you want recent mail with no filters at all;
         use `get_message` to read a full message once a result surfaces its id.
         """
         if searcher is None:

@@ -657,7 +657,7 @@ def _to_api_result(r: SearchResult) -> dict[str, Any]:
         "to": [],
         "date": received.isoformat() if received else None,
         "snippet_html": r.snippet,
-        "has_attachments": r.attachment_filename is not None,
+        "has_attachments": r.has_attachments,
         "score": r.score,
         "matched_arms": [r.matched_chunk_table],
     }

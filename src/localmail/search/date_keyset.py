@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, get_args
 
 from localmail.search.sort_axes import SortOrder
+from localmail.search.attachment_presence import HAS_ATTACHMENT_SQL
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from localmail.search.searcher import KeysetCursor
@@ -107,14 +108,20 @@ UNDATED_TAIL_ONLY_SQL = f" AND {DATE_EXPR_SQL} IS NULL "
 #: SELECT would let the planner consider a plan the real query can never
 #: have, which is what ``tests/test_searcher_sort_order_plan.py`` mirrors
 #: it for.
-ROW_SQL_TEMPLATE = """
+ROW_SQL_TEMPLATE = (
+    """
             SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
-                   m.date_sent, m.internal_date
+                   m.date_sent, m.internal_date, """
+    # Composed, never restated: the filter reads the same constant (#364).
+    # It holds no braces, so the `.format` below leaves it alone.
+    + HAS_ATTACHMENT_SQL
+    + """
               FROM messages m
              WHERE {where}
              {order_by}
              LIMIT %s
 """
+)
 
 
 def compose_date_keyset_sql(*, where: str, order: SortOrder) -> str:

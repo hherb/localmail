@@ -178,7 +178,7 @@ def test_wire_date_reflects_internal_date_when_set() -> None:
         subject="s", from_addr="a@b", from_name="A",
         date_sent=header_date, internal_date=arrived,
         snippet="", snippet_source="body",
-        attachment_filename=None, matched_chunk_id=None,
+        attachment_filename=None, has_attachments=False, matched_chunk_id=None,
         matched_chunk_table="message_chunks",
     )
     out = _to_api_result(r)
@@ -199,7 +199,7 @@ def test_wire_date_falls_back_to_date_sent_when_internal_date_null() -> None:
         subject="s", from_addr="a@b", from_name="A",
         date_sent=header_date, internal_date=None,
         snippet="", snippet_source="body",
-        attachment_filename=None, matched_chunk_id=None,
+        attachment_filename=None, has_attachments=False, matched_chunk_id=None,
         matched_chunk_table="message_chunks",
     )
     out = _to_api_result(r)
@@ -221,6 +221,7 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     fake_result.snippet = "…bus leaves…"
     fake_result.snippet_source = "body"
     fake_result.attachment_filename = None
+    fake_result.has_attachments = False
     fake_result.matched_chunk_id = None
     fake_result.matched_chunk_table = "message_chunks"
 

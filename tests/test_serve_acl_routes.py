@@ -244,6 +244,7 @@ def _account_scoped_fake_searcher(account_to_hits: dict[int, list[dict[str, obje
                 r.snippet = "hit"
                 r.snippet_source = "body"
                 r.attachment_filename = None
+                r.has_attachments = False
                 r.matched_chunk_id = None
                 r.matched_chunk_table = "message_chunks"
                 results.append(r)
@@ -288,6 +289,17 @@ def _assert_wire_ordering_fields(body: dict) -> None:
     assert isinstance(body["rankable"], bool), body["rankable"]
 
 
+def _assert_wire_hit_fields(body: dict) -> None:
+    """Every hit carries a real ``has_attachments`` (#364).
+
+    Type, not a value, for the reason ``_assert_wire_ordering_fields``
+    gives: a fake that never set the attribute serialises it as ``{}`` or
+    ``[]`` instead of failing.
+    """
+    for hit in body["results"]:
+        assert isinstance(hit["has_attachments"], bool), hit["has_attachments"]
+
+
 def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
     """Alice and Bob have disjoint grants — neither can see the other's hits via /v1/search."""
     ctx = _seed_alice_and_bob(db_conn, tmp_path)
@@ -303,6 +315,7 @@ def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
                headers=_h(ctx["alice"]))
     assert r.status_code == 200
     _assert_wire_ordering_fields(r.json())
+    _assert_wire_hit_fields(r.json())
     seen = {int(hit["account"]["id"]) for hit in r.json()["results"]}
     assert seen == {ctx["a_aid"]}
 
@@ -311,6 +324,7 @@ def test_search_isolates_alice_from_bob_messages(db_dsn, db_conn, tmp_path):
                headers=_h(ctx["bob"]))
     assert r.status_code == 200
     _assert_wire_ordering_fields(r.json())
+    _assert_wire_hit_fields(r.json())
     seen = {int(hit["account"]["id"]) for hit in r.json()["results"]}
     assert seen == {ctx["b_aid"]}
 

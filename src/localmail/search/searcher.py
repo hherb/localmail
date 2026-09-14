@@ -73,6 +73,7 @@ from localmail.search.date_keyset import (
     keyset_clause,
     needs_undated_top_up,
 )
+from localmail.search.attachment_presence import HAS_ATTACHMENT_SQL
 
 
 def _msg_date(item: dict) -> datetime | None:
@@ -416,6 +417,11 @@ class SearchResult:
     snippet: str
     snippet_source: Literal["header", "body", "attachment"]
     attachment_filename: str | None
+    #: Whether the *message* carries attachments (``HAS_ATTACHMENT_SQL``),
+    #: whatever matched. Defaultless: a result that could claim ``False`` by
+    #: omission is #364, where the wire flag was derived from
+    #: ``attachment_filename`` — the matched chunk's source.
+    has_attachments: bool
     matched_chunk_id: int | None
     matched_chunk_table: Literal["message", "message_chunks", "attachment_chunks"]
 
@@ -778,19 +784,21 @@ class Searcher:
         page_rows = rows[:page_size]
         results: list[SearchResult] = []
         for rank, (mid, account_id, subject, from_addr, from_name,
-                   date_sent, internal_date) in enumerate(page_rows, start=1):
+                   date_sent, internal_date, has_attachments) in enumerate(
+                       page_rows, start=1):
             results.append(SearchResult(
                 message_id=mid, account_id=account_id,
                 rank=rank, score=1.0 / rank, rrf_score=0.0,
                 subject=subject, from_addr=from_addr, from_name=from_name,
                 date_sent=date_sent, internal_date=internal_date,
                 snippet="", snippet_source="header",
-                attachment_filename=None, matched_chunk_id=None,
+                attachment_filename=None, has_attachments=has_attachments,
+                matched_chunk_id=None,
                 matched_chunk_table="message",
             ))
         next_keyset: KeysetCursor | None = None
         if has_more and page_rows:
-            last_id, _, _, _, _, last_date_sent, last_internal_date = page_rows[-1]
+            last_id, _, _, _, _, last_date_sent, last_internal_date, _ = page_rows[-1]
             next_keyset = KeysetCursor(
                 ts=last_internal_date or last_date_sent,
                 id=int(last_id),
@@ -912,12 +920,14 @@ class Searcher:
         msgs: dict[int, dict] = {}
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, account_id, subject, from_addr, from_name, date_sent,"
-                " internal_date, body_text FROM messages WHERE id = ANY(%s)", (msg_ids,))
-            for mid, acct, subj, fa, fn, ds, intd, body in cur.fetchall():
+                "SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,"
+                " m.date_sent, m.internal_date, m.body_text,"
+                f" {HAS_ATTACHMENT_SQL}"
+                " FROM messages m WHERE m.id = ANY(%s)", (msg_ids,))
+            for mid, acct, subj, fa, fn, ds, intd, body, has_att in cur.fetchall():
                 msgs[mid] = {"account_id": acct, "subject": subj, "from_addr": fa,
                              "from_name": fn, "date_sent": ds, "internal_date": intd,
-                             "body_text": body}
+                             "body_text": body, "has_attachments": has_att}
 
             # Fetch message_chunks text+kind for Arms 2 and 3 hits.
             msg_chunk_ids = [
@@ -1069,6 +1079,10 @@ class Searcher:
                 internal_date=m.get("internal_date"),
                 snippet=snip, snippet_source=source,
                 attachment_filename=attachment_filename,
+                # `m` is `{}` for a message deleted between retrieval and
+                # hydration, the same case `account_id`'s default above covers;
+                # a message that no longer exists carries no attachments.
+                has_attachments=bool(m.get("has_attachments", False)),
                 matched_chunk_id=h.best_chunk_id,
                 matched_chunk_table=h.best_chunk_table,
             ))

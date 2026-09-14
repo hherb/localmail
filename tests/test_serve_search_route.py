@@ -51,6 +51,7 @@ def _fake_searcher_returning_one_hit():
     result.snippet = "hi"
     result.snippet_source = "body"
     result.attachment_filename = None
+    result.has_attachments = False
     result.matched_chunk_id = None
     result.matched_chunk_table = "message_chunks"
     page = MagicMock()
@@ -98,6 +99,7 @@ def test_search_returns_results(db_dsn: str, api_token: str, db_conn, api_user) 
     body = r.json()
     assert len(body["results"]) == 1
     assert body["results"][0]["message_id"] == "7"
+    assert body["results"][0]["has_attachments"] is False
     assert body["next_cursor"] is None
     # The ordering that ran reaches the wire through the real route (#345).
     # Asserted here rather than only at `run_search`: a response model, or a

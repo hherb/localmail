@@ -29,6 +29,7 @@ def _result(message_id: int = 1) -> MagicMock:
     r.snippet = ""
     r.snippet_source = "body"
     r.attachment_filename = None
+    r.has_attachments = False
     r.matched_chunk_table = "message_chunks"
     return r
 

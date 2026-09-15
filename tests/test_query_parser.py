@@ -65,3 +65,35 @@ def test_malformed_date_raises():
     with pytest.raises(QueryParseError) as exc:
         parse_query("after:not-a-date")
     assert "after" in str(exc.value).lower()
+
+
+def test_has_no_attachment_flag():
+    q = parse_query("invoice has:no-attachment")
+    assert q.free_text == "invoice"
+    assert q.filters.has_attachment is False
+
+
+def test_has_values_are_case_insensitive():
+    assert parse_query("has:No-Attachment").filters.has_attachment is False
+    assert parse_query("has:ATTACHMENT").filters.has_attachment is True
+
+
+def test_an_unknown_has_value_is_refused_not_dropped():
+    """It used to vanish from the query — not a filter, and not free text."""
+    with pytest.raises(
+        QueryParseError,
+        match="has: expected 'attachment' or 'no-attachment', got 'attachments'",
+    ):
+        parse_query("invoice has:attachments")
+
+
+def test_contradictory_has_values_are_refused():
+    with pytest.raises(
+        QueryParseError,
+        match="has: 'attachment' and 'no-attachment' contradict each other",
+    ):
+        parse_query("has:attachment has:no-attachment")
+
+
+def test_a_repeated_has_value_is_accepted():
+    assert parse_query("has:attachment has:attachment").filters.has_attachment is True

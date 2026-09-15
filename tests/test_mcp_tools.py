@@ -468,3 +468,27 @@ def test_tool_search_pages_ascending_end_to_end_over_a_real_archive(db_dsn, db_c
         f"ascending walk did not cover the archive oldest-first: {walked} "
         f"!= {oldest_first}"
     )
+
+
+def test_tool_search_honours_has_attachment_false(db_dsn, db_conn):
+    """The tool's description has promised this since it shipped; it was dropped."""
+    uid = create_user(db_conn, "carol", "hunter2")
+    acct = _insert_account(db_conn, "carol-acct")
+    grant_account(db_conn, uid, acct)
+    plain = _insert_message(db_conn, acct, "invoice plain", "the invoice")
+    attached = _insert_message(db_conn, acct, "invoice attached", "the invoice, attached")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE messages SET attachments = %s::jsonb WHERE id = %s",
+            ('[{"filename": "invoice.pdf", "sha256": "' + "ef" * 32 + '"}]', attached),
+        )
+    db_conn.commit()
+    searcher = _lexical_searcher(db_dsn)
+    try:
+        page = tools.tool_search(
+            searcher=searcher, user_id=uid, allowed_account_ids=[acct],
+            query="", limit=20, cursor=None, filters={"has_attachment": False},
+        )
+    finally:
+        searcher._pool.close()
+    assert {int(r["message_id"]) for r in page["results"]} == {plain}

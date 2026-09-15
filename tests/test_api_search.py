@@ -26,6 +26,19 @@ def test_build_query_string_validates_date_format() -> None:
         build_query_string(free_text="x", filters={"after": "not-a-date"})
 
 
+def test_build_query_string_emits_no_attachment_for_false() -> None:
+    assert build_query_string(
+        free_text="x", filters={"has_attachment": False},
+    ) == "x has:no-attachment"
+
+
+@pytest.mark.parametrize("value", ["yes", "true", 1, 0])
+def test_a_non_boolean_has_attachment_is_refused(value) -> None:
+    with pytest.raises(ValidationFailed,
+                       match="has_attachment: expected true, false or null"):
+        build_query_string(free_text="x", filters={"has_attachment": value})
+
+
 @pytest.mark.parametrize("free_text", [
     "invoice",
     "",
@@ -44,6 +57,7 @@ def test_build_query_string_validates_date_format() -> None:
     {"subject": "  "},
     {"after": "2026-01-01", "before": "2026-02-01"},
     {"has_attachment": True},
+    {"has_attachment": False},
     {"lang": "en"},
     {"to": 'bob "the" builder'},
 ])
@@ -97,11 +111,11 @@ def test_filter_value_with_embedded_quote_is_stripped() -> None:
     assert 'subject:"has quotes in it"' in q
 
 
-def test_known_unsupported_filter_keys_is_empty() -> None:
-    """Every v1 spec filter key is wired through to the Searcher."""
-    from localmail.api.search import _KNOWN_UNSUPPORTED_FILTER_KEYS, _SUPPORTED_FILTER_KEYS
-    assert _KNOWN_UNSUPPORTED_FILTER_KEYS == frozenset()
-    assert {"date_from", "date_to", "lang"} <= _SUPPORTED_FILTER_KEYS
+def test_build_query_string_refuses_an_unknown_filter_key() -> None:
+    """Every v1 filter key is wired through; any other key is refused by
+    name rather than ignored (#364)."""
+    with pytest.raises(ValidationFailed, match="unknown key 'label'"):
+        build_query_string(free_text="x", filters={"label": "work"})
 
 
 @pytest.mark.parametrize("key, value, expected_token", [
@@ -178,7 +192,7 @@ def test_wire_date_reflects_internal_date_when_set() -> None:
         subject="s", from_addr="a@b", from_name="A",
         date_sent=header_date, internal_date=arrived,
         snippet="", snippet_source="body",
-        attachment_filename=None, matched_chunk_id=None,
+        attachment_filename=None, has_attachments=False, matched_chunk_id=None,
         matched_chunk_table="message_chunks",
     )
     out = _to_api_result(r)
@@ -199,7 +213,7 @@ def test_wire_date_falls_back_to_date_sent_when_internal_date_null() -> None:
         subject="s", from_addr="a@b", from_name="A",
         date_sent=header_date, internal_date=None,
         snippet="", snippet_source="body",
-        attachment_filename=None, matched_chunk_id=None,
+        attachment_filename=None, has_attachments=False, matched_chunk_id=None,
         matched_chunk_table="message_chunks",
     )
     out = _to_api_result(r)
@@ -221,6 +235,7 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     fake_result.snippet = "…bus leaves…"
     fake_result.snippet_source = "body"
     fake_result.attachment_filename = None
+    fake_result.has_attachments = False
     fake_result.matched_chunk_id = None
     fake_result.matched_chunk_table = "message_chunks"
 

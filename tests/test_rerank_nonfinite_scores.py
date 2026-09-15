@@ -192,8 +192,12 @@ def _row(mid: int) -> dict:
         "fused": FusedHit(message_id=mid, best_chunk_id=None,
                           best_chunk_table="message", rrf_score=0.5,
                           contributing_arms=[0]),
+        # A real `_hydrate` row always carries this key (#364 F2 made the
+        # `.get` default that used to paper over its absence a `KeyError`
+        # instead); the value itself is irrelevant to every test here.
         "msg": {"account_id": 1, "subject": f"m{mid}", "from_addr": "a@x",
-                "from_name": None, "date_sent": _WHEN, "internal_date": None},
+                "from_name": None, "date_sent": _WHEN, "internal_date": None,
+                "has_attachments": False},
         "snippet_source_text": "body text",
     }
 

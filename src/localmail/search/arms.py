@@ -18,6 +18,7 @@ from typing import Any
 import psycopg
 
 from localmail.config import SearchConfig
+from localmail.search.attachment_presence import HAS_ATTACHMENT_SQL
 from localmail.search.query import ParsedQuery, SearchFilters
 from localmail.search.searcher import ArmHit
 
@@ -58,9 +59,9 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
         parts.append("m.date_sent < %s")
         params.append(filters.before)
     if filters.has_attachment is True:
-        parts.append("jsonb_array_length(m.attachments) > 0")
+        parts.append(HAS_ATTACHMENT_SQL)
     if filters.has_attachment is False:
-        parts.append("jsonb_array_length(m.attachments) = 0")
+        parts.append(f"NOT {HAS_ATTACHMENT_SQL}")
     if filters.folders:
         parts.append(
             "EXISTS (SELECT 1 FROM message_labels ml JOIN mailboxes mb ON mb.id = ml.mailbox_id"
@@ -271,7 +272,8 @@ def arm_vector_attachment_chunks(
            This prevents a single popular blob (e.g. a newsletter PDF attached
            to hundreds of recipients) from monopolising the candidate budget.
         4. Apply Phase 1 filter SQL (account:, folder:, after:, before:,
-           from:, to:, subject:, label:, has:attachment) via _filter_sql().
+           from:, to:, subject:, label:, has:attachment / has:no-attachment)
+           via _filter_sql().
            Filters operate on the messages alias 'm', matching every other arm.
         5. Convert cosine distance [0, 2] to arm_score via 1.0 - dist,
            yielding a similarity-like value in [-1, 1]. RRF fusion uses only

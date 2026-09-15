@@ -9,6 +9,8 @@ flattened into a cursor string.
 """
 from __future__ import annotations
 
+import difflib
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -24,7 +26,7 @@ from localmail.api.search_cursor import (
     resolve_cursor_plan,
 )
 from localmail.config import SearchConfig
-from localmail.search.query import QueryParseError, parse_query
+from localmail.search.query import QueryParseError, parse_query, unclosed_quote
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.rewrite_status import (
     CONTINUATION_PAGE,
@@ -56,32 +58,48 @@ _SUPPORTED_FILTER_KEYS = frozenset({
     "date_from", "date_to", "lang",
 })
 
-# Empty: every v1 spec filter key now wires through to the Searcher.
-# Kept as a frozenset so the existing "unsupported key" check keeps working
-# without special-casing an empty case at call sites.
-_KNOWN_UNSUPPORTED_FILTER_KEYS: frozenset[str] = frozenset()
+
+def filter_key_error(filters: Mapping[str, object]) -> str | None:
+    """Name every key that is not a filter, or ``None`` when all of them are.
+
+    Refused by name rather than dropped (#364): an ignored key answers a
+    filtered question with unfiltered results and a 200. A key is judged
+    whatever its value, ``null`` included. The suggestion is there because a
+    likely slip is sending the hit field's name, ``has_attachments``, where
+    the filter is ``has_attachment`` (the one #364 reports).
+    """
+    unknown = sorted(str(k) for k in filters if k not in _SUPPORTED_FILTER_KEYS)
+    if not unknown:
+        return None
+    supported = sorted(_SUPPORTED_FILTER_KEYS)
+    described = []
+    for key in unknown:
+        close = difflib.get_close_matches(key, supported, n=1, cutoff=0.8)
+        described.append(f"{key!r} (did you mean {close[0]!r}?)" if close else repr(key))
+    noun = "key" if len(unknown) == 1 else "keys"
+    return (f"filters: unknown {noun} {', '.join(described)}; "
+            f"supported: {', '.join(supported)}")
 
 
 def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
     """Compose `free_text` + filter DSL tokens into a single query string.
 
-    Date filters are validated to YYYY-MM-DD. Keys in
-    `_KNOWN_UNSUPPORTED_FILTER_KEYS` raise `ValidationFailed` so the caller
-    sees a clear 400. Other unknown keys are silently ignored (forward
-    compatibility with future filter additions).
+    Raises `ValidationFailed` for a key that is not a filter
+    (`filter_key_error`) and for a malformed value: dates must be YYYY-MM-DD,
+    `lang` a non-empty code with no whitespace or quotes, ids strict digit
+    strings, `has_attachment` true, false or null, and a quoted value
+    non-empty once its quotes are stripped. Unknown keys and malformed values
+    are refused rather than dropped (#364). An empty string for `from`, `to`,
+    `subject` or a date, and an empty id list, is an absent filter; an empty
+    `lang` is refused.
     """
-    for key in _KNOWN_UNSUPPORTED_FILTER_KEYS:
-        if filters.get(key) not in (None, [], "", False):
-            supported = ", ".join(sorted(_SUPPORTED_FILTER_KEYS))
-            raise ValidationFailed(
-                f"filter {key!r} is accepted by the API schema but not yet "
-                f"wired through to the search backend. Supported filters: {supported}"
-            )
+    key_error = filter_key_error(filters)
+    if key_error is not None:
+        raise ValidationFailed(key_error)
     parts: list[str] = []
     if free_text:
         parts.append(free_text)
-    for token in _filter_tokens(filters):
-        parts.append(token)
+    parts.extend(_filter_tokens(filters))
     return " ".join(parts)
 
 
@@ -94,11 +112,11 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
         for vs_v in vs:
             out.append(f"folder_id:{parse_int_id(str(vs_v), field='folder_id')}")
     if (v := filters.get("from")):
-        out.append(f'from:{_quote_value(v)}')
+        out.append(f'from:{_quote_value(v, "from")}')
     if (v := filters.get("to")):
-        out.append(f'to:{_quote_value(v)}')
+        out.append(f'to:{_quote_value(v, "to")}')
     if (v := filters.get("subject")):
-        out.append(f'subject:{_quote_value(v)}')
+        out.append(f'subject:{_quote_value(v, "subject")}')
     if (v := filters.get("after")):
         _validate_date(v, "after")
         out.append(f"after:{v}")
@@ -119,13 +137,29 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
                 s = str(one).strip().lower()
                 if not s:
                     raise ValidationFailed("lang: empty value not allowed")
+                # Emitted unquoted, so whitespace or a quote here re-tokenizes
+                # the composed query: `en has:no-attachment` injected a filter,
+                # and `en'` swallowed every token after it.
+                if any(ch.isspace() or ch in "\"'" for ch in s):
+                    raise ValidationFailed(
+                        f"lang: expected a language code such as 'en', got {one!r}"
+                    )
                 out.append(f"lang:{s}")
-    if filters.get("has_attachment") is True:
+    has_attachment = filters.get("has_attachment")
+    if has_attachment is True:
         out.append("has:attachment")
+    elif has_attachment is False:
+        # Dropped before #364, though the MCP tool's description promised it
+        # and `_filter_sql` already honoured it.
+        out.append("has:no-attachment")
+    elif has_attachment is not None:
+        raise ValidationFailed(
+            f"has_attachment: expected true, false or null, got {has_attachment!r}"
+        )
     return out
 
 
-def _quote_value(v: Any) -> str:
+def _quote_value(v: Any, key: str) -> str:
     """Wrap a free-form filter value in double quotes so the DSL tokenizer
     treats it as a single token.
 
@@ -133,8 +167,14 @@ def _quote_value(v: Any) -> str:
     three tokens and inject an extra `account:` operator, bypassing the
     requested scope. Embedded quotes and newlines have no useful meaning for
     substring filters and are stripped — the DSL has no escape syntax.
+
+    A value with nothing left after stripping is refused: `key:""` parses as
+    the free-text token `key:`, so the filter would vanish and a filter-only
+    request would become a text search.
     """
     s = str(v).replace('"', "").replace("\n", " ").replace("\r", " ")
+    if not s:
+        raise ValidationFailed(f"{key}: value is empty once its quotes are removed")
     return f'"{s}"'
 
 
@@ -149,18 +189,30 @@ def _gate_free_text(free_text: str) -> str:
     """The text ``Searcher.search`` will build an FTS predicate from.
 
     ``parse_query`` raises ``QueryParseError`` for a malformed ``after:``/
-    ``before:`` date and for an empty ``lang:`` value. It is a bare
+    ``before:`` date, an empty ``lang:`` value, and (#364) an unknown
+    ``has:`` value or a contradictory ``has:`` pair. It is a bare
     ``ValueError``, and ``serve.app`` registers a handler for ``APIError``
     only — so it escaped ``run_search`` as an **unhandled 500 with no
     problem+json body**, and reached the MCP tool as an exception no
     ``ToolError`` mapping covers.
 
-    Translating it here rather than at each call site is what makes the fix
-    total: this runs once, unconditionally, at the top of ``run_search``,
-    ahead of the empty-ACL short-circuit and of every retrieval branch. The
-    gate's own parse is what #326 added; the *fresh* path has raised the
-    same bare error since long before, from ``Searcher.search``'s parse, and
-    is covered now by the same translation running first.
+    ``run_search`` parses **three** strings, because ``parse_query`` is not
+    compositional across an unclosed quote and each can fail where the others
+    parse:
+
+    1. The query composed from the caller's unscoped filters, in its filter
+       gate, ahead of the empty-ACL short-circuit (``_gate_composed_query``).
+       A ``has:`` token in the free text contradicting the structured
+       ``has_attachment`` filter exists only in a composed string.
+    2. The **raw** ``free_text``, here, bound to ``parsed_free_text``. That
+       feeds ``resolve_cursor_plan`` and the empty-ACL branch's
+       ``sort_applied``/``rankable``. This is the parse #326 added.
+    3. The ACL-scoped query each rowed branch hands ``Searcher.search``
+       (``_gate_composed_query`` again). An unclosed quote swallows the
+       ``account_id:`` tokens only this string carries.
+
+    None of the three stops an unclosed quote from swallowing filter tokens
+    *silently*, when the swallowed text happens to parse. That is #367.
 
     ``query="invoice after:last-week"`` is exactly the shape an LLM agent
     emits, which is the audience this cursor cluster is written for.
@@ -169,6 +221,44 @@ def _gate_free_text(free_text: str) -> str:
         return parse_query(free_text).free_text
     except QueryParseError as exc:
         raise ValidationFailed(str(exc)) from exc
+
+
+def _gate_composed_query(query: str, *, free_text: str) -> None:
+    """Parse a query composed from ``free_text`` plus filter tokens.
+
+    Two call sites: the early gate, over the caller's unscoped filters, and
+    each rowed branch, over the ACL-scoped query it is about to hand
+    ``Searcher.search``. Only the latter carries the ``account_id:`` tokens
+    ``_scope_filters_by_acl`` adds, so ``has:"`` passes the earlier gates and
+    then reaches ``_parse_has`` as ``' account_id:1'``. Unparsed here, that
+    bare ``QueryParseError`` escaped both branches'
+    ``except SearchArgumentRefused`` as a 500.
+
+    When the free text parses on its own but leaves a quote open, the open
+    quote is what broke the composition, so the refusal names it. The
+    parser's own message would quote the swallowed tokens (``got
+    'attachment account_id:3 account_id:7'``) back at a caller who never
+    wrote them. Otherwise the parser's message stands: a bad date or a
+    contradictory ``has:`` pair is the caller's own error either way.
+    """
+    try:
+        parse_query(query)
+    except QueryParseError as exc:
+        quote = unclosed_quote(free_text)
+        if quote is not None and _parses(free_text):
+            raise ValidationFailed(
+                f"query: unclosed {quote!r} quote; it swallows the filters "
+                "composed after the query, so close it or remove it"
+            ) from exc
+        raise ValidationFailed(str(exc)) from exc
+
+
+def _parses(text: str) -> bool:
+    try:
+        parse_query(text)
+    except QueryParseError:
+        return False
+    return True
 
 
 def run_search(
@@ -254,6 +344,25 @@ def run_search(
     membership_error = sort_membership_error(sort=sort, sort_order=sort_order)
     if membership_error is not None:
         raise ValidationFailed(membership_error)
+
+    # Filters next, keys and then values, for the reason the gate above
+    # gives: ahead of the empty-ACL short-circuit, whose empty page reads as
+    # "no results". The value checks used to run only in the
+    # `build_query_string` calls below that branch, so a malformed
+    # `date_from` from a caller granted nothing was answered 200 (#364).
+    # Composed and discarded here. The fresh and keyset branches compose it
+    # again from the ACL-scoped filters and parse that too
+    # (`_gate_composed_query`); the pool branch never composes the query.
+    #
+    # Parsed too (result discarded), not merely composed: a `has:` token in
+    # `query` can contradict the structured `has_attachment` filter, and
+    # that contradiction exists only in the *composed* string — `free_text`
+    # and `filters` each look fine read alone. Left unparsed here, it would
+    # first be parsed inside `Searcher.search`, whose bare `QueryParseError`
+    # neither branch's `except SearchArgumentRefused` catches: a 500 (caught
+    # in #366's review before it shipped).
+    _gate_composed_query(build_query_string(free_text=free_text, filters=filters),
+                         free_text=free_text)
 
     # Resolved before the ACL short-circuit below, because that branch answers
     # with an empty page — indistinguishable from "you have reached the end".
@@ -381,6 +490,7 @@ def run_search(
     # returned for `cursor is None` and for nothing else.
     if cursor is None:
         query = build_query_string(free_text=free_text, filters=scoped_filters)
+        _gate_composed_query(query, free_text=free_text)
         try:
             # The caller's **raw** axes, not `plan`'s resolution of them.
             # `Searcher.search` resolves both itself, from the same two pure
@@ -438,6 +548,7 @@ def run_search(
         # a stated sort or order that disagrees.
         keyset = decode_keyset_cursor(cursor)
         query = build_query_string(free_text=free_text, filters=scoped_filters)
+        _gate_composed_query(query, free_text=free_text)
         try:
             page = searcher.search(query, page_size=limit, user_id=user_id,
                                    sort=plan.sort, sort_order=plan.sort_order,
@@ -657,7 +768,7 @@ def _to_api_result(r: SearchResult) -> dict[str, Any]:
         "to": [],
         "date": received.isoformat() if received else None,
         "snippet_html": r.snippet,
-        "has_attachments": r.attachment_filename is not None,
+        "has_attachments": r.has_attachments,
         "score": r.score,
         "matched_arms": [r.matched_chunk_table],
     }

@@ -40,7 +40,10 @@ pub struct SearchRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     /// "rank" or "date". Omitted on the wire when None so the server
-    /// applies its own default ("rank") and old servers ignore the field.
+    /// resolves the ordering itself (#324). Servers since #364 refuse
+    /// unknown fields in this request and its filters, so a field added to
+    /// either struct needs server support first; the Python suite pins that
+    /// (`tests/test_serve_search_request_keys.py`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
 }

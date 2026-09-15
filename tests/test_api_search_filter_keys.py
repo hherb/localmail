@@ -72,16 +72,18 @@ def test_run_search_refuses_an_unknown_key_before_any_work(allowed) -> None:
                    allowed_account_ids=allowed, user_id=1)
 
 
-@pytest.mark.parametrize("filters", [
-    {"date_from": "last-week"},
-    {"lang": ""},
-    {"account_ids": ["x1"]},
-    {"has_attachment": "yes"},
+@pytest.mark.parametrize("filters, message", [
+    ({"date_from": "last-week"}, "date_from: expected YYYY-MM-DD"),
+    ({"lang": ""}, "lang: empty value not allowed"),
+    ({"account_ids": ["x1"]}, "account_id must be a base-10 integer"),
+    ({"has_attachment": "yes"}, "has_attachment: expected true, false or null"),
 ])
-def test_a_malformed_filter_value_is_a_400_even_with_an_empty_acl(filters) -> None:
-    """These fail before this task: the value checks ran inside
-    ``build_query_string``, below the branch that had already answered."""
-    with pytest.raises(ValidationFailed):
+def test_a_malformed_filter_value_is_a_400_even_with_an_empty_acl(filters, message) -> None:
+    """These fail before #364: the value checks ran inside
+    ``build_query_string``, below the branch that had already answered.
+    Each case names the check that must fire, so an unrelated earlier
+    ``ValidationFailed`` cannot satisfy it."""
+    with pytest.raises(ValidationFailed, match=message):
         run_search(searcher=_searcher(), free_text="flight", filters=filters,
                    limit=10, allowed_account_ids=[], user_id=1)
 

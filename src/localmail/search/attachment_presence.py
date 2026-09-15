@@ -8,8 +8,8 @@ Three consumers compose it: the ``has_attachment`` filter in
 ``Searcher._hydrate``, and the date walk's ``date_keyset.ROW_SQL_TEMPLATE``.
 Before #364 the hit flag had its own rule ("the matched chunk was an
 attachment's"), so a filtered search returned hits flagged ``false``. #365
-narrows what counts (images embedded in the HTML body) by editing this
-constant, and the filter and the flag move together.
+will stop counting images embedded in the HTML body; its SQL half is an edit
+to this constant, so the filter and the flag move together.
 
 It has its own module because ``arms`` imports ``searcher`` and ``searcher``
 imports ``date_keyset`` at module level, so ``date_keyset`` taking this from
@@ -22,7 +22,11 @@ from __future__ import annotations
 #:
 #: Guarded because ``jsonb_array_length`` raises 22023 on a non-array, and
 #: ``messages.attachments`` is ``JSONB NOT NULL DEFAULT '[]'`` with no CHECK.
-#: Unguarded, one such row fails every search page that surfaces it. A
+#: Unguarded, one such row fails every search that evaluates the expression
+#: on it — the filter in a WHERE clause whether or not the row is returned.
+#: The price is that a malformed row reads as "no attachments", so
+#: ``has_attachment=false`` admits it; no writer produces one, and the #280
+#: guard in ``extract_queue`` makes the same call. A
 #: ``CASE`` rather than ``AND``, because Postgres does not promise the order
 #: in which ``AND``'s operands are evaluated. Contains no ``{}`` or ``%``, so
 #: it composes safely into ``str.format`` templates and psycopg statements.

@@ -1,7 +1,7 @@
 # Search requests are honoured or refused, never dropped
 
 Date: 2026-09-14
-Status: approved; implemented on fix/364-search-honesty
+Status: approved; implemented in PR #366. Corrections from its review are annotated in place.
 Issue: #364 (slice A of the kastellan request triage; #365 follows it)
 
 ## Problem
@@ -20,7 +20,7 @@ A fifth defect sits beside these: filter *values* are validated after the empty-
 ## Non-goals
 
 - **Changing what "has attachments" means.** Images embedded in the HTML body still count, as they do today. That is #365, which moves the filter and the flag together; this slice makes them agree first, and puts the rule in one place so #365 changes one constant.
-- A GUI control for "without attachments". The GUI never sends `false` (unchecked is `null`), and its DSL parser keeps an unrecognised `has:` token as free text, so it is unaffected.
+- A GUI control for "without attachments". The GUI never sends `false` (unchecked is `null`), and its DSL parser keeps an unrecognised `has:` token as free text, so it needs no change. **Correction:** it is not *unaffected* — a user typing `has:attachments` or `has:pdf` now gets a 400 banner where they used to get unfiltered rows. That is intended: the value no longer vanishes.
 - A CLI `--no-attachment` flag.
 - Renaming `has_attachments` (hit) or `has_attachment` (filter). The GUI's types and Kastellan's fixtures carry both; the did-you-mean below covers the confusion.
 - Any API version bump. `API_MINOR` has never moved, through several additive changes. Every behaviour here is visible in the response itself: a 400 or a corrected flag. Feature detection is slice B's problem, because an old server answers `?headers=list` silently.
@@ -47,7 +47,7 @@ Measured on the test cluster: `'[]'` gives false, `'[{...}]'` gives true, and `'
 
 It has three consumers, and none of them may restate it:
 
-- **`_filter_sql`:** `has_attachment is True` gives `HAS_ATTACHMENT_SQL`; `is False` gives `NOT (HAS_ATTACHMENT_SQL)`, an exact complement because the expression is never NULL.
+- **`_filter_sql`:** `has_attachment is True` gives `HAS_ATTACHMENT_SQL`; `is False` gives `NOT (HAS_ATTACHMENT_SQL)`, an exact complement because the expression is never NULL. (As shipped, the parentheses live inside the constant and the code writes `f"NOT {HAS_ATTACHMENT_SQL}"`. A malformed row reads as "no attachments", so `false` admits it.)
 - **`Searcher._hydrate`'s messages SELECT:** one more column. The table gains the alias `m`, since the expression names it.
 - **`date_keyset.ROW_SQL_TEMPLATE`:** one more column, composed in rather than written out, because that template is also what the plan tests EXPLAIN.
 
@@ -62,7 +62,7 @@ The pool cache stores hydrated message dicts, so continuation pages carry the fi
 The DSL gains one value: `has:no-attachment`.
 
 - `query.parse_query` sets `has_attachment = False` for it.
-- `has:` with any other value raises `QueryParseError`, naming both valid values. `_gate_free_text` already translates that to a 400 at the top of `run_search`, so no new catch is needed.
+- `has:` with any other value raises `QueryParseError`, naming both valid values. `_gate_free_text` already translates that to a 400 at the top of `run_search`, so no new catch is needed. **Correction (#366 review):** a new gate *was* needed. `query='has:"'` passes the gate, then its open quote swallows the ACL's `account_id:` token inside `Searcher.search`, and the bare `QueryParseError` escaped as a 500. `run_search` now also parses the ACL-scoped query each rowed branch hands the Searcher (`_gate_composed_query`), naming the open quote in its refusal.
 - `has:attachment` together with `has:no-attachment` in one query also raises, instead of the last one winning. **Correction (found in final review):** a contradiction between the `has:` in `query` and the structured `has_attachment` filter exists only in the *composed* string — `free_text` and `filters` each parse cleanly alone, and `_gate_free_text(free_text)` never sees the filter's token. The early filter gate in `run_search` therefore also parses `build_query_string(free_text, filters)` (result discarded) through `_gate_free_text`, ahead of the empty-ACL short-circuit; see the #364 F1 note in CLAUDE.md.
 - `_filter_tokens` emits `has:no-attachment` for `False`.
 
@@ -76,13 +76,13 @@ The DSL gains one value: `has:no-attachment`.
 
 - It reports every key outside the supported set, **whatever its value**, `null` included. A key that does not exist is a mistake even when null.
 - It adds a did-you-mean from `difflib.get_close_matches(key, supported, n=1, cutoff=0.8)`, so `has_attachments` suggests `has_attachment`.
-- `run_search` calls it right after the sort-membership check and raises `ValidationFailed`. It therefore applies to every transport and to library callers.
+- `run_search` reaches it right after the sort-membership check and raises `ValidationFailed`. (As shipped it is called inside `build_query_string`, which `run_search` calls early and discards.) It therefore applies to every transport and to library callers.
 
 The HTTP route has to see extra keys to report them:
 
 - `SearchFiltersModel` switches to `extra: "allow"`.
 - The route forwards `model_dump(by_alias=True, exclude_none=True)` merged with `model_extra`, so an unknown key reaches `run_search` even when its value is `null`.
-- The MCP tool declares typed parameters and cannot produce one.
+- The MCP tool declares typed parameters and cannot produce one. **Correction (#366 review):** it cannot produce an unknown *filter key*, but an unknown *tool argument* is silently dropped by FastMCP's argument model. That is #368.
 
 `_KNOWN_UNSUPPORTED_FILTER_KEYS` and its check are deleted: always empty, and superseded. A test pins that the model's wire names equal `_SUPPORTED_FILTER_KEYS`, which is the drift that machinery existed for: a field accepted by the model and silently unsupported downstream.
 
@@ -101,13 +101,13 @@ has: 'attachment' and 'no-attachment' contradict each other
 
 ### 4. Filter validation precedes the empty-ACL short-circuit
 
-Filter values are checked by `_filter_tokens` (dates, `lang`, digit-string ids). Today that runs inside `build_query_string`, after `_scope_filters_by_acl` has returned `None` for a grant-nothing caller. Validation moves ahead of that branch, right after `filter_key_error`.
+Filter values are checked by `_filter_tokens` (dates, `lang`, digit-string ids). Today that runs inside `build_query_string`, after `_scope_filters_by_acl` has returned `None` for a grant-nothing caller. Validation moves ahead of that branch, right after `filter_key_error`. (As shipped, keys, values and the composed query's parse all happen in one early `_gate_free_text(build_query_string(...))` call.)
 
 This slice does **not** restructure `_filter_tokens` into separate validate and emit halves. The early call validates and discards its tokens, and the later `build_query_string` call emits them for the ACL-scoped filters. The duplicated work is a handful of string operations.
 
 ### 5. `query` is optional
 
-- `SearchRequest.query: str = ""`.
+- `SearchRequest.query: str = ""`. **Correction (#366 review):** shipped as `str | None = ""` on both transports, normalised to `""`. Otherwise `"query": null`, which a client modelling the field as optional sends, was a 422.
 - The MCP `search` tool's `query` defaults to `""`, and its description loses "prefer `list_messages` for that intent". A filter-only query is a search, not a browse.
 
 A textless query already resolves to the date walk and reports `sort_applied: "date"`, `rankable: false`.
@@ -132,7 +132,7 @@ The house rules apply. Fixtures are built with `tests/_eml.py` against the seede
 **`false` and the DSL:**
 - `parse_query` for `has:no-attachment`, an unknown `has:` value, and the contradictory pair.
 - `_filter_tokens` emits the token.
-- End to end over HTTP and over the MCP tool: `false` excludes messages that have attachments.
+- End to end over HTTP and over the MCP tool: `false` excludes messages that have attachments. (As shipped, actual exclusion is proven through `run_search` and the MCP tool against a seeded archive. The HTTP test pins that `false` reaches the Searcher's composed query.)
 
 **Unknown keys:**
 - `filter_key_error`: unit cases, including a `null`-valued unknown key and the did-you-mean.
@@ -148,7 +148,7 @@ The house rules apply. Fixtures are built with `tests/_eml.py` against the seede
 
 - **README:** the `has:` operator list (`has:no-attachment`), the search request section (unknown keys refused, `query` optional), and the hit field's meaning.
 - **`docs/mcp-usage.md`:** `query` is optional.
-- **CLAUDE.md:** a short entry under Browse & search pagination covering one presence rule for filter and flag, refusal of unknown keys, the DSL value, and the validation order. The incorrect "content_id only on inline parts" claims are #365's to correct, not this slice's.
+- **CLAUDE.md:** a short entry (shipped as a sibling bullet beside Browse & search pagination, not under it) covering one presence rule for filter and flag, refusal of unknown keys, the DSL value, and the validation order. The incorrect "content_id only on inline parts" claims are #365's to correct, not this slice's.
 - **The `search/query.py` module docstring** lists the new value.
 
 ## Files

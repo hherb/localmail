@@ -211,6 +211,32 @@ def test_search_query_is_optional_for_a_filter_only_search(db_dsn):
     assert schema["properties"]["query"].get("default") == ""
 
 
+def test_search_accepts_a_null_query_through_the_argument_model(db_dsn, monkeypatch):
+    """Driven through ``call_tool`` rather than the raw function, because the
+    SDK's argument model is what rejected ``null`` (#366 review)."""
+    import localmail.mcp.server as server_mod
+
+    seen: dict = {}
+
+    def _recording_tool_search(**kwargs):
+        seen.update(kwargs)
+        return {"results": [], "next_cursor": None}
+
+    monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
+    monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
+
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=object(),
+                                  config=McpConfig(enabled=True))
+        asyncio.run(server.call_tool("search", {"query": None,
+                                                "has_attachment": True}))
+    finally:
+        pool.close()
+    assert seen["query"] == ""
+    assert seen["filters"] == {"has_attachment": True}
+
+
 def test_search_forwards_an_omitted_query_as_empty(db_dsn, monkeypatch):
     import localmail.mcp.server as server_mod
 

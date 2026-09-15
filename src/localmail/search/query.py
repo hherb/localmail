@@ -55,8 +55,8 @@ _OPERATORS = {
 }
 
 
-def _tokenize(s: str) -> list[str]:
-    """Whitespace-split, but keep quoted strings (single or double) intact."""
+def _scan(s: str) -> tuple[list[str], str | None]:
+    """Tokens, and the quote character still open at the end (or ``None``)."""
     out: list[str] = []
     buf: list[str] = []
     quote: str | None = None
@@ -76,7 +76,22 @@ def _tokenize(s: str) -> list[str]:
             buf.append(ch)
     if buf:
         out.append("".join(buf))
-    return out
+    return out, quote
+
+
+def _tokenize(s: str) -> list[str]:
+    """Whitespace-split, but keep quoted strings (single or double) intact."""
+    return _scan(s)[0]
+
+
+def unclosed_quote(s: str) -> str | None:
+    """The quote character ``s`` leaves open, or ``None`` if every quote closes.
+
+    An open quote runs to the end of the string, so anything composed after
+    ``s`` is swallowed into its last token. Read off the tokenizer itself so
+    the two cannot disagree about what counts as a quote.
+    """
+    return _scan(s)[1]
 
 
 def _parse_date(value: str, field_name: str) -> date:

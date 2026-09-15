@@ -4996,34 +4996,85 @@ for the full design.
     one rule. It is composed by `_filter_sql` (`NOT` of it for `false`), by
     `_hydrate`'s SELECT and by `date_keyset.ROW_SQL_TEMPLATE`, so the filter
     and the flag cannot disagree. A `CASE` guards `jsonb_array_length`, which
-    raises on a non-array, and the column has no CHECK. #365 narrows what
-    counts by editing this one constant.
+    raises on a non-array, and the column has no CHECK. The price is that a
+    malformed row reads as "no attachments", so `has_attachment=false` admits
+    it (#280's guard makes the same call). #365's SQL half is an edit to this
+    one constant. `iter_attachments()` walks only the top-level part's
+    immediate children, so an embedded image counts when it sits directly
+    under a top-level `related` or `mixed`, not when nested inside
+    `alternative`.
   - **`false`:** `has_attachment: false` compiles to the DSL
     `has:no-attachment`. Any other `has:` value, and the contradictory pair,
     raise `QueryParseError`. An unknown value used to vanish from the query,
-    not even kept as free text.
-    - **The contradictory pair needed a second gate (found in final
-      review, #364 F1).** A `has:` in `query` that contradicts the
-      structured `has_attachment` filter exists only in the **composed**
-      string — `free_text` and `filters` each parse cleanly alone, so
-      `_gate_free_text(free_text)` never sees it. Unparsed, it first hit
-      `Searcher.search`'s own parse of the ACL-composed query and raised
-      the bare `QueryParseError` there, past both branches' `except
-      SearchArgumentRefused` — an unhandled 500 before this fix. The early
-      filter gate in `run_search` now also parses
-      `build_query_string(free_text, filters)` (result discarded) through
-      `_gate_free_text`, ahead of the empty-ACL short-circuit, so the
-      contradiction is refused at the one place that sees both halves.
+    not even kept as free text. **There is no literal form** — `has:pdf` in
+    ordinary text is a 400, by design (loud beats a vanished token).
+  - **`run_search` parses three strings, because `parse_query` is not
+    compositional across an unclosed quote** (see `_gate_free_text`). Each
+    one catches something the others cannot:
+    - **The query composed from the caller's unscoped filters**, ahead of
+      the empty-ACL short-circuit. A `has:` in `query` contradicting the
+      structured filter exists only in a composed string. The branches
+      would have reached it too late, inside `Searcher.search`, as a bare
+      `QueryParseError` past `except SearchArgumentRefused`: a 500. That
+      500 never shipped; it was found between two commits of #366.
+    - **The raw `free_text`**, which feeds cursor planning.
+    - **The ACL-scoped query each rowed branch hands the Searcher**
+      (`_gate_composed_query`, from #366's review). The early gate is not
+      "the one place that sees both halves": only this string carries the
+      `account_id:` tokens.
+      - **The bug:** `query='has:"'` passed both earlier gates, then the
+        open quote swallowed `account_id:1` into the `has:` value inside the
+        Searcher — a 500 on the fresh and keyset branches.
+      - **On `main`:** that query was a 200 with no cursor or an archive
+        cursor (a text-walk cursor had its own 400). `after:"` was already
+        the same 500.
+      - **Pins:** mutation-pinned per branch by
+        `test_api_search_unclosed_quote.py`.
+    - **Both composed gates name the open quote** when the free text parses
+      on its own (`query.unclosed_quote`, read off the tokenizer). The
+      parser's message quoted the swallowed tokens instead —
+      `got 'attachment account_id:3 account_id:7'`, ids the caller never
+      wrote — which sends an agent to add account ids. A bad date or a
+      contradictory pair keeps the parser's message.
+  - **None of these stops the silent case: #367.** Filter tokens are
+    composed *after* the free text, so an apostrophe (`O'Brien`) swallows
+    every filter and ACL token whenever the result still parses — a 200
+    with filters dropped. The fix is to compose filters first, and it
+    retires the documented gate-vs-Searcher divergence along with the tests
+    and notes above that pin it as live. That is why it is its own PR.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.
-    Pydantic's `forbid` was not used: its 422 carries an array `detail`,
-    which is not problem+json.
+    `forbid` was not used: FastAPI answers it with a 422 whose `detail` is
+    an array, not problem+json. A type error on a known field still gets
+    that 422 (#370).
+    - **An unknown MCP tool argument is still dropped (#368).** FastMCP's
+      `ArgModelBase` sets no `extra`, and there is no supported per-tool
+      hook, so "refused" is an HTTP property today.
+    - **`tests/test_serve_search_request_keys.py` reads the GUI's Rust wire
+      structs** and requires every field to be a supported key. With
+      refusal, a Rust field the server lacks turns every GUI search into a
+      400, and `gui-ci` mocks the server. The reader refuses `rename_all`
+      rather than guessing. Separately, the GUI drops `lang`/`date_from`/
+      `date_to` at the Tauri hop (#371).
   - **Validation order:** filter values are validated **before** the empty-ACL
     short-circuit, since `run_search` calls `build_query_string` once early
     and discards the result. A malformed `date_from` from a grant-nothing
     caller used to be a 200 empty page.
-  - **`query`:** optional on HTTP and MCP.
+    - **Two re-tokenizing values are refused too** (#366's review):
+      - A `lang` containing whitespace or a quote. It is emitted unquoted,
+        so `en has:no-attachment` injected a filter and `en'` swallowed
+        every token after it.
+      - A `from`/`to`/`subject` value that is empty once `_quote_value`
+        strips its quotes. `subject:""` parses as the free-text token
+        `subject:`.
+      - An empty string is still an absent filter.
+  - **`query`:** optional **and nullable** on HTTP and MCP (`str | None`,
+    normalised to `""` at the transport). Only an *omitted* query worked at
+    first, and `null` was the 422 above, which is what a client modelling
+    the field as `Option<String>` sends.
+    - **The MCP half is pinned through `server.call_tool`**, not the raw
+      function: the SDK's argument model is what rejected `null`.
 - **Hard ACL clamp inside the Searcher**: the ACL is enforced in **two**
   places, and both are load-bearing. `api/search.py::_scope_filters_by_acl`
   intersects the caller's *structured* `account_ids` filter and
@@ -5130,8 +5181,9 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   api/ layer already returns the wire-shaped dicts, so HTTP routes and MCP tools
   share that serialization). Per-user ACL applies to every tool (results scoped
   to the token user's granted accounts).
-  - `search(query, sort="rank"|"date", limit, cursor, account_ids, folder_ids,
-    date_from, date_to, from_addr, to, subject, has_attachment, lang, smart)` —
+  - `search(query="", sort=None|"rank"|"date", sort_order, limit, cursor,
+    account_ids, folder_ids, date_from, date_to, from_addr, to, subject,
+    has_attachment, lang, smart)` — `query` optional and nullable (#364);
     hybrid search; `smart=true` runs the Phase-4 LLM rewrite (page 1) and the
     response `rewrite_skipped` reflects whether it happened; page by re-calling
     with `next_cursor`; a cursor-expired error means re-run without a cursor.

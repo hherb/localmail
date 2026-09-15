@@ -141,11 +141,11 @@ def build_mcp_server(
 
     @server.tool()
     def search(
-        query: Annotated[str, Field(description=(
+        query: Annotated[str | None, Field(description=(
             "Free-text query matched against message subjects/bodies and "
-            "extracted attachment text. Optional: omit it to search by "
-            "filters alone, newest first — for example `has_attachment=true` "
-            "for recent mail with attachments."))] = "",
+            "extracted attachment text. Optional: omit it (or pass null) to "
+            "search by filters alone, newest first — for example "
+            "`has_attachment=true` for recent mail with attachments."))] = "",
         sort: Annotated[Literal["rank", "date"] | None, Field(description=(
             'Result ordering: "rank" (hybrid relevance — what an omitted '
             '`sort` resolves to whenever the query has text to rank, with '
@@ -260,8 +260,10 @@ def build_mcp_server(
         re-run the same query without a cursor and skip rows you already
         hold.
 
-        Use `list_messages` when you want recent mail with no filters at all;
-        use `get_message` to read a full message once a result surfaces its id.
+        Use `list_messages` for recent mail narrowed at most by account or
+        folder; use `search` without a `query` for any other filter (sender,
+        dates, `has_attachment`, …). Use `get_message` to read a full message
+        once a result surfaces its id.
         """
         if searcher is None:
             raise ToolError("search is unavailable: no searcher configured")
@@ -284,7 +286,7 @@ def build_mcp_server(
                 searcher=searcher,
                 user_id=user_id,
                 allowed_account_ids=allowed,
-                query=query,
+                query=query or "",
                 sort=sort,
                 sort_order=sort_order,
                 limit=limit,

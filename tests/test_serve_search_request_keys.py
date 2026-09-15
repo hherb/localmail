@@ -4,6 +4,9 @@
 """The HTTP search route refuses what it cannot honour, by name (#364)."""
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -56,6 +59,91 @@ def test_the_supported_field_list_is_the_request_model() -> None:
     ]
 
 
+_GUI_SEARCH_RS = (Path(__file__).resolve().parents[1]
+                  / "gui" / "src-tauri" / "src" / "commands" / "search.rs")
+
+
+def _rust_wire_names(source: str, struct: str) -> set[str]:
+    """The JSON keys a serde struct in ``search.rs`` serialises.
+
+    Strict, because a lenient reader fails silently in the direction that
+    matters: a line it skips is a field it never compares. Every body line
+    must be blank, a ``//`` comment, a one-line ``#[serde(...)]`` attribute
+    this reader understands, or ``pub name: Type,``. Anything else — a
+    private or ``pub(crate)`` field, a raw identifier, ``flatten``, a
+    ``rename(serialize = …)``, a ``rename_all`` on the struct — fails here
+    rather than being guessed at.
+    """
+    match = re.search(rf"pub struct {struct} \{{(.*?)\n\}}", source, re.S)
+    assert match, f"struct {struct} not found in {_GUI_SEARCH_RS}"
+    header = source[:match.start()].rsplit("\n\n", 1)[-1]
+    assert "rename_all" not in header, f"{struct}: rename_all is not modelled"
+    names: set[str] = set()
+    rename: str | None = None
+    for raw in match.group(1).splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if (attr := re.fullmatch(r"#\[serde\((.*)\)\]", line)):
+            body = attr.group(1)
+            assert not re.search(r"flatten|rename\s*\(|rename_all", body), (
+                f"{struct}: serde attribute not modelled: {line}")
+            if (r := re.search(r'\brename\s*=\s*"([^"]+)"', body)):
+                rename = r.group(1)
+            continue
+        field = re.fullmatch(r"pub ([A-Za-z_][A-Za-z0-9_]*)\s*:.*,", line)
+        assert field, f"{struct}: line not modelled: {raw.strip()}"
+        names.add(rename or field.group(1))
+        rename = None
+    assert names, f"struct {struct}: no fields read"
+    return names
+
+
+def test_every_field_the_gui_sends_is_one_this_server_supports() -> None:
+    """The server refuses unknown keys now (#364), so a field added to the
+    GUI's Rust wire structs before the server supports it turns *every* GUI
+    search into a 400 — and ``gui-ci`` mocks the server, so nothing there
+    would notice. Before #364 such a field was silently ignored."""
+    source = _GUI_SEARCH_RS.read_text()
+    assert _rust_wire_names(source, "SearchFiltersWire") <= _SUPPORTED_FILTER_KEYS
+    assert _rust_wire_names(source, "SearchRequest") <= set(SearchRequest.model_fields)
+
+
+def test_the_rust_field_reader_honours_a_rename() -> None:
+    """The reader's own negative control: a rename must replace the field
+    name, or a renamed-to-unsupported key would pass the pin above."""
+    source = ('pub struct Demo {\n'
+              '    #[serde(rename = "colour")]\n'
+              '    pub color: Option<String>,\n'
+              '    pub query: String,\n'
+              '}\n')
+    assert _rust_wire_names(source, "Demo") == {"colour", "query"}
+
+
+@pytest.mark.parametrize("line", [
+    "    secret: Option<String>,",
+    "    pub(crate) scope: Option<String>,",
+    "    pub r#type: Option<String>,",
+    "    #[serde(flatten)]\n    pub extra: Extra,",
+    '    #[serde(rename(serialize = "x"))]\n    pub y: String,',
+])
+def test_the_rust_field_reader_refuses_what_it_does_not_model(line) -> None:
+    """Each of these serialises a key the lenient reader skipped or
+    mis-named (#366 review), so the GUI pin passed with an unsupported field
+    in the struct."""
+    source = f"pub struct Demo {{\n    pub query: String,\n{line}\n}}\n"
+    with pytest.raises(AssertionError, match="not modelled"):
+        _rust_wire_names(source, "Demo")
+
+
+def test_a_comment_mentioning_rename_does_not_rename_the_next_field() -> None:
+    source = ('pub struct Demo {\n'
+              '    // the server may rename = "query" one day\n'
+              '    pub colour: Option<String>,\n'
+              '}\n')
+    assert _rust_wire_names(source, "Demo") == {"colour"}
+
+
 def test_an_unknown_filter_key_is_a_400_naming_it(
     db_dsn, api_token, db_conn, api_user,
 ) -> None:
@@ -81,6 +169,9 @@ def test_a_null_valued_unknown_filter_key_is_still_a_400(
     r, searcher = _post(db_dsn, api_token,
                         {"query": "flight", "filters": {"has_attachments": None}})
     assert r.status_code == 400, r.text
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["detail"].startswith(
+        "filters: unknown key 'has_attachments' (did you mean 'has_attachment'?);")
     searcher.search.assert_not_called()
 
 
@@ -128,11 +219,17 @@ def test_real_client_shapes_still_succeed(
     assert r.status_code == 200, r.text
 
 
-def test_query_may_be_omitted_for_a_filter_only_search(
-    db_dsn, api_token, db_conn, api_user,
+@pytest.mark.parametrize("body", [
+    {"filters": {"has_attachment": True}},
+    # `null` is how a client whose query field is optional says "no query";
+    # every sibling optional field already accepted it (#366 review).
+    {"query": None, "filters": {"has_attachment": True}},
+])
+def test_query_may_be_omitted_or_null_for_a_filter_only_search(
+    db_dsn, api_token, db_conn, api_user, body,
 ) -> None:
     _seed_acct_and_grant(db_conn, api_user.id)
-    r, searcher = _post(db_dsn, api_token, {"filters": {"has_attachment": True}})
+    r, searcher = _post(db_dsn, api_token, body)
     assert r.status_code == 200, r.text
     composed = parse_query(searcher.search.call_args.args[0])
     assert composed.free_text == ""
@@ -153,9 +250,13 @@ def test_has_attachment_false_reaches_the_searcher(
 def test_a_caller_granted_nothing_gets_the_400_not_an_empty_page(
     db_dsn, api_token, api_user,
 ) -> None:
-    for filters in ({"has_attachments": True}, {"date_from": "last-week"}):
+    for filters, detail in (
+        ({"has_attachments": True}, "filters: unknown key 'has_attachments'"),
+        ({"date_from": "last-week"}, "date_from: expected YYYY-MM-DD"),
+    ):
         r, _ = _post(db_dsn, api_token, {"query": "flight", "filters": filters})
         assert r.status_code == 400, (filters, r.text)
+        assert r.json()["detail"].startswith(detail), (filters, r.text)
 
 
 def test_a_has_token_in_the_query_contradicting_the_filter_is_a_400(

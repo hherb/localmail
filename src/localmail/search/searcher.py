@@ -418,9 +418,10 @@ class SearchResult:
     snippet_source: Literal["header", "body", "attachment"]
     attachment_filename: str | None
     #: Whether the *message* carries attachments (``HAS_ATTACHMENT_SQL``),
-    #: whatever matched. Defaultless: a result that could claim ``False`` by
-    #: omission is #364, where the wire flag was derived from
-    #: ``attachment_filename`` — the matched chunk's source.
+    #: whatever matched. Defaultless, so no construction site can report
+    #: ``False`` by forgetting it. #364's flag was wrong for a different
+    #: reason: it was derived from ``attachment_filename``, the matched
+    #: chunk's source.
     has_attachments: bool
     matched_chunk_id: int | None
     matched_chunk_table: Literal["message", "message_chunks", "attachment_chunks"]
@@ -1080,13 +1081,11 @@ class Searcher:
                 snippet=snip, snippet_source=source,
                 attachment_filename=attachment_filename,
                 # `m` is `{}` for a message deleted between retrieval and
-                # hydration, the same case `account_id`'s default above covers;
-                # a message that no longer exists carries no attachments. A
-                # `.get` default here would let a *present* row missing the
-                # key claim `False` by omission — the defaultless-field
-                # footgun this hydration query cannot actually produce, since
-                # `HAS_ATTACHMENT_SQL` is always selected, but that guarantee
-                # belongs on the row check, not folded into a silent default.
+                # hydration (as `account_id`'s default above), and a deleted
+                # message has no attachments; dropping such hits is #372. A
+                # present row is subscripted rather than `.get(…, False)`:
+                # `_hydrate` always selects the key, and if it ever stops, a
+                # `KeyError` beats a silent `False`.
                 has_attachments=m["has_attachments"] if m else False,
                 matched_chunk_id=h.best_chunk_id,
                 matched_chunk_table=h.best_chunk_table,

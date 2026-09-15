@@ -32,7 +32,8 @@ class SearchFiltersModel(BaseModel):
 
     # "allow", never "ignore": an unknown key has to reach `run_search`,
     # which refuses it by name. Ignored, a planner's `has_attachments` (the
-    # hit field's plural) got unfiltered results and a 200 (#364).
+    # hit field's name, sent as a filter) got unfiltered results and a 200
+    # (#364).
     model_config = {"populate_by_name": True, "extra": "allow"}
 
 
@@ -41,14 +42,16 @@ SEARCH_LIMIT_MAX = 200
 
 class SearchRequest(BaseModel):
     # "allow" so the route can refuse an unknown field by name rather than
-    # drop it (#364). Pydantic's "forbid" answers 422 with an array `detail`,
-    # which is not problem+json, so a client that renders `detail` (the
-    # kastellan mail worker does) gets nothing it can act on.
+    # drop it (#364). "forbid" makes FastAPI answer 422 with an array
+    # `detail`, which is not problem+json, so a client that renders `detail`
+    # (the kastellan mail worker does) gets nothing it can act on. A type
+    # error on a known field is still that 422 (#370).
     model_config = {"extra": "allow"}
 
-    # Optional: a filter-only search is a search. A query with no free text
-    # takes the date walk and reports `rankable: false` (#324).
-    query: str = ""
+    # Optional, and nullable like every other optional field here: a
+    # filter-only search is a search. A query with no free text takes the
+    # date walk (#324) and reports `rankable: false` (#353).
+    query: str | None = ""
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
     # "rank" orders by rerank relevance; "date" takes the date-ordered
@@ -126,7 +129,7 @@ def search_endpoint(
     }
     return run_search(
         searcher=searcher,
-        free_text=req.query,
+        free_text=req.query or "",
         filters=filters_dict,
         limit=req.limit,
         allowed_account_ids=allowed,

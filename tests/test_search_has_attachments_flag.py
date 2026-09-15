@@ -41,18 +41,22 @@ class _Embedder:
         pass
 
 
-def _seed(conn: psycopg.Connection, *, malformed: bool) -> tuple[int, dict[str, int]]:
+def _seed(conn: psycopg.Connection) -> tuple[int, dict[str, int]]:
     """Messages that match "Berlin" through their subject and body only.
 
     No ``attachment_text`` rows are seeded, so no hit can come from an
     attachment chunk. A flag that is true here can only have come from the
-    message itself, which is the distinction #364 is about. The malformed
-    row is optional because the embed worker's chunking has no business
-    being asked about it; the date walk does.
+    message itself, which is the distinction #364 is about.
+
+    The malformed row (``attachments = '{}'``) is seeded for **every** test,
+    the hybrid ones included. It used to be left out of those on the grounds
+    that chunking has no business seeing it, which was measured false in
+    #366's review, and leaving it out left ``_hydrate``'s guard unpinned:
+    both the bare ``jsonb_array_length`` and a restated ``<> '[]'`` rule
+    survived the whole suite there. Every rule agrees on ``[]`` and on a
+    one-PDF array, so only this row can tell them apart.
     """
-    shapes = [("ticket", _PDF), ("lunch", "[]")]
-    if malformed:
-        shapes.append(("malformed", "{}"))
+    shapes = [("ticket", _PDF), ("lunch", "[]"), ("malformed", "{}")]
     ids: dict[str, int] = {}
     with conn.cursor() as cur:
         cur.execute("INSERT INTO accounts (name, email_address, imap_host, auth_method)"
@@ -96,7 +100,7 @@ def test_the_wire_field_is_the_result_field_not_the_snippet_source() -> None:
 
 
 def test_the_date_walk_flags_the_message(db_dsn, db_conn) -> None:
-    _, ids = _seed(db_conn, malformed=True)
+    _, ids = _seed(db_conn)
     pool = open_pool(db_dsn)
     try:
         searcher = Searcher(pool=pool, cfg=SearchConfig(), embeddings=None,
@@ -110,7 +114,7 @@ def test_the_date_walk_flags_the_message(db_dsn, db_conn) -> None:
 
 
 def test_the_hybrid_path_flags_the_message_not_the_matched_chunk(db_dsn, db_conn) -> None:
-    _, ids = _seed(db_conn, malformed=False)
+    _, ids = _seed(db_conn)
     cfg = SearchConfig()
     run_embed_worker_once(db_conn, cfg, _Embedder())
     pool = open_pool(db_dsn)
@@ -122,17 +126,18 @@ def test_the_hybrid_path_flags_the_message_not_the_matched_chunk(db_dsn, db_conn
         pool.close()
     assert page.sort_applied == "rank"
     by_id = {r.message_id: r for r in page.results}
-    assert set(by_id) == {ids["ticket"], ids["lunch"]}
+    assert set(by_id) == {ids["ticket"], ids["lunch"], ids["malformed"]}
     # The old rule read the matched chunk, and no chunk here is an attachment's.
     assert by_id[ids["ticket"]].matched_chunk_table != "attachment_chunks"
     assert by_id[ids["ticket"]].has_attachments is True
     assert by_id[ids["lunch"]].has_attachments is False
+    assert by_id[ids["malformed"]].has_attachments is False
 
 
 def test_the_flag_reaches_the_wire_through_the_real_route(
     db_dsn, db_conn, api_user, api_token,
 ) -> None:
-    acct, ids = _seed(db_conn, malformed=False)
+    acct, ids = _seed(db_conn)
     with db_conn.cursor() as cur:
         cur.execute("INSERT INTO user_accounts (user_id, account_id) VALUES (%s, %s)",
                     (api_user.id, acct))
@@ -148,7 +153,7 @@ def test_the_flag_reaches_the_wire_through_the_real_route(
         pool.close()
     assert r.status_code == 200, r.text
     got = {int(h["message_id"]): h["has_attachments"] for h in r.json()["results"]}
-    assert got == {ids["ticket"]: True, ids["lunch"]: False}
+    assert got == {ids["ticket"]: True, ids["lunch"]: False, ids["malformed"]: False}
 
 
 @pytest.mark.parametrize("free_text", ["", "Berlin"])
@@ -158,7 +163,7 @@ def test_the_filter_selects_exactly_the_flagged_hits(db_dsn, db_conn, free_text)
     ``""`` drives the date walk and ``"Berlin"`` the hybrid pool, so both
     places a hit is built are covered.
     """
-    acct, _ = _seed(db_conn, malformed=False)
+    acct, _ = _seed(db_conn)
     cfg = SearchConfig()
     run_embed_worker_once(db_conn, cfg, _Embedder())
     pool = open_pool(db_dsn)
@@ -180,3 +185,28 @@ def test_the_filter_selects_exactly_the_flagged_hits(db_dsn, db_conn, free_text)
         "both halves must be non-empty, or this proves nothing", everything)
     assert set(with_attachments) == {m for m, flag in everything.items() if flag}
     assert set(without_attachments) == {m for m, flag in everything.items() if not flag}
+
+
+def test_a_message_deleted_before_hydration_reports_no_attachments() -> None:
+    """``_hydrate`` reads each hit's row with ``msgs.get(id, {})``, so a
+    message deleted between retrieval and hydration arrives as ``{}``.
+    Subscripting the flag there raised ``KeyError`` — a 500 — where every
+    other field has a default; the guard is what stops it. Dropping such a
+    ghost hit instead is #372, which will replace this pin.
+    """
+    from unittest.mock import MagicMock
+
+    from localmail.search.query import parse_query
+    from localmail.search.searcher import FusedHit
+
+    ghost = {
+        "fused": FusedHit(message_id=7, best_chunk_id=None, best_chunk_table="message",
+                          rrf_score=0.5, contributing_arms=[0]),
+        "msg": {},
+        "snippet_source_text": "",
+    }
+    searcher = Searcher(pool=MagicMock(), cfg=SearchConfig(), embeddings=None,
+                        reranker=None, rewriter=None)
+    [result] = searcher._build_results([ghost], parse_query("x"), [0.5],
+                                       page=1, page_size=10)
+    assert result.has_attachments is False

@@ -52,8 +52,15 @@
 > clean minutes later and the three tests passed in isolation, so the second
 > full run is the result quoted below.
 >
-> **Open issues: 32** (29 + #373/#374/#375), dropping to **31** when the PR
-> merges. **Dependabot: 7 → 1** on merge (#71 `accelerate` stays open on
+> **(5) A four-agent review of #376 found no blocker and ~20 real defects,
+> all fixed on the branch or filed** — see "Review round" below. The one
+> that mattered: the desktop GUI sends the typed query *and* the stored chip
+> filters, so after the precedence flip a chip could show a filter that was
+> not applied. `submit()` now moves a contradicting typed operator into its
+> chip.
+>
+> **Open issues: 34** (29 + #373/#374/#375 + #377/#378 from the review),
+> dropping to **33** when the PR merges. **Dependabot: 7 → 1** on merge (#71 `accelerate` stays open on
 > purpose).
 
 ## Project context (1-minute version)
@@ -113,7 +120,7 @@ SPDX headers in `src/localmail/`; **not** in `gui/`). **kastellan** consumes
   carries `httpcore2` to 2.13.0. `httpx2-jsfetch` enters the lock
   emscripten-only.
 - `vitest ^4.1.11` (4.1.9 → 4.1.11, with `@vitest/*` and `tinyrainbow`).
-- `nanoid` 3.3.16 → 3.3.18 via `npm audit fix`: flagged by `npm audit`, not
+- `nanoid` 3.3.16 → 3.3.19 via `npm audit fix`: flagged by `npm audit`, not
   yet by Dependabot.
 - `accelerate` (#71) is left open: no fix exists; it arrives via
   `docling-ibm-models` and `docling-slim`, and the attack needs a malicious
@@ -128,16 +135,76 @@ SPDX headers in `src/localmail/`; **not** in `gui/`). **kastellan** consumes
 - `test_serve_search_request_keys.py`: one docstring referencing
   `_gate_free_text`.
 
+### Review round — `/pr-review-toolkit:review-pr` then `/fixall`
+
+Four reviewers ran in parallel: code, tests, comments, silent failures. No
+critical issue: three independent fuzzes (20k, 32k through a real Searcher,
+167k scoped pairs) found zero divergence and no ACL widening.
+
+**Fixed on the branch:**
+- **GUI chip mismatch.** `filter_parse.absorbConflictingOperators`, called
+  at the top of `search.submit()`: a typed `from:`/`to:`/`subject:`/
+  `after:`/`before:` that contradicts a chip replaces it and leaves the
+  query. Only on conflict; `has:`/`lang:` untouched; dates only when shaped
+  like one. The popover seeds typed scalars first, and removing an
+  After/Before chip now clears its `dateFrom`/`dateTo` twin.
+- **A second review of these fixes caught two defects in them**, both fixed:
+  the rebuilt query re-quoted only whitespace tokens, so a kept `"don't"`
+  went out bare and swallowed later filters server-side (`joinTokens` now
+  quotes `'` too — 0 server-token mismatches on 20,000 random queries vs
+  9,779 for a bare join); and `_DATE_SHAPE` first required zero padding,
+  which 400'd a typed `after:2020-1-1` the GUI moved into a chip.
+- **MCP descriptions** for `query`, `from_addr`, `to`, `subject`,
+  `date_from`, `date_to` now say the typed operator overrides; pinned
+  against the published schema. `docs/mcp-usage.md` too.
+- **`_validate_date` checks for one ASCII token** (`2020-01- 1` passed
+  `strptime` and split into two tokens; non-ASCII digits are refused now,
+  unpadded `2020-1-1` stays accepted to match the query parser).
+- **Both rowed branches map a `QueryParseError` to a 400** again, as a
+  backstop (#366's per-branch re-parse had been it).
+- **Tests:** quotes inside filter values in the neutrality params and
+  `_EVERY_FILTER`, plus an anchor test (the comparison alone was blind to a
+  quote-stripping regression); `date_to` precedence; the gate-attribution
+  test now uses a mock (it passed with the gate disabled); and a
+  **real-archive** folder-filter test through `run_search` and MCP. That one
+  asserts equality with a non-empty set — pre-fix the result was *empty*,
+  not unfiltered — and seeds `OBrien` because of #373.
+- **Docs:** `nanoid` is 3.3.**19** (was written 3.3.18 here, in CLAUDE.md,
+  the handoff and commit `e3a1819`'s message — the message stays wrong);
+  "can only affect itself" / "for every input" overclaims; stale present
+  tense in tests and CLAUDE.md (#326, #331, #345, #353, validation order);
+  the #364 spec and plan annotated in place; #367 history trimmed out of six
+  source comments.
+
+**Filed:** **#377** NUL byte in `query` or a text filter is a psycopg 500
+(reproduced through `run_search` against the test DB). **#378** operators
+with an empty/unparsable value silently become free text; `has:"` used to be
+a named 400 and is now a search for the word "has". **Commented:** #369 (id
+lists in `query` widen the caller's own lists; the GUI now resolves scalar
+conflicts client-side), #374 (a `--from` value can inject `has:no-attachment`).
+
+**Mutation checks** (snapshot + restore, byte-compared): no-strip of `"`
+and single-quote wrapping are caught by the neutrality test and the anchor;
+free-text-first fails all 4 real-archive cases with `set() == {'1'}`;
+disabling the gate's sort check fails the renamed gate test; the gate
+parsing the raw field still fails 6 (the backstop does not mask it).
+
 ### Verification (this Mac, all extras)
 
-| gate | `main` @ `964ff13` | branch @ `ab73610` |
-|---|---|---|
-| pytest collected | **3543** | **3622** |
-| pytest run | — | **3622 passed, 0 failed, 2 warnings, 276 s** (load ~50) |
-| mypy | — | Success, **155** files |
-| ruff `src/` | — | **10** (#285 baseline) |
-| svelte-check / vitest / build | — | 0 errors / **483 passed** / ok |
-| CI (#376) | — | green; Linux pytest **3621 passed, 1 skipped** on 3.12 and 3.13 |
+| gate | `main` @ `964ff13` | branch @ `ab73610` | + review fixes |
+|---|---|---|---|
+| pytest collected | **3543** | **3622** | **3682** |
+| pytest run | — | **3622 passed, 0 failed, 2 warnings, 276 s** (load ~50) | **3682 passed, 0 failed, 2 warnings, 264 s** (load ~45) |
+| mypy | — | Success, **155** files | Success, **155** files |
+| ruff `src/` | — | **10** (#285 baseline) | **10** |
+| svelte-check / vitest / build | — | 0 errors / **483 passed** / ok | 0 errors / **516 passed** / not re-run |
+| CI (#376) | — | green; Linux pytest **3621 passed, 1 skipped** on 3.12 and 3.13 | read `gh pr checks 376` |
+
+- **+60 pytest for the review fixes:** 14 date shape (12 refused, 1
+  unpadded accepted, 1 impossible date), 2 `QueryParseError` backstop, 6 MCP
+  descriptions, 33 neutrality cases (3 quoted filter values × 11 texts), 1
+  anchor, 4 real-archive. **+33 vitest:** 26 in `filter_parse` (absorb and
+  `joinTokens`), 2 store, 2 popover, 3 chip-twin.
 
 - **+79 collected is counted per file**, not derived: +53 new file, −20
   retired file, +44 neutrality cases, +2 `rank_without_text`.
@@ -163,7 +230,7 @@ against the whole PR diff, so a docs-only push to a code PR still runs
 everything. Those runs were pending at handoff; read `gh pr checks 376`
 rather than this line. Afterwards:
 - `gh issue view 367 --json state` should be `CLOSED`, and **open issues
-  32 → 31**.
+  34 → 33**.
 - Dependabot should read **1** (#71) once GitHub rescans the lock files. If
   #72–#77 stay open, they need the manifests on `main`, not the branch.
 
@@ -192,7 +259,11 @@ rather than this line. Afterwards:
   duplicate returns every occurrence in order; `full` is unchanged against a
   golden response.
 
-### 3. **The #366 review-round issues**
+### 3. **The #366 and #376 review-round issues**
+- **#377**: NUL byte → 500. Refuse in `build_query_string` (a `ValidationFailed`
+  naming the field) is the #364-consistent answer.
+- **#378**: empty/unparsable operators become free text. Careful: `subject:
+  meeting` is natural text an agent emits.
 - **#369**: refuse scalar conflicts. Its first two rows now read the other
   way; see the comment there. When it lands,
   `test_a_query_operator_now_outvotes_a_conflicting_structured_filter`
@@ -233,7 +304,7 @@ touching `_GIT_TIMEOUT_S`.
 ## Open decisions & risks
 
 1. **One PR is open and yours to merge** (**#376**, `fix/367-filters-before-free-text`,
-   based on `main` `964ff13`). **Open issues 32 → 31; Dependabot 7 → 1.**
+   based on `main` `964ff13`). **Open issues 34 → 33; Dependabot 7 → 1.**
 2. **A merge does NOT close issues its subject merely names.** Use `Closes #N`
    in the PR body and check `gh issue list` afterwards.
 3. **THIS FILE IS NOT THE AUTHORITY — `git` and `gh` are.** Session 46 wrote no
@@ -306,7 +377,7 @@ ls -t docs/handoffs/ | head -3
 
 # RISK 2 — after the merge, CHECK WHAT CLOSED.
 gh pr list
-gh issue list --limit 50                 # 32 open; 31 after the merge
+gh issue list --limit 50                 # 34 open; 33 after the merge
 gh issue view 367 --json state --jq .state
 
 # Dependabot — expect 1 (#71 accelerate) once main carries the new locks.
@@ -376,4 +447,4 @@ unset VIRTUAL_ENV && uv run localmail search-status    # under a second (#280)
 open (**#376**) on `fix/367-filters-before-free-text` — `9882cb0` (#367), `e3a1819`
 (dependency floors), `ab73610` (README + CLAUDE.md) and the handoff commit.
 Latest migration **`0036_api_keys.sql`**; next free slot `0037_*.sql` (none
-added). **Open issues: 32 → 31 on merge. Dependabot: 7 → 1 on merge.**
+added). **Open issues: 34 → 33 on merge. Dependabot: 7 → 1 on merge.**

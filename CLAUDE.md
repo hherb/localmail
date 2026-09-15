@@ -2238,15 +2238,15 @@ never ships.
   read against at all.
 - **`httpx2-jsfetch` entered the lock under an emscripten-only marker** and is
   installed on neither host.
-- **`npm audit fix` moved `nanoid` 3.3.16 → 3.3.18** in the same PR (vite →
+- **`npm audit fix` moved `nanoid` 3.3.16 → 3.3.19** in the same PR (vite →
   postcss, build-time, a lock-only patch bump). Dependabot had not raised it
   yet; `npm audit` did, so read `npm audit` as well as the Dependabot list
   when touching `gui/`.
 - **Dependabot #71 (`accelerate <= 1.14.0`) is left open on purpose.** No fixed
   release exists. It arrives via `docling-ibm-models` and `docling-slim`, both
-  under the `[extraction]` extra, and the path traversal needs a malicious sharded checkpoint index. The
-  layout models come from the HF hub, never from mail. Revisit when a fixed
-  release lands.
+  under the `[extraction]` extra, and the path traversal needs a malicious
+  sharded checkpoint index. The layout models come from the HF hub, never
+  from mail. Revisit when a fixed release lands.
 
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
@@ -3662,17 +3662,19 @@ for the full design.
             produced #308's own follow-up defect. **They do not, however,
             measure the same string**, and an earlier wording here said
             they "ask the same question", which is wrong in a way worth
-            keeping written down: the api gate parses the raw `free_text`,
+            keeping written down: the api gate parses the query composed
+            from the caller's filters (the raw `free_text` until #367),
             while `Searcher.search` parses
-            `build_query_string(free_text, scoped_filters)` — the composed
-            query, which `_scope_filters_by_acl` has already appended
-            `account_id:` ACL tokens to. They agree because
+            `build_query_string(free_text, scoped_filters)` — the
+            composition from the ACL-scoped filters, which carries the
+            `account_id:` ACL tokens. They agree because
             `build_query_string` is **free-text-neutral**, which is a
             property of the composer and of neither guard, and is therefore
             pinned on the composer by
             `test_api_search.py::test_build_query_string_is_free_text_neutral`
-            (70 combinations of query shape × filter shape). CLAUDE.md
-            claimed that equivalence for #308 and nothing pinned it.
+            (every query shape × filter shape, quotes inside filter values
+            included). CLAUDE.md claimed that equivalence for #308 and
+            nothing pinned it.
             **The branch guard is the authority** — it sees the string the
             FTS predicate is actually built from; the gate exists to answer
             before any work is done, and before the empty-ACL branch can
@@ -3680,8 +3682,9 @@ for the full design.
             divergence was reachable with an unbalanced quote (`from:"`),
             which made `run_search`'s catch of `KeysetCursorUnusable` live.
             **#367 closed it**: `build_query_string` composes the filters
-            first, so neutrality holds for every input and the gate now
-            parses the composed query too. That catch is a backstop again.
+            first, so neutrality holds for every input the composition
+            parses, and the gate parses only that composition. That catch
+            is a backstop again.
           - **Only the text-cursor-plus-blank-query pair is refused.** An
             archive cursor continues under any query, because it has no FTS
             predicate to rebuild — so #322's blank-query pagination is
@@ -3734,8 +3737,8 @@ for the full design.
             emits. The rule is `api.search._gate_query` (named
             `_gate_free_text` until #367 folded the raw-field parse into the
             composed one), which translates it to `ValidationFailed`; **one
-            call, unconditional, at the top of `run_search`**, so it covers the fresh path too
-            rather than needing a second catch. Pinned by
+            call, unconditional, at the top of `run_search`**, so it covers
+            the fresh path too rather than needing a second catch. Pinned by
             `tests/test_api_search_malformed_query.py` across all four
             branches, with a positive control.
       - **Both sort axes are membership-checked at runtime** (review of
@@ -3942,7 +3945,8 @@ for the full design.
         #278/#295 objection to a new wire key is satisfied instead by
         landing it *with* its renderer, which is the test that objection
         actually sets.
-      - **The empty-ACL short-circuit reports `plan.sort`**, which is exact
+      - **The empty-ACL short-circuit reports
+        `resolve_sort(requested=plan.sort, free_text=…)`**, which is exact
         on the **keyset** mode (`KEYSET_SORT`, which `resolve_sort`
         returns for any query) and, **since #367**, on the **fresh** mode
         too. Until then fresh was the *gate's* resolution of the raw request
@@ -3950,15 +3954,14 @@ for the full design.
         disagreed across an open quote: `from:"` resolved `rank` at the gate
         and `date` in the Searcher, `"` the reverse. The gate parses the
         composition now and the filters come first, so both read the same
-        free text. On **pool** mode it is the caller's
-        claim about a pool that branch never consults (`CursorPlan` says
-        so). That one is accepted only because **no rows come back** —
-        nothing is mislabelled because nothing is labelled. The rowed paths
-        never read it: `Searcher.search` stamps fresh and keyset,
-        `continue_page` reads the pool's own metadata, and
+        free text. On **pool** mode it describes a pool that branch never
+        consults (`CursorPlan` says so). That one is accepted only because
+        **no rows come back** — nothing is mislabelled because nothing is
+        labelled. The rowed paths never read it: `Searcher.search` stamps
+        fresh and keyset, `continue_page` reads the pool's own metadata, and
         `_empty_grown_page` takes `meta.sort` rather than a default. An
         earlier wording here claimed "exact on the fresh and keyset modes";
-        that was wrong for fresh and is corrected in place.
+        that was wrong for fresh when written and #367 made it true again.
       - **Relevance is disabled with a reason, not merely re-labelled** —
         the `action_flags` precedent, removing the inert control rather than
         quietening it. Disabled only on proof: `statedSort` never sends
@@ -4143,9 +4146,11 @@ for the full design.
         filters trailing `parse_query` was not compositional across an
         unbalanced quote. Measured, both ways: `from:"` read rankable at the
         gate and textless in the Searcher, and `"` the reverse. #367 closed
-        it for fresh and keyset; pool mode keeps the caveat. Since `resolve_sort` *is* `is_rankable` plus
-        the caller's `requested`, this is the same divergence `sort_applied`
-        carries, not a second one. Both are accepted for the reason that
+        it for fresh and keyset; pool mode has its own caveat (the fields
+        describe a pool the branch never consults, see `sort_applied`
+        above). Since `resolve_sort` *is* `is_rankable` plus the caller's
+        `requested`, this is the same divergence `sort_applied` carries, not
+        a second one. Both are accepted for the reason that
         field already gives — **no rows come back**, so nothing is
         mislabelled because nothing is labelled.
       - **`click`, not `change`, and not both.** A radio fires no `change`
@@ -4608,7 +4613,8 @@ for the full design.
           resolved `date` that the Searcher resolved to `rank`. Corrected in
           place — and **#367 made the original wording true again**: with the
           filters composed first the two read the same free text, so the
-          catch is a backstop. The docstring says both now.
+          catch is a backstop. The docstring now says only that; the history
+          lives here.
         - **Point 3 — `cursor:` was the branch's word, not the cause's.**
           The keyset branch wrote the prefix into its own f-string, so it
           labelled everything it caught: a `sort_order` refusal on a request
@@ -5073,16 +5079,42 @@ for the full design.
     was ignored, and the swallowed tokens became FTS terms and polluted the
     embedding.
     - **Why first is safe:** every filter token is self-contained. Ids are
-      digits, dates validated, `has:` a constant, `lang` refused if it
-      carries whitespace or a quote, quoted values stripped of quotes and
-      non-empty (those two refusals were #366's prerequisites). So the free
-      text starts with the tokenizer in its initial state, and
+      ASCII digits, dates one ASCII token, `has:` a constant, `lang`
+      refused if it carries whitespace or a quote, quoted values stripped of
+      `"` and non-empty (those two refusals were #366's prerequisites). So
+      the free text starts with the tokenizer in its initial state, and
       `parse(composed).free_text == parse(free_text).free_text` holds for
-      every input, unbalanced quotes included, exactly and without a
-      `.strip()`. Pinned by
+      every input the composition parses, unbalanced quotes included,
+      exactly and without a `.strip()`. Pinned by
       `test_api_search.py::test_build_query_string_is_free_text_neutral` and
-      `test_api_search_filters_before_free_text.py`, which also asserts the
-      free text cannot change what the filters parse to.
+      `test_api_search_filters_before_free_text.py`, which also asserts that
+      no quote in the free text can reach a filter token. That is a claim
+      about tokenization only: the free text's *operators* still reach the
+      filters (precedence, below).
+      - **A date's shape is checked, not left to `strptime`**
+        (`api.search._DATE_SHAPE`, review of #376). `strptime`'s `%d` takes
+        a space, so `2020-01- 1` validated and then split into
+        `after:2020-01-` plus a stray `1`: a 400 naming the wrong key with a
+        truncated value. It also admits non-ASCII digits. The shape is one
+        ASCII token, `\d{4}-\d{1,2}-\d{1,2}` — **unpadded month and day
+        stay accepted on purpose**. A first cut required `\d{2}` and a
+        second review caught it: the query parser accepts `after:2020-1-1`,
+        and the GUI moves a typed date into a structured filter, so a
+        stricter structured rule 400'd a search the query had accepted, on
+        Enter. The client absorbs only a typed date of the same shape.
+      - **The rowed branches still map a `QueryParseError` from the
+        Searcher to a 400**, as a backstop beside the family catch. No input
+        reaches it — the ACL-scoped composition differs from the gate's only
+        by digit tokens — but #366's per-branch re-parse had been that
+        backstop, and removing it left the next divergence a silent 500.
+        The class is named, so no other `ValueError` is relabelled.
+      - **The end-to-end pin runs against a real archive**
+        (`test_a_folder_filter_restricts_the_rows_of_an_apostrophe_query`,
+        through `run_search` and the MCP wrapper). It asserts equality with
+        a non-empty set because before the fix the swallowed id tokens
+        became FTS terms and matched *nothing*, so an absence assertion
+        passes against the bug; and it seeds `OBrien`, since #373 means a
+        body spelled `O'Brien` matches on neither side of the fix.
     - **What it retired:** the gate-vs-Searcher divergence #324's review
       documented as live (the `from:"`/`"` class; see the #324, #326, #345
       and #353 notes, annotated in place), #366's per-branch re-parse and
@@ -5098,6 +5130,53 @@ for the full design.
       between two structured filters are unchanged (`date_from` still beats
       `after`), `has:` still refuses, and list filters are still unioned.
       Pinned by `test_a_query_operator_now_outvotes_a_conflicting_structured_filter`.
+      - **The agent-facing descriptions say so.** `from_addr`/`to`/
+        `subject` said "must contain" and `date_from` "Lower bound", and
+        README's "don't send both" is not something an agent reads, so
+        each description names its overriding operator. Pinned against the
+        *published* schema (`test_mcp_server_build.py`), for #308's reason.
+      - **The GUI sends both, so its chips had to learn it** (review of
+        #376). `SearchBar` submits the typed query with the stored filters,
+        and the chips render the stored filters only, so `from:bob` typed
+        over a "From: alice" chip searched for bob under a chip saying
+        alice — #345's control asserting a state not in effect. `submit()`
+        now runs `filter_parse.absorbConflictingOperators`: a typed
+        `from:`/`to:`/`subject:`/`after:`/`before:` that *contradicts* a
+        chip replaces the chip's value and leaves the query. It becomes a
+        structured filter, so no quote elsewhere in the text can swallow it
+        and the chip is what is applied. A typed operator with no chip, or
+        matching its chip, is left in the box, so nothing changes for a
+        search that has no conflict. `has:` (refused on conflict) and
+        `lang:` (unioned, and dropped at the Tauri hop by #371) are not
+        touched, and a typed date is absorbed only when it is shaped like
+        one (`after:last-week` stays in the query for the server to refuse).
+        The popover seeds scalars typed-first to match.
+        - **The rebuilt query goes through `filter_parse.joinTokens`, and a
+          whitespace-only re-quote was the first cut's defect.** The client
+          tokenizer drops `"` and reads `'` literally; the server's opens a
+          quote at `'`. So a kept one-word `"don't"` re-joined bare swallowed
+          every later token server-side — a `has:`/`lang:`/`to:` the user
+          never touched, dropped to fix a chip. `joinTokens` wraps any token
+          holding whitespace **or** `'` in `"`, inside which both tokenizers
+          read `'` literally; tokens never contain `"`, so the wrapping stays
+          balanced. Verified across languages on 20,000 random queries: 0
+          server-token mismatches, against 9,779 for a bare join and 8,750
+          for whitespace-only quoting. Splicing the absorbed spans out of the
+          raw string was rejected: removing a token that holds an apostrophe
+          changes the server's quote pairing (`it's from:o'brien
+          has:attachment` then loses `has:`). `extractDslFilters().freeText`
+          uses the same join, which fixes the popover's Apply too — it had
+          the bare join on `main`.
+        - **Two imprecisions, both from reading with the client tokenizer.**
+          An operator only the server extracts (`'from:bob'`, single-quoted)
+          is not seen, so its chip can still be out-voted. And an operator an
+          earlier apostrophe hid from the server (`don't from:bob`) *is*
+          seen and absorbed, so the applied value becomes the typed one where
+          the server would have kept the chip's — which is what was typed.
+        - **Removing an After/Before chip clears its `dateFrom`/`dateTo`
+          twin.** The popover writes both and seeds from the twin, so a
+          removed date came back on the next Apply, and the leftover twin
+          kept `hasNoScope()` false so the last chip's × never reset.
     - **Not closed by it:** the tokenizer still drops an apostrophe inside a
       word (`O'Brien` → `OBrien`), so such a name never matches lexically
       (the tsvector holds `'o' 'brien'`). That is the free text mangling
@@ -5120,8 +5199,8 @@ for the full design.
       rather than guessing. Separately, the GUI drops `lang`/`date_from`/
       `date_to` at the Tauri hop (#371).
   - **Validation order:** filter values are validated **before** the empty-ACL
-    short-circuit, since `run_search` calls `build_query_string` once early
-    and discards the result. A malformed `date_from` from a grant-nothing
+    short-circuit, since `run_search` composes and parses the query once,
+    early (`_gate_query`), keeping only its free text. A malformed `date_from` from a grant-nothing
     caller used to be a 200 empty page.
     - **Two re-tokenizing values are refused too** (#366's review):
       - A `lang` containing whitespace or a quote. It is emitted unquoted,

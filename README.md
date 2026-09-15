@@ -955,10 +955,18 @@ direct children, so an image embedded in an HTML body counts when it sits
 directly under a top-level `multipart/related` or `multipart/mixed`, but not
 inside `multipart/alternative` —
 [#365](https://github.com/hherb/localmail/issues/365) tracks narrowing that.
-Two known gaps: an unclosed quote in `query` (an apostrophe, as in `O'Brien`)
-still swallows the filters composed after it
-([#367](https://github.com/hherb/localmail/issues/367)), and the MCP tool
-still ignores an argument it does not declare
+An apostrophe or unclosed quote in `query` (`O'Brien`, `don't`) no longer
+swallows the filters: they are composed ahead of the query text, so a folder,
+date or attachment filter is honoured whatever the text contains. Such a query
+used to answer 200 with every filter silently dropped, or a 400 naming the
+open quote when the result failed to parse. Closes
+[#367](https://github.com/hherb/localmail/issues/367). One consequence: if
+`query` carries an operator that conflicts with a structured filter
+(`"query": "from:bob"` with `"filters": {"from": "alice"}`), the query's value
+now wins where the filter's used to. Both are silent, and
+[#369](https://github.com/hherb/localmail/issues/369) tracks refusing the
+conflict instead; until then, don't send both. The MCP tool still ignores an
+argument it does not declare
 ([#368](https://github.com/hherb/localmail/issues/368)). Closes
 [#364](https://github.com/hherb/localmail/issues/364).
 

@@ -699,6 +699,14 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     where a `git pull` moves the tree under a daemon that keeps executing the
     code it already imported. `reset_build_info()` + an autouse conftest
     fixture, the `reset_version_reports()` shape.
+    - **The cache also keeps a *timeout*, and that is a known defect
+      (#375).** On the Mac, `serve` under launchd intermittently hits
+      `_GIT_TIMEOUT_S` (2 s) on `rev-parse` or `diff --quiet`. The same
+      commands take 10–70 ms from a shell, even with launchd's environment.
+      One slow probe on a loaded machine then reports `build_hash: null` until
+      the next restart. So on the Mac a `git_failed` is not proof the deploy
+      is wrong: check the log line and the process start time against the
+      tree's HEAD.
   - **The repo it finds must be ours**, checked by requiring
     `<toplevel>/src/localmail/__init__.py` to resolve to the file we imported.
     Containment is not enough: a virtualenv inside a dotfiles repo *is*
@@ -2218,6 +2226,28 @@ calls. So this is the sqlparse case (hygiene), not the pypdf/icalendar one.
   dry-run measures the resolution at the moment it runs; it is not a promise
   about the one that ships.
 
+**`httpx2>=2.12.0` (dev group) and `vitest ^4.1.11` (`gui/`) are dev-only
+floors** (Dependabot #72–#77, closed with #367's PR). Neither is reachable by
+mail: `httpx2` exists only for Starlette's `TestClient` (#192), and `vitest`
+never ships.
+
+- **`httpx2>=2.12.0` also floors `httpcore2`** without naming it, because each
+  `httpx2` release pins `httpcore2` exactly (`==2.12.0` for 2.12.0). That pin is
+  a constraint, so the declared floor governs what any re-resolution may pick.
+  That makes this unlike the `transformers` case above, which had no floor to
+  read against at all.
+- **`httpx2-jsfetch` entered the lock under an emscripten-only marker** and is
+  installed on neither host.
+- **`npm audit fix` moved `nanoid` 3.3.16 → 3.3.18** in the same PR (vite →
+  postcss, build-time, a lock-only patch bump). Dependabot had not raised it
+  yet; `npm audit` did, so read `npm audit` as well as the Dependabot list
+  when touching `gui/`.
+- **Dependabot #71 (`accelerate <= 1.14.0`) is left open on purpose.** No fixed
+  release exists. It arrives via `docling-ibm-models` and `docling-slim`, both
+  under the `[extraction]` extra, and the path traversal needs a malicious sharded checkpoint index. The
+  layout models come from the HF hub, never from mail. Revisit when a fixed
+  release lands.
+
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
 MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for
@@ -3647,9 +3677,11 @@ for the full design.
             FTS predicate is actually built from; the gate exists to answer
             before any work is done, and before the empty-ACL branch can
             report a contradictory request as a completed one. The
-            divergence is reachable with an unbalanced quote (`from:"`),
-            which is why `run_search`'s catch of `KeysetCursorUnusable` is
-            **not** the dead backstop its comment used to claim.
+            divergence was reachable with an unbalanced quote (`from:"`),
+            which made `run_search`'s catch of `KeysetCursorUnusable` live.
+            **#367 closed it**: `build_query_string` composes the filters
+            first, so neutrality holds for every input and the gate now
+            parses the composed query too. That catch is a backstop again.
           - **Only the text-cursor-plus-blank-query pair is refused.** An
             archive cursor continues under any query, because it has no FTS
             predicate to rebuild — so #322's blank-query pagination is
@@ -3699,9 +3731,10 @@ for the full design.
             never parsed `free_text` at all, and it reached MCP as an
             exception no `ToolError` mapping covers.
             `query="invoice after:last-week"` is exactly what an LLM agent
-            emits. The rule is `api.search._gate_free_text`, which
-            translates it to `ValidationFailed`; **one call, unconditional,
-            at the top of `run_search`**, so it covers the fresh path too
+            emits. The rule is `api.search._gate_query` (named
+            `_gate_free_text` until #367 folded the raw-field parse into the
+            composed one), which translates it to `ValidationFailed`; **one
+            call, unconditional, at the top of `run_search`**, so it covers the fresh path too
             rather than needing a second catch. Pinned by
             `tests/test_api_search_malformed_query.py` across all four
             branches, with a positive control.
@@ -3797,8 +3830,8 @@ for the full design.
           resolution of them** (review follow-up). It shipped passing
           `plan.sort`/`plan.sort_order` on the fresh branch, and `plan.sort`
           is never `None` — so an *unstated* sort arrived at the Searcher
-          looking stated, and on the divergent-parse class below a caller
-          who omitted `sort` was refused with "pass sort='date' **or omit
+          looking stated, and on the divergent-parse class below (an open
+          quote, until #367) a caller who omitted `sort` was refused with "pass sort='date' **or omit
           sort**", a remedy they had already followed. #324's own defect — a
           sort the caller never chose, reported as their statement —
           reintroduced by #324's fix, and it breaks both
@@ -3811,14 +3844,19 @@ for the full design.
             is textless to the gate (whose rank+asc refusal therefore does
             not fire) and text once the ACL token composes in, so the
             Searcher resolves `rank`, meets a stated `asc`, and raises.
-            Unreachable while the gate forwarded its own resolution.
-          - **Known residual, filed not fixed**: the gate's rank+asc refusal
-            still reads `plan.sort`, so `sort_order="asc"` with no sort on
-            that same divergent class is still a 400 naming a `rank` path the
-            request would not take. Pre-existing — `main` behaves identically
-            — and fixing it means gating on the composed query, which needs
-            `run_search`'s ordering restructured around the empty-ACL
-            short-circuit.
+            Unreachable while the gate forwarded its own resolution. **Moot
+            since #367**: the two read the same free text, so the catch is a
+            backstop, but forwarding the raw axes is still what keeps the
+            Searcher judging only what the caller stated.
+          - **The known residual is closed by #367**: the gate's rank+asc
+            refusal read `plan.sort` from the raw field's parse, so
+            `sort_order="asc"` on that divergent class was a 400 naming a
+            `rank` path the request would not take. The gate now parses the
+            composed query, whose free text is the Searcher's, which is the
+            "gate on the composed query" this bullet said was needed. It did
+            not need the restructuring it predicted: composing filters first
+            made the unscoped composition's free text identical to the
+            scoped one's.
         - **`KEYSET_SORT` is `TEXTLESS_SORT`, aliased rather than respelled.**
           Two `"date"` literals held up two non-local properties with nothing
           checking either: page 1 accepts `sort=TEXTLESS_SORT` and mints a
@@ -3836,14 +3874,15 @@ for the full design.
           query resolves to *is* the walk that mints those cursors — so the
           alias makes drift impossible and `test_sort_axes.py` asserts the
           property so that un-aliasing fails there rather than silently later.
-        - **`run_search`'s catch of `SortNotApplicable` is live, not a
-          backstop.** The api gate parses the raw request field and the
-          Searcher parses the ACL-composed query, and `parse_query` is not
-          compositional across an unbalanced quote: `from:"` leaves
-          `'from:'` as free text alone and nothing once a trailing
-          `account_id:` token joins it. Verified, not argued. Without the
-          catch the caller's error escapes as a 500 — `serve.app` handles
-          `APIError` only — on a query the boundary had already cleared.
+        - **`run_search`'s catch of `SortNotApplicable` was live from #324
+          until #367, and is a backstop again.** The api gate parsed the raw
+          request field and the Searcher the ACL-composed query, and
+          `parse_query` is not compositional across an unbalanced quote
+          *when the filters trail*: `from:"` left `'from:'` as free text
+          alone and nothing once a trailing `account_id:` token joined it.
+          #367 composes the filters first, so both read `from:` and agree.
+          The catch stays, because without it a future divergence escapes
+          as a 500 — `serve.app` handles `APIError` only.
         - **The GUI never states `rank` at all** (review follow-up).
           `search_paging.statedSort` returns `undefined` for it and `date`
           otherwise, reading only the cursor — **not** the query. It shipped
@@ -3904,15 +3943,16 @@ for the full design.
         landing it *with* its renderer, which is the test that objection
         actually sets.
       - **The empty-ACL short-circuit reports `plan.sort`**, which is exact
-        on the **keyset** mode only (`KEYSET_SORT`, which `resolve_sort`
-        returns for any query). On **fresh** mode it is the *gate's*
-        resolution, and the gate parses the raw request field where the
-        Searcher parses the ACL-composed query — the divergence
-        `resolve_cursor_plan` documents reaches this value too. Measured,
-        both directions: `from:"` resolves `rank` at the gate and `date` in
-        the Searcher, `"` the reverse. On **pool** mode it is the caller's
+        on the **keyset** mode (`KEYSET_SORT`, which `resolve_sort`
+        returns for any query) and, **since #367**, on the **fresh** mode
+        too. Until then fresh was the *gate's* resolution of the raw request
+        field, where the Searcher parses the ACL-composed query, and they
+        disagreed across an open quote: `from:"` resolved `rank` at the gate
+        and `date` in the Searcher, `"` the reverse. The gate parses the
+        composition now and the filters come first, so both read the same
+        free text. On **pool** mode it is the caller's
         claim about a pool that branch never consults (`CursorPlan` says
-        so). All three are accepted only because **no rows come back** —
+        so). That one is accepted only because **no rows come back** —
         nothing is mislabelled because nothing is labelled. The rowed paths
         never read it: `Searcher.search` stamps fresh and keyset,
         `continue_page` reads the pool's own metadata, and
@@ -4093,16 +4133,17 @@ for the full design.
         **equivalent mutation** no input can separate. Recorded in the test
         file with its proof, because a reader who conflates the two cases
         deletes pins that are load-bearing.
-      - **The empty-ACL short-circuit shares `sort_applied`'s caveat rather
-        than being exempt from it.** It shipped claiming to be "exact on
-        every mode, unlike `sort_applied`", on the grounds that rankability
-        is a property of the query alone. True of the *function*, and it
-        does not follow: the two layers feed it **different strings**. The
-        gate parses the raw request field, the rowed branches parse
-        `build_query_string(...)`'s composed query, and `parse_query` is not
-        compositional across an unbalanced quote. Measured, both ways:
-        `from:"` reads rankable at the gate and textless in the Searcher,
-        and `"` the reverse. Since `resolve_sort` *is* `is_rankable` plus
+      - **The empty-ACL short-circuit shared `sort_applied`'s caveat rather
+        than being exempt from it** (until #367). It shipped claiming to be
+        "exact on every mode, unlike `sort_applied`", on the grounds that
+        rankability is a property of the query alone. True of the
+        *function*, and it did not follow: the two layers fed it **different
+        free text**. The gate parsed the raw request field, the rowed
+        branches `build_query_string(...)`'s composed query, and with the
+        filters trailing `parse_query` was not compositional across an
+        unbalanced quote. Measured, both ways: `from:"` read rankable at the
+        gate and textless in the Searcher, and `"` the reverse. #367 closed
+        it for fresh and keyset; pool mode keeps the caveat. Since `resolve_sort` *is* `is_rankable` plus
         the caller's `requested`, this is the same divergence `sort_applied`
         carries, not a second one. Both are accepted for the reason that
         field already gives — **no rows come back**, so nothing is
@@ -4561,11 +4602,13 @@ for the full design.
         - **Point 1 — `SortOrderNotApplicable`'s audience.** Its docstring
           said the api/ catch "is a backstop for a future dispatch change
           rather than a live path". That was true when written and **#324
-          falsified it**: the gate and the Searcher judge different strings,
-          and `'"'` is textless to the gate and text once the ACL token is
-          composed in, so the gate can clear a `sort_order="asc"` against a
-          resolved `date` that the Searcher resolves to `rank`. Corrected in
-          place.
+          falsified it**: the gate and the Searcher judged different strings,
+          and `'"'` was textless to the gate and text once the ACL token was
+          composed in, so the gate could clear a `sort_order="asc"` against a
+          resolved `date` that the Searcher resolved to `rank`. Corrected in
+          place — and **#367 made the original wording true again**: with the
+          filters composed first the two read the same free text, so the
+          catch is a backstop. The docstring says both now.
         - **Point 3 — `cursor:` was the branch's word, not the cause's.**
           The keyset branch wrote the prefix into its own f-string, so it
           labelled everything it caught: a `sort_order` refusal on a request
@@ -5008,40 +5051,59 @@ for the full design.
     raise `QueryParseError`. An unknown value used to vanish from the query,
     not even kept as free text. **There is no literal form** — `has:pdf` in
     ordinary text is a 400, by design (loud beats a vanished token).
-  - **`run_search` parses three strings, because `parse_query` is not
-    compositional across an unclosed quote** (see `_gate_free_text`). Each
-    one catches something the others cannot:
-    - **The query composed from the caller's unscoped filters**, ahead of
-      the empty-ACL short-circuit. A `has:` in `query` contradicting the
-      structured filter exists only in a composed string. The branches
-      would have reached it too late, inside `Searcher.search`, as a bare
-      `QueryParseError` past `except SearchArgumentRefused`: a 500. That
-      500 never shipped; it was found between two commits of #366.
-    - **The raw `free_text`**, which feeds cursor planning.
-    - **The ACL-scoped query each rowed branch hands the Searcher**
-      (`_gate_composed_query`, from #366's review). The early gate is not
-      "the one place that sees both halves": only this string carries the
-      `account_id:` tokens.
-      - **The bug:** `query='has:"'` passed both earlier gates, then the
-        open quote swallowed `account_id:1` into the `has:` value inside the
-        Searcher — a 500 on the fresh and keyset branches.
-      - **On `main`:** that query was a 200 with no cursor or an archive
-        cursor (a text-walk cursor had its own 400). `after:"` was already
-        the same 500.
-      - **Pins:** mutation-pinned per branch by
-        `test_api_search_unclosed_quote.py`.
-    - **Both composed gates name the open quote** when the free text parses
-      on its own (`query.unclosed_quote`, read off the tokenizer). The
-      parser's message quoted the swallowed tokens instead —
-      `got 'attachment account_id:3 account_id:7'`, ids the caller never
-      wrote — which sends an agent to add account ids. A bad date or a
-      contradictory pair keeps the parser's message.
-  - **None of these stops the silent case: #367.** Filter tokens are
-    composed *after* the free text, so an apostrophe (`O'Brien`) swallows
-    every filter and ACL token whenever the result still parses — a 200
-    with filters dropped. The fix is to compose filters first, and it
-    retires the documented gate-vs-Searcher divergence along with the tests
-    and notes above that pin it as live. That is why it is its own PR.
+  - **`run_search` parses one string** since #367 (`_gate_query`): the
+    query composed from the caller's unscoped filters, ahead of the
+    empty-ACL short-circuit. It is the composition rather than the raw field
+    because a `has:` in `query` contradicting the structured filter exists
+    only in a composed string; left to the Searcher it would arrive as a bare
+    `QueryParseError` past `except SearchArgumentRefused`, a 500. Its free
+    text feeds cursor planning and the empty-ACL `sort_applied`/`rankable`.
+    - **#366 shipped three parses and a refusal naming the open quote**,
+      because filter tokens then *trailed* the free text: `query='has:"'`
+      passed both early gates and swallowed `account_id:1` into the `has:`
+      value inside the Searcher (a 500), so each rowed branch re-parsed its
+      ACL-scoped composition, and the message named the quote instead of
+      quoting `account_id:3 account_id:7` back at the caller. All of it is
+      retired: see #367 below.
+  - **Filter tokens are composed ahead of the free text (#367).** With the
+    free text first, an apostrophe (`O'Brien`, `don't`) or any unclosed quote
+    ran to the end of the string and swallowed every filter token and the
+    ACL's `account_id:` tokens into free text. When that still parsed, the
+    request was a 200 with its filters gone: a folder chosen in the GUI tree
+    was ignored, and the swallowed tokens became FTS terms and polluted the
+    embedding.
+    - **Why first is safe:** every filter token is self-contained. Ids are
+      digits, dates validated, `has:` a constant, `lang` refused if it
+      carries whitespace or a quote, quoted values stripped of quotes and
+      non-empty (those two refusals were #366's prerequisites). So the free
+      text starts with the tokenizer in its initial state, and
+      `parse(composed).free_text == parse(free_text).free_text` holds for
+      every input, unbalanced quotes included, exactly and without a
+      `.strip()`. Pinned by
+      `test_api_search.py::test_build_query_string_is_free_text_neutral` and
+      `test_api_search_filters_before_free_text.py`, which also asserts the
+      free text cannot change what the filters parse to.
+    - **What it retired:** the gate-vs-Searcher divergence #324's review
+      documented as live (the `from:"`/`"` class; see the #324, #326, #345
+      and #353 notes, annotated in place), #366's per-branch re-parse and
+      its open-quote message, and `query.unclosed_quote`. The two
+      `SearchArgumentRefused` catches in `run_search` are backstops again,
+      kept because a future divergence would otherwise be a 500.
+    - **Deliberate consequence — precedence flipped.** `parse_query` keeps
+      the last value of a scalar operator, so a query operator
+      (`from:bob`, `after:2020-01-01`) now out-votes a conflicting
+      structured filter; the filter used to win. Both are the silent
+      last-token-wins **#369** tracks, and the operator chose not to add
+      machinery preserving one silent winner over the other. Conflicts
+      between two structured filters are unchanged (`date_from` still beats
+      `after`), `has:` still refuses, and list filters are still unioned.
+      Pinned by `test_a_query_operator_now_outvotes_a_conflicting_structured_filter`.
+    - **Not closed by it:** the tokenizer still drops an apostrophe inside a
+      word (`O'Brien` → `OBrien`), so such a name never matches lexically
+      (the tsvector holds `'o' 'brien'`). That is the free text mangling
+      itself, not swallowing the filters, and is filed as #373. The CLI's
+      `localmail search` has its own composer with the pre-#367 order and
+      unsanitized flag values, filed as #374 (with #305's `cli.py` work).
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.

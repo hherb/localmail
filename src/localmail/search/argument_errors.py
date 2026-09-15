@@ -273,12 +273,10 @@ class SortNotApplicable(SearchArgumentRefused):
     recording ``date`` and the drop became a contradiction the caller could
     see one page later.
 
-    **Its audience is library callers**, plus every wire caller whose query
-    the two layers read differently. ``api.run_search`` refuses the same
-    shape at its own boundary, ahead of the empty-ACL short-circuit — but
-    the two guards read *different strings* (the raw request field there,
-    the ACL-composed query here), so this is not merely a backstop; see
-    ``run_search``'s catch, which maps it to a 400.
+    **Its audience is library callers.** ``api.run_search`` refuses the same
+    shape at its own boundary, ahead of the empty-ACL short-circuit, and the
+    two guards read the same free text (#367), so from the wire this is a
+    backstop that ``run_search``'s catch maps to a 400.
 
     The CLI is **not** in that audience today: ``localmail search`` has no
     ``--sort`` option and passes none, so this cannot be raised from it. If
@@ -290,15 +288,9 @@ class SortNotApplicable(SearchArgumentRefused):
 class SortOrderNotApplicable(SearchArgumentRefused):
     """``sort_order="asc"`` was asked for on a sort that cannot serve it.
 
-    Its audience is library callers **and** the api/ layer, and the second
-    half of that is a correction (#331). ``run_search`` does refuse rank+asc
-    at its own gate first, so the catch beyond it reads like a backstop —
-    but since #324 the two ends judge *different strings* (the raw request
-    field at the gate, the ACL-composed query in the Searcher), and
-    ``parse_query`` is not compositional across an unbalanced quote: ``'"'``
-    is textless to the gate and text once an ``account_id:`` token joins it,
-    so a ``sort_order="asc"`` the gate cleared against its resolved ``date``
-    meets a resolved ``rank`` here. The catch is live.
+    Its audience is library callers, and the api/ layer only as a backstop.
+    ``run_search`` refuses rank+asc at its own gate first, reading the same
+    free text the Searcher does (#367), so the gate answers first.
 
     The CLI is **not** in that audience today, exactly as
     ``SortNotApplicable`` above is not: ``localmail search`` has no

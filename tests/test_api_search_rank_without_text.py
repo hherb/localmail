@@ -8,8 +8,10 @@ this cluster keeps re-learning — **ahead of the empty-ACL short-circuit**,
 which returns an empty page byte-identical to "you have reached the end":
 a grant-nothing caller must not be told a contradictory request succeeded.
 The Searcher's own guard covers the CLI and library callers who never reach
-here, and the two read different strings, so it is not a dead backstop —
-see ``test_api_search_cursor_walk.py`` for the same argument on #326.
+here. The two used to read different free text across an open quote, which
+made the Searcher's refusal reachable from the wire; since #367 composes the
+filters ahead of the free text they agree, and ``run_search``'s mapping of
+that refusal is a backstop again.
 
 The round trip is what #324 actually is, so it is pinned as a round trip:
 page 1 mints a cursor recording ``date``, and re-stating the ``rank`` that
@@ -179,10 +181,10 @@ def test_the_caller_s_axes_are_forwarded_verbatim() -> None:
     Forwarding the gate's resolution instead destroys the distinction the
     Searcher's guard turns on. ``plan.sort`` is never ``None``, so an
     unstated sort arrived looking stated, and on the divergent-parse class
-    below a caller who omitted ``sort`` was told to "pass sort='date' or
-    omit sort" — a remedy they had already followed. That is #324's own
-    defect, a sort the caller never chose reported as their statement,
-    reintroduced by #324's fix.
+    (an open quote, before #367) a caller who omitted ``sort`` was told to
+    "pass sort='date' or omit sort" — a remedy they had already followed.
+    That is #324's own defect, a sort the caller never chose reported as
+    their statement, reintroduced by #324's fix.
 
     Pinned on both axes and in both directions, because a mutation that
     forwards ``plan`` for one of them is otherwise invisible: the gate's
@@ -205,54 +207,62 @@ def test_the_caller_s_axes_are_forwarded_verbatim() -> None:
     assert (kwargs["sort"], kwargs["sort_order"]) == ("rank", "desc")
 
 
-def test_a_caller_who_omitted_sort_is_never_told_to_omit_it() -> None:
-    """The regression #324's fix introduced, on the class it documented.
-
-    ``parse_query`` is not compositional across an unbalanced quote:
-    ``from:"`` leaves ``'from:'`` as free text alone and nothing once the
-    ACL's ``account_id:`` token joins it. So the gate reads this query as
-    rankable and resolves ``rank``; the Searcher reads it as textless. With
-    the gate's resolution forwarded, that ``rank`` was attributed to a
-    caller who never wrote it.
-
-    Driven with the **real** Searcher, because the property is that the two
-    guards genuinely disagree — a mock would only prove the plumbing.
-    """
+def _searcher_reaching_retrieval():
+    """A real Searcher whose pool fails loudly once every guard has passed."""
     from localmail.config import SearchConfig
     from localmail.search.searcher import Searcher
 
-    def _searcher_reaching_retrieval() -> Searcher:
-        pool = MagicMock()
-        # Reaching this proves the request was not refused: every #324 guard
-        # fires before any connection is opened.
-        pool.connection.side_effect = AssertionError("retrieval was reached")
-        return Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(),
-                        reranker=None, rewriter=None)
+    pool = MagicMock()
+    # Reaching this proves the request was not refused: every #324 guard
+    # fires before any connection is opened.
+    pool.connection.side_effect = AssertionError("retrieval was reached")
+    return Searcher(pool=pool, cfg=SearchConfig(), embeddings=_E(),
+                    reranker=None, rewriter=None)
 
-    # No `sort` argument at all: there is nothing to refuse.
+
+@pytest.mark.parametrize("free_text, sort, sort_order", [
+    # Free text `from:` on both readings, so rankable, so a stated rank runs.
+    ('from:"', "rank", None),
+    ('from:"', None, None),
+    # No free text on both readings, so it resolves to date and asc is honoured.
+    ('"', None, "asc"),
+])
+def test_the_gate_and_the_searcher_now_read_an_open_quote_alike(
+    free_text: str, sort, sort_order,
+) -> None:
+    """The class #324's review found the two layers disagreeing on, served.
+
+    Before #367 the gate parsed the raw request field and the Searcher the
+    ACL-composed query, whose ``account_id:`` tokens followed the free text,
+    so an open quote swallowed them: ``from:"`` was text to the gate and
+    textless to the Searcher, and ``'"'`` the reverse. A stated rank on the
+    first was refused by the Searcher, and ``asc`` on the second met a
+    ``rank`` the gate had not resolved, both reaching the caller as 400s
+    only because ``run_search`` mapped the Searcher's refusal.
+
+    The gate now parses the composition from the caller's filters, and the
+    filters lead it, so both readings see the same free text and each
+    request is served. Driven with the **real** Searcher, because the
+    property is that its own resolution agrees.
+    """
     with pytest.raises(AssertionError, match="retrieval was reached"):
-        run_search(searcher=_searcher_reaching_retrieval(), free_text='from:"',
-                   filters={}, limit=5, allowed_account_ids=[1], user_id=1)
-
-    # The divergence runs the other way too, and that is what the widened
-    # catch is for: `'"'` is textless to the gate (so its rank+asc refusal
-    # does not fire) and text once the ACL token is composed in, so the
-    # Searcher resolves `rank`, meets `asc`, and raises
-    # `SortOrderNotApplicable`. Forwarding the gate's resolution made that
-    # unreachable; forwarding the caller's makes it a clean 400 instead of
-    # an uncaught 500. The Searcher's own wording identifies which guard
-    # answered.
-    with pytest.raises(ValidationFailed, match="bounded candidate pool"):
-        run_search(searcher=_searcher_reaching_retrieval(), free_text='"',
+        run_search(searcher=_searcher_reaching_retrieval(), free_text=free_text,
                    filters={}, limit=5, allowed_account_ids=[1], user_id=1,
-                   sort_order="asc")
+                   sort=sort, sort_order=sort_order)
 
-    # The positive control: a *stated* rank on the same query is still a 400,
-    # so this is not merely a guard that stopped firing.
+
+def test_a_query_textless_to_both_readings_is_refused_by_the_gate() -> None:
+    """The positive control, so the test above is not merely a guard that
+    stopped firing. ``subject:"invoice`` leaves its quote open and no free
+    text on either reading, so a stated rank is refused — by the gate, which
+    is why the Searcher here is a mock that must never be called. (A real
+    Searcher would not tell the two apart: its own #324 guard also fires
+    before any connection is opened.)"""
+    s = _searcher()
     with pytest.raises(ValidationFailed, match="no free text"):
-        run_search(searcher=_searcher_reaching_retrieval(), free_text='from:"',
-                   filters={}, limit=5, allowed_account_ids=[1], user_id=1,
-                   sort="rank")
+        run_search(searcher=s, free_text='subject:"invoice', filters={},
+                   limit=5, allowed_account_ids=[1], user_id=1, sort="rank")
+    s.search.assert_not_called()
 
 
 def test_ascending_order_with_free_text_is_still_refused() -> None:
@@ -261,49 +271,6 @@ def test_ascending_order_with_free_text_is_still_refused() -> None:
         run_search(searcher=s, free_text="invoice", filters={}, limit=5,
                    allowed_account_ids=[1], user_id=1, sort_order="asc")
     s.search.assert_not_called()
-
-
-def test_the_searchers_refusal_is_mapped_rather_than_escaping_as_a_500() -> None:
-    """The two guards read **different strings**, and the gap is reachable.
-
-    The gate parses the raw request field; the Searcher parses the
-    ACL-composed query. ``parse_query`` is not compositional across an
-    unbalanced quote — ``from:"`` leaves ``'from:'`` as free text alone and
-    nothing once a trailing ``account_id:`` token joins it — so the gate
-    reads this query as rankable and the branch reads it as textless.
-
-    Without the catch the Searcher's ``SortNotApplicable`` escapes
-    ``run_search``: ``serve.app`` registers a handler for ``APIError``
-    only, so it reaches the caller as a 500 with no problem+json body, on
-    a query the boundary had already cleared. Pinned with the real
-    Searcher guard rather than a mock, because the property under test is
-    that the two really do disagree.
-    """
-    from localmail.config import SearchConfig
-    from localmail.search.searcher import Searcher
-
-    class _Embeddings:
-        name = "s"
-        model = "s"
-        dimension = 768
-
-        def embed_documents(self, texts):  # pragma: no cover - never reached
-            raise AssertionError("retrieval must not start")
-
-        def embed_query(self, text):  # pragma: no cover - never reached
-            raise AssertionError("retrieval must not start")
-
-        def health_check(self) -> None:
-            pass
-
-    pool = MagicMock()
-    pool.connection.side_effect = AssertionError("no connection may be opened")
-    searcher = Searcher(pool=pool, cfg=SearchConfig(), embeddings=_Embeddings(),
-                        reranker=None, rewriter=None)
-    with pytest.raises(ValidationFailed, match="no free text"):
-        run_search(searcher=searcher, free_text='from:"', filters={}, limit=5,
-                   allowed_account_ids=[1], user_id=1, sort="rank")
-    pool.connection.assert_not_called()
 
 
 # --- the round trip, against a real archive --------------------------------

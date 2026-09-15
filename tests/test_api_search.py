@@ -29,7 +29,7 @@ def test_build_query_string_validates_date_format() -> None:
 def test_build_query_string_emits_no_attachment_for_false() -> None:
     assert build_query_string(
         free_text="x", filters={"has_attachment": False},
-    ) == "x has:no-attachment"
+    ) == "has:no-attachment x"
 
 
 @pytest.mark.parametrize("value", ["yes", "true", 1, 0])
@@ -47,6 +47,12 @@ def test_a_non_boolean_has_attachment_is_refused(value) -> None:
     'quoted "phrase" here',
     "multi word text",
     "trailing ",
+    # An open quote runs to the end of the string, so these separated the two
+    # readings while filters were composed after the free text (#367).
+    "O'Brien",
+    'from:"',
+    '"',
+    'it\'s "open',
 ])
 @pytest.mark.parametrize("filters", [
     {},
@@ -60,30 +66,34 @@ def test_a_non_boolean_has_attachment_is_refused(value) -> None:
     {"has_attachment": False},
     {"lang": "en"},
     {"to": 'bob "the" builder'},
+    # A quote inside a filter value precedes the free text, so it must not
+    # open a run that swallows it: `_quote_value` strips `"` and wraps in `"`.
+    {"from": "o'brien@example.com"},
+    {"subject": 'say "hi'},
+    {"subject": "don't forget", "to": "it's"},
 ])
 def test_build_query_string_is_free_text_neutral(
     free_text: str, filters: dict,
 ) -> None:
     """Composing filters in must not change what counts as the free text.
 
-    #326's two guards both apply ``parse_query`` and both read
-    ``.free_text``, but not to the same string: ``api.run_search``'s gate
-    parses the **raw** request field, while ``Searcher.search`` parses
-    ``build_query_string(free_text, scoped_filters)`` — the composed query,
-    which ``_scope_filters_by_acl`` has already appended ``account_id:``
-    tokens to. They agree only because this composer is free-text-neutral,
-    which is a property of the composer and of neither guard.
+    #326's two guards both read ``parse_query(...).free_text``, of two
+    compositions: ``api.run_search``'s gate parses the query composed from
+    the caller's filters, ``Searcher.search`` the one composed from the
+    ACL-scoped filters, which adds ``account_id:`` tokens. They read the same
+    free text only because this composer is free-text-neutral, which is a
+    property of the composer and of neither guard.
 
-    Unpinned, that is a third reading of one rule in a cluster whose own
-    history is two predicates disagreeing about what counts as a blank
-    query (#308's follow-up). CLAUDE.md asserted the equivalence for #308;
-    this is what makes it true rather than written down.
+    Filter tokens lead (#367), so it holds for an open quote in the free text
+    and for a quote inside a filter value alike, exactly, with no whitespace
+    to strip. Unpinned, it would be a third reading of one rule in a cluster
+    whose history is two predicates disagreeing about a blank query (#308).
     """
     from localmail.search.query import parse_query
 
     composed = parse_query(build_query_string(free_text=free_text,
                                               filters=filters)).free_text
-    assert composed.strip() == parse_query(free_text).free_text.strip()
+    assert composed == parse_query(free_text).free_text
 
 
 def test_filter_value_with_dsl_injection_is_quoted() -> None:
@@ -144,7 +154,9 @@ def test_build_query_string_emits_account_id_tokens():
     )
     assert "account_id:5" in out
     assert "account_id:7" in out
-    assert out.startswith("hello")
+    # Filters lead and the free text trails, so an open quote in it can
+    # swallow no filter token (#367).
+    assert out.endswith("hello")
 
 
 def test_build_query_string_emits_folder_id_tokens():
@@ -153,7 +165,7 @@ def test_build_query_string_emits_folder_id_tokens():
         filters={"folder_ids": ["42"]},
     )
     assert "folder_id:42" in out
-    assert out.startswith("invoices")
+    assert out.endswith("invoices")  # filters first (#367)
 
 
 def test_build_query_string_account_ids_handles_int_or_str():
@@ -375,9 +387,9 @@ def test_run_search_empty_acl_short_circuit_includes_rewrite_status():
                    "sort_applied": "rank",
                    # And `rankable` beside it (#353), resolved from the same
                    # string as `sort_applied` so the pair cannot contradict
-                   # itself. Neither is *exact*: both read the gate's parse
-                   # of the raw request field, where the rowed branches read
-                   # the composed query. Accepted because no rows come back.
+                   # itself. On this fresh request both are what the
+                   # Searcher would have stamped: the gate reads the free
+                   # text it reads (#367).
                    "rankable": True,
                    "rewrite_status": "not_requested", "rewrite_note": None,
                    "rewrite_note_code": None}

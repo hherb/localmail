@@ -145,7 +145,10 @@ def build_mcp_server(
             "Free-text query matched against message subjects/bodies and "
             "extracted attachment text. Optional: omit it (or pass null) to "
             "search by filters alone, newest first — for example "
-            "`has_attachment=true` for recent mail with attachments."))] = "",
+            "`has_attachment=true` for recent mail with attachments. "
+            "Filter operators typed here (`from:`, `to:`, `subject:`, "
+            "`after:`, `before:`) override the matching parameter below, so "
+            "set a constraint in one place, not both."))] = "",
         sort: Annotated[Literal["rank", "date"] | None, Field(description=(
             'Result ordering: "rank" (hybrid relevance — what an omitted '
             '`sort` resolves to whenever the query has text to rank, with '
@@ -192,21 +195,24 @@ def build_mcp_server(
             "Lower bound (inclusive) on the sender's header Date, as "
             "YYYY-MM-DD. Note this filters the header Date, which may differ "
             "from the displayed/sort date (newest-first uses the IMAP arrival "
-            "date when present)."))]
+            "date when present). An `after:` in `query` overrides it."))]
             = None,
         date_to: Annotated[str | None, Field(description=(
             "Upper bound (exclusive) on the sender's header Date, as "
-            "YYYY-MM-DD. Filters the header Date — see `date_from`."))]
+            "YYYY-MM-DD. Filters the header Date — see `date_from`. A "
+            "`before:` in `query` overrides it."))]
             = None,
         from_addr: Annotated[str | None, Field(description=(
             "Case-insensitive substring the From address or display name "
-            "must contain."))]
+            "must contain. A `from:` in `query` overrides it."))]
             = None,
         to: Annotated[str | None, Field(description=(
-            "Case-insensitive substring any To address must contain."))]
+            "Case-insensitive substring any To address must contain. A "
+            "`to:` in `query` overrides it."))]
             = None,
         subject: Annotated[str | None, Field(description=(
-            "Case-insensitive substring the subject must contain."))]
+            "Case-insensitive substring the subject must contain. A "
+            "`subject:` in `query` overrides it."))]
             = None,
         has_attachment: Annotated[bool | None, Field(description=(
             "True for only messages with attachments, False for only those "

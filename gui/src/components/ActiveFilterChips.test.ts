@@ -43,6 +43,40 @@ describe("ActiveFilterChips", () => {
     expect(runSearch).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["after", "dateFrom"],
+    ["before", "dateTo"],
+  ] as const)("removing the %s chip also clears its %s twin", async (key, twin) => {
+    // The popover writes a date to both fields and seeds itself from the
+    // twin, so a twin left behind re-applied a removed date on the next Apply
+    // — and kept hasNoScope() false, so the last chip's × never reset.
+    search.setQuery("hello");
+    search.setFilters({
+      accountIds: [], folderIds: [],
+      from: "", to: "", subject: "", after: "", before: "", hasAttachment: null,
+      [key]: "2024-01-01", [twin]: "2024-01-01",
+    });
+    render(ActiveFilterChips);
+    await fireEvent.click(screen.getByRole("button", { name: new RegExp(`remove ${key}`, "i") }));
+    expect(search.snapshot.filters[key]).toBe("");
+    expect(search.snapshot.filters[twin]).toBe("");
+  });
+
+  it("removing the only date chip resets, its twin no longer counting as scope", async () => {
+    search.setFilters({
+      accountIds: [], folderIds: [],
+      from: "", to: "", subject: "", after: "2024-01-01", before: "", hasAttachment: null,
+      dateFrom: "2024-01-01",
+    });
+    const { __setSearchResultsForTest } = await import("../lib/stores/search.svelte");
+    __setSearchResultsForTest([], 12);
+    render(ActiveFilterChips);
+    await fireEvent.click(screen.getByRole("button", { name: /remove after/i }));
+    expect(search.snapshot.tookMs).toBeNull();
+    const { runSearch } = await import("../lib/tauri");
+    expect(runSearch).not.toHaveBeenCalled();
+  });
+
   it("clicking the last chip's × with no remaining scope resets instead of submitting", async () => {
     // Empty-query search degenerates to vector-arm hits against the
     // embedding of the empty string -> exactly `rerank_pool_size` (default

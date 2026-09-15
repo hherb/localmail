@@ -1635,7 +1635,8 @@ In `CLAUDE.md`, directly before the line that begins `- **Hard ACL clamp inside 
     counts by editing this one constant.
   - **`false`:** `has_attachment: false` compiles to the DSL
     `has:no-attachment`. Any other `has:` value, and the contradictory pair,
-    raise `QueryParseError`, which `_gate_free_text` already maps to a 400.
+    raise `QueryParseError`, which `_gate_free_text` already maps to a 400
+    (`_gate_query` since #367).
     An unknown value used to vanish from the query, not even kept as free
     text.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside

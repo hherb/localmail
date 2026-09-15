@@ -52,14 +52,16 @@ def walk_for_text(free_text: str) -> KeysetWalk:
     then, and ``subject:invoice`` is a non-empty *request field* that leaves
     no free text behind for an FTS predicate to be built from.
 
-    The two callers parse **different strings**, which is worth knowing
-    before treating them as interchangeable: ``api.run_search``'s gate
-    parses the raw request field, ``Searcher.search`` the composed query
-    carrying the ACL's ``account_id:`` tokens. They agree because
-    ``build_query_string`` is free-text-neutral — pinned on the composer by
-    ``test_api_search.py::test_build_query_string_is_free_text_neutral``,
-    not on either caller. The Searcher's reading is the authority; the
-    gate's exists to answer before any work is done.
+    The two callers parse slightly **different strings**:
+    ``api.run_search``'s gate parses the query composed from the caller's
+    filters, ``Searcher.search`` the composition from the ACL-scoped ones,
+    carrying the ACL's ``account_id:`` tokens. They read identical free text
+    because ``build_query_string`` composes the filters first (#367) and is
+    free-text-neutral for every input it composes — pinned on the composer
+    by ``test_api_search.py::test_build_query_string_is_free_text_neutral``,
+    not on either caller. The Searcher's reading is the authority for
+    callers who never reach ``run_search``; the gate's exists to answer
+    before any work is done.
     """
     return "text" if free_text.strip() else "archive"
 

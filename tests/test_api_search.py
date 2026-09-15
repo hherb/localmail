@@ -29,7 +29,7 @@ def test_build_query_string_validates_date_format() -> None:
 def test_build_query_string_emits_no_attachment_for_false() -> None:
     assert build_query_string(
         free_text="x", filters={"has_attachment": False},
-    ) == "x has:no-attachment"
+    ) == "has:no-attachment x"
 
 
 @pytest.mark.parametrize("value", ["yes", "true", 1, 0])
@@ -47,6 +47,12 @@ def test_a_non_boolean_has_attachment_is_refused(value) -> None:
     'quoted "phrase" here',
     "multi word text",
     "trailing ",
+    # An open quote runs to the end of the string, so these separated the two
+    # readings while filters were composed after the free text (#367).
+    "O'Brien",
+    'from:"',
+    '"',
+    'it\'s "open',
 ])
 @pytest.mark.parametrize("filters", [
     {},
@@ -78,12 +84,17 @@ def test_build_query_string_is_free_text_neutral(
     history is two predicates disagreeing about what counts as a blank
     query (#308's follow-up). CLAUDE.md asserted the equivalence for #308;
     this is what makes it true rather than written down.
+
+    It held only for balanced quotes until #367: the filter tokens followed
+    the free text, so an open quote swallowed them and ``from:"`` read as
+    text alone and as nothing once composed. With the filters composed first
+    it holds for every input, and exactly, with no whitespace to strip.
     """
     from localmail.search.query import parse_query
 
     composed = parse_query(build_query_string(free_text=free_text,
                                               filters=filters)).free_text
-    assert composed.strip() == parse_query(free_text).free_text.strip()
+    assert composed == parse_query(free_text).free_text
 
 
 def test_filter_value_with_dsl_injection_is_quoted() -> None:
@@ -144,7 +155,9 @@ def test_build_query_string_emits_account_id_tokens():
     )
     assert "account_id:5" in out
     assert "account_id:7" in out
-    assert out.startswith("hello")
+    # Filters lead and the free text trails, so an open quote in it can
+    # swallow nothing (#367).
+    assert out.endswith("hello")
 
 
 def test_build_query_string_emits_folder_id_tokens():
@@ -153,7 +166,7 @@ def test_build_query_string_emits_folder_id_tokens():
         filters={"folder_ids": ["42"]},
     )
     assert "folder_id:42" in out
-    assert out.startswith("invoices")
+    assert out.endswith("invoices")  # filters first (#367)
 
 
 def test_build_query_string_account_ids_handles_int_or_str():

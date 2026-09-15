@@ -270,12 +270,13 @@ def resolve_cursor_plan(
     be rebuilt from. Two predicates for one rule is what produced #308's
     follow-up defect — the api gate and the retrieval branch disagreeing
     about what counted as a blank query — so this reads it through the same
-    ``sort_axes``/``keyset_walk`` rules the Searcher does. It reads a
-    *different string*, though: the raw request field, where the Searcher
-    parses the ACL-composed query. They agree for every well-formed query
-    and can diverge across an unbalanced quote, which is why the Searcher
-    stays the authority and ``run_search`` maps its refusals rather than
-    assuming they cannot happen.
+    ``sort_axes``/``keyset_walk`` rules the Searcher does. ``run_search``
+    passes the free text of the query composed from the caller's filters,
+    which is exactly the free text the Searcher reads from its ACL-scoped
+    composition: the filters are composed first (#367), so no open quote in
+    the query can separate the two, as one could before. The Searcher stays
+    the authority for callers who never reach ``run_search``, and
+    ``run_search`` still maps its refusals rather than assuming none arrive.
 
     It is an input again, but for a narrower question than before #322.
     The old guard refused *any* keyset cursor presented with a blank query,

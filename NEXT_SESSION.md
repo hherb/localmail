@@ -157,8 +157,11 @@ SPDX headers in `src/localmail/`; **not** in `gui/`). **kastellan** consumes
 **You merge** #376. The PR body carries `Closes #367`. **CI was green on
 `ab73610`**: pytest 3.12 and 3.13 each 3621 passed / 1 skipped (the
 pre-existing Linux skip), cargo macOS + Ubuntu, svelte-check + vitest.
-Cloudflare Pages was still pending at handoff (it passed on #366). The
-handoff commit touches no CI-filtered path. Afterwards:
+Cloudflare Pages was still pending at handoff (it passed on #366). **CI
+re-runs on the handoff commits too**: for a PR, the path filter is judged
+against the whole PR diff, so a docs-only push to a code PR still runs
+everything. Those runs were pending at handoff; read `gh pr checks 376`
+rather than this line. Afterwards:
 - `gh issue view 367 --json state` should be `CLOSED`, and **open issues
   32 → 31**.
 - Dependabot should read **1** (#71) once GitHub rescans the lock files. If

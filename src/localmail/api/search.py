@@ -10,6 +10,7 @@ flattened into a cursor string.
 from __future__ import annotations
 
 import difflib
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -87,21 +88,22 @@ def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
     **The filter tokens come first (#367).** `parse_query`'s tokenizer treats
     `'` and `"` as quote openers that run to the end of the string, so with
     the free text first an apostrophe (`O'Brien`, `don't`) swallowed every
-    filter token after it, the ACL's `account_id:` tokens included, and the
-    request was answered 200 with its filters gone. Every filter token is
-    self-contained (ids are digits, dates validated, `has:` a constant,
-    `lang` refused if it carries whitespace or a quote, quoted values
-    stripped of quotes and non-empty), so the free text starts with the
-    tokenizer in its initial state and can only affect itself. Hence
+    filter token after it, the ACL's `account_id:` tokens included; when the
+    swallowed text still parsed, the request was answered 200 with its
+    filters gone. Every filter token is self-contained (ids are ASCII digits,
+    dates one ASCII token, `has:` a constant, `lang` refused if it
+    carries whitespace or a quote, quoted values stripped of `"` and
+    non-empty), so the free text starts with the tokenizer in its initial
+    state and no quote in it can reach a filter token. Hence
     ``parse_query(composed).free_text == parse_query(free_text).free_text``
-    for every input, which is what lets `run_search`'s gate and
-    `Searcher.search` read one free text.
+    for every input the composition parses, which is what lets `run_search`'s
+    gate and `Searcher.search` read one free text.
 
-    One consequence is deliberate: a scalar operator in `free_text`
-    (`from:`, `after:`, …) now out-votes a conflicting structured filter,
-    because `parse_query` keeps the last value and the free text is last.
-    It used to be the other way round. Both are the silent last-token-wins
-    #369 exists to end; `has:` already refuses a conflict.
+    That is a claim about tokenization, not precedence: a scalar operator in
+    `free_text` (`from:`, `after:`, …) out-votes a conflicting structured
+    filter, because `parse_query` keeps the last value and the free text is
+    last. That is the silent last-token-wins #369 exists to end; `has:`
+    already refuses a conflict, and list-valued filters are unioned.
 
     Raises `ValidationFailed` for a key that is not a filter
     (`filter_key_error`) and for a malformed value: dates must be YYYY-MM-DD,
@@ -157,8 +159,8 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
                     raise ValidationFailed("lang: empty value not allowed")
                 # Emitted unquoted, so whitespace or a quote here re-tokenizes
                 # the composed query: `en has:no-attachment` injected a filter,
-                # and `en'` would open a quote swallowing the free text that
-                # follows the filter tokens (#367).
+                # and `en'` would open a quote swallowing every token after
+                # it — the `has:` filter and the free text alike.
                 if any(ch.isspace() or ch in "\"'" for ch in s):
                     raise ValidationFailed(
                         f"lang: expected a language code such as 'en', got {one!r}"
@@ -197,8 +199,19 @@ def _quote_value(v: Any, key: str) -> str:
     return f'"{s}"'
 
 
+#: One ASCII token, checked before ``strptime``. A date is emitted unquoted
+#: ahead of the free text, so it must be one token (#367), and ``strptime``
+#: admits more than that: ``%d`` takes a space (``2020-01- 1``) and ``%Y``
+#: non-ASCII digits. Unpadded month and day stay accepted, because the query
+#: parser accepts ``after:2020-1-1`` and the desktop client moves a typed date
+#: into a structured filter; a stricter rule here would 400 what it accepted.
+_DATE_SHAPE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}", re.ASCII)
+
+
 def _validate_date(value: str, key: str) -> None:
     try:
+        if not _DATE_SHAPE.fullmatch(value):
+            raise ValueError(value)
         datetime.strptime(value, "%Y-%m-%d")
     except (TypeError, ValueError) as exc:
         raise ValidationFailed(f"{key}: expected YYYY-MM-DD, got {value!r}") from exc
@@ -222,13 +235,12 @@ def _gate_query(query: str) -> ParsedQuery:
     (``build_query_string`` composes the filters first, #367), so one parse
     serves both purposes.
 
-    ``run_search`` parses nothing else. The rowed branches hand
-    ``Searcher.search`` the same composition from the ACL-scoped filters,
-    which differs only in its ``account_id:`` tokens. Those are digits and
-    swallow nothing, so that parse cannot fail where this one succeeded, and
-    it reads the same free text. Before #367 it did neither: an open quote
-    swallowed those tokens, which took #366 a second gate in each branch and
-    a refusal naming the quote to keep a 400.
+    The rowed branches do not re-parse. They hand ``Searcher.search`` the
+    same composition from the ACL-scoped filters, which differs only in its
+    ``account_id:`` tokens. Those are digits and swallow nothing, so that
+    parse cannot fail where this one succeeded, and it reads the same free
+    text; each branch still maps a ``QueryParseError`` from it to a 400, as a
+    backstop.
     """
     try:
         return parse_query(query)
@@ -334,12 +346,11 @@ def run_search(
     #
     # Bound to a local because its free text feeds `resolve_cursor_plan` and
     # the empty-ACL branch's `sort_applied`/`rankable`, both ahead of the
-    # Searcher. It is the free text the Searcher's own #324/#326 guards read,
-    # not merely one that agrees with it for well-formed queries:
+    # Searcher. It is the free text the Searcher's own #324/#326 guards read:
     # `build_query_string` composes the filters first (#367), so this parse
     # and the Searcher's parse of the ACL-scoped composition see identical
-    # free text for every input, unbalanced quotes included. Pinned on the
-    # composer by `test_api_search.py::test_build_query_string_is_free_text_neutral`.
+    # free text, unbalanced quotes included. Pinned on the composer by
+    # `test_api_search.py::test_build_query_string_is_free_text_neutral`.
     # The Searcher's guards stay the authority for callers who never reach
     # this function; this gate exists to answer before any work is done.
     parsed_free_text = _gate_query(
@@ -409,12 +420,9 @@ def run_search(
         # the only value this changes.
         #
         # On the **fresh** and **keyset** modes both are what the Searcher
-        # would have stamped: `parsed_free_text` is the free text it reads
-        # (#367). They used to share a caveat — an open quote made the gate
-        # and the Searcher read different free text, so `from:"` was
-        # rankable here and textless there — which composing the filters
-        # first retired. On **pool** mode both still describe a pool this
-        # branch never consults (`CursorPlan` says so).
+        # would have stamped: `parsed_free_text` is the free text it reads.
+        # On **pool** mode both describe a pool this branch never consults
+        # (`CursorPlan` says so).
         #
         # That one is accepted because **no rows come back**: nothing is
         # mislabelled, since nothing is labelled. The rowed paths never rely
@@ -447,24 +455,19 @@ def run_search(
         query = build_query_string(free_text=free_text, filters=scoped_filters)
         try:
             # The caller's **raw** axes, not `plan`'s resolution of them.
-            # `Searcher.search` resolves both itself, from the same two pure
-            # rules the gate above asked — but from the ACL-composed query,
-            # which is the string its FTS predicate is actually built from.
-            # Forwarding `plan.sort` instead destroys the one distinction the
-            # Searcher's guard turns on: `plan.sort` is never None, so an
-            # *unstated* sort arrived there looking stated, and a caller who
-            # omitted it was refused with "pass sort='date' or omit sort" —
-            # a remedy they had already followed. That is #324's own defect
-            # (a sort the caller never chose, reported as their statement)
-            # reintroduced by its fix. It was reachable wherever the gate
-            # and the Searcher read different free text, which #367 ended;
-            # forwarding the caller's statement is still what keeps the
-            # Searcher's guard judging the right thing.
+            # `plan.sort` is never None, so an *unstated* sort would arrive
+            # looking stated, and the Searcher's guard would refuse a caller
+            # who omitted `sort` with "pass sort='date' or omit sort" — a
+            # remedy they had already followed (#324's own defect). The gate
+            # and the Searcher read the same free text, so the gate refuses
+            # first and the two forms answer alike on the wire; forwarding the
+            # caller's statement is what keeps the Searcher judging only what
+            # the caller wrote, for the day they do not.
             #
-            # The branch guard is the authority for this pair, because the
-            # Searcher is what CLI and library callers reach. The gate stays
-            # as the early refusal that answers before any work and before
-            # the empty-ACL short-circuit.
+            # The Searcher's guard is the authority for CLI and library
+            # callers, who never reach this function. The gate is the early
+            # refusal that answers before any work and before the empty-ACL
+            # short-circuit.
             page = searcher.search(query, page_size=limit, user_id=user_id,
                                    sort=sort, sort_order=sort_order,
                                    smart=effective_smart,
@@ -477,20 +480,18 @@ def run_search(
             # tuple was an operator-facing 500, `serve.app` handling only
             # `APIError`. #342 shipped exactly that hole one branch over.
             #
-            # A backstop again, not a live path. From #324 until #367 it was
-            # live: the ACL's `account_id:` tokens were composed after the
-            # free text, so an open quote swallowed them, `from:"` read as
-            # text to the gate and textless to the Searcher (and `'"'` the
-            # reverse), and this catch was what kept the caller's error a
-            # 400. The filters are composed first now, so both read the same
-            # free text and the gate refuses first. Kept because it costs
-            # nothing and the next divergence would otherwise be a 500.
+            # A backstop: the gate above reads the same free text and refuses
+            # first. Kept so the next divergence is a 400 rather than a 500.
             #
             # Caught by the family, never by bare ValueError — psycopg,
             # datetime and the embedding backends raise that, and
             # relabelling a real outage as a caller error would send them
             # to fix a blameless query.
             raise ValidationFailed(exc.wire_message()) from exc
+        except QueryParseError as exc:
+            # The Searcher's own parse of this composition, backstopped for
+            # the same reason. The class is named, so nothing else is caught.
+            raise ValidationFailed(str(exc)) from exc
     elif plan.mode == "keyset":
         # Keyset cursor → date-keyset continuation. The cursor carries only
         # (ts, id) and the direction it was minted in; the query + filters
@@ -515,11 +516,9 @@ def run_search(
             # `search_cursor.py`. Catching the family retires the reasoning
             # along with the enumeration.
             #
-            # #326's walk guard is the member that could arrive: it asks the
-            # question `resolve_cursor_plan` already asked above. Until #367
-            # an unbalanced quote (`from:"`) gave the two different free
-            # text, and this catch kept the Searcher's answer a 400. They
-            # read the same free text now, so it is a backstop.
+            # #326's walk guard is the member that could arrive, and it asks
+            # what `resolve_cursor_plan` already asked, of the same free text:
+            # a backstop, like the fresh branch's.
             #
             # The `cursor:` prefix comes off the *exception*, not off this
             # branch (#331 point 3). Written here, it was applied to
@@ -535,6 +534,9 @@ def run_search(
             # relabelling a real outage as a cursor problem would send the
             # caller to re-send a blameless query.
             raise ValidationFailed(exc.wire_message()) from exc
+        except QueryParseError as exc:
+            # As on the fresh branch.
+            raise ValidationFailed(str(exc)) from exc
     else:
         # No `SearchArgumentRefused` catch here, and that is a fact about this
         # branch rather than an omission: it never calls `searcher.search`.

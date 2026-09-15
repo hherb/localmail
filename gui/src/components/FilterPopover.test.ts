@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import FilterPopover from "./FilterPopover.svelte";
 import { search } from "../lib/stores/search.svelte";
+import { emptyFilters } from "../lib/api/search";
 
 vi.mock("../lib/tauri", () => ({ runSearch: vi.fn(async () => ({
   results: [], next_cursor: null, total_estimate: null, took_ms: 0,
@@ -35,6 +36,33 @@ describe("FilterPopover", () => {
     expect(search.snapshot.filters.dateTo).toBe("2024-04-01");
     expect(search.snapshot.filters.after).toBe("2024-03-01");
     expect(search.snapshot.filters.before).toBe("2024-04-01");
+  });
+
+  it("seeds a field from a typed operator over a contradicting chip (#367)", () => {
+    // What the next search applies: the server lets the typed operator win,
+    // and submit() moves it into the chip. Seeding from the chip showed the
+    // value about to be overridden.
+    search.setFilters({
+      ...emptyFilters(), from: "alice", to: "carol", subject: "old",
+      after: "2024-01-01", dateFrom: "2024-01-01",
+      before: "2024-12-31", dateTo: "2024-12-31",
+    });
+    search.setQuery(
+      "from:bob to:dave subject:new after:2019-01-01 before:2019-06-01 invoice");
+    render(FilterPopover);
+    const value = (label: RegExp) => (screen.getByLabelText(label) as HTMLInputElement).value;
+    expect(value(/^from$/i)).toBe("bob");
+    expect(value(/^to$/i)).toBe("dave");
+    expect(value(/subject/i)).toBe("new");
+    expect(value(/^from date$/i)).toBe("2019-01-01");
+    expect(value(/^to date$/i)).toBe("2019-06-01");
+  });
+
+  it("seeds a field from its chip when nothing is typed for it", () => {
+    search.setFilters({ ...emptyFilters(), from: "alice" });
+    search.setQuery("invoice");
+    render(FilterPopover);
+    expect((screen.getByLabelText(/^from$/i) as HTMLInputElement).value).toBe("alice");
   });
 
   it("typing into from updates the local state then writes on Apply", async () => {

@@ -263,10 +263,11 @@ def test_a_has_token_in_the_query_contradicting_the_filter_is_a_400(
     db_dsn, api_token, db_conn, api_user,
 ) -> None:
     """The contradiction exists only in the composed string (#364 F1): a
-    parse of the raw `free_text` alone never sees the filter's `has:` token
-    (which is why `run_search`'s gate parses the composition, #367), and neither branch's `except SearchArgumentRefused` catches the
-    bare `QueryParseError` the real `Searcher.search` raises from its own
-    parse of the composed query — it escaped as an unhandled 500 before
+    parse of the raw `free_text` alone never sees the filter's `has:` token,
+    which is why `run_search`'s early gate parses the composition (since
+    #366; #367 made that one parse supply the free text too). Unparsed
+    there, the bare `QueryParseError` the real `Searcher.search` raises from
+    its own parse of the composed query escaped as an unhandled 500 before
     this fix. The fake reproduces exactly that one behaviour so the RED run
     shows the real shape rather than a mock artifact.
 

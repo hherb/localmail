@@ -13,6 +13,11 @@
   // after typing `from:anna` shows "anna" in the From field. DSL tokens
   // that don't map to popover fields stay in the query string as free text.
   //
+  // A typed scalar comes first: the server lets it out-vote the chip (#367),
+  // and submit() moves it into the chip, so it is what the next search
+  // applies. `hasAttachment` and `language` keep the chip first — the server
+  // refuses a `has:` conflict and unions `lang`, so neither is out-voted.
+  //
   // The form exposes one date pair (`dateFrom`/`dateTo`); the legacy
   // `after`/`before` UI fields are seeded from them on apply() so the wire
   // format keeps both populated for server backward-compat.
@@ -22,14 +27,14 @@
     return {
       accountIds: stored.accountIds,
       folderIds: stored.folderIds,
-      from: stored.from || dsl.from,
-      to: stored.to || dsl.to,
-      subject: stored.subject || dsl.subject,
+      from: dsl.from || stored.from,
+      to: dsl.to || stored.to,
+      subject: dsl.subject || stored.subject,
       after: "",
       before: "",
       hasAttachment: stored.hasAttachment ?? dsl.hasAttachment,
-      dateFrom: stored.dateFrom || dsl.dateFrom || stored.after || dsl.after,
-      dateTo: stored.dateTo || dsl.dateTo || stored.before || dsl.before,
+      dateFrom: dsl.dateFrom || stored.dateFrom || stored.after,
+      dateTo: dsl.dateTo || stored.dateTo || stored.before,
       language: stored.language || dsl.language,
     };
   }

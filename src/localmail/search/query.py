@@ -58,10 +58,9 @@ _OPERATORS = {
 def _tokenize(s: str) -> list[str]:
     """Whitespace-split, but keep quoted strings (single or double) intact.
 
-    An unclosed quote runs to the end of the string, which is why
-    ``api.search.build_query_string`` composes filter tokens *ahead* of a
-    caller's free text (#367): anything after an open quote is swallowed
-    into its last token.
+    An unclosed quote runs to the end of the string: anything after an open
+    quote is swallowed into its last token. A composer appending tokens after
+    untrusted text must account for that (#367, and #374 for the CLI's).
     """
     out: list[str] = []
     buf: list[str] = []

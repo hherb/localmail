@@ -16,10 +16,11 @@
       search.setFilters({ ...f, subject: "" });
     }});
     if (f.after) out.push({ key: "after", label: `After: ${f.after}`, clear() {
-      search.setFilters({ ...f, after: "" });
+      // Its twin too: the popover writes both and seeds from `dateFrom`.
+      search.setFilters({ ...f, after: "", dateFrom: "" });
     }});
     if (f.before) out.push({ key: "before", label: `Before: ${f.before}`, clear() {
-      search.setFilters({ ...f, before: "" });
+      search.setFilters({ ...f, before: "", dateTo: "" });
     }});
     if (f.hasAttachment === true) out.push({ key: "has", label: "Has attachment", clear() {
       search.setFilters({ ...f, hasAttachment: null });

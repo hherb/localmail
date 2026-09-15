@@ -182,9 +182,9 @@ def test_the_caller_s_axes_are_forwarded_verbatim() -> None:
     Searcher's guard turns on. ``plan.sort`` is never ``None``, so an
     unstated sort arrived looking stated, and on the divergent-parse class
     (an open quote, before #367) a caller who omitted ``sort`` was told to
-    "pass sort='date' or omit sort" — a remedy they had already followed. That is #324's own
-    defect, a sort the caller never chose reported as their statement,
-    reintroduced by #324's fix.
+    "pass sort='date' or omit sort" — a remedy they had already followed.
+    That is #324's own defect, a sort the caller never chose reported as
+    their statement, reintroduced by #324's fix.
 
     Pinned on both axes and in both directions, because a mutation that
     forwards ``plan`` for one of them is otherwise invisible: the gate's
@@ -232,17 +232,18 @@ def test_the_gate_and_the_searcher_now_read_an_open_quote_alike(
 ) -> None:
     """The class #324's review found the two layers disagreeing on, served.
 
-    The gate parses the raw request field and the Searcher the ACL-composed
-    query. While the ``account_id:`` tokens were composed *after* the free
-    text, an open quote swallowed them: ``from:"`` was text to the gate and
-    textless to the Searcher, and ``'"'`` the reverse. So a stated rank on
-    the first was refused by the Searcher, and ``asc`` on the second met a
+    Before #367 the gate parsed the raw request field and the Searcher the
+    ACL-composed query, whose ``account_id:`` tokens followed the free text,
+    so an open quote swallowed them: ``from:"`` was text to the gate and
+    textless to the Searcher, and ``'"'`` the reverse. A stated rank on the
+    first was refused by the Searcher, and ``asc`` on the second met a
     ``rank`` the gate had not resolved, both reaching the caller as 400s
     only because ``run_search`` mapped the Searcher's refusal.
 
-    With the filters composed first (#367) both readings see the same free
-    text, and each request is served. Driven with the **real** Searcher,
-    because the property is that its own resolution agrees.
+    The gate now parses the composition from the caller's filters, and the
+    filters lead it, so both readings see the same free text and each
+    request is served. Driven with the **real** Searcher, because the
+    property is that its own resolution agrees.
     """
     with pytest.raises(AssertionError, match="retrieval was reached"):
         run_search(searcher=_searcher_reaching_retrieval(), free_text=free_text,
@@ -250,16 +251,18 @@ def test_the_gate_and_the_searcher_now_read_an_open_quote_alike(
                    sort=sort, sort_order=sort_order)
 
 
-def test_a_query_textless_to_both_readings_is_refused_before_the_searcher() -> None:
+def test_a_query_textless_to_both_readings_is_refused_by_the_gate() -> None:
     """The positive control, so the test above is not merely a guard that
     stopped firing. ``subject:"invoice`` leaves its quote open and no free
-    text on either reading, so a stated rank is refused, and by the gate:
-    no connection is opened."""
-    searcher = _searcher_reaching_retrieval()
+    text on either reading, so a stated rank is refused — by the gate, which
+    is why the Searcher here is a mock that must never be called. (A real
+    Searcher would not tell the two apart: its own #324 guard also fires
+    before any connection is opened.)"""
+    s = _searcher()
     with pytest.raises(ValidationFailed, match="no free text"):
-        run_search(searcher=searcher, free_text='subject:"invoice', filters={},
+        run_search(searcher=s, free_text='subject:"invoice', filters={},
                    limit=5, allowed_account_ids=[1], user_id=1, sort="rank")
-    searcher._pool.connection.assert_not_called()
+    s.search.assert_not_called()
 
 
 def test_ascending_order_with_free_text_is_still_refused() -> None:

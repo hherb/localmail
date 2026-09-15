@@ -3,9 +3,10 @@
 
 """A malformed operator value is a 400, never an unhandled 500 (#333 review).
 
-``run_search`` parses ``free_text`` at its cursor gate, which runs *before*
-the empty-ACL short-circuit and *on* the pool-cursor branch — two paths that
-never parsed it until #326 gave the gate a ``free_text`` argument. The parser
+``run_search`` parses the query composed from the caller's filters in its
+early gate (``_gate_query``), which runs *before* the empty-ACL short-circuit
+and *on* the pool-cursor branch — two paths that never parsed it until #326
+gave the cursor gate a ``free_text`` argument. The parser
 raises ``QueryParseError``, a bare ``ValueError`` that no ``api/`` or
 ``serve/`` handler catches: ``serve.app`` registers one for ``APIError``
 only, so it escaped as a 500 with no problem+json body, and reached the MCP

@@ -52,6 +52,36 @@ describe("search store", () => {
     expect(search.snapshot.loading).toBe(false);
   });
 
+  it("submit() moves a typed operator that contradicts a chip into the chip (#367)", async () => {
+    // The server lets the typed one win, so sending both left a "From: alice"
+    // chip on screen over results for bob.
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue({ results: [], next_cursor: null, total_estimate: null,
+                           took_ms: 1.0 });
+    search.setFilters({ ...emptyFilters(), from: "alice" });
+    search.setQuery("from:bob invoice");
+    await search.submit();
+    expect(runSearch).toHaveBeenCalledWith(expect.objectContaining({
+      query: "invoice",
+      filters: expect.objectContaining({ from: "bob" }),
+    }));
+    expect(search.snapshot.filters.from).toBe("bob");
+    expect(search.snapshot.query).toBe("invoice");
+  });
+
+  it("submit() leaves a typed operator with no chip in the query", async () => {
+    (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
+      .mockResolvedValue({ results: [], next_cursor: null, total_estimate: null,
+                           took_ms: 1.0 });
+    search.setQuery("from:bob invoice");
+    await search.submit();
+    expect(runSearch).toHaveBeenCalledWith(expect.objectContaining({
+      query: "from:bob invoice",
+      filters: expect.objectContaining({ from: null }),
+    }));
+    expect(search.snapshot.query).toBe("from:bob invoice");
+  });
+
   it("uses the configured page size and fallback language", async () => {
     (runSearch as unknown as { mockResolvedValue: (v: unknown) => void })
       .mockResolvedValue({ results: [], next_cursor: null, total_estimate: null, took_ms: 1 });

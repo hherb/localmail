@@ -274,9 +274,9 @@ def resolve_cursor_plan(
     passes the free text of the query composed from the caller's filters,
     which is exactly the free text the Searcher reads from its ACL-scoped
     composition: the filters are composed first (#367), so no open quote in
-    the query can separate the two, as one could before. The Searcher stays
-    the authority for callers who never reach ``run_search``, and
-    ``run_search`` still maps its refusals rather than assuming none arrive.
+    the query can separate the two. The Searcher stays the authority for
+    callers who never reach ``run_search``, and ``run_search`` still maps its
+    refusals rather than assuming none arrive.
 
     It is an input again, but for a narrower question than before #322.
     The old guard refused *any* keyset cursor presented with a blank query,

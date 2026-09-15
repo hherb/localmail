@@ -12,6 +12,8 @@
  * submit() merges the DSL string with structured popover filters via
  * filtersUiToWire(). Tree-driven account/folder filters are written into
  * `filters.accountIds` / `filters.folderIds` by the caller before submit().
+ * A typed operator that contradicts a chip is moved into the chip first
+ * (`absorbConflictingOperators`), so the chips show what the server applies.
  */
 import {
   emptyFilters,
@@ -19,6 +21,7 @@ import {
   type SearchFiltersUI,
   type SearchResultRow,
 } from "../api/search";
+import { absorbConflictingOperators } from "../filter_parse";
 import { runSearch } from "../tauri";
 import { formatError } from "../format_error";
 import { isSearchCursorExpired } from "../search_cursor_expired";
@@ -122,6 +125,12 @@ class SearchStore {
 
   async submit(): Promise<void> {
     const seq = ++this.#submitSeq;
+    // Only on a fresh search: loadMore re-sends what this left in place.
+    const absorbed = absorbConflictingOperators(this.#state.query, this.#state.filters);
+    if (absorbed.filters !== this.#state.filters) {
+      this.#state.query = absorbed.query;
+      this.#state.filters = absorbed.filters;
+    }
     this.#state.loading = true;
     this.#state.errorMessage = null;
     try {

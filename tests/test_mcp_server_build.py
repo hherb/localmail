@@ -125,6 +125,47 @@ def test_search_declares_no_sort_order_default_of_its_own(db_dsn):
     )
 
 
+@pytest.mark.parametrize("param, operator", [
+    ("from_addr", "from:"), ("to", "to:"), ("subject", "subject:"),
+    ("date_from", "after:"), ("date_to", "before:"),
+])
+def test_a_scalar_filter_says_a_query_operator_overrides_it(db_dsn, param,
+                                                            operator):
+    """Filter tokens are composed ahead of the query text (#367), so for
+    these scalars a matching operator typed into `query` wins — the parser
+    keeps the last value. The descriptions an agent reads said "must
+    contain" and "Lower bound", which stopped being true then; README's
+    "don't send both" is not something an agent sees."""
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    description = (tools["search"].inputSchema or {})["properties"][param].get(
+        "description", "")
+    assert f"`{operator}`" in description and "`query`" in description, (
+        f"{param}'s description does not say a `{operator}` in `query` "
+        f"overrides it: {description!r}"
+    )
+
+
+def test_the_query_description_says_its_operators_override_the_filters(db_dsn):
+    """The half of the sibling above an agent reads first: it describes the
+    parameter where the operators are typed."""
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    description = (tools["search"].inputSchema or {})["properties"]["query"].get(
+        "description", "")
+    for operator in ("from:", "to:", "subject:", "after:", "before:"):
+        assert f"`{operator}`" in description, (operator, description)
+    assert "override" in description, description
+
+
 def _search_tool_fn(server):
     """The registered `search` tool's underlying function.
 

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { extractDslFilters, formatDslTokens } from "./filter_parse";
+import {
+  absorbConflictingOperators,
+  extractDslFilters,
+  formatDslTokens,
+  joinTokens,
+  tokenize,
+} from "./filter_parse";
 import { emptyFilters } from "./api/search";
 
 describe("extractDslFilters", () => {
@@ -141,5 +147,164 @@ describe("dateFrom / dateTo / language round-trip", () => {
     expect(formatted).toContain("after:2024-03-01");
     expect(formatted).toContain("before:2024-04-01");
     expect(formatted).toContain("lang:de");
+  });
+});
+
+describe("absorbConflictingOperators", () => {
+  // The server composes structured filters ahead of the query text and keeps
+  // the last value of a scalar operator (#367), so a typed operator beats the
+  // chip. These pin that the chip is made to say so.
+
+  it("moves a typed from: that contradicts the chip into the chip", () => {
+    const chips = { ...emptyFilters(), from: "alice" };
+    const out = absorbConflictingOperators("from:bob invoice", chips);
+    expect(out.filters.from).toBe("bob");
+    expect(out.query).toBe("invoice");
+  });
+
+  it("moves to:, subject:, after: and before: the same way", () => {
+    const chips = {
+      ...emptyFilters(), to: "carol", subject: "old",
+      after: "2024-01-01", dateFrom: "2024-01-01",
+      before: "2024-12-31", dateTo: "2024-12-31",
+    };
+    const out = absorbConflictingOperators(
+      "to:dave subject:new after:2019-01-01 before:2019-06-01 x", chips);
+    expect(out.filters).toMatchObject({
+      to: "dave", subject: "new",
+      after: "2019-01-01", dateFrom: "2019-01-01",
+      before: "2019-06-01", dateTo: "2019-06-01",
+    });
+    expect(out.query).toBe("x");
+  });
+
+  it("reads a date chip set only through dateFrom/dateTo", () => {
+    const chips = { ...emptyFilters(), dateFrom: "2024-01-01" };
+    const out = absorbConflictingOperators("after:2019-01-01 x", chips);
+    expect(out.filters.after).toBe("2019-01-01");
+    expect(out.filters.dateFrom).toBe("2019-01-01");
+    expect(out.query).toBe("x");
+  });
+
+  it("leaves the query alone when no chip is contradicted", () => {
+    const chips = { ...emptyFilters(), subject: "q3" };
+    const query = 'from:bob "exact phrase" it\'s';
+    const out = absorbConflictingOperators(query, chips);
+    // The same objects back, so the store can tell nothing changed.
+    expect(out.query).toBe(query);
+    expect(out.filters).toBe(chips);
+  });
+
+  it("leaves a typed operator that matches its chip where it is", () => {
+    const chips = { ...emptyFilters(), from: "bob" };
+    const out = absorbConflictingOperators("from:bob invoice", chips);
+    expect(out.query).toBe("from:bob invoice");
+    expect(out.filters).toBe(chips);
+  });
+
+  it("keeps every other token, quoting one with whitespace or an apostrophe", () => {
+    const chips = { ...emptyFilters(), from: "alice" };
+    const out = absorbConflictingOperators(
+      'to:"bob smith" from:bob "exact phrase" don\'t', chips);
+    expect(out.query).toBe('"to:bob smith" "exact phrase" "don\'t"');
+    // Re-quoted, the kept operator still reads as one filter.
+    expect(extractDslFilters(out.query).filters.to).toBe("bob smith");
+  });
+
+  it.each([
+    // The server's tokenizer opens a quote at a bare apostrophe and swallows
+    // every later token, so these filters were lost when the one-word token
+    // was re-joined unquoted (review of #376).
+    ['"don\'t" has:attachment from:bob', '"don\'t" has:attachment'],
+    ['from:bob "O\'Brien" lang:de', '"O\'Brien" lang:de'],
+    ['from:bob "it\'s" to:carol', '"it\'s" to:carol'],
+    ['subject:"it\'s" from:bob has:attachment', '"subject:it\'s" has:attachment'],
+  ])("quotes a kept apostrophe token so no later filter is swallowed: %s", (query, expected) => {
+    const out = absorbConflictingOperators(query, { ...emptyFilters(), from: "alice" });
+    expect(out.query).toBe(expected);
+  });
+
+  it("removes every typed token for an absorbed operator, keeping the last value", () => {
+    const chips = { ...emptyFilters(), from: "alice" };
+    const out = absorbConflictingOperators("from:bob x from:carol", chips);
+    expect(out.filters.from).toBe("carol");
+    expect(out.query).toBe("x");
+  });
+
+  it("absorbs an operator the server's tokenizer would have hidden", () => {
+    // Server-side, the apostrophe in `don't` opens a quote that swallows
+    // `from:bob` into free text, so the server applied the chip's alice and
+    // searched for the words "dont from:bob". The typed value is what the
+    // user asked for, so it is applied — not what the server would have done.
+    const chips = { ...emptyFilters(), from: "alice" };
+    const out = absorbConflictingOperators("don't from:bob", chips);
+    expect(out.filters.from).toBe("bob");
+    expect(out.query).toBe('"don\'t"');
+  });
+
+  it("reads a before chip set only through dateTo", () => {
+    const chips = { ...emptyFilters(), dateTo: "2024-12-31" };
+    const out = absorbConflictingOperators("before:2019-06-01 x", chips);
+    expect(out.filters.before).toBe("2019-06-01");
+    expect(out.filters.dateTo).toBe("2019-06-01");
+    expect(out.query).toBe("x");
+  });
+
+  it("leaves a typed date that matches its chip where it is", () => {
+    const chips = { ...emptyFilters(), after: "2024-01-01", dateFrom: "2024-01-01" };
+    const out = absorbConflictingOperators("after:2024-01-01 x", chips);
+    expect(out.query).toBe("after:2024-01-01 x");
+    expect(out.filters).toBe(chips);
+  });
+
+  it("leaves a typed date that is not a date in the query", () => {
+    // The server refuses it by name from the query. Moved into the chip it
+    // would be refused as the structured filter, and the chip would carry it.
+    const chips = { ...emptyFilters(), after: "2024-01-01", dateFrom: "2024-01-01" };
+    const out = absorbConflictingOperators("after:last-week x", chips);
+    expect(out.query).toBe("after:last-week x");
+    expect(out.filters).toBe(chips);
+  });
+
+  it("does not touch has: or lang:", () => {
+    // The server refuses a has: conflict outright and unions lang, so neither
+    // silently out-votes its chip.
+    const chips = { ...emptyFilters(), hasAttachment: true, language: "en" };
+    const out = absorbConflictingOperators("has:attachment lang:de x", chips);
+    expect(out.query).toBe("has:attachment lang:de x");
+    expect(out.filters).toBe(chips);
+  });
+});
+
+describe("joinTokens", () => {
+  // The query the client sends after absorbing must tokenize to the same
+  // tokens on the server, whose tokenizer also opens a quote at `'`. Inside
+  // `"` both treat `'` as literal, and the tokenizer never leaves a `"` in a
+  // token, so a quoted token cannot unbalance anything after it.
+  it.each([
+    [["hello", "world"], "hello world"],
+    [["don't"], '"don\'t"'],
+    [["to:bob smith", "x"], '"to:bob smith" x'],
+    [["a\tb", "it's", "q"], '"a\tb" "it\'s" q'],
+  ])("joins %j as %s", (tokens, expected) => {
+    expect(joinTokens(tokens)).toBe(expected);
+  });
+
+  it.each([
+    'from:bob "O\'Brien" lang:de',
+    '"unclosed phrase from:x',
+    "it's from:o'brien has:attachment",
+    'ab"c d"e \'x y\' "z\'s"',
+    'to:"a\tb" \'',
+  ])("gives back the tokens it was given: %s", (query) => {
+    const tokens = tokenize(query);
+    expect(tokenize(joinTokens(tokens))).toEqual(tokens);
+  });
+
+  it("a bare join loses a multi-word token (the negative control)", () => {
+    // The negative control for the test above: a bare join of these tokens
+    // does not round-trip, which is the defect the quoting exists for.
+    const tokens = tokenize('"to:bob smith" x');
+    expect(tokenize(tokens.join(" "))).not.toEqual(tokens);
   });
 });

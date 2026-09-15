@@ -101,7 +101,10 @@ dev = [
     "pytest-cov>=5.0",
     "reportlab>=4.0",
     "httpx>=0.27",
-    "httpx2>=2.4",
+    # Dev-only (Starlette TestClient, #192). 2.12.0 is a security floor
+    # (Dependabot #73-#75); it pins httpcore2 exactly, which carries that
+    # past its own advisory (#72, fixed in 2.10.0).
+    "httpx2>=2.12.0",
 ]
 
 [project.scripts]

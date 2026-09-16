@@ -27,7 +27,13 @@ HEADER_MODES: tuple[HeaderMode, ...] = ("compact", "full", "list")
 # block that does not end within this ceiling.
 HEADER_BLOCK_READ_BYTES = 64 * 1024
 
-_SEPARATORS = (b"\r\n\r\n", b"\n\n")
+# Each separator is a doubled line terminator: the first occurrence ends the last
+# header line, the second occurrence is the blank line. We return up to and
+# including the first occurrence, omitting the blank line itself.
+_SEPARATORS = (
+    (b"\r\n\r\n", 2),  # separator pattern, length of line ending to include
+    (b"\n\n", 1),
+)
 
 
 @dataclass(frozen=True)
@@ -55,14 +61,14 @@ def header_block(data: bytes, *, truncated: bool) -> bytes | None:
     past the cut — reporting None is what stops a short list passing for a
     complete one.
     """
-    ends = []
-    for sep in _SEPARATORS:
-        idx = data.find(sep)
+    separator_matches = []
+    for sep_pattern, ending_len in _SEPARATORS:
+        idx = data.find(sep_pattern)
         if idx >= 0:
-            ends.append((idx, len(sep)))
-    if ends:
-        min_idx, sep_len = min(ends)
-        return data[: min_idx + sep_len // 2]
+            separator_matches.append((idx, ending_len))
+    if separator_matches:
+        min_idx, ending_len = min(separator_matches)
+        return data[: min_idx + ending_len]
     return None if truncated else data
 
 

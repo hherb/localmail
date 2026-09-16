@@ -377,7 +377,7 @@ def test_a_header_the_stdlib_cannot_parse_degrades_alone() -> None:
         policy=_SubjectParseRaises(),
     )
     out = group_entries(entries_from_message(msg))
-    assert out["Subject"] == [" s"]
+    assert out["Subject"] == ["s"]
     assert out["From"] == ["a@x"]
 ```
 

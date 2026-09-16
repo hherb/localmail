@@ -67,6 +67,10 @@ def detail(
     external_images: bool = Query(False),
     user=Depends(get_authenticated_user),
 ) -> dict[str, Any]:
+    """One message. `headers` is `compact` (default, no headers key), `full`
+    (an object keyed by wire spelling) or `list` (one entry per occurrence, in
+    wire order); any other value is a 400.
+    """
     mid = parse_int_id(message_id, field="message_id")
     pool = request.app.state.pool
     with pool.connection() as conn:
@@ -74,7 +78,7 @@ def detail(
         return get_message(
             conn, mid,
             allowed_account_ids=allowed,
-            full_headers=(headers == "full"),
+            headers=headers,
             allow_external_images=external_images,
         )
 

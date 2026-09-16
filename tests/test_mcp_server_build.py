@@ -43,6 +43,32 @@ def test_build_disables_dns_rebinding_protection(db_dsn):
     assert security.enable_dns_rebinding_protection is False
 
 
+def test_get_message_publishes_the_three_header_modes(db_dsn):
+    """The agent-facing schema is `server.py`'s, not `tools.py`'s (#308)."""
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    props = (tools["get_message"].inputSchema or {})["properties"]
+    assert "full_headers" not in props, "the removed flag never worked as described"
+    assert set(props["headers"]["enum"]) == {"compact", "full", "list"}
+    assert props["headers"].get("default") == "compact"
+
+
+def test_get_message_tells_the_agent_when_order_matters(db_dsn):
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    description = (tools["get_message"].inputSchema or {})["properties"]["headers"]["description"]
+    assert "wire order" in description
+    assert "Received" in description
+
+
 def test_search_tells_the_agent_the_response_names_the_ordering(db_dsn):
     """`sort_applied` must be in the *published* description, not only in
     `tools.py`.

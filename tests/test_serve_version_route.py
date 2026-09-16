@@ -32,6 +32,13 @@ def test_the_six_keys_are_present(db_dsn: str) -> None:
     }
 
 
+def test_api_minor_announces_the_headers_list_mode(db_dsn: str) -> None:
+    """An old server cannot refuse `?headers=list`; it answers 200 with no
+    headers key. `api_minor >= 1` is the only way a client can ask first."""
+    body = _client(db_dsn).get("/v1/version").json()
+    assert body["api_minor"] >= 1
+
+
 def test_the_source_fields_are_never_null(db_dsn: str) -> None:
     """Only `build_hash` is nullable. A client that cannot explain an absent
     hash is the state this design exists to end."""

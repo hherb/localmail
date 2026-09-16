@@ -3136,6 +3136,24 @@ for the full design.
   adding a new ID-bearing endpoint or MCP tool, declare the parameter
   as `str` and call `parse_int_id(...)`; never accept `int` directly
   from the wire, and never bypass the helper.
+- **Message headers are served per occurrence, in wire order (#379).** `?headers=full`
+  emitted the `messages.headers` JSONB verbatim, which groups by wire spelling:
+  order across names is lost (89.1% of messages carry a repeated name), case
+  variants split into separate keys (5.1%), and the values are frozen at sync
+  time (11.6% disagree with a fresh parse — whitespace only, all of it). The
+  rule is the pure [src/localmail/header_block.py](src/localmail/header_block.py):
+  one sequence of `HeaderEntry`, of which `full` is `group_entries(...)` and
+  `list` is `entries_to_wire(...)`, so **the two modes cannot disagree** —
+  `parser._headers_dict` is that grouping too, which is what keeps the stored
+  column and the wire on one rule. Read as a bounded `raw_bytes` prefix
+  (`HEADER_BLOCK_READ_BYTES`, 64 KiB; 0 of 129,590 live messages need more,
+  p95 is 8.7 KB) because that column carries the attachments (p99 2.6 MB, max
+  35 MB); a block that does not end inside it is **re-read in full with a
+  WARNING**, never silently truncated. An unknown mode is a **400** naming the
+  three (it used to be a silent compact, indistinguishable from an old server
+  ignoring `list`), refused ahead of the empty-ACL short-circuit so it is never
+  disguised as a 404. **`api_minor` is 1** — its first move — because an old
+  server cannot refuse the new mode.
 - **Browse & search pagination (PR #70)**:
   - `GET /v1/messages` is the canonical keyset browse endpoint, ordered
     `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC` with

@@ -15,7 +15,9 @@ from localmail.build_report import resolve_build_info
 from localmail.serve.middleware import get_authenticated_user
 
 API_MAJOR = 1
-API_MINOR = 0
+# 1: GET /v1/messages/{id}?headers=list (#379). An older server answers an
+# unknown mode with 200 and no headers key, so this is the only feature signal.
+API_MINOR = 1
 
 logger = logging.getLogger("localmail.serve")
 

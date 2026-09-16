@@ -108,7 +108,38 @@ column — has exactly one implementation. `parse_message` and the read path
 cannot disagree about what a header's value is. The import direction is
 `parser -> header_block`; `header_block` imports only the stdlib and `pgtext`.
 
-### 2. The read path reads a bounded prefix
+### 2. Wire shapes
+
+`compact` (the default) emits no `headers` key at all — not null, not `{}`.
+That is today's behaviour and the only thing "compact" has ever meant.
+
+`full` is unchanged in shape: one key per wire spelling, each value the list of
+that name's occurrences in order.
+
+```json
+{"headers": {"Received": ["by 2002:a9a:740a … (PDT)", "from smtp-252-55.iad1 …"],
+             "Subject": ["How was your Hertz rental experience?"]}}
+```
+
+`list` puts the same occurrences in one array, in wire order, each with the name
+as spelled:
+
+```json
+{"headers": [{"name": "Received", "value": "by 2002:a9a:740a … (PDT)"},
+             {"name": "received", "value": "from smtp-252-55.iad1 …"},
+             {"name": "Subject",  "value": "How was your Hertz rental experience?"}]}
+```
+
+The key is `headers` in both modes rather than a second `header_list` key: the
+request names the shape it wants, so a client that asks for `list` and expects
+an object has contradicted itself. The GUI's Rust struct already models the
+field as `Option<Value>`, and a typed client only meets the array if it sends
+`list`.
+
+`group_entries` reproduces the `full` object from the `list` array exactly —
+that is the refinement invariant, and it is one function rather than a claim.
+
+### 3. The read path reads a bounded prefix
 
 `api/messages.py::get_message` takes `headers: HeaderMode` — a
 `Literal["compact", "full", "list"]` — in place of `full_headers: bool`. There
@@ -129,22 +160,46 @@ test below keeps it that way).
 
 **Truncation is never silent.** When `header_block_end` returns `None`, one
 fallback statement reads the whole `raw_bytes` for that message — ACL-scoped,
-the same shape `get_message_raw` already uses — and a WARNING names the id and
-the ceiling. A short header list that looked complete is precisely the failure
-this slice exists to end. It is unreachable on the live archive today, which is
+the same shape `get_message_raw` already uses — and a WARNING on the `localmail.api.messages` logger names the id and the
+ceiling. A short header list that looked complete is precisely the failure this
+slice exists to end. It is unreachable on the live archive today, which is
 why it is a fallback rather than a refusal.
 
-### 3. An unusable mode is refused, not answered
+### 4. An unusable mode is refused, not answered
 
-The route validates `headers` and raises `ValidationFailed` (400 problem+json)
-naming the accepted values. Not FastAPI's `Literal` alone: that answers 422 with
-an array `detail`, which is #370's complaint and which kastellan's worker
-renders as a 512-byte raw body. This follows slice A — an unknown filter key is
-a 400 naming the key.
+The rule is the pure `header_block.header_mode_error(value) -> str | None` —
+a message, or `None` — shaped like `account_names.account_name_error` and
+`sort_axes.sort_membership_error`, with each caller deciding what an error *is*.
+The HTTP route maps it to `ValidationFailed` (400 problem+json); the message
+names the three accepted values, and is worded once so the two transports cannot
+answer the same input differently.
+
+**`get_message` is where it is checked, not the route.** The route declares
+`headers: str = Query("compact")` and passes the string down; `get_message`
+calls `header_mode_error` and raises `ValidationFailed`, which the existing
+handler renders as 400 problem+json. Two reasons, both ones this codebase has
+already paid for: a library or CLI caller reaches `get_message` without passing
+through a route (the #348 lesson, where a misspelled sort axis was a 500 because
+only the transports declared the vocabulary), and one validation site cannot
+drift from another.
+
+Declaring a FastAPI `Literal` on the route instead would answer 422 with an
+array `detail` — #370's complaint, and what kastellan's worker renders as a
+512-byte raw body. This follows slice A: an unknown filter key is a 400 naming
+the key.
+
+**The check runs before any IO**, ahead of the ACL lookup and the SELECT, so a
+bad mode costs a round trip and not a query — the ordering `tests/test_searcher_guards_precede_io.py`
+pins one subsystem over.
+
+The MCP tool declares the `Literal` directly as well, because the SDK's argument
+model refuses an unknown value before the tool body runs and `ToolError` is
+already how that surfaces. `header_mode_error` remains the authority for
+anything that reaches the api layer.
 
 This is a behaviour change: `?headers=xyz` was a silent 200-compact.
 
-### 4. `api_minor` becomes 1
+### 5. `api_minor` becomes 1
 
 An old server *cannot* refuse `?headers=list`; it answers 200 with no `headers`
 key. So a client has to be able to ask before it asks, and the only feature
@@ -155,7 +210,7 @@ asserts `>= 0` and passes unchanged; the six-key set test is untouched.
 This is the first move of that number, and the reason slice A explicitly
 deferred feature detection to this slice.
 
-### 5. MCP takes the same vocabulary
+### 6. MCP takes the same vocabulary
 
 `get_message(message_id, headers="compact"|"full"|"list")`. `full_headers` is
 removed rather than kept beside it: two parameters that can contradict each
@@ -192,7 +247,10 @@ key at all.
   truncation fallback, driven by a fixture whose block exceeds a patched
   ceiling.
 - **Route**: `headers=list` end to end; an unknown value is 400 problem+json
-  naming the accepted values; `full`'s body is unchanged against a golden.
+  naming the accepted values, and the refusal is pinned *at the transport* as
+  well as at the api layer; `full`'s body is unchanged against a golden.
+- **Guard precedes IO**: a bad mode raises before the ACL lookup and the SELECT,
+  asserted against a connection that fails if touched.
 - **MCP**: the *published* `inputSchema` declares `headers` with the three
   values and no `full_headers` — read off the published tool list, since
   `server.py` is what an agent sees (#308's lesson).

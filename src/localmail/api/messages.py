@@ -4,12 +4,24 @@
 """Message detail and raw RFC822 access for the API."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import psycopg
 
-from localmail.api.errors import NotFound
+from localmail.api.errors import NotFound, ValidationFailed
 from localmail.api.sanitize import sanitize_html
+from localmail.header_block import (
+    HEADER_BLOCK_READ_BYTES,
+    HeaderEntry,
+    entries_to_wire,
+    group_entries,
+    header_block,
+    header_mode_error,
+    parse_header_block,
+)
+
+logger = logging.getLogger("localmail.api.messages")
 
 
 def get_message(
@@ -17,7 +29,7 @@ def get_message(
     message_id: int,
     *,
     allowed_account_ids: list[int],
-    full_headers: bool = False,
+    headers: str = "compact",
     allow_external_images: bool = False,
 ) -> dict[str, Any]:
     """Return a structured representation of one message.
@@ -29,20 +41,35 @@ def get_message(
     HTML body is server-sanitized; cid: image refs are rewritten to
     /v1/attachments/<sha256> when the corresponding attachment is present.
     """
+    mode_problem = header_mode_error(headers)
+    if mode_problem is not None:
+        raise ValidationFailed(mode_problem)
     if not allowed_account_ids:
         raise NotFound(f"message {message_id} not found")
     with conn.cursor() as cur:
+        wants_headers = headers != "compact"
+        header_col = (
+            ", substring(m.raw_bytes from 1 for %(limit)s) AS header_prefix"
+            if wants_headers else ""
+        )
         cur.execute(
-            """
+            f"""
             SELECT m.id, m.account_id, m.subject, m.from_addr, m.from_name,
                    m.to_addrs, m.cc_addrs, m.bcc_addrs, m.body_text, m.body_html,
-                   m.attachments, m.headers, m.date_sent,
+                   m.attachments, m.date_sent,
                    a.name AS account_name, a.email_address AS account_address
+                   {header_col}
               FROM messages m
               JOIN accounts a ON a.id = m.account_id
-             WHERE m.id = %s AND m.account_id = ANY(%s)
-            """,
-            (message_id, allowed_account_ids),
+             WHERE m.id = %(mid)s AND m.account_id = ANY(%(accounts)s)
+            """,  # noqa: S608 - header_col is a literal chosen by `wants_headers`
+            {
+                "mid": message_id,
+                "accounts": allowed_account_ids,
+                # +1 so a block that fills the ceiling is distinguishable from
+                # one that ends exactly at it, without a second query.
+                "limit": HEADER_BLOCK_READ_BYTES + 1,
+            },
         )
         row = cur.fetchone()
         if row is None:
@@ -61,8 +88,8 @@ def get_message(
 
     (mid, account_id, subject, from_addr, from_name,
      to_addrs, cc_addrs, bcc_addrs, body_text, body_html,
-     attachments, headers, date_sent,
-     account_name, account_address) = row
+     attachments, date_sent,
+     account_name, account_address) = row[:14]
 
     cid_to_sha = _build_cid_map(attachments or [])
     sanitized_html = (
@@ -91,9 +118,38 @@ def get_message(
         "account": {"id": str(account_id), "name": account_name, "address": account_address},
         "folders": [{"id": str(fid), "name": fname} for fid, fname in folder_rows],
     }
-    if full_headers:
-        msg["headers"] = headers or {}
+    if wants_headers:
+        entries = _header_entries(
+            conn, message_id,
+            allowed_account_ids=allowed_account_ids,
+            prefix=bytes(row[14]),
+        )
+        msg["headers"] = (
+            entries_to_wire(entries) if headers == "list" else group_entries(entries)
+        )
     return msg
+
+
+def _header_entries(
+    conn: psycopg.Connection,
+    message_id: int,
+    *,
+    allowed_account_ids: list[int],
+    prefix: bytes,
+) -> list[HeaderEntry]:
+    """Occurrences from the prefix, re-reading in full if it was cut short."""
+    block = header_block(prefix, truncated=len(prefix) > HEADER_BLOCK_READ_BYTES)
+    if block is None:
+        logger.warning(
+            "header block of message %s exceeds %d bytes; re-reading in full",
+            message_id, HEADER_BLOCK_READ_BYTES,
+        )
+        raw = get_message_raw(
+            conn, message_id, allowed_account_ids=allowed_account_ids
+        )
+        whole = header_block(raw, truncated=False)
+        block = b"" if whole is None else whole
+    return parse_header_block(block)
 
 
 def get_message_raw(

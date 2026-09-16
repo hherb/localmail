@@ -141,9 +141,14 @@ that is the refinement invariant, and it is one function rather than a claim.
 
 ### 3. The read path reads a bounded prefix
 
-`api/messages.py::get_message` takes `headers: HeaderMode` — a
-`Literal["compact", "full", "list"]` — in place of `full_headers: bool`. There
-are no external callers; the routes and the MCP tools are the only two.
+`api/messages.py::get_message` takes `headers: str = "compact"` in place of
+`full_headers: bool`, and narrows it itself. There are no external callers; the
+routes and the MCP tools are the only two.
+
+**`str`, not the `HeaderMode` Literal, and that is deliberate.** The route's
+value is user input, so a `Literal` annotation there would be a claim mypy
+cannot check and a reader would trust. The alias is exported for the MCP tool,
+whose SDK does enforce it, and as the return of the narrowing below.
 
 - `compact`: reads nothing extra and emits **no** `headers` key, exactly as
   today. The `m.headers` column leaves the SELECT.
@@ -188,9 +193,13 @@ array `detail` — #370's complaint, and what kastellan's worker renders as a
 512-byte raw body. This follows slice A: an unknown filter key is a 400 naming
 the key.
 
-**The check runs before any IO**, ahead of the ACL lookup and the SELECT, so a
-bad mode costs a round trip and not a query — the ordering `tests/test_searcher_guards_precede_io.py`
-pins one subsystem over.
+**The check runs first inside `get_message`** — above the empty-ACL
+short-circuit and every query — so a caller granted nothing is told its mode is
+unusable rather than being told the message does not exist. Slice A's
+`test_rank_with_ascending_is_refused_even_with_an_empty_acl` is the same
+ordering rule, and the same test shape pins it. (The route's own ACL lookup
+still runs before the call; what is load-bearing is that a refusal is never
+disguised as a 404.)
 
 The MCP tool declares the `Literal` directly as well, because the SDK's argument
 model refuses an unknown value before the tool body runs and `ToolError` is

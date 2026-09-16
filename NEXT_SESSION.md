@@ -1,8 +1,9 @@
 # NEXT_SESSION.md — localmail handoff
 
 > **Status as of 2026-09-17 (session 48).** `main` was **`2ccfb1b`** at the
-> start — #376 had been merged between sessions, so the previous handoff was
-> **current for once** (risk 3 clean, first time in four sessions).
+> start — #376 had been merged between sessions, so the previous handoff
+> described its own state accurately and risk 3 was clean. (`git log -- NEXT_SESSION.md`
+> still shows the gap at `964ff13`: session 46 shipped #366 and wrote none.)
 >
 > This session **deployed `main` to both hosts**, diagnosed and cleared a
 > Postgres fault that made three unrelated tests fail, and opened **one PR**

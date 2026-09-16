@@ -167,8 +167,11 @@ They are in the spec and CLAUDE.md, and none of them existed in the code before:
 | mypy | — | Success, **156** files |
 | ruff `src/` | — | **10** (#285 baseline, unchanged) |
 | `gui/` touched | — | **no** (so no vitest/cargo gate needed) |
+| CI (PR #381) | — | **green** on `30b1dff`: pytest **3730 passed, 1 skipped** on 3.12 *and* 3.13, plus Cloudflare Pages. `gui-ci` correctly did not run. |
 
 - **+49 tests.** The two pre-existing warnings are the #25 websockets pair.
+  CI's `1 skipped` against macOS's `0` is the pre-existing platform difference
+  CLAUDE.md records — same 3731 collected on both.
 - **Mutation-checked, both restored from file copies (never `git checkout`):**
   `list` emitting the `full` shape fails the acceptance test; a truncated
   block served as complete fails two tests.

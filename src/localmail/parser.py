@@ -14,6 +14,7 @@ from email.message import EmailMessage, MIMEPart
 from email.utils import getaddresses
 from typing import Any
 
+from localmail.header_block import entries_from_message, group_entries
 from localmail.pgtext import strip_nuls, strip_nuls_all
 
 
@@ -116,22 +117,12 @@ def _header_text(msg: EmailMessage, name: str) -> str | None:
 
 
 def _headers_dict(msg: EmailMessage) -> dict[str, list[str]]:
-    """Every header, degrading only the ones the parser chokes on.
+    """Every header, grouped by wire spelling.
 
-    `msg.items()` parses each value through the policy, so a single unparsable
-    header raises for the *whole* dict -- guarding `_header_text` alone would
-    leave the message poisoned one line later. `raw_items()` is the same
-    sequence unparsed, so each occurrence is parsed individually and a failing
-    one falls back to its raw text instead of costing the other headers.
+    The occurrences come from `header_block`, which `api.messages` also serves
+    per occurrence — one rule, so the stored column and the wire cannot drift.
     """
-    out: dict[str, list[str]] = {}
-    for name, raw_value in msg.raw_items():
-        try:
-            value = str(msg.policy.header_fetch_parse(name, raw_value))
-        except Exception:
-            value = raw_value
-        out.setdefault(name, []).append(value)
-    return out
+    return group_entries(entries_from_message(msg))
 
 
 def _decoded_payload(part: MIMEPart[Any, Any]) -> bytes:

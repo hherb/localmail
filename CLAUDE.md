@@ -5346,7 +5346,9 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
     hybrid search; `smart=true` runs the Phase-4 LLM rewrite (page 1) and the
     response `rewrite_skipped` reflects whether it happened; page by re-calling
     with `next_cursor`; a cursor-expired error means re-run without a cursor.
-  - `get_message(message_id, full_headers=False)`.
+  - `get_message(message_id, headers="compact"|"full"|"list")` — `"list"`
+    returns one `{name, value}` entry per header occurrence in wire order,
+    for order-sensitive headers like `Received` (#379).
   - `get_attachment(sha256, mode="text"|"metadata")` — extracted text or
     metadata, **never raw bytes** (raw download stays the HTTP
     `/v1/attachments/{sha256}` route).
@@ -5368,7 +5370,11 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   already lives in api/); (2) ONE `search` tool, not three — `run_search` takes a
   single optional `cursor` and auto-grows the pool, paging = re-call with
   `next_cursor`; (3) `get_message(full_headers=…)`, not
-  `include_body`/`include_attachments`.
+  `include_body`/`include_attachments` (**corrected by #379**:
+  `full_headers=False` is gone — the tool now takes
+  `headers="compact"|"full"|"list"`; the reconciliation this bullet records,
+  one parameter instead of two, is unchanged, only its shape widened from a
+  bool to a three-mode axis).
 - Tools return structured content; `SearchCursorExpired` / `NotFound` /
   `ValidationFailed` map to clean `ToolError`s. Raw attachment bytes are
   intentionally NOT exposed over MCP (HTTP `/v1/attachments` only). **Deferred

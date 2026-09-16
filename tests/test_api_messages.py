@@ -5,6 +5,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import psycopg
 import pytest
@@ -264,6 +265,24 @@ def test_an_unusable_mode_is_refused_even_with_an_empty_acl(
     with pytest.raises(ValidationFailed) as excinfo:
         get_message(db_conn, mid, allowed_account_ids=[], headers="xyzzy")
     assert "'list'" in str(excinfo.value)
+
+
+def test_the_mode_guard_precedes_the_acl_lookup_and_the_select() -> None:
+    """The pin the design doc's Testing section claims and never shipped.
+
+    The empty-ACL test above only proves the mode guard outranks the
+    ACL-emptiness short-circuit — it uses a real `db_conn` that would work
+    fine if touched, so it cannot show the guard precedes IO. This hands
+    `get_message` a connection double that raises the moment anything is
+    touched, the `tests/test_searcher_guards_precede_io.py` shape, with a
+    *populated* ACL so the SELECT would otherwise run.
+    """
+    conn = MagicMock(spec=psycopg.Connection)
+    conn.cursor.side_effect = AssertionError("no cursor may be opened")
+    with pytest.raises(ValidationFailed) as excinfo:
+        get_message(conn, 1, allowed_account_ids=[1, 2, 3], headers="xyzzy")
+    assert "'list'" in str(excinfo.value)
+    conn.cursor.assert_not_called()
 
 
 def test_a_header_block_past_the_ceiling_is_re_read_in_full(

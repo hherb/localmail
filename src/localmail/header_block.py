@@ -14,12 +14,19 @@ import email.policy
 from collections.abc import Iterable
 from dataclasses import dataclass
 from email.message import EmailMessage
-from typing import Literal
+from typing import Literal, get_args
 
 from localmail.pgtext import strip_nuls
 
 HeaderMode = Literal["compact", "full", "list"]
-HEADER_MODES: tuple[HeaderMode, ...] = ("compact", "full", "list")
+
+# Derived, never restated: CI runs no mypy step, so a hand-typed tuple could
+# silently drift wider than the Literal MCP's `Field` validates against —
+# HTTP would then accept a mode MCP refuses, and `api/messages.py`'s
+# `else` branch would serve the extra mode as `full`. Deriving from the
+# Literal itself, rather than checking one against the other, makes that
+# drift impossible by construction instead of merely caught.
+HEADER_MODES: tuple[HeaderMode, ...] = get_args(HeaderMode)
 
 # The block is read as a bounded prefix of `raw_bytes`, which carries the
 # attachments too: p50 44 KB, p99 2.6 MB, max 35 MB on the live archive against

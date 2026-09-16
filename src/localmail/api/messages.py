@@ -140,9 +140,15 @@ def _header_entries(
     """Occurrences from the prefix, re-reading in full if it was cut short."""
     block = header_block(prefix, truncated=len(prefix) > HEADER_BLOCK_READ_BYTES)
     if block is None:
+        # Two distinct causes reach this branch: a genuinely oversized header
+        # block, or a message using bare `\r` line endings — `header_block`
+        # only recognises `\r\n\r\n`/`\n\n`, so a tiny block with no
+        # recognised separator looks identical to a truncated one. State the
+        # observation, not a conclusion about the block's size.
         logger.warning(
-            "header block of message %s exceeds %d bytes; re-reading in full",
-            message_id, HEADER_BLOCK_READ_BYTES,
+            "no header/body separator found in the first %d bytes of "
+            "message %s; re-reading in full",
+            HEADER_BLOCK_READ_BYTES, message_id,
         )
         raw = get_message_raw(
             conn, message_id, allowed_account_ids=allowed_account_ids

@@ -315,10 +315,11 @@ def build_mcp_server(
             "`search` or `list_messages`."))],
         headers: Annotated[HeaderMode, Field(description=(
             "\"compact\" (default) omits headers; \"full\" returns an object "
-            "keyed by header name, each value that name's occurrences; "
-            "\"list\" returns one {name, value} entry per occurrence in wire "
-            "order — use it when order matters, e.g. a Received chain or "
-            "Authentication-Results."))] = "compact",
+            "keyed by the header name as spelled on the wire (so `Received` "
+            "and `received` are separate keys), each value that spelling's "
+            "occurrences; \"list\" returns one {name, value} entry per "
+            "occurrence in wire order — use it when order matters, e.g. a "
+            "Received chain or Authentication-Results."))] = "compact",
     ) -> dict[str, Any]:
         """Fetch one message — headers, body, and attachment list — by id,
         ACL-scoped to your granted accounts.
@@ -344,6 +345,12 @@ def build_mcp_server(
                 )
             except NotFound as exc:
                 raise ToolError(f"message {message_id} not found") from exc
+            except ValidationFailed as exc:
+                # The `HeaderMode` annotation refuses a bad mode before the
+                # body runs, so this is a backstop — but `tools.tool_get_message`
+                # types the seam `str`, and an api-layer refusal left unmapped
+                # at one transport is #348's shape.
+                raise ToolError(str(exc)) from exc
 
     @server.tool()
     def get_attachment(

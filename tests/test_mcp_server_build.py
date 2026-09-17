@@ -11,6 +11,8 @@ from localmail.config import McpConfig
 
 pytest.importorskip("mcp")  # the [mcp] extra (mcp SDK) gates this module
 
+from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
+
 from localmail.mcp import build_mcp_server  # noqa: E402
 
 
@@ -325,3 +327,76 @@ def test_search_forwards_an_omitted_query_as_empty(db_dsn, monkeypatch):
         pool.close()
     assert seen["query"] == ""
     assert seen["filters"] == {"has_attachment": True}
+
+
+def _get_message_tool_fn(server):
+    """The registered `get_message` tool's underlying function.
+
+    Reached through the tool manager for the reason `_search_tool_fn` is: the
+    schema assertions see the parameter list and nothing of what the body does
+    with it.
+    """
+    return server._tool_manager.get_tool("get_message").fn
+
+
+def test_get_message_forwards_the_headers_mode_to_the_tool_body(db_dsn, monkeypatch):
+    """The `server.py` -> `tools.tool_get_message` hop, which nothing pinned.
+
+    The schema assertions above publish the three modes; deleting
+    `headers=headers` from the forwarding call leaves them green while every
+    agent silently gets `compact` — the response simply has no `headers` key.
+    That is #308's shape, which this file already guards for `search`.
+    """
+    import localmail.mcp.server as server_mod
+
+    seen: dict = {}
+
+    def _recording_tool_get_message(conn, **kwargs):
+        seen.update(kwargs)
+        return {"id": "1"}
+
+    monkeypatch.setattr(
+        server_mod.tools, "tool_get_message", _recording_tool_get_message
+    )
+    monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
+    monkeypatch.setattr(server_mod, "allowed_account_ids", lambda conn, uid: [1])
+
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=object(),
+                                  config=McpConfig(enabled=True))
+        _get_message_tool_fn(server)(message_id="1", headers="list")
+    finally:
+        pool.close()
+    assert seen.get("headers") == "list"
+
+
+def test_get_message_maps_a_refused_mode_to_a_tool_error(db_dsn, monkeypatch):
+    """An api-layer refusal must not escape the tool as a bare exception.
+
+    Unreachable through the published schema — the `HeaderMode` Literal refuses
+    first — but `tools.tool_get_message` types the seam `str`, and CLAUDE.md
+    states the contract for every tool: `ValidationFailed` maps to a clean
+    `ToolError`.
+    """
+    import localmail.mcp.server as server_mod
+    from localmail.api.errors import ValidationFailed
+
+    def _refusing_tool_get_message(conn, **kwargs):
+        raise ValidationFailed("headers must be one of 'compact', 'full', 'list'")
+
+    monkeypatch.setattr(
+        server_mod.tools, "tool_get_message", _refusing_tool_get_message
+    )
+    monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
+    monkeypatch.setattr(server_mod, "allowed_account_ids", lambda conn, uid: [1])
+
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=object(),
+                                  config=McpConfig(enabled=True))
+        with pytest.raises(ToolError) as excinfo:
+            _get_message_tool_fn(server)(message_id="1", headers="xyzzy")
+    finally:
+        pool.close()
+    assert "'compact'" in str(excinfo.value)

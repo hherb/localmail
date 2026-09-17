@@ -8,17 +8,20 @@ import logging
 from typing import Any
 
 import psycopg
+from psycopg.rows import dict_row
 
 from localmail.api.errors import NotFound, ValidationFailed
 from localmail.api.sanitize import sanitize_html
 from localmail.header_block import (
-    HEADER_BLOCK_READ_BYTES,
+    PREFIX_READ_BYTES,
     HeaderEntry,
     entries_to_wire,
     group_entries,
     header_block,
+    header_block_of_whole,
     header_mode_error,
     parse_header_block,
+    prefix_is_truncated,
 )
 
 logger = logging.getLogger("localmail.api.messages")
@@ -46,7 +49,10 @@ def get_message(
         raise ValidationFailed(mode_problem)
     if not allowed_account_ids:
         raise NotFound(f"message {message_id} not found")
-    with conn.cursor() as cur:
+    # Named rows, never positional: the SELECT's shape is conditional, so an
+    # index would have to agree with a column list two branches away. #119/#123
+    # made the same call for the account reads.
+    with conn.cursor(row_factory=dict_row) as cur:
         wants_headers = headers != "compact"
         header_col = (
             ", substring(m.raw_bytes from 1 for %(limit)s) AS header_prefix"
@@ -63,12 +69,13 @@ def get_message(
               JOIN accounts a ON a.id = m.account_id
              WHERE m.id = %(mid)s AND m.account_id = ANY(%(accounts)s)
             """,  # noqa: S608 - header_col is a literal chosen by `wants_headers`
+            # PREFIX_READ_BYTES is the ceiling plus one, so a message that
+            # continues past the ceiling comes back longer than it and
+            # `prefix_is_truncated` can say so without a second query.
             {
                 "mid": message_id,
                 "accounts": allowed_account_ids,
-                # +1 so a block that fills the ceiling is distinguishable from
-                # one that ends exactly at it, without a second query.
-                "limit": HEADER_BLOCK_READ_BYTES + 1,
+                "limit": PREFIX_READ_BYTES,
             },
         )
         row = cur.fetchone()
@@ -86,10 +93,9 @@ def get_message(
         )
         folder_rows = cur.fetchall()
 
-    (mid, account_id, subject, from_addr, from_name,
-     to_addrs, cc_addrs, bcc_addrs, body_text, body_html,
-     attachments, date_sent,
-     account_name, account_address) = row[:14]
+    attachments = row["attachments"]
+    body_html = row["body_html"]
+    date_sent = row["date_sent"]
 
     cid_to_sha = _build_cid_map(attachments or [])
     sanitized_html = (
@@ -103,26 +109,32 @@ def get_message(
     blob_meta = _load_attachment_meta(conn, attachments or [])
 
     msg: dict[str, Any] = {
-        "id": str(mid),
-        "subject": subject,
-        "from": _address(from_addr, from_name),
-        "to": [_address(a, None) for a in (to_addrs or [])],
-        "cc": [_address(a, None) for a in (cc_addrs or [])],
-        "bcc": [_address(a, None) for a in (bcc_addrs or [])],
+        "id": str(row["id"]),
+        "subject": row["subject"],
+        "from": _address(row["from_addr"], row["from_name"]),
+        "to": [_address(a, None) for a in (row["to_addrs"] or [])],
+        "cc": [_address(a, None) for a in (row["cc_addrs"] or [])],
+        "bcc": [_address(a, None) for a in (row["bcc_addrs"] or [])],
         "date": date_sent.isoformat() if date_sent else None,
-        "body_text": body_text,
+        "body_text": row["body_text"],
         "body_html": sanitized_html,
         "attachments": [
             _attachment_entry(a, blob_meta) for a in (attachments or [])
         ],
-        "account": {"id": str(account_id), "name": account_name, "address": account_address},
-        "folders": [{"id": str(fid), "name": fname} for fid, fname in folder_rows],
+        "account": {
+            "id": str(row["account_id"]),
+            "name": row["account_name"],
+            "address": row["account_address"],
+        },
+        "folders": [
+            {"id": str(f["id"]), "name": f["name"]} for f in folder_rows
+        ],
     }
     if wants_headers:
         entries = _header_entries(
             conn, message_id,
             allowed_account_ids=allowed_account_ids,
-            prefix=bytes(row[14]),
+            prefix=bytes(row["header_prefix"]),
         )
         msg["headers"] = (
             entries_to_wire(entries) if headers == "list" else group_entries(entries)
@@ -138,23 +150,27 @@ def _header_entries(
     prefix: bytes,
 ) -> list[HeaderEntry]:
     """Occurrences from the prefix, re-reading in full if it was cut short."""
-    block = header_block(prefix, truncated=len(prefix) > HEADER_BLOCK_READ_BYTES)
+    block = header_block(prefix, truncated=prefix_is_truncated(prefix))
     if block is None:
-        # Two distinct causes reach this branch: a genuinely oversized header
-        # block, or a message using bare `\r` line endings — `header_block`
-        # only recognises `\r\n\r\n`/`\n\n`, so a tiny block with no
-        # recognised separator looks identical to a truncated one. State the
-        # observation, not a conclusion about the block's size.
+        # Reaching here needs a message PAST the ceiling — `header_block`
+        # returns the data itself when it is not truncated — whose first
+        # PREFIX_READ_BYTES hold no separator `_SEPARATORS` recognises. That is
+        # an oversized header block, or any line-ending spelling it does not
+        # match (a bare `\r`, or `\n` then `\r\n`) in a message that large.
+        # From here they are indistinguishable, so state the observation rather
+        # than a conclusion about the block's size. Below the ceiling those odd
+        # spellings never arrive here and are served correctly anyway: the
+        # whole message goes to `email.message_from_bytes`, whose line splitter
+        # accepts `\r`, `\n` and `\r\n` and finds the separator itself.
         logger.warning(
             "no header/body separator found in the first %d bytes of "
             "message %s; re-reading in full",
-            HEADER_BLOCK_READ_BYTES, message_id,
+            PREFIX_READ_BYTES, message_id,
         )
         raw = get_message_raw(
             conn, message_id, allowed_account_ids=allowed_account_ids
         )
-        whole = header_block(raw, truncated=False)
-        block = b"" if whole is None else whole
+        block = header_block_of_whole(raw)
     return parse_header_block(block)
 
 

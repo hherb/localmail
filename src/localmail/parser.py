@@ -120,7 +120,11 @@ def _headers_dict(msg: EmailMessage) -> dict[str, list[str]]:
     """Every header, grouped by wire spelling.
 
     The occurrences come from `header_block`, which `api.messages` also serves
-    per occurrence — one rule, so the stored column and the wire cannot drift.
+    per occurrence — one rule, so the stored column and the wire agree on what
+    a header's value *is*. Their contents can still differ: this column is a
+    snapshot of whatever parser ran at sync time (11.6% of sampled live rows
+    differ from a fresh parse by whitespace, #379), which is why the read path
+    parses `raw_bytes` instead of serving it.
     """
     return group_entries(entries_from_message(msg))
 

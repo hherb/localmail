@@ -30,9 +30,24 @@ HEADER_MODES: tuple[HeaderMode, ...] = get_args(HeaderMode)
 
 # The block is read as a bounded prefix of `raw_bytes`, which carries the
 # attachments too: p50 44 KB, p99 2.6 MB, max 35 MB on the live archive against
-# a p95 header block of 8.7 KB. Measured for #379: 0 of 129,590 messages have a
-# block that does not end within this ceiling.
+# a p95 header block of 8.7 KB. Measured for #379 over the whole live archive,
+# not a sample: 0 of 129,590 messages have a block that does not end within this
+# ceiling.
 HEADER_BLOCK_READ_BYTES = 64 * 1024
+
+# What a reader asks the database for, and how it judges what came back. The
+# two halves live together because they are one rule: read the ceiling plus one
+# byte, and a prefix that comes back longer than the ceiling is one the message
+# continues past. Written apart — the `+1` at the SQL and the `>` at the caller —
+# dropping either silently serves a block that fills the ceiling as complete,
+# which is the short-list-passing-for-complete failure this module exists to end.
+PREFIX_READ_BYTES = HEADER_BLOCK_READ_BYTES + 1
+
+
+def prefix_is_truncated(prefix: bytes) -> bool:
+    """Whether a prefix read as `PREFIX_READ_BYTES` was cut short."""
+    return len(prefix) > HEADER_BLOCK_READ_BYTES
+
 
 # Each separator is a doubled line terminator: the first occurrence ends the last
 # header line, the second occurrence is the blank line. We return up to and
@@ -59,24 +74,51 @@ def header_mode_error(value: str) -> str | None:
     return f"headers must be one of {accepted}; got {value!r}"
 
 
-def header_block(data: bytes, *, truncated: bool) -> bytes | None:
-    """The bytes before the first blank line, or None if it has none.
+def _up_to_separator(data: bytes) -> bytes | None:
+    """The bytes up to and including the last header line's terminator.
 
-    `truncated` says whether `data` was cut short by a read ceiling. Without a
-    separator the answer differs: a complete message simply has no body (RFC
-    5322 permits it), while a truncated one may have the rest of its headers
-    past the cut — reporting None is what stops a short list passing for a
-    complete one.
+    None when `data` holds no recognised separator — which says nothing about
+    why; `header_block` and `header_block_of_whole` each answer that for their
+    own kind of input.
     """
     separator_matches = []
     for sep_pattern, ending_len in _SEPARATORS:
         idx = data.find(sep_pattern)
         if idx >= 0:
             separator_matches.append((idx, ending_len))
-    if separator_matches:
-        min_idx, ending_len = min(separator_matches)
-        return data[: min_idx + ending_len]
+    if not separator_matches:
+        return None
+    min_idx, ending_len = min(separator_matches)
+    return data[: min_idx + ending_len]
+
+
+def header_block(data: bytes, *, truncated: bool) -> bytes | None:
+    """The block in `data`; None ONLY when `truncated` and none was found.
+
+    `truncated` says whether `data` was cut short by a read ceiling. Without a
+    separator the answer differs: a complete message simply has no body (RFC
+    5322 permits it), so all of `data` is the block, while a truncated one may
+    have the rest of its headers past the cut — reporting None is what stops a
+    short list passing for a complete one. So with `truncated=False` this is
+    total, and a caller passing it has no None to handle; that caller wants
+    `header_block_of_whole`, whose return type says so.
+    """
+    found = _up_to_separator(data)
+    if found is not None:
+        return found
     return None if truncated else data
+
+
+def header_block_of_whole(data: bytes) -> bytes:
+    """The block of a complete message. Total: no body means all of it.
+
+    Separate from `header_block` rather than a `truncated=False` call so the
+    re-read path has no unreachable None branch to invent a fallback for — an
+    empty block would serve an empty header list, which is indistinguishable
+    from a message that genuinely has none.
+    """
+    found = _up_to_separator(data)
+    return data if found is None else found
 
 
 def entries_from_message(msg: EmailMessage) -> list[HeaderEntry]:
@@ -84,7 +126,9 @@ def entries_from_message(msg: EmailMessage) -> list[HeaderEntry]:
 
     `raw_items()` is the wire sequence unparsed, so each occurrence is parsed
     individually and a failing one falls back to its raw text rather than
-    costing the other headers (#314).
+    costing the other headers (#314). Never `msg.items()`: it parses every
+    value through the policy, so one unparsable header raises for the *whole*
+    sequence and poisons the message.
     """
     out: list[HeaderEntry] = []
     for name, raw_value in msg.raw_items():

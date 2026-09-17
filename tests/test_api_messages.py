@@ -285,23 +285,121 @@ def test_the_mode_guard_precedes_the_acl_lookup_and_the_select() -> None:
     conn.cursor.assert_not_called()
 
 
+def _shrink_ceiling(monkeypatch, ceiling: int) -> None:
+    """Both halves of the read rule move together, or the test proves nothing.
+
+    `PREFIX_READ_BYTES` is what the SELECT asks for and
+    `header_block.HEADER_BLOCK_READ_BYTES` is what `prefix_is_truncated`
+    judges against. Patching one leaves the two disagreeing, which is exactly
+    the state the constants are co-located to prevent.
+    """
+    monkeypatch.setattr("localmail.header_block.HEADER_BLOCK_READ_BYTES", ceiling)
+    monkeypatch.setattr("localmail.api.messages.PREFIX_READ_BYTES", ceiling + 1)
+
+
+def _padding(n_headers: int) -> bytes:
+    return b"".join(b"X-Pad-%d: %s\r\n" % (i, b"y" * 200) for i in range(n_headers))
+
+
 def test_a_header_block_past_the_ceiling_is_re_read_in_full(
     db_conn: psycopg.Connection, monkeypatch, caplog,
 ) -> None:
     """Never a short list that looks complete."""
-    padding = b"".join(
-        b"X-Pad-%d: %s\r\n" % (i, b"y" * 200) for i in range(40)
-    )
     mid = _seed_msg(
         db_conn,
-        raw_bytes=padding + b"Subject: beyond the ceiling\r\n\r\nbody",
+        raw_bytes=_padding(40) + b"Subject: beyond the ceiling\r\n\r\nbody",
     )
     db_conn.commit()
-    monkeypatch.setattr("localmail.api.messages.HEADER_BLOCK_READ_BYTES", 512)
+    _shrink_ceiling(monkeypatch, 512)
     with caplog.at_level(logging.WARNING, logger="localmail.api.messages"):
         msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="list")
+    # Every header, not just the tail: a re-read that returned a slice would
+    # still satisfy an assertion about the last entry.
+    assert [e["name"] for e in msg["headers"]] == (
+        [f"X-Pad-{i}" for i in range(40)] + ["Subject"]
+    )
     assert msg["headers"][-1] == {"name": "Subject", "value": "beyond the ceiling"}
-    assert any(str(mid) in r.getMessage() for r in caplog.records)
+    # Anchored on the wording and the logger, not on the id: `mid` is a small
+    # serial from a freshly-truncated table, so `str(mid) in ...` is satisfied
+    # by any unrelated record carrying that digit.
+    warnings = [
+        r for r in caplog.records if r.name == "localmail.api.messages"
+    ]
+    assert len(warnings) == 1
+    assert "no header/body separator found" in warnings[0].getMessage()
+    assert str(mid) in warnings[0].getMessage()
+
+
+def test_an_ordinary_message_past_the_ceiling_is_served_without_a_re_read(
+    db_conn: psycopg.Connection, monkeypatch, caplog,
+) -> None:
+    """The negative control: truncated, but the block ended before the cut.
+
+    This is every message over the ceiling whose headers are normal — i.e. the
+    common case. Without it, `header_block` deciding on `truncated` alone and
+    never searching passes every other test here, and each such request pays a
+    full `raw_bytes` re-read under a WARNING asserting the opposite of the truth.
+    """
+    mid = _seed_msg(
+        db_conn,
+        raw_bytes=b"Subject: inside the ceiling\r\n\r\n" + b"z" * 4000,
+    )
+    db_conn.commit()
+    _shrink_ceiling(monkeypatch, 512)
+    with caplog.at_level(logging.WARNING, logger="localmail.api.messages"):
+        msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="list")
+    assert msg["headers"] == [{"name": "Subject", "value": "inside the ceiling"}]
+    assert [r for r in caplog.records if r.name == "localmail.api.messages"] == []
+
+
+def test_the_header_read_is_bounded_and_only_paid_when_headers_are_wanted(
+    db_conn: psycopg.Connection, monkeypatch,
+) -> None:
+    """`substring(...)` is the whole protection against pulling a 35 MB column.
+
+    Nothing about the *answers* changes if it is dropped — the separator is
+    still found — so this is asserted structurally, on the statement the
+    cursor is actually given. `compact` must not pay for it at all.
+    """
+    mid = _seed_msg(db_conn)
+    db_conn.commit()
+    seen: list[str] = []
+    real_cursor = db_conn.cursor
+
+    class _Recording:
+        """psycopg's `Cursor.execute` is read-only C, so delegate rather than patch."""
+
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, query, params=None, **kw):
+            seen.append(query if isinstance(query, str) else query.decode())
+            return self._cur.execute(query, params, **kw)
+
+        def __enter__(self):
+            self._cur.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._cur.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._cur, name)
+
+    monkeypatch.setattr(
+        db_conn, "cursor", lambda *a, **kw: _Recording(real_cursor(*a, **kw))
+    )
+
+    get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="full")
+    detail = [q for q in seen if "FROM messages m" in q]
+    assert len(detail) == 1
+    assert "substring(m.raw_bytes from 1 for %(limit)s)" in detail[0]
+
+    seen.clear()
+    get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    detail = [q for q in seen if "FROM messages m" in q]
+    assert len(detail) == 1
+    assert "raw_bytes" not in detail[0]
 
 
 def test_get_message_not_found_raises(db_conn: psycopg.Connection) -> None:

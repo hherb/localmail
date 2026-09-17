@@ -2,7 +2,13 @@
 # Copyright (C) 2026 Horst Herb
 
 """The acceptance stated for slice B: every occurrence, in order, and `full`
-unchanged against a golden response (#379)."""
+unchanged *in shape* against a golden response (#379).
+
+"Unchanged" is a claim about the shape, not the bytes: `full` now comes from a
+fresh parse rather than the stored column, and #379 measures those differing by
+whitespace on 11.6% of sampled live rows. The fixture seeds `headers` as `{}`
+precisely so a passthrough of the column cannot satisfy the golden.
+"""
 import json
 from datetime import datetime, timezone
 
@@ -85,9 +91,10 @@ def test_two_received_headers_and_a_case_variant_come_back_in_order(
     assert r.json()["headers"][0]["value"].startswith("from a.example")
 
 
-def test_full_is_unchanged_against_the_golden_response(
+def test_full_is_unchanged_in_shape_against_the_golden_response(
     db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
 ) -> None:
+    """The stored column is seeded `{}`, so this also pins it is not served."""
     mid = _seed(db_conn)
     grant_alice_all_accounts()
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None))

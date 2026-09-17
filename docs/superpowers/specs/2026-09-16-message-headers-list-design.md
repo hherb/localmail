@@ -83,6 +83,22 @@ class HeaderEntry:
 
 Four functions:
 
+> **Corrected in place after implementation (#381 review).** What shipped is
+> six public names, not four, and the first one is spelled differently. The
+> semantics below are unchanged; the names and the return type are not.
+> `header_block_end(...) -> int | None` shipped as
+> `header_block(prefix, *, truncated) -> bytes | None` (the slice, not the
+> offset — a cosmetic difference, and every rule stated below holds). Alongside
+> it, the review added the **total** `header_block_of_whole(data) -> bytes` for
+> the re-read path, so that caller has no unreachable `None` to invent a `b""`
+> fallback for, and `PREFIX_READ_BYTES` / `prefix_is_truncated` so the read
+> length and the judgement of what came back are one rule rather than two
+> written 70 lines apart. The design also did not anticipate `entries_to_wire`
+> (the `list` shape, sibling to `group_entries`) or `header_mode_error`
+> (§"where the mode is validated", below). There is **no narrowing function**:
+> `header_mode_error` returns `str | None`, like `account_name_error`, and the
+> clause elsewhere in this document promising one is withdrawn.
+
 - `header_block_end(prefix: bytes, *, truncated: bool) -> int | None` — the
   offset of the first `\r\n\r\n` or `\n\n`, or `len(prefix)` when the prefix is
   a whole message that ends without one (RFC 5322 permits a message with no
@@ -148,7 +164,11 @@ routes and the MCP tools are the only two.
 **`str`, not the `HeaderMode` Literal, and that is deliberate.** The route's
 value is user input, so a `Literal` annotation there would be a claim mypy
 cannot check and a reader would trust. The alias is exported for the MCP tool,
-whose SDK does enforce it, and as the return of the narrowing below.
+whose SDK does enforce it. (**Corrected after implementation, #381 review:** the
+clause that followed here claimed it was also "the return of the narrowing
+below". There is no narrowing — `header_mode_error` returns `str | None`, a
+message or None, shaped like `account_names.account_name_error`. The alias has
+exactly one other consumer, the MCP `Annotated[HeaderMode, Field(...)]`.)
 
 - `compact`: reads nothing extra and emits **no** `headers` key, exactly as
   today. The `m.headers` column leaves the SELECT.

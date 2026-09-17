@@ -27,8 +27,10 @@ def _seed_msg(conn: psycopg.Connection) -> int:
                                      body_text, body_html, attachments, raw_bytes, raw_sha256,
                                      size_bytes, headers, date_sent, date_received)
                VALUES (%s, '<m@x>', 'hello', 'a@x', 'Anna', 'hi', '<p>hi</p>', '[]'::jsonb,
-                       'RAW', %s, 3, %s::jsonb, %s, %s) RETURNING id""",
-            (aid, b"\x00" * 32, json.dumps({"From": "a@x"}),
+                       %s, %s, 3, %s::jsonb, %s, %s) RETURNING id""",
+            (aid,
+             b"Received: by 10.0.0.1\r\nFrom: a@x\r\nreceived: from relay\r\n\r\nhi",
+             b"\x00" * 32, json.dumps({"From": ["a@x"]}),
              datetime(2026, 3, 4, tzinfo=timezone.utc), now),
         )
         row = cur.fetchone(); assert row is not None
@@ -129,7 +131,53 @@ def test_get_message_full_headers(
         headers={"Authorization": f"Bearer {api_token}"},
     )
     assert r.status_code == 200
-    assert r.json()["headers"]["From"] == "a@x"
+    assert r.json()["headers"]["From"] == ["a@x"]
+
+
+def test_get_message_headers_list_is_ordered_per_occurrence(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    mid = _seed_msg(db_conn)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/messages/{mid}?headers=list",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert [e["name"] for e in r.json()["headers"]] == ["Received", "From", "received"]
+
+
+def test_the_default_mode_still_omits_headers(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    mid = _seed_msg(db_conn)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/messages/{mid}",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert "headers" not in r.json()
+
+
+def test_an_unknown_headers_mode_is_problem_json_not_a_silent_compact(
+    db_dsn: str, api_token: str, db_conn, grant_alice_all_accounts,
+) -> None:
+    """It used to answer 200 with no headers key — a typo, and a new client's
+    `list` against an old server, were indistinguishable from success (#379)."""
+    mid = _seed_msg(db_conn)
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/messages/{mid}?headers=xyzzy",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["type"] == "/problems/validation-failed"
+    assert "'list'" in body["detail"]
 
 
 def test_get_message_not_found(db_dsn: str, api_token: str) -> None:
@@ -147,7 +195,9 @@ def test_get_raw(
     r = c.get(f"/v1/messages/{mid}/raw", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("message/rfc822")
-    assert r.content == b"RAW"
+    assert r.content == (
+        b"Received: by 10.0.0.1\r\nFrom: a@x\r\nreceived: from relay\r\n\r\nhi"
+    )
 
 
 def test_get_message_malformed_id_returns_400(db_dsn: str, api_token: str) -> None:

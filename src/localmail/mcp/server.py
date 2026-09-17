@@ -30,6 +30,7 @@ from localmail.api.acl import allowed_account_ids
 from localmail.api.errors import NotFound, SearchCursorExpired, ValidationFailed
 from localmail.api.ids import parse_int_id
 from localmail.config import McpConfig
+from localmail.header_block import HeaderMode
 import localmail.mcp.tools as tools
 from localmail.mcp.auth import LocalmailTokenVerifier, user_id_from_access_token
 from localmail.mcp.discovery import mcp_resource_url
@@ -312,9 +313,13 @@ def build_mcp_server(
         message_id: Annotated[str, Field(description=(
             "The message id to fetch (string integer), as returned by "
             "`search` or `list_messages`."))],
-        full_headers: Annotated[bool, Field(description=(
-            "True to include the complete raw header set; False (default) "
-            "returns the common subset (From/To/Subject/Date/…)."))] = False,
+        headers: Annotated[HeaderMode, Field(description=(
+            "\"compact\" (default) omits headers; \"full\" returns an object "
+            "keyed by the header name as spelled on the wire (so `Received` "
+            "and `received` are separate keys), each value that spelling's "
+            "occurrences; \"list\" returns one {name, value} entry per "
+            "occurrence in wire order — use it when order matters, e.g. a "
+            "Received chain or Authentication-Results."))] = "compact",
     ) -> dict[str, Any]:
         """Fetch one message — headers, body, and attachment list — by id,
         ACL-scoped to your granted accounts.
@@ -336,10 +341,16 @@ def build_mcp_server(
                     conn,
                     message_id=mid,
                     allowed_account_ids=allowed,
-                    full_headers=full_headers,
+                    headers=headers,
                 )
             except NotFound as exc:
                 raise ToolError(f"message {message_id} not found") from exc
+            except ValidationFailed as exc:
+                # The `HeaderMode` annotation refuses a bad mode before the
+                # body runs, so this is a backstop — but `tools.tool_get_message`
+                # types the seam `str`, and an api-layer refusal left unmapped
+                # at one transport is #348's shape.
+                raise ToolError(str(exc)) from exc
 
     @server.tool()
     def get_attachment(

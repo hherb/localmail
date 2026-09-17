@@ -1421,7 +1421,10 @@ empty case**, which is why one archive can behave differently on two hosts.
   left the message poisoned one line later. It iterates `raw_items()` — the same
   sequence, unparsed — and parses per occurrence, so a failing one falls back to
   its raw text and degrades **only that header**, never the whole `headers`
-  column.
+  column. **Since #379 that walk is `header_block.entries_from_message`**, which
+  `_headers_dict` now only groups — so grep for the rule there, not in
+  `parser.py`. The serving path reaches the same walk, which means the fallback
+  now also runs per request rather than once at sync (#382).
 - **`In-Reply-To` / `References` need no guard**: the plural `parse_message_ids`
   already catches `HeaderParseError` per id. Verified against 3.12.3 — do not add
   one "for symmetry".
@@ -3136,6 +3139,54 @@ for the full design.
   adding a new ID-bearing endpoint or MCP tool, declare the parameter
   as `str` and call `parse_int_id(...)`; never accept `int` directly
   from the wire, and never bypass the helper.
+- **Message headers are served per occurrence, in wire order (#379).** `?headers=full`
+  emitted the `messages.headers` JSONB verbatim, which groups by wire spelling:
+  order across names is lost (89.1% of 2,746 **sampled** messages carry a
+  repeated name), case variants split into separate keys (5.1% of the same
+  sample), and the values are frozen at sync time (11.6% of 900 sampled disagree
+  with a fresh parse — whitespace only, all of it). Those three are samples; the
+  read-ceiling figure below is a census, and the denominators are kept because
+  a later reader will otherwise re-cite them as archive-wide. The
+  rule is the pure [src/localmail/header_block.py](src/localmail/header_block.py):
+  one sequence of `HeaderEntry`, of which `full` is `group_entries(...)` and
+  `list` is `entries_to_wire(...)`, so **the two modes cannot disagree** —
+  `parser._headers_dict` is that grouping too, which keeps the stored column and
+  the wire on **one rule**. That is a claim about the rule, not about the values:
+  the column is a sync-time snapshot and is exactly what the 11.6% measures, so
+  do not read it as "the two agree". Read as a bounded `raw_bytes` prefix
+  (`HEADER_BLOCK_READ_BYTES`, 64 KiB; 0 of 129,590 live messages need more,
+  p95 is 8.7 KB) because that column carries the attachments (p99 2.6 MB, max
+  35 MB); a block that does not end inside it is **re-read in full with a
+  WARNING**, never silently truncated. **The ceiling and the judge are one
+  rule**: `PREFIX_READ_BYTES` is the ceiling plus one and `prefix_is_truncated`
+  reads that same byte, so the SQL cannot ask for a length the caller then
+  misjudges — written apart, a block that exactly fills the ceiling reads as
+  complete. The re-read calls the **total** `header_block_of_whole`, so there is
+  no None branch to invent a `b""` fallback for; an empty block would serve an
+  empty header list, indistinguishable from a message that genuinely has none.
+  An unknown mode is a **400** naming the
+  three (it used to be a silent compact, indistinguishable from an old server
+  ignoring `list`), refused ahead of the empty-ACL short-circuit so it is never
+  disguised as a 404. **`api_minor` is 1** — its first move — because an old
+  server cannot refuse the new mode. **The detail row is read with `dict_row`**,
+  not positionally: the SELECT's shape is conditional on the mode, so an index
+  would have to agree with a column list two branches away (#119/#123 made the
+  same call).
+  - **Consequences filed, not fixed:** the read path no longer touches
+    `messages.headers`, so that column and `messages_headers_gin` are now
+    **write-only** (#383); the per-occurrence broad catch moved onto the
+    serving path still discards its exception, and now runs per request rather
+    than once at sync (#382); and the `substring()` prefix read may not be cheap
+    if `raw_bytes` is LZ4-compressed in TOAST, which is unmeasured (#384).
+  - **Two invariants here change no answer, so they are pinned structurally**
+    (both mutations survived the whole suite when found). A `truncated=True`
+    prefix that still holds the separator must be served *from it* — that is
+    every message over the ceiling, i.e. every attachment-bearing one — or each
+    such request pays a full `raw_bytes` re-read under a WARNING that states the
+    opposite of the truth. And the `substring(...)` bound is the only thing
+    stopping a 35 MB column being pulled on a header fetch; dropping it changes
+    no response, so `test_the_header_read_is_bounded_and_only_paid_when_headers_are_wanted`
+    asserts the statement the cursor is given, with `compact` as the control.
 - **Browse & search pagination (PR #70)**:
   - `GET /v1/messages` is the canonical keyset browse endpoint, ordered
     `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC` with
@@ -5328,7 +5379,9 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
     hybrid search; `smart=true` runs the Phase-4 LLM rewrite (page 1) and the
     response `rewrite_skipped` reflects whether it happened; page by re-calling
     with `next_cursor`; a cursor-expired error means re-run without a cursor.
-  - `get_message(message_id, full_headers=False)`.
+  - `get_message(message_id, headers="compact"|"full"|"list")` — `"list"`
+    returns one `{name, value}` entry per header occurrence in wire order,
+    for order-sensitive headers like `Received` (#379).
   - `get_attachment(sha256, mode="text"|"metadata")` — extracted text or
     metadata, **never raw bytes** (raw download stays the HTTP
     `/v1/attachments/{sha256}` route).
@@ -5350,7 +5403,11 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   already lives in api/); (2) ONE `search` tool, not three — `run_search` takes a
   single optional `cursor` and auto-grows the pool, paging = re-call with
   `next_cursor`; (3) `get_message(full_headers=…)`, not
-  `include_body`/`include_attachments`.
+  `include_body`/`include_attachments` (**corrected by #379**:
+  `full_headers=False` is gone — the tool now takes
+  `headers="compact"|"full"|"list"`; the reconciliation this bullet records,
+  one parameter instead of two, is unchanged, only its shape widened from a
+  bool to a three-mode axis).
 - Tools return structured content; `SearchCursorExpired` / `NotFound` /
   `ValidationFailed` map to clean `ToolError`s. Raw attachment bytes are
   intentionally NOT exposed over MCP (HTTP `/v1/attachments` only). **Deferred

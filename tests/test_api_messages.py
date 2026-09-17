@@ -2,13 +2,15 @@
 # Copyright (C) 2026 Horst Herb
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import psycopg
 import pytest
 
-from localmail.api.errors import NotFound
+from localmail.api.errors import NotFound, ValidationFailed
 from localmail.api.messages import _build_cid_map, get_message, get_message_raw
 from localmail.attachments import write_attachments
 from localmail.parser import parse_message
@@ -46,8 +48,15 @@ def _seed_msg(conn: psycopg.Connection, **overrides) -> int:
             body_text="hi there",
             body_html="<p>hi <b>there</b></p>",
             attachments=[],
-            raw_bytes=b"From: anna\r\nSubject: hello\r\n\r\nhi",
-            headers={"From": "anna@example.com", "Subject": "hello", "Date": "Mon, 4 Mar 2026 10:00:00 +0000"},
+            raw_bytes=(
+                b"Received: by 10.0.0.1 with SMTP id aaa\r\n"
+                b"From: Anna <anna@example.com>\r\n"
+                b"received: from relay.example\r\n"
+                b"Subject: hello\r\n"
+                b"Date: Wed, 04 Mar 2026 10:00:00 +0000\r\n"
+                b"\r\nhi there"
+            ),
+            headers={"From": ["Anna <anna@example.com>"], "Subject": ["hello"]},
             date_sent=datetime(2026, 3, 4, 10, 0, tzinfo=timezone.utc),
             date_received=now,
         )
@@ -196,7 +205,7 @@ def test_get_message_attachment_malformed_sha_degrades_to_null(
 def test_get_message_returns_compact_headers(db_conn: psycopg.Connection) -> None:
     mid = _seed_msg(db_conn)
     db_conn.commit()
-    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, full_headers=False)
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="compact")
     assert msg["id"] == str(mid)
     assert msg["subject"] == "hello"
     assert msg["from"]["address"] == "anna@example.com"
@@ -206,15 +215,191 @@ def test_get_message_returns_compact_headers(db_conn: psycopg.Connection) -> Non
     assert msg["body_text"] == "hi there"
     assert msg["account"]["name"] == "acct"
     assert msg["folders"][0]["name"] == "INBOX"
-    assert "headers" not in msg or msg.get("headers") in (None, {})
+    assert "headers" not in msg
 
 
-def test_get_message_full_headers_includes_all(db_conn: psycopg.Connection) -> None:
+def test_full_headers_are_read_from_the_message_not_the_stored_column(
+    db_conn: psycopg.Connection,
+) -> None:
+    """The column is a snapshot of the parser that ran at sync (#379).
+
+    The fixture's JSONB deliberately omits `Date` and `Received`; a passthrough
+    would return the column and miss them.
+    """
     mid = _seed_msg(db_conn)
     db_conn.commit()
-    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, full_headers=True)
-    assert msg["headers"]["From"] == "anna@example.com"
-    assert msg["headers"]["Date"].startswith("Mon, 4 Mar")
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="full")
+    assert msg["headers"]["From"] == ["Anna <anna@example.com>"]
+    assert msg["headers"]["Date"] == ["Wed, 04 Mar 2026 10:00:00 +0000"]
+    assert msg["headers"]["Received"] == ["by 10.0.0.1 with SMTP id aaa"]
+
+
+def test_list_keeps_every_occurrence_in_wire_order(db_conn: psycopg.Connection) -> None:
+    mid = _seed_msg(db_conn)
+    db_conn.commit()
+    msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="list")
+    assert [e["name"] for e in msg["headers"]] == [
+        "Received", "From", "received", "Subject", "Date",
+    ]
+    assert msg["headers"][0]["value"] == "by 10.0.0.1 with SMTP id aaa"
+
+
+def test_grouping_the_list_reproduces_full(db_conn: psycopg.Connection) -> None:
+    """The refinement invariant, end to end through the accessor."""
+    mid = _seed_msg(db_conn)
+    db_conn.commit()
+    listed = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="list")
+    full = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="full")
+    grouped: dict[str, list[str]] = {}
+    for entry in listed["headers"]:
+        grouped.setdefault(entry["name"], []).append(entry["value"])
+    assert grouped == full["headers"]
+
+
+def test_an_unusable_mode_is_refused_even_with_an_empty_acl(
+    db_conn: psycopg.Connection,
+) -> None:
+    """A refusal must never be disguised as a 404 (slice A's ordering rule)."""
+    mid = _seed_msg(db_conn)
+    db_conn.commit()
+    with pytest.raises(ValidationFailed) as excinfo:
+        get_message(db_conn, mid, allowed_account_ids=[], headers="xyzzy")
+    assert "'list'" in str(excinfo.value)
+
+
+def test_the_mode_guard_precedes_the_acl_lookup_and_the_select() -> None:
+    """The pin the design doc's Testing section claims and never shipped.
+
+    The empty-ACL test above only proves the mode guard outranks the
+    ACL-emptiness short-circuit — it uses a real `db_conn` that would work
+    fine if touched, so it cannot show the guard precedes IO. This hands
+    `get_message` a connection double that raises the moment anything is
+    touched, the `tests/test_searcher_guards_precede_io.py` shape, with a
+    *populated* ACL so the SELECT would otherwise run.
+    """
+    conn = MagicMock(spec=psycopg.Connection)
+    conn.cursor.side_effect = AssertionError("no cursor may be opened")
+    with pytest.raises(ValidationFailed) as excinfo:
+        get_message(conn, 1, allowed_account_ids=[1, 2, 3], headers="xyzzy")
+    assert "'list'" in str(excinfo.value)
+    conn.cursor.assert_not_called()
+
+
+def _shrink_ceiling(monkeypatch, ceiling: int) -> None:
+    """Both halves of the read rule move together, or the test proves nothing.
+
+    `PREFIX_READ_BYTES` is what the SELECT asks for and
+    `header_block.HEADER_BLOCK_READ_BYTES` is what `prefix_is_truncated`
+    judges against. Patching one leaves the two disagreeing, which is exactly
+    the state the constants are co-located to prevent.
+    """
+    monkeypatch.setattr("localmail.header_block.HEADER_BLOCK_READ_BYTES", ceiling)
+    monkeypatch.setattr("localmail.api.messages.PREFIX_READ_BYTES", ceiling + 1)
+
+
+def _padding(n_headers: int) -> bytes:
+    return b"".join(b"X-Pad-%d: %s\r\n" % (i, b"y" * 200) for i in range(n_headers))
+
+
+def test_a_header_block_past_the_ceiling_is_re_read_in_full(
+    db_conn: psycopg.Connection, monkeypatch, caplog,
+) -> None:
+    """Never a short list that looks complete."""
+    mid = _seed_msg(
+        db_conn,
+        raw_bytes=_padding(40) + b"Subject: beyond the ceiling\r\n\r\nbody",
+    )
+    db_conn.commit()
+    _shrink_ceiling(monkeypatch, 512)
+    with caplog.at_level(logging.WARNING, logger="localmail.api.messages"):
+        msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="list")
+    # Every header, not just the tail: a re-read that returned a slice would
+    # still satisfy an assertion about the last entry.
+    assert [e["name"] for e in msg["headers"]] == (
+        [f"X-Pad-{i}" for i in range(40)] + ["Subject"]
+    )
+    assert msg["headers"][-1] == {"name": "Subject", "value": "beyond the ceiling"}
+    # Anchored on the wording and the logger, not on the id: `mid` is a small
+    # serial from a freshly-truncated table, so `str(mid) in ...` is satisfied
+    # by any unrelated record carrying that digit.
+    warnings = [
+        r for r in caplog.records if r.name == "localmail.api.messages"
+    ]
+    assert len(warnings) == 1
+    assert "no header/body separator found" in warnings[0].getMessage()
+    assert str(mid) in warnings[0].getMessage()
+
+
+def test_an_ordinary_message_past_the_ceiling_is_served_without_a_re_read(
+    db_conn: psycopg.Connection, monkeypatch, caplog,
+) -> None:
+    """The negative control: truncated, but the block ended before the cut.
+
+    This is every message over the ceiling whose headers are normal — i.e. the
+    common case. Without it, `header_block` deciding on `truncated` alone and
+    never searching passes every other test here, and each such request pays a
+    full `raw_bytes` re-read under a WARNING asserting the opposite of the truth.
+    """
+    mid = _seed_msg(
+        db_conn,
+        raw_bytes=b"Subject: inside the ceiling\r\n\r\n" + b"z" * 4000,
+    )
+    db_conn.commit()
+    _shrink_ceiling(monkeypatch, 512)
+    with caplog.at_level(logging.WARNING, logger="localmail.api.messages"):
+        msg = get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="list")
+    assert msg["headers"] == [{"name": "Subject", "value": "inside the ceiling"}]
+    assert [r for r in caplog.records if r.name == "localmail.api.messages"] == []
+
+
+def test_the_header_read_is_bounded_and_only_paid_when_headers_are_wanted(
+    db_conn: psycopg.Connection, monkeypatch,
+) -> None:
+    """`substring(...)` is the whole protection against pulling a 35 MB column.
+
+    Nothing about the *answers* changes if it is dropped — the separator is
+    still found — so this is asserted structurally, on the statement the
+    cursor is actually given. `compact` must not pay for it at all.
+    """
+    mid = _seed_msg(db_conn)
+    db_conn.commit()
+    seen: list[str] = []
+    real_cursor = db_conn.cursor
+
+    class _Recording:
+        """psycopg's `Cursor.execute` is read-only C, so delegate rather than patch."""
+
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, query, params=None, **kw):
+            seen.append(query if isinstance(query, str) else query.decode())
+            return self._cur.execute(query, params, **kw)
+
+        def __enter__(self):
+            self._cur.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._cur.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._cur, name)
+
+    monkeypatch.setattr(
+        db_conn, "cursor", lambda *a, **kw: _Recording(real_cursor(*a, **kw))
+    )
+
+    get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT, headers="full")
+    detail = [q for q in seen if "FROM messages m" in q]
+    assert len(detail) == 1
+    assert "substring(m.raw_bytes from 1 for %(limit)s)" in detail[0]
+
+    seen.clear()
+    get_message(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
+    detail = [q for q in seen if "FROM messages m" in q]
+    assert len(detail) == 1
+    assert "raw_bytes" not in detail[0]
 
 
 def test_get_message_not_found_raises(db_conn: psycopg.Connection) -> None:
@@ -226,7 +411,7 @@ def test_get_message_raw_returns_bytes(db_conn: psycopg.Connection) -> None:
     mid = _seed_msg(db_conn)
     db_conn.commit()
     raw = get_message_raw(db_conn, mid, allowed_account_ids=_ANY_ACCOUNT)
-    assert raw.startswith(b"From: anna")
+    assert raw.startswith(b"Received: by 10.0.0.1 with SMTP id aaa")
 
 
 def test_get_message_raw_not_found_raises(db_conn: psycopg.Connection) -> None:

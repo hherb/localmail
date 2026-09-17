@@ -838,6 +838,17 @@ call, with or without a `since` cursor). Clients use `/v1/messages`
 for initial mail-list load and history scroll, and `/v1/changes` for
 polling new arrivals.
 
+`GET /v1/messages/{id}` takes `headers=compact|full|list`. `compact` (the
+default) omits the `headers` key; `full` returns an object keyed by the header
+name as spelled on the wire, each value that name's occurrences; `list` returns
+one `{name, value}` entry per occurrence **in wire order**, which is what a
+`Received` chain or an `Authentication-Results` sequence needs — an object
+cannot express order across names, and splits `Received` from `received`. Any
+other value is a 400. Grouping `list` by name reproduces `full` exactly.
+
+`headers=list` is announced by `api_minor >= 1` on `GET /v1/version`: an older
+server answers the unknown mode with 200 and no `headers` key.
+
 ### Server-side polling cursors
 
 A client that keeps its own `since` cursor re-reads the 200-message tail

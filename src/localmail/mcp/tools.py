@@ -94,7 +94,7 @@ def tool_get_message(
     *,
     message_id: int,
     allowed_account_ids: list[int],
-    full_headers: bool = False,
+    headers: str = "compact",
 ) -> dict[str, Any]:
     """One message (headers, body, attachment list), ACL-scoped.
 
@@ -104,7 +104,7 @@ def tool_get_message(
     return api_get_message(
         conn, message_id,
         allowed_account_ids=allowed_account_ids,
-        full_headers=full_headers,
+        headers=headers,
     )
 
 

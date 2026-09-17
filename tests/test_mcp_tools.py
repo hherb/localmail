@@ -194,6 +194,31 @@ def test_tool_get_message_denied_raises_notfound(db_conn):
         )
 
 
+def test_tool_get_message_forwards_the_header_mode(db_conn):
+    uid = create_user(db_conn, "carol-hdr", "hunter2")
+    acct = _insert_account(db_conn, "carol-hdr-acct")
+    grant_account(db_conn, uid, acct)
+    raw = b"Received: by 10.0.0.1\r\nFrom: a@x\r\nreceived: from relay\r\n\r\nbody"
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO messages"
+            "  (account_id, message_id, raw_sha256, subject, body_text,"
+            "   headers, raw_bytes, size_bytes)"
+            " VALUES (%s, '<hdr-mcp@x>', %s, 'hi', 'body', '{}'::jsonb, %s, %s)"
+            " RETURNING id",
+            (acct, b"\x5a" * 32, raw, len(raw)),
+        )
+        row = cur.fetchone(); assert row is not None
+        mid = int(row[0])
+    db_conn.commit()
+    msg = tools.tool_get_message(
+        db_conn, message_id=mid,
+        allowed_account_ids=allowed_account_ids(db_conn, uid),
+        headers="list",
+    )
+    assert [e["name"] for e in msg["headers"]] == ["Received", "From", "received"]
+
+
 def test_tool_list_messages_scopes(db_conn):
     uid = create_user(db_conn, "erin", "hunter2")
     granted = _insert_account(db_conn, "erin-granted")

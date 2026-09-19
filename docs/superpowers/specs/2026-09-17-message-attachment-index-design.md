@@ -106,13 +106,14 @@ reasoned:**
 MAX_JSONB_INDEX = 2**31 - 1
 ```
 
-*(Planning correction: an earlier wording of this comment named
-`operator does not exist: jsonb -> bigint` as the error a larger index
-raises. Verified on the shipped SQL, which casts the operand with `%s::int`:
-the actual error is `NumericValueOutOfRange: integer out of range`. The
-uncast form does raise the originally-named error, but that isn't what
-ships. The conclusion — either way a 500, and no array has that many
-entries — is unchanged.)*
+*(Planning correction: an earlier wording of both this comment and the prose
+bullet above it named `UndefinedFunction` / `operator does not exist: jsonb ->
+bigint` as the error a larger index raises. Verified on the shipped SQL,
+which casts the operand with `%s::int`: the actual error is
+`NumericValueOutOfRange: integer out of range`. The uncast form does raise
+the originally-named `UndefinedFunction`/`jsonb -> bigint` error, but that
+isn't what ships. The conclusion — either way a 500, and no array has that
+many entries — is unchanged.)*
 
 The message id needs no such bound: `messages.id = %s` compares `bigint` with
 `numeric` without error, measured up to `10**20`.

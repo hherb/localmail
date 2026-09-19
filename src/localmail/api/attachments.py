@@ -12,6 +12,7 @@ which is accelerated by the GIN index from migration 0013.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
@@ -36,6 +37,71 @@ def _parse_sha256_hex(sha256_hex: str) -> bytes:
         return bytes.fromhex(sha256_hex)
     except ValueError as exc:
         raise ValidationFailed(f"sha256 is not valid hex: {exc}") from exc
+
+
+#: The largest operand `jsonb -> integer` accepts. A larger index is
+#: `operator does not exist: jsonb -> bigint` — a 500 — and cannot address an
+#: entry anyway, since no array has that many.
+MAX_JSONB_INDEX = 2**31 - 1
+
+
+@dataclass(frozen=True)
+class MessageAttachment:
+    """One entry of a message's ``attachments`` array, resolved by position.
+
+    ``filename`` is *this entry's* name. A blob is content-addressable and may
+    be carried under several names, even within one message, so this is the
+    only way to know which one the caller meant.
+    """
+
+    sha256: str
+    filename: str | None
+
+
+def _attachment_absent(message_id: int, index: int) -> NotFound:
+    # One wording for every resolver 404, so no branch can tell a caller
+    # whether the message exists, is ungranted, or is merely short.
+    return NotFound(f"attachment {index} of message {message_id} not found")
+
+
+def resolve_message_attachment(
+    conn: psycopg.Connection,
+    message_id: int,
+    index: int,
+    *,
+    allowed_account_ids: list[int],
+) -> MessageAttachment:
+    """Resolve entry ``index`` of message ``message_id`` under the message ACL.
+
+    A negative index is refused (``ValidationFailed``) before anything else:
+    Postgres ``->`` indexes from the end, so ``attachments -> -1`` would
+    silently answer with the last entry. It is refused ahead of the empty-ACL
+    short-circuit so a malformed request is never disguised as a 404.
+
+    Every other failure is the one ``NotFound``: the message is missing or
+    ungranted, the index is past the end, the index exceeds
+    ``MAX_JSONB_INDEX`` (decided without a query), or the entry carries no
+    hash.
+    """
+    if index < 0:
+        raise ValidationFailed(f"attachment index must be >= 0, got {index}")
+    if index > MAX_JSONB_INDEX or not allowed_account_ids:
+        raise _attachment_absent(message_id, index)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT m.attachments -> %s::int FROM messages m "
+            "WHERE m.id = %s AND m.account_id = ANY(%s)",
+            (index, message_id, allowed_account_ids),
+        )
+        row = cur.fetchone()
+    entry = None if row is None else row[0]
+    if not isinstance(entry, dict) or not entry.get("sha256"):
+        raise _attachment_absent(message_id, index)
+    filename = entry.get("filename")
+    return MessageAttachment(
+        sha256=str(entry["sha256"]),
+        filename=None if filename is None else str(filename),
+    )
 
 
 def _caller_can_read_blob(

@@ -98,11 +98,21 @@ reasoned:**
   formed and simply cannot exist, so it raises `NotFound` before the query:
 
 ```python
-#: The largest operand `jsonb -> integer` accepts. A larger index is
-#: `operator does not exist: jsonb -> bigint` — a 500 — and cannot address an
-#: entry anyway, since no array has that many.
+#: The largest operand `jsonb -> integer` accepts. The shipped SQL casts with
+#: `%s::int`, so a larger index raises `NumericValueOutOfRange: integer out of
+#: range` — a 500 — rather than the uncast form's `operator does not exist:
+#: jsonb -> bigint`; either way it's a 500, and cannot address an entry
+#: anyway, since no array has that many.
 MAX_JSONB_INDEX = 2**31 - 1
 ```
+
+*(Planning correction: an earlier wording of this comment named
+`operator does not exist: jsonb -> bigint` as the error a larger index
+raises. Verified on the shipped SQL, which casts the operand with `%s::int`:
+the actual error is `NumericValueOutOfRange: integer out of range`. The
+uncast form does raise the originally-named error, but that isn't what
+ships. The conclusion — either way a 500, and no array has that many
+entries — is unchanged.)*
 
 The message id needs no such bound: `messages.id = %s` compares `bigint` with
 `numeric` without error, measured up to `10**20`.

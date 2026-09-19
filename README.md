@@ -852,11 +852,11 @@ server answers the unknown mode with 200 and no `headers` key.
 `GET /v1/messages/{id}/attachments/{index}` serves attachment `index` — its
 0-based position in the `attachments` array `GET /v1/messages/{id}` returns —
 with the same bytes, `Range`, `ETag` and download headers as
-`GET /v1/attachments/{sha256}`. Use it when a message carries two attachments
-of one filename, or when the download should keep *this* entry's name: a blob
-is content-addressed, so the hash route can only offer one of the names it is
-carried under. The index counts inline parts too, exactly as the array does.
-An index past the end is a 404.
+`GET /v1/attachments/{sha256}`. Use it when the download should keep *this*
+entry's name: a blob is content-addressed, so the hash route can only offer
+one of the names it is carried under. Also use it when a message carries two
+attachments of one filename. The index counts inline parts too, exactly as
+the array does. An index past the end is a 404.
 
 Extracted text is paged by **character** on both
 `GET /v1/attachments/{sha256}/text` and

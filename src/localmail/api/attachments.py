@@ -39,9 +39,11 @@ def _parse_sha256_hex(sha256_hex: str) -> bytes:
         raise ValidationFailed(f"sha256 is not valid hex: {exc}") from exc
 
 
-#: The largest operand `jsonb -> integer` accepts. A larger index is
-#: `operator does not exist: jsonb -> bigint` — a 500 — and cannot address an
-#: entry anyway, since no array has that many.
+#: The largest operand `jsonb -> integer` accepts. The shipped SQL casts with
+#: `%s::int`, so a larger index raises `NumericValueOutOfRange: integer out of
+#: range` — a 500 — rather than the uncast form's `operator does not exist:
+#: jsonb -> bigint`; either way it's a 500, and cannot address an entry
+#: anyway, since no array has that many.
 MAX_JSONB_INDEX = 2**31 - 1
 
 
@@ -97,9 +99,20 @@ def resolve_message_attachment(
     entry = None if row is None else row[0]
     if not isinstance(entry, dict) or not entry.get("sha256"):
         raise _attachment_absent(message_id, index)
+    # A stored hash that isn't a well-formed sha256 can only have gotten here
+    # some other way than this API (`_parse_sha256_hex` already rejects a
+    # non-string) — reuse it so "valid sha256" has one definition, and fold
+    # its refusal into the shared 404 rather than let a caller who sent a
+    # perfectly well-formed request see `_parse_sha256_hex`'s wording about
+    # data they never sent.
+    sha256 = entry["sha256"]
+    try:
+        _parse_sha256_hex(sha256)
+    except ValidationFailed as exc:
+        raise _attachment_absent(message_id, index) from exc
     filename = entry.get("filename")
     return MessageAttachment(
-        sha256=str(entry["sha256"]),
+        sha256=str(sha256),
         filename=None if filename is None else str(filename),
     )
 
@@ -318,6 +331,10 @@ def get_attachment_text_page(
     ):
         raise NotFound(f"no extracted text for attachment {sha256_hex}")
     with conn.cursor() as cur:
+        # substring() is strict: substring(x from n for NULL) returns NULL, not
+        # x from n to the end. So the no-limit case can't collapse into the
+        # one-statement form below with a NULL `for` — that would silently
+        # empty every read that has no limit.
         if window.sql_for is None:
             cur.execute(
                 "SELECT substring(extracted_text from %s::int), "

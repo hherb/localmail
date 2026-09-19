@@ -147,8 +147,14 @@ def test_absent_index_is_404(
 
 def test_ungranted_is_404(db_dsn, api_token, db_conn, tmp_path) -> None:
     mid, _ = _seed(db_conn, tmp_path, _SAME_NAME)
-    r = _client(db_dsn).get(f"/v1/messages/{mid}/attachments/0", headers=_auth(api_token))
-    assert r.status_code == 404
+    c = _client(db_dsn)
+    ungranted = c.get(f"/v1/messages/{mid}/attachments/0", headers=_auth(api_token))
+    nonexistent = c.get(f"/v1/messages/{mid + 999_999}/attachments/0", headers=_auth(api_token))
+    assert ungranted.status_code == nonexistent.status_code == 404
+    # No enumeration: an ungranted-but-real message and one that doesn't
+    # exist at all read exactly the same, each for its own message id.
+    assert ungranted.json()["detail"] == f"attachment 0 of message {mid} not found"
+    assert nonexistent.json()["detail"] == f"attachment 0 of message {mid + 999_999} not found"
 
 
 @pytest.mark.parametrize("index", ["-1", "x", "1.0"])
@@ -158,6 +164,16 @@ def test_malformed_index_is_problem_json(
     mid, _ = _seed(db_conn, tmp_path, _SAME_NAME)
     grant_alice_all_accounts()
     r = _client(db_dsn).get(f"/v1/messages/{mid}/attachments/{index}", headers=_auth(api_token))
+    assert r.status_code == 400
+    assert r.json()["type"] == "/problems/validation-failed"
+
+
+def test_a_malformed_index_is_a_400_even_ungranted(db_dsn, api_token, db_conn, tmp_path) -> None:
+    # index is judged before the connection opens, so it's a 400 even for a
+    # caller granted nothing — the bytes-route counterpart of
+    # test_a_bad_text_window_is_a_400_even_ungranted.
+    mid, _ = _seed(db_conn, tmp_path, _SAME_NAME)
+    r = _client(db_dsn).get(f"/v1/messages/{mid}/attachments/-1", headers=_auth(api_token))
     assert r.status_code == 400
     assert r.json()["type"] == "/problems/validation-failed"
 

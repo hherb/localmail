@@ -138,3 +138,13 @@ def test_an_empty_acl_is_a_404(db_conn: psycopg.Connection) -> None:
     _aid, mid = _seed(db_conn, _ENTRIES)
     with pytest.raises(NotFound):
         resolve_message_attachment(db_conn, mid, 0, allowed_account_ids=[])
+
+
+def test_a_stored_malformed_sha256_is_a_404_not_a_400(db_conn: psycopg.Connection) -> None:
+    # A hash that isn't 64 hex chars can only have gotten into the row some
+    # other way than this API (a hand edit, a pre-validation import) — it must
+    # read the same as a missing hash, not surface `_parse_sha256_hex`'s
+    # wording about a well-formed request the caller never made.
+    aid, mid = _seed(db_conn, [{"filename": "x", "sha256": "not-hex"}])
+    with pytest.raises(NotFound, match=f"attachment 0 of message {mid} not found"):
+        resolve_message_attachment(db_conn, mid, 0, allowed_account_ids=[aid])

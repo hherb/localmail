@@ -789,6 +789,7 @@ src/localmail/
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
   pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
+  text_window.py    # pure: TextWindow/TextPage — character paging of stored text (slice D)
   ocr_policy.py     # pure: plan_ocr / unknown_engine_message (#248)
   version_report.py # resolve_version + pure unknown_version_diagnostic (#291)
                     #   + METADATA_UNREADABLE (#296) + log_version_diagnostic (#295)
@@ -3196,7 +3197,9 @@ for the full design.
   indexes from the end, so `-> -1` is the *last* entry — `parse_int_id` refuses
   it on the wire, and the accessor refuses it again for library callers), and
   one past **`MAX_JSONB_INDEX`** (int4) is a 404 decided without a query
-  (`jsonb -> bigint` does not exist, so it was a 500).
+  (the shipped SQL casts with `%s::int`, so an oversized index raises
+  `NumericValueOutOfRange: integer out of range`, a 500; the uncast form
+  would instead raise `jsonb -> bigint does not exist` — either way a 500).
   - **The only behavioural difference from the sha route is the name.** The
     `Content-Disposition` carries the resolved entry's own filename. Measured:
     888 in-message `(message, sha)` groups carry one blob under two names, and

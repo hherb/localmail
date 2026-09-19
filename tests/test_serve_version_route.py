@@ -117,3 +117,11 @@ def test_api_minor_announces_attachment_index_addressing(db_dsn: str) -> None:
     version can tell the two apart."""
     body = _client(db_dsn).get("/v1/version").json()
     assert body["api_minor"] >= 2
+
+
+def test_api_minor_announces_the_search_hit_projection(db_dsn: str) -> None:
+    """An old server refuses `fields`/`snippet_chars` with a 400 (#364), so a
+    client could discover the feature by failing; the version lets it ask
+    first."""
+    body = _client(db_dsn).get("/v1/version").json()
+    assert body["api_minor"] >= 3

@@ -556,3 +556,23 @@ def test_rewriter_max_expansion_terms_default():
     from localmail.config import SearchConfig
     cfg = SearchConfig()
     assert cfg.rewriter_max_expansion_terms == 8
+
+
+def test_snippet_max_chars_defaults_to_1000() -> None:
+    assert SearchConfig().snippet_max_chars == 1000
+
+
+def test_snippet_max_chars_below_the_default_width_is_rejected() -> None:
+    # Otherwise the default width would be a value the API refuses, and a
+    # caller could not state it explicitly.
+    with pytest.raises(ValidationError, match="snippet_max_chars"):
+        SearchConfig(snippet_width_chars=200, snippet_max_chars=199)
+
+
+def test_snippet_max_chars_equal_to_the_width_is_accepted() -> None:
+    assert SearchConfig(snippet_width_chars=300, snippet_max_chars=300).snippet_max_chars == 300
+
+
+def test_snippet_max_chars_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        SearchConfig(snippet_width_chars=1, snippet_max_chars=0)

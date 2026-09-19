@@ -87,6 +87,31 @@ class SearchRequest(BaseModel):
     # Opt-in LLM query rewrite (Phase 4). Ignored gracefully when the server
     # has no rewriter configured — the response's rewrite_skipped reflects it.
     smart: bool = False
+    # Slice E: project each hit to exactly these keys (`snippet` is the
+    # plain-text name for `snippet_html`), and size the snippet window.
+    # Deliberately no `min_length`/`ge`/`le`: pydantic would answer 422 with
+    # an array `detail` (#370), and `run_search`'s pure rules answer a
+    # problem+json 400 that names the problem. A non-list `fields` is a type
+    # error on a known field and stays the 422 that #370 tracks.
+    fields: list[str] | None = None
+    # `Any`, not `int | bool` and not a bare `int`: pydantic's lax coercion is
+    # exactly what this field must not have. A plain `int` field silently
+    # coerces `"5"` and `5.0` to `5` — answered 200 under a request that named
+    # a string or a float, never the integer `snippet_chars_error` checked —
+    # and a genuinely non-numeric value (`1.5`, `"abc"`) gets pydantic's own
+    # 422 with an array `detail` (#370), not the problem+json 400
+    # `snippet_chars_error` gives it. `int | bool` fixed the `bool` half (a
+    # JSON `true` stayed a `bool` rather than coercing to `1`) but left the
+    # string/float coercions live. `Any` reaches every JSON value into
+    # `snippet_chars_error` unmodified, so that pure rule is the one
+    # authority: every refusal — bool, non-int, out-of-range — is its call,
+    # worded once, on the wire and for library callers alike.
+    snippet_chars: Any = Field(
+        default=None,
+        description=("Snippet window width in characters: an integer from 1 "
+                     "to [search] snippet_max_chars. Anything else is a "
+                     "400."),
+    )
 
 
 def _unknown_field_error(req: SearchRequest) -> str | None:
@@ -138,4 +163,6 @@ def search_endpoint(
         sort_order=req.sort_order,
         cursor=req.cursor,
         smart=req.smart,
+        fields=req.fields,
+        snippet_chars=req.snippet_chars,
     )

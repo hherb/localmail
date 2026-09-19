@@ -862,7 +862,8 @@ Extracted text is paged by **character** on both
 `GET /v1/attachments/{sha256}/text` and
 `GET /v1/messages/{id}/attachments/{index}/text`: pass `offset` and `limit`,
 and read the next page from `next_offset` (`null` at the end). Omitting both
-returns the whole text, as before. Do not compute the next offset from
+returns the whole text in `text`, as before; the four new keys are present
+either way. Do not compute the next offset from
 `text.length` in JavaScript — it counts UTF-16 units, not characters, and
 skips text on any page containing a character above U+FFFF.
 
@@ -870,8 +871,10 @@ skips text on any page containing a character above U+FFFF.
 {"text": "…", "offset": 0, "limit": 20000, "total": 128875, "next_offset": 20000}
 ```
 
-Both are announced by `api_minor >= 2`: an older server answers the index
-route with a 404 indistinguishable from a missing message.
+Both are announced by `api_minor >= 2`. An older server answers the index
+route with a 404 indistinguishable from a missing message, and — the silent
+half — ignores `offset`/`limit`, returning the whole text with no
+`next_offset`, so check the version before relying on paging.
 
 ### Server-side polling cursors
 

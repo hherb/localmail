@@ -134,3 +134,24 @@ def test_a_bad_query_is_a_validation_failure(
 ) -> None:
     with pytest.raises(ValidationFailed, match=fragment):
         text_window_from_query(offset, limit)
+
+
+def test_an_offset_without_a_limit_reads_from_the_offset(
+    db_conn: psycopg.Connection,
+) -> None:
+    # The no-limit branch is its own statement (`substring … for NULL` is
+    # strict), so it needs its own pin: reading from 1 there would return the
+    # whole text labelled `offset: 3`.
+    sha, aid = _seed_text(db_conn, "hello")
+    page = get_attachment_text_page(
+        db_conn, sha, allowed_account_ids=[aid], window=TextWindow(offset=3),
+    )
+    assert (page.text, page.offset, page.total, page.next_offset) == ("lo", 3, 5, None)
+
+
+def test_get_attachment_text_is_never_capped(db_conn: psycopg.Connection) -> None:
+    # MCP reads through this with the whole-text window; every other fixture
+    # is shorter than any plausible page size, so a silent cap would pass them.
+    text = "x" * 300_000 + _ASTRAL
+    sha, aid = _seed_text(db_conn, text)
+    assert get_attachment_text(db_conn, sha, allowed_account_ids=[aid]) == text

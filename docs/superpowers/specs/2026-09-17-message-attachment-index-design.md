@@ -238,6 +238,14 @@ class TextPage:
     def to_wire(self) -> dict[str, object]: ...
 ```
 
+*(Review correction, in place: the `MAX_TEXT_CHARS` comment above names the
+wrong error, the same slip as the `MAX_JSONB_INDEX` one. The shipped SQL casts
+with `%s::int`, so an oversized position raises `NumericValueOutOfRange:
+integer out of range`; `function substring(unknown, bigint) does not exist` is
+the uncast form's error. The conclusion — a 500, hence the clamp — is
+unchanged. The shipped comment in `text_window.py` carries both.)*
+
+
 `text_window_error` refuses `offset < 0` and `limit < 1`. **`limit=0` is
 refused, not served**, because it would answer `next_offset == offset` for any
 text not yet exhausted, and a client looping on `next_offset` would never

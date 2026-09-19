@@ -91,8 +91,11 @@ def _content_disposition(name: str) -> str:
     return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
 
 
-def _safe_response_mime(stored: str) -> str:
-    return _SAFE_FALLBACK_MIME if stored.lower() in _INLINE_RISKY_MIMES else stored
+def _safe_response_mime(stored: str | None) -> str:
+    # `attachment_blobs.mime_type` is nullable; no type is the safe type.
+    if not stored or stored.lower() in _INLINE_RISKY_MIMES:
+        return _SAFE_FALLBACK_MIME
+    return stored
 
 
 def _fallback_filename(sha256_hex: str) -> str:
@@ -171,7 +174,7 @@ def blob_response(
     request: Request,
     *,
     sha256: str,
-    mime: str,
+    mime: str | None,
     size: int,
     fp: BinaryIO,
     filename: str | None,

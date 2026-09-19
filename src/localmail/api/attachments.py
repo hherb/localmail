@@ -12,6 +12,7 @@ which is accelerated by the GIN index from migration 0013.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -22,14 +23,23 @@ from localmail.api.errors import NotFound, ValidationFailed
 from localmail.api.ids import parse_int_id
 from localmail.text_window import TextPage, TextWindow, text_window_error
 
+logger = logging.getLogger(__name__)
 
-def _parse_sha256_hex(sha256_hex: str) -> bytes:
+
+def _parse_sha256_hex(sha256_hex: object) -> bytes:
     """Decode a 64-char hex string to 32 bytes. Raises ValidationFailed on bad input.
 
     Used at every API entry point so malformed path parameters surface as
     400 problem+json rather than an unhandled 500 from bytes.fromhex.
     """
-    if not isinstance(sha256_hex, str) or len(sha256_hex) != 64:
+    if not isinstance(sha256_hex, str):
+        # Worded without len(): a stored JSONB number reaches here, and
+        # len(5) would raise TypeError past every `except ValidationFailed`.
+        raise ValidationFailed(
+            "sha256 must be a 64-character hex string, "
+            f"got {type(sha256_hex).__name__}"
+        )
+    if len(sha256_hex) != 64:
         raise ValidationFailed(
             f"sha256 must be a 64-character hex string, got {len(sha256_hex)} chars"
         )
@@ -82,8 +92,13 @@ def resolve_message_attachment(
 
     Every other failure is the one ``NotFound``: the message is missing or
     ungranted, the index is past the end, the index exceeds
-    ``MAX_JSONB_INDEX`` (decided without a query), or the entry carries no
-    hash.
+    ``MAX_JSONB_INDEX`` (decided without a query), or the stored entry is
+    malformed — not an object, or carrying no well-formed sha256.
+
+    The wire cannot tell those apart, by design; the log can. A malformed
+    entry is a corrupt row an operator should hear about, so it gets one
+    WARNING. A missing message or a short array is an ordinary answer and
+    stays silent.
     """
     if index < 0:
         raise ValidationFailed(f"attachment index must be >= 0, got {index}")
@@ -97,23 +112,29 @@ def resolve_message_attachment(
         )
         row = cur.fetchone()
     entry = None if row is None else row[0]
-    if not isinstance(entry, dict) or not entry.get("sha256"):
+    if entry is None:
         raise _attachment_absent(message_id, index)
-    # A stored hash that isn't a well-formed sha256 can only have gotten here
-    # some other way than this API (`_parse_sha256_hex` already rejects a
-    # non-string) — reuse it so "valid sha256" has one definition, and fold
-    # its refusal into the shared 404 rather than let a caller who sent a
-    # perfectly well-formed request see `_parse_sha256_hex`'s wording about
-    # data they never sent.
-    sha256 = entry["sha256"]
+    # The column has no CHECK, so a restore or a hand UPDATE can put anything
+    # here. `_parse_sha256_hex` is the one definition of a valid sha256; its
+    # refusal is folded into the shared 404 rather than shown to a caller
+    # whose request was well formed.
+    sha256 = entry.get("sha256") if isinstance(entry, dict) else None
     try:
-        _parse_sha256_hex(sha256)
+        sha_bytes = _parse_sha256_hex(sha256)
     except ValidationFailed as exc:
+        logger.warning(
+            "malformed attachments entry: message_id=%d index=%d: %s",
+            message_id, index, exc,
+        )
         raise _attachment_absent(message_id, index) from exc
     filename = entry.get("filename")
     return MessageAttachment(
-        sha256=str(sha256),
-        filename=None if filename is None else str(filename),
+        # Re-encoded from the parsed bytes, so it is canonical lowercase and
+        # the ETag matches the sha route's for the same blob.
+        sha256=sha_bytes.hex(),
+        # A non-string name is as good as none: falling back to the
+        # sha-prefix name beats a Python repr in the download dialog.
+        filename=filename if isinstance(filename, str) else None,
     )
 
 
@@ -189,7 +210,7 @@ def get_attachment_blob_info(
     Lightweight probe used by the streaming route before evaluating the
     conditional-GET preconditions (#62). Enforces the same ACL check as
     ``open_attachment_bytes`` so a 404 still wins over a 304 for callers
-    who cannot read the blob, but skips the ``Path.exists()`` / file-open
+    who cannot read the blob, but skips the file open
     work and the JSONB filename scan that are wasted when
     ``If-None-Match`` is going to short-circuit to 304.
 
@@ -214,20 +235,25 @@ def _open_blob_file_at(path: str, sha256_hex: str) -> BinaryIO:
     so the file open doesn't re-run the ACL EXISTS predicate and the
     ``attachment_blobs`` SELECT that the probe just ran (#64).
 
-    The ``Path.exists()`` check stays so a blob deleted between probe
-    and open surfaces as ``NotFound`` rather than a mid-stream
-    ``FileNotFoundError``. Caller closes the returned file. Raises
-    ``NotFound`` if the on-disk file is missing.
+    A blob missing on disk — including one deleted between probe and open —
+    surfaces as ``NotFound`` rather than an unhandled ``FileNotFoundError``:
+    the open is attempted and its failure caught, so there is no
+    ``exists()``/``open()`` window to race. Caller closes the returned file.
 
     Underscore-prefixed and accepts a raw ``path`` rather than ``conn``:
     both make it obvious at every call site that this skips ACL on
     purpose, so it can't be reached for "by accident" the way the prior
     ``open_attachment_bytes(..., prefetched=...)`` kwarg could (#67).
     """
-    p = Path(path)
-    if not p.exists():
-        raise NotFound(f"attachment {sha256_hex} file missing at {path}")
-    return p.open("rb")
+    try:
+        return Path(path).open("rb")
+    except FileNotFoundError as exc:
+        # The path is logged, never sent: it is the server's filesystem
+        # layout, and the caller can act on "missing" without it.
+        logger.warning(
+            "attachment blob file missing: sha256=%s path=%s", sha256_hex, path,
+        )
+        raise NotFound(f"attachment {sha256_hex} file missing") from exc
 
 
 def open_attachment_bytes(
@@ -296,8 +322,8 @@ def text_window_from_query(offset: str | None, limit: str | None) -> TextWindow:
     The one place a query string becomes a :class:`TextWindow`, shared by both
     text routes so they cannot word a refusal two ways. Parsed with
     ``parse_int_id`` so a malformed value is problem+json, never FastAPI's 422
-    array (#370). A consequence: ``offset=-1`` is refused as "not a base-10
-    integer" before ``text_window_error`` could word it as "must be >= 0" —
+    array (#370). A consequence: ``offset=-1`` is refused as "offset must be
+    a base-10 integer" before ``text_window_error`` could word it as "must be >= 0" —
     the wording every other integer parameter on /v1 already has.
     """
     off = 0 if offset is None else parse_int_id(offset, field="offset")

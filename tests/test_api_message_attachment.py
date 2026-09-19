@@ -148,3 +148,65 @@ def test_a_stored_malformed_sha256_is_a_404_not_a_400(db_conn: psycopg.Connectio
     aid, mid = _seed(db_conn, [{"filename": "x", "sha256": "not-hex"}])
     with pytest.raises(NotFound, match=f"attachment 0 of message {mid} not found"):
         resolve_message_attachment(db_conn, mid, 0, allowed_account_ids=[aid])
+
+
+@pytest.mark.parametrize("bad_hash", [5, True, 1.5, ["x"] * 64, {"a": 1}])
+def test_a_stored_non_string_sha256_is_a_404_not_a_500(
+    db_conn: psycopg.Connection, bad_hash: object,
+) -> None:
+    # `_parse_sha256_hex` once worded its refusal with len(), which a number
+    # does not have: the TypeError escaped `except ValidationFailed` as a 500.
+    aid, mid = _seed(db_conn, [{"filename": "x", "sha256": bad_hash}])
+    with pytest.raises(NotFound, match=f"attachment 0 of message {mid} not found"):
+        resolve_message_attachment(db_conn, mid, 0, allowed_account_ids=[aid])
+
+
+@pytest.mark.parametrize("bad_entry", ["abc", 7, ["x"], True])
+def test_a_non_object_entry_is_the_shared_404(
+    db_conn: psycopg.Connection, bad_entry: object,
+) -> None:
+    aid, mid = _seed(db_conn, [bad_entry])  # type: ignore[list-item]
+    with pytest.raises(NotFound, match=f"attachment 0 of message {mid} not found"):
+        resolve_message_attachment(db_conn, mid, 0, allowed_account_ids=[aid])
+
+
+@pytest.mark.parametrize("bad_name", [7, {"a": 1}, ["x"]])
+def test_a_non_string_filename_reads_as_no_name(
+    db_conn: psycopg.Connection, bad_name: object,
+) -> None:
+    aid, mid = _seed(db_conn, [{"filename": bad_name, "sha256": _A}])
+    got = resolve_message_attachment(db_conn, mid, 0, allowed_account_ids=[aid])
+    assert got == MessageAttachment(sha256=_A, filename=None)
+
+
+def test_a_stored_uppercase_sha256_is_served_lowercase(
+    db_conn: psycopg.Connection,
+) -> None:
+    # The ETag is derived from this string; the sha route's is lowercase.
+    aid, mid = _seed(db_conn, [{"filename": "x", "sha256": _A.upper()}])
+    got = resolve_message_attachment(db_conn, mid, 0, allowed_account_ids=[aid])
+    assert got.sha256 == _A
+
+
+_LOGGER = "localmail.api.attachments"
+
+
+def test_a_malformed_entry_is_logged(
+    db_conn: psycopg.Connection, caplog: pytest.LogCaptureFixture,
+) -> None:
+    aid, mid = _seed(db_conn, [{"filename": "x", "sha256": "not-hex"}])
+    with caplog.at_level("WARNING", logger=_LOGGER), pytest.raises(NotFound):
+        resolve_message_attachment(db_conn, mid, 0, allowed_account_ids=[aid])
+    [record] = [r for r in caplog.records if r.name == _LOGGER]
+    assert record.levelname == "WARNING"
+    assert f"message_id={mid} index=0" in record.getMessage()
+
+
+def test_an_index_past_the_end_is_not_logged(
+    db_conn: psycopg.Connection, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A short array is an ordinary answer, not a corrupt row.
+    aid, mid = _seed(db_conn, _ENTRIES)
+    with caplog.at_level("DEBUG", logger=_LOGGER), pytest.raises(NotFound):
+        resolve_message_attachment(db_conn, mid, 3, allowed_account_ids=[aid])
+    assert [r for r in caplog.records if r.name == _LOGGER] == []

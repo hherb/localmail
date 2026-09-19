@@ -19,9 +19,11 @@ from dataclasses import dataclass
 
 #: Postgres caps a single field value at 1 GB, and a character is at least one
 #: byte, so no TEXT value is longer than this. `substring()` takes int4
-#: positions — a larger one is `function substring(…, bigint, …) does not
-#: exist`, a 500 — so offsets and limits are clamped here, which cannot change
-#: an answer: every offset at or past this is past the end of every text.
+#: positions. The shipped SQL casts with `%s::int`, so a larger one raises
+#: `NumericValueOutOfRange: integer out of range` (the uncast form's error is
+#: `function substring(unknown, bigint) does not exist`) — either way a 500.
+#: So offsets and limits are clamped here, which cannot change an answer:
+#: every offset at or past this is past the end of every text.
 MAX_TEXT_CHARS = 2**30
 
 
@@ -41,13 +43,37 @@ def text_window_error(offset: int, limit: int | None) -> str | None:
 
 @dataclass(frozen=True)
 class TextPage:
-    """One window of a text, with what a client needs to fetch the next."""
+    """One window of a text, with what a client needs to fetch the next.
+
+    Clients loop on ``next_offset``, so its consistency with the text is the
+    type's contract rather than its producer's arithmetic: a page claiming
+    more to read while not advancing would spin every paging client forever.
+    That can only arise if Postgres' ``length()`` and Python's ``len()`` stop
+    counting the same thing, which is exactly when it must be loud.
+    """
 
     text: str
     offset: int
     limit: int | None
     total: int
     next_offset: int | None
+
+    def __post_init__(self) -> None:
+        if self.limit is not None and len(self.text) > self.limit:
+            raise ValueError(
+                f"page holds {len(self.text)} characters, over its limit {self.limit}"
+            )
+        end = self.offset + len(self.text)
+        expected = end if end < self.total else None
+        if self.next_offset != expected:
+            raise ValueError(
+                f"next_offset {self.next_offset} disagrees with offset "
+                f"{self.offset} + {len(self.text)} characters of {self.total}"
+            )
+        if self.next_offset is not None and self.next_offset <= self.offset:
+            raise ValueError(
+                f"next_offset {self.next_offset} does not advance past {self.offset}"
+            )
 
     def to_wire(self) -> dict[str, object]:
         return {

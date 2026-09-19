@@ -57,6 +57,8 @@ def test_two_attachments_of_one_name_are_addressable_by_index(
     # The index route agrees with the array get_message returns.
     assert first.headers["etag"] == f'"{listed[0]["sha256"]}"'
     assert second.headers["etag"] == f'"{listed[1]["sha256"]}"'
+    # Both entries share a name, so this shows only that a name is served;
+    # per-entry naming is test_disposition_carries_the_entrys_own_name.
     assert 'filename="note.txt"' in second.headers["content-disposition"]
 
 

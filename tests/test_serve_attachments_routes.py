@@ -149,6 +149,22 @@ def test_attachment_text_pages_by_character(
     }
 
 
+def test_attachment_text_with_only_an_offset_reads_to_the_end(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    sha = "e2" * 32
+    _seed_text_blob(db_conn, tmp_path, sha, "Hello world")
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}/text?offset=6",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.json() == {
+        "text": "world", "offset": 6, "limit": None, "total": 11, "next_offset": None,
+    }
+
+
 @pytest.mark.parametrize("query", ["offset=-1", "offset=x", "limit=0", "limit=1.5"])
 def test_a_bad_window_is_problem_json_not_422(
     db_dsn: str, api_token: str, db_conn, tmp_path: Path,

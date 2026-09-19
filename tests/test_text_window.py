@@ -97,3 +97,31 @@ def test_to_wire_carries_exactly_the_five_keys() -> None:
     assert wire == {
         "text": "ab", "offset": 0, "limit": 2, "total": 5, "next_offset": 2,
     }
+
+
+@pytest.mark.parametrize(("text", "offset", "limit", "total", "next_offset", "fragment"), [
+    # The stall: more to read, but next_offset does not move.
+    ("", 3, 5, 10, 3, "does not advance"),
+    # Disagrees with offset + len(text).
+    ("ab", 0, 2, 5, 4, "disagrees"),
+    # Claims the end when there is more.
+    ("ab", 0, 2, 5, None, "disagrees"),
+    # Claims more when the text is exhausted.
+    ("ab", 3, 2, 5, 5, "disagrees"),
+    ("abc", 0, 2, 5, 3, "over its limit"),
+])
+def test_an_inconsistent_page_cannot_be_built(
+    text: str, offset: int, limit: int | None, total: int,
+    next_offset: int | None, fragment: str,
+) -> None:
+    with pytest.raises(ValueError, match=fragment):
+        TextPage(
+            text=text, offset=offset, limit=limit, total=total,
+            next_offset=next_offset,
+        )
+
+
+def test_a_consistent_page_builds() -> None:
+    """Positive control for the refusals above."""
+    assert TextPage(text="ab", offset=0, limit=2, total=5, next_offset=2).next_offset == 2
+    assert TextPage(text="", offset=9, limit=2, total=5, next_offset=None).text == ""

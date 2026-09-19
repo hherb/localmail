@@ -3193,7 +3193,7 @@ for the full design.
   `GET /v1/messages/{id}/attachments/{index}[/text]`; `api_minor` is **2**.
   The resolver (`api.attachments.resolve_message_attachment`) reads
   `m.attachments -> %s::int` under the **message** ACL. Two index values never
-  reach it, both measured: a **negative** index is refused (Postgres `->`
+  reach that query, both measured: a **negative** index is refused (Postgres `->`
   indexes from the end, so `-> -1` is the *last* entry — `parse_int_id` refuses
   it on the wire, and the accessor refuses it again for library callers), and
   one past **`MAX_JSONB_INDEX`** (int4) is a 404 decided without a query
@@ -3209,19 +3209,41 @@ for the full design.
     both routes. **The file open stays at each call site**, after
     `not_modified`: the #62 tests spy on each route module's
     `_open_blob_file_at`, and an open moved into the helper would make every
-    `calls == []` pass whether or not a file was opened. Each spy has a
-    positive control proving it intercepts.
+    `calls == []` pass whether or not a file was opened. Each
+    `_open_blob_file_at` spy has a positive control proving it intercepts;
+    the sha route's `get_attachment_filename` spy does not.
   - **Text is paged by character** through the pure
     [src/localmail/text_window.py](src/localmail/text_window.py), on both text
     routes. `next_offset` is server-computed because JS `.length` counts UTF-16
     units — 8 of 9,303 live extractions contain astral characters. Offsets and
     limits are clamped at `MAX_TEXT_CHARS` (2³⁰) because `substring()` takes
-    int4, which changes no answer. **A window is not cheaper in the database**:
+    int4; the clamp changes no answer. **A window is not cheaper in the database**:
     the text is TOAST-compressed (the 2.1 MB maximum is stored as 388 KB), so
     every window decompresses all of it — 3 ms first page, 8 ms last, against
     2 ms for the whole. Paging buys response size, not DB time.
   - **MCP is untouched**: `get_attachment_text` keeps its signature and
-    delegates to `get_attachment_text_page(…, window=TextWindow())`.
+    delegates to `get_attachment_text_page(…, window=TextWindow())`. Pinned
+    against a silent cap by a 300,000-character text — every other fixture
+    is shorter than any plausible page size.
+  - **`TextPage` refuses a page that does not advance.** Clients loop on
+    `next_offset`, so `__post_init__` checks it against `offset +
+    len(text)` and `total`, and that it moves. It can only fail if
+    Postgres' `length()` and Python's `len()` stop counting the same thing;
+    a loud 500 then beats every paging client spinning (`QueueCounts`'
+    reasoning).
+  - **A malformed stored entry is the shared 404, and one WARNING.** The
+    column has no CHECK, so the resolver refuses a non-object entry, a
+    non-string or malformed `sha256` (a number used to be a **500**:
+    `_parse_sha256_hex` worded its refusal with `len()`), and serves a
+    non-string `filename` as no name. The wire cannot tell these from a
+    missing message, by design; the log can. A short array stays silent.
+    The stored hash is lowercased so the ETag matches the sha route's.
+  - **Review fixes that reach both routes**: `_open_blob_file_at` no longer
+    puts the blob's filesystem path in the 404 detail (it is logged instead)
+    and catches `FileNotFoundError` on the open itself, so a file deleted
+    between probe and open is a 404, not a 500; a NULL `mime_type` is served
+    as `application/octet-stream` rather than raising on `.lower()`; and
+    `parse_int_id` maps Python's 4300-digit `int()` limit to a 400.
 - **Browse & search pagination (PR #70)**:
   - `GET /v1/messages` is the canonical keyset browse endpoint, ordered
     `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC` with

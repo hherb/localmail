@@ -262,3 +262,128 @@ def test_a_bad_text_window_is_a_400_even_ungranted(
     )
     assert r.status_code == 400
     assert r.json()["type"] == "/problems/validation-failed"
+
+
+def test_text_with_only_an_offset_reads_to_the_end(
+    db_dsn, api_token, db_conn, tmp_path, grant_alice_all_accounts,
+) -> None:
+    mid, shas = _seed(db_conn, tmp_path, _SAME_NAME)
+    _seed_text(db_conn, shas[0], "hello")
+    grant_alice_all_accounts()
+    r = _client(db_dsn).get(
+        f"/v1/messages/{mid}/attachments/0/text?offset=3", headers=_auth(api_token),
+    )
+    assert r.json() == {
+        "text": "lo", "offset": 3, "limit": None, "total": 5, "next_offset": None,
+    }
+
+
+def test_a_whitespace_filename_falls_back_to_the_sha_prefix_name(
+    db_dsn, api_token, db_conn, tmp_path, grant_alice_all_accounts,
+) -> None:
+    mid, shas = _seed(db_conn, tmp_path, [("   ", b"blank", "application/pdf")])
+    grant_alice_all_accounts()
+    r = _client(db_dsn).get(f"/v1/messages/{mid}/attachments/0", headers=_auth(api_token))
+    assert f'filename="attachment-{shas[0][:16]}.bin"' in r.headers["content-disposition"]
+
+
+def test_a_huge_index_is_a_400_not_a_500(db_dsn, api_token, db_conn, tmp_path) -> None:
+    mid, _ = _seed(db_conn, tmp_path, _SAME_NAME)
+    r = _client(db_dsn).get(
+        f"/v1/messages/{mid}/attachments/{'9' * 5000}", headers=_auth(api_token),
+    )
+    assert r.status_code == 400
+    assert r.json()["type"] == "/problems/validation-failed"
+
+
+def test_a_missing_blob_file_is_a_404_that_does_not_name_the_path(
+    db_dsn, api_token, db_conn, tmp_path, grant_alice_all_accounts, caplog,
+) -> None:
+    mid, shas = _seed(db_conn, tmp_path, [("gone.pdf", b"soon gone", "application/pdf")])
+    blob = tmp_path / "blobs" / shas[0][:2] / shas[0][2:4] / shas[0]
+    blob.unlink()
+    grant_alice_all_accounts()
+    with caplog.at_level("WARNING", logger="localmail.api.attachments"):
+        r = _client(db_dsn).get(f"/v1/messages/{mid}/attachments/0", headers=_auth(api_token))
+    assert r.status_code == 404
+    assert str(tmp_path) not in r.text
+    assert any(str(blob) in rec.getMessage() for rec in caplog.records)
+
+
+# A blob is content-addressable and global: the same bytes can sit in a
+# message the caller is granted and one they are not. The blob-level ACL then
+# passes, so the message ACL in the resolver is the only thing keeping the
+# ungranted message's attachment closed.
+
+def _seed_shared_blob(
+    conn: psycopg.Connection, tmp_path: Path, user_id: int,
+) -> tuple[int, str]:
+    """Two accounts carry the same blob; only the first is granted.
+    Returns (the ungranted message's id, sha)."""
+    payload = b"shared-bytes"
+    sha = hashlib.sha256(payload).hexdigest()
+    blob = tmp_path / sha
+    blob.write_bytes(payload)
+    mids: list[int] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_blobs (sha256, mime_type, size_bytes, path) "
+            "VALUES (%s, 'text/plain', %s, %s)",
+            (bytes.fromhex(sha), len(payload), str(blob)),
+        )
+        cur.execute(
+            "INSERT INTO attachment_text (sha256, extractor, extracted_text) "
+            "VALUES (%s, 'pypdf', 'secret')",
+            (bytes.fromhex(sha),),
+        )
+        aids: list[int] = []
+        for name in ("granted", "ungranted"):
+            cur.execute(
+                "INSERT INTO accounts (name, email_address, imap_host, auth_method) "
+                "VALUES (%s, 'x@y.test', 'imap.x', 'password') RETURNING id",
+                (name,),
+            )
+            row = cur.fetchone(); assert row is not None
+            aids.append(int(row[0]))
+            raw = name.encode()
+            cur.execute(
+                "INSERT INTO messages (account_id, message_id, raw_bytes, raw_sha256, "
+                "size_bytes, headers, attachments, date_sent) "
+                "VALUES (%s, %s, %s, %s, 1, '{}'::jsonb, %s, %s) RETURNING id",
+                (aids[-1], f"<{name}@x>", raw, hashlib.sha256(raw).digest(),
+                 psycopg.types.json.Jsonb([{"filename": f"{name}.txt", "sha256": sha}]),
+                 datetime.now(timezone.utc)),
+            )
+            row = cur.fetchone(); assert row is not None
+            mids.append(int(row[0]))
+        cur.execute(
+            "INSERT INTO user_accounts (user_id, account_id) VALUES (%s, %s)",
+            (user_id, aids[0]),
+        )
+    conn.commit()
+    return mids[1], sha
+
+
+@pytest.mark.parametrize("suffix", ["", "/text"])
+def test_a_blob_granted_elsewhere_does_not_open_an_ungranted_message(
+    db_dsn, api_token, api_user, db_conn, tmp_path, suffix: str,
+) -> None:
+    ungranted, _sha = _seed_shared_blob(db_conn, tmp_path, api_user.id)
+    r = _client(db_dsn).get(
+        f"/v1/messages/{ungranted}/attachments/0{suffix}", headers=_auth(api_token),
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"] == f"attachment 0 of message {ungranted} not found"
+
+
+def test_a_blob_granted_elsewhere_is_404_not_304_for_an_ungranted_message(
+    db_dsn, api_token, api_user, db_conn, tmp_path,
+) -> None:
+    # The index-route counterpart of #62's test_304_acl_denied_returns_404_not_304:
+    # a 304 would confirm the attachment exists.
+    ungranted, sha = _seed_shared_blob(db_conn, tmp_path, api_user.id)
+    r = _client(db_dsn).get(
+        f"/v1/messages/{ungranted}/attachments/0",
+        headers=_auth(api_token, **{"If-None-Match": f'"{sha}"'}),
+    )
+    assert r.status_code == 404

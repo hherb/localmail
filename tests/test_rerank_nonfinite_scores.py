@@ -230,7 +230,7 @@ def test_finite_rows_keep_their_order_whatever_order_the_pool_arrives_in() -> No
             fallback=[0.5] * len(perm),
         )
         out = searcher._build_results(rows, parse_query("x"), scores,
-                                      page=1, page_size=10)
+                                      page=1, page_size=10, snippet_width=200)
         page = [r.message_id for r in out]
         finite = [mid for mid in page if mid != ids["A"]]
         assert finite == [ids["C"], ids["D"], ids["B"]], (

@@ -121,7 +121,7 @@ def test_equally_relevant_rows_are_ordered_newest_first() -> None:
     """
     rows = [_row(20, _OLD), _row(10, _NEW)]
     out = _searcher()._build_results(rows, parse_query("x"), [0.5, 0.5],
-                                     page=1, page_size=10)
+                                     page=1, page_size=10, snippet_width=200)
     assert [r.message_id for r in out] == [10, 20]
 
 
@@ -130,7 +130,7 @@ def test_a_higher_score_still_outranks_a_newer_date() -> None:
     put the date first would reorder genuinely different relevances."""
     rows = [_row(20, _OLD), _row(10, _NEW)]
     out = _searcher()._build_results(rows, parse_query("x"), [0.9, 0.1],
-                                     page=1, page_size=10)
+                                     page=1, page_size=10, snippet_width=200)
     assert [r.message_id for r in out] == [20, 10]
 
 
@@ -143,7 +143,7 @@ def test_the_page_ranks_internal_date_above_date_sent() -> None:
     """
     rows = [_row(20, _NEW, internal=_OLD), _row(10, _OLD, internal=_NEW)]
     out = _searcher()._build_results(rows, parse_query("x"), [0.5, 0.5],
-                                     page=1, page_size=10)
+                                     page=1, page_size=10, snippet_width=200)
     assert [r.message_id for r in out] == [10, 20]
 
 
@@ -152,7 +152,7 @@ def test_an_undated_row_sorts_after_a_dated_one_of_equal_relevance() -> None:
     are nullable and archive imports really do produce such rows."""
     rows = [_row(20, None), _row(10, _OLD)]
     out = _searcher()._build_results(rows, parse_query("x"), [0.5, 0.5],
-                                     page=1, page_size=10)
+                                     page=1, page_size=10, snippet_width=200)
     assert [r.message_id for r in out] == [10, 20]
 
 
@@ -162,10 +162,10 @@ def test_rows_equal_on_score_and_date_still_order_deterministically() -> None:
     arbitrary thing this file exists to remove."""
     forward = _searcher()._build_results([_row(10, _OLD), _row(20, _OLD)],
                                          parse_query("x"), [0.5, 0.5],
-                                         page=1, page_size=10)
+                                         page=1, page_size=10, snippet_width=200)
     backward = _searcher()._build_results([_row(20, _OLD), _row(10, _OLD)],
                                           parse_query("x"), [0.5, 0.5],
-                                          page=1, page_size=10)
+                                          page=1, page_size=10, snippet_width=200)
     assert [r.message_id for r in forward] == [r.message_id for r in backward]
 
 

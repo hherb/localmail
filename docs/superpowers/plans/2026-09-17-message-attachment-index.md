@@ -714,6 +714,10 @@ In `src/localmail/api/attachments.py`, add `from dataclasses import dataclass` t
 #: The largest operand `jsonb -> integer` accepts. A larger index is
 #: `operator does not exist: jsonb -> bigint` — a 500 — and cannot address an
 #: entry anyway, since no array has that many.
+# *(Correction after execution: the shipped SQL casts with `%s::int`, so the
+# error a larger index raises is `NumericValueOutOfRange: integer out of
+# range`; `operator does not exist: jsonb -> bigint` is the uncast form's.
+# Either way a 500 — the conclusion stands.)*
 MAX_JSONB_INDEX = 2**31 - 1
 
 
@@ -1872,6 +1876,10 @@ CLAUDE.md, in the GUI server section directly after the bullet beginning
   it on the wire, and the accessor refuses it again for library callers), and
   one past **`MAX_JSONB_INDEX`** (int4) is a 404 decided without a query
   (`jsonb -> bigint` does not exist, so it was a 500).
+<!-- *(Correction after execution: the shipped SQL casts with `%s::int`, so
+the error a larger index raises is `NumericValueOutOfRange: integer out of
+range`; `operator does not exist: jsonb -> bigint` is the uncast form's.
+Either way a 500 — the conclusion stands.)* -->
   - **The only behavioural difference from the sha route is the name.** The
     `Content-Disposition` carries the resolved entry's own filename. Measured:
     888 in-message `(message, sha)` groups carry one blob under two names, and

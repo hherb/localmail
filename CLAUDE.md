@@ -3187,6 +3187,38 @@ for the full design.
     stopping a 35 MB column being pulled on a header fetch; dropping it changes
     no response, so `test_the_header_read_is_bounded_and_only_paid_when_headers_are_wanted`
     asserts the statement the cursor is given, with `compact` as the control.
+- **Attachments are addressable by position (kastellan slice D).** Design:
+  [docs/superpowers/specs/2026-09-17-message-attachment-index-design.md](docs/superpowers/specs/2026-09-17-message-attachment-index-design.md).
+  `GET /v1/messages/{id}/attachments/{index}[/text]`; `api_minor` is **2**.
+  The resolver (`api.attachments.resolve_message_attachment`) reads
+  `m.attachments -> %s::int` under the **message** ACL. Two index values never
+  reach it, both measured: a **negative** index is refused (Postgres `->`
+  indexes from the end, so `-> -1` is the *last* entry — `parse_int_id` refuses
+  it on the wire, and the accessor refuses it again for library callers), and
+  one past **`MAX_JSONB_INDEX`** (int4) is a 404 decided without a query
+  (`jsonb -> bigint` does not exist, so it was a 500).
+  - **The only behavioural difference from the sha route is the name.** The
+    `Content-Disposition` carries the resolved entry's own filename. Measured:
+    888 in-message `(message, sha)` groups carry one blob under two names, and
+    1,109 blobs carry several names across messages; `get_attachment_filename`
+    picks the earliest carrier, so the sha route is wrong for the rest.
+  - **The streaming rules live in `serve/routes/blob_response.py`**, shared by
+    both routes. **The file open stays at each call site**, after
+    `not_modified`: the #62 tests spy on each route module's
+    `_open_blob_file_at`, and an open moved into the helper would make every
+    `calls == []` pass whether or not a file was opened. Each spy has a
+    positive control proving it intercepts.
+  - **Text is paged by character** through the pure
+    [src/localmail/text_window.py](src/localmail/text_window.py), on both text
+    routes. `next_offset` is server-computed because JS `.length` counts UTF-16
+    units — 8 of 9,303 live extractions contain astral characters. Offsets and
+    limits are clamped at `MAX_TEXT_CHARS` (2³⁰) because `substring()` takes
+    int4, which changes no answer. **A window is not cheaper in the database**:
+    the text is TOAST-compressed (the 2.1 MB maximum is stored as 388 KB), so
+    every window decompresses all of it — 3 ms first page, 8 ms last, against
+    2 ms for the whole. Paging buys response size, not DB time.
+  - **MCP is untouched**: `get_attachment_text` keeps its signature and
+    delegates to `get_attachment_text_page(…, window=TextWindow())`.
 - **Browse & search pagination (PR #70)**:
   - `GET /v1/messages` is the canonical keyset browse endpoint, ordered
     `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC` with

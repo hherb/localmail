@@ -17,7 +17,9 @@ from localmail.serve.middleware import get_authenticated_user
 API_MAJOR = 1
 # 1: GET /v1/messages/{id}?headers=list (#379). An older server answers an
 # unknown mode with 200 and no headers key, so this is the only feature signal.
-API_MINOR = 1
+# 2: GET /v1/messages/{id}/attachments/{index}[/text]. An older server answers
+# 404, which a client cannot tell from a missing message or index.
+API_MINOR = 2
 
 logger = logging.getLogger("localmail.serve")
 

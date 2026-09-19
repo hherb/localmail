@@ -849,6 +849,30 @@ other value is a 400. Grouping `list` by name reproduces `full` exactly.
 `headers=list` is announced by `api_minor >= 1` on `GET /v1/version`: an older
 server answers the unknown mode with 200 and no `headers` key.
 
+`GET /v1/messages/{id}/attachments/{index}` serves attachment `index` — its
+0-based position in the `attachments` array `GET /v1/messages/{id}` returns —
+with the same bytes, `Range`, `ETag` and download headers as
+`GET /v1/attachments/{sha256}`. Use it when a message carries two attachments
+of one filename, or when the download should keep *this* entry's name: a blob
+is content-addressed, so the hash route can only offer one of the names it is
+carried under. The index counts inline parts too, exactly as the array does.
+An index past the end is a 404.
+
+Extracted text is paged by **character** on both
+`GET /v1/attachments/{sha256}/text` and
+`GET /v1/messages/{id}/attachments/{index}/text`: pass `offset` and `limit`,
+and read the next page from `next_offset` (`null` at the end). Omitting both
+returns the whole text, as before. Do not compute the next offset from
+`text.length` in JavaScript — it counts UTF-16 units, not characters, and
+skips text on any page containing a character above U+FFFF.
+
+```json
+{"text": "…", "offset": 0, "limit": 20000, "total": 128875, "next_offset": 20000}
+```
+
+Both are announced by `api_minor >= 2`: an older server answers the index
+route with a 404 indistinguishable from a missing message.
+
 ### Server-side polling cursors
 
 A client that keeps its own `since` cursor re-reads the 200-message tail

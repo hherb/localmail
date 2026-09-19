@@ -109,3 +109,11 @@ def test_the_route_never_reads_the_human_diagnostic(db_dsn: str) -> None:
     # Positive control: the walk really does see this module's identifiers, so
     # a rename of the collector cannot make the assertion above pass vacuously.
     assert "resolve_build_info" in referenced
+
+
+def test_api_minor_announces_attachment_index_addressing(db_dsn: str) -> None:
+    """An old server answers /v1/messages/{id}/attachments/0 with 404 — the
+    same status a missing message or an index past the end gets. Only the
+    version can tell the two apart."""
+    body = _client(db_dsn).get("/v1/version").json()
+    assert body["api_minor"] >= 2

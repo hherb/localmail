@@ -18,6 +18,8 @@ from typing import BinaryIO
 import psycopg
 
 from localmail.api.errors import NotFound, ValidationFailed
+from localmail.api.ids import parse_int_id
+from localmail.text_window import TextPage, TextWindow, text_window_error
 
 
 def _parse_sha256_hex(sha256_hex: str) -> bytes:
@@ -209,11 +211,40 @@ def get_attachment_filename(
     return str(row[0])
 
 
-def get_attachment_text(
-    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
-) -> str:
-    """Return extracted text for a blob. Raises NotFound if not yet extracted
-    or if the caller cannot read any carrying message.
+def text_window_from_query(offset: str | None, limit: str | None) -> TextWindow:
+    """The wire's ``offset``/``limit`` as a window; anything malformed is a 400.
+
+    The one place a query string becomes a :class:`TextWindow`, shared by both
+    text routes so they cannot word a refusal two ways. Parsed with
+    ``parse_int_id`` so a malformed value is problem+json, never FastAPI's 422
+    array (#370). A consequence: ``offset=-1`` is refused as "not a base-10
+    integer" before ``text_window_error`` could word it as "must be >= 0" —
+    the wording every other integer parameter on /v1 already has.
+    """
+    off = 0 if offset is None else parse_int_id(offset, field="offset")
+    lim = None if limit is None else parse_int_id(limit, field="limit")
+    problem = text_window_error(off, lim)
+    if problem is not None:
+        raise ValidationFailed(problem)
+    return TextWindow(offset=off, limit=lim)
+
+
+def get_attachment_text_page(
+    conn: psycopg.Connection,
+    sha256_hex: str,
+    *,
+    allowed_account_ids: list[int],
+    window: TextWindow,
+) -> TextPage:
+    """One character window of a blob's extracted text, with its total length.
+
+    Raises ``NotFound`` if the text is not yet extracted or the caller cannot
+    read any carrying message. ``window`` has no default: ``TextWindow()`` is
+    the whole text, and a caller that meant a page must say so (#234's shape).
+
+    Not cheaper in the database than the whole text: the value is
+    TOAST-compressed, so every window decompresses all of it. What a window
+    buys is the size of the response.
     """
     sha_bytes = _parse_sha256_hex(sha256_hex)
     if not _caller_can_read_blob(
@@ -221,11 +252,33 @@ def get_attachment_text(
     ):
         raise NotFound(f"no extracted text for attachment {sha256_hex}")
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s",
-            (sha_bytes,),
-        )
+        if window.sql_for is None:
+            cur.execute(
+                "SELECT substring(extracted_text from %s::int), "
+                "       length(extracted_text) "
+                "FROM attachment_text WHERE sha256 = %s",
+                (window.sql_from, sha_bytes),
+            )
+        else:
+            cur.execute(
+                "SELECT substring(extracted_text from %s::int for %s::int), "
+                "       length(extracted_text) "
+                "FROM attachment_text WHERE sha256 = %s",
+                (window.sql_from, window.sql_for, sha_bytes),
+            )
         row = cur.fetchone()
     if row is None:
         raise NotFound(f"no extracted text for attachment {sha256_hex}")
-    return row[0]
+    return window.page(row[0], int(row[1]))
+
+
+def get_attachment_text(
+    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
+) -> str:
+    """Return extracted text for a blob. Raises NotFound if not yet extracted
+    or if the caller cannot read any carrying message.
+    """
+    return get_attachment_text_page(
+        conn, sha256_hex,
+        allowed_account_ids=allowed_account_ids, window=TextWindow(),
+    ).text

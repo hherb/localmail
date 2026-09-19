@@ -17,7 +17,12 @@ from localmail.serve.middleware import get_authenticated_user
 API_MAJOR = 1
 # 1: GET /v1/messages/{id}?headers=list (#379). An older server answers an
 # unknown mode with 200 and no headers key, so this is the only feature signal.
-API_MINOR = 1
+# 2: GET /v1/messages/{id}/attachments/{index}[/text], and offset/limit on
+# both text routes. An older server answers the index route 404, which a
+# client cannot tell from a missing message or index; and it ignores
+# offset/limit, answering 200 with the whole text and no next_offset — the
+# silent half, as with `headers=list` under 1.
+API_MINOR = 2
 
 logger = logging.getLogger("localmail.serve")
 

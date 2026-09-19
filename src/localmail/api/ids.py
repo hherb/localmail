@@ -48,4 +48,11 @@ def parse_int_id(value: str, *, field: str) -> int:
         raise ValidationFailed(
             f"{field} must be a base-10 integer, got {value!r}"
         )
-    return int(value)
+    try:
+        return int(value)
+    except ValueError as exc:
+        # Python refuses int() on more than 4300 digits
+        # (sys.get_int_max_str_digits); an unhandled ValueError is a 500.
+        raise ValidationFailed(
+            f"{field} must be a base-10 integer, got {len(value)} digits"
+        ) from exc

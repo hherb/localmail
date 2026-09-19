@@ -63,3 +63,10 @@ def test_parse_int_id_error_message_includes_field_and_value() -> None:
         parse_int_id("nope", field="account_id")
     assert "account_id" in str(ei.value)
     assert "'nope'" in str(ei.value)
+
+
+def test_parse_int_id_refuses_more_digits_than_python_converts() -> None:
+    # int() refuses strings past sys.get_int_max_str_digits (4300) with a
+    # bare ValueError, which would escape every transport as a 500.
+    with pytest.raises(ValidationFailed, match="index must be a base-10 integer, got 5000 digits"):
+        parse_int_id("9" * 5000, field="index")

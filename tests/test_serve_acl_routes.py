@@ -160,7 +160,10 @@ def test_alice_cannot_read_b_attachment_text(db_dsn, db_conn, tmp_path):
     assert r.status_code == 404
     r = c.get(f"/v1/attachments/{ctx['a_sha']}/text", headers=_h(ctx["alice"]))
     assert r.status_code == 200
-    assert r.json() == {"text": "secret-a-content"}
+    assert r.json() == {
+        "text": "secret-a-content", "offset": 0, "limit": None,
+        "total": 16, "next_offset": None,
+    }
 
 
 def test_changes_filters_by_acl(db_dsn, db_conn, tmp_path):

@@ -12,21 +12,34 @@ which is accelerated by the GIN index from migration 0013.
 """
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
 import psycopg
 
 from localmail.api.errors import NotFound, ValidationFailed
+from localmail.api.ids import parse_int_id
+from localmail.text_window import TextPage, TextWindow, text_window_error
+
+logger = logging.getLogger(__name__)
 
 
-def _parse_sha256_hex(sha256_hex: str) -> bytes:
+def _parse_sha256_hex(sha256_hex: object) -> bytes:
     """Decode a 64-char hex string to 32 bytes. Raises ValidationFailed on bad input.
 
     Used at every API entry point so malformed path parameters surface as
     400 problem+json rather than an unhandled 500 from bytes.fromhex.
     """
-    if not isinstance(sha256_hex, str) or len(sha256_hex) != 64:
+    if not isinstance(sha256_hex, str):
+        # Worded without len(): a stored JSONB number reaches here, and
+        # len(5) would raise TypeError past every `except ValidationFailed`.
+        raise ValidationFailed(
+            "sha256 must be a 64-character hex string, "
+            f"got {type(sha256_hex).__name__}"
+        )
+    if len(sha256_hex) != 64:
         raise ValidationFailed(
             f"sha256 must be a 64-character hex string, got {len(sha256_hex)} chars"
         )
@@ -34,6 +47,95 @@ def _parse_sha256_hex(sha256_hex: str) -> bytes:
         return bytes.fromhex(sha256_hex)
     except ValueError as exc:
         raise ValidationFailed(f"sha256 is not valid hex: {exc}") from exc
+
+
+#: The largest operand `jsonb -> integer` accepts. The shipped SQL casts with
+#: `%s::int`, so a larger index raises `NumericValueOutOfRange: integer out of
+#: range` — a 500 — rather than the uncast form's `operator does not exist:
+#: jsonb -> bigint`; either way it's a 500, and cannot address an entry
+#: anyway, since no array has that many.
+MAX_JSONB_INDEX = 2**31 - 1
+
+
+@dataclass(frozen=True)
+class MessageAttachment:
+    """One entry of a message's ``attachments`` array, resolved by position.
+
+    ``filename`` is *this entry's* name. A blob is content-addressable and may
+    be carried under several names, even within one message, so this is the
+    only way to know which one the caller meant.
+    """
+
+    sha256: str
+    filename: str | None
+
+
+def _attachment_absent(message_id: int, index: int) -> NotFound:
+    # One wording for every resolver 404, so no branch can tell a caller
+    # whether the message exists, is ungranted, or is merely short.
+    return NotFound(f"attachment {index} of message {message_id} not found")
+
+
+def resolve_message_attachment(
+    conn: psycopg.Connection,
+    message_id: int,
+    index: int,
+    *,
+    allowed_account_ids: list[int],
+) -> MessageAttachment:
+    """Resolve entry ``index`` of message ``message_id`` under the message ACL.
+
+    A negative index is refused (``ValidationFailed``) before anything else:
+    Postgres ``->`` indexes from the end, so ``attachments -> -1`` would
+    silently answer with the last entry. It is refused ahead of the empty-ACL
+    short-circuit so a malformed request is never disguised as a 404.
+
+    Every other failure is the one ``NotFound``: the message is missing or
+    ungranted, the index is past the end, the index exceeds
+    ``MAX_JSONB_INDEX`` (decided without a query), or the stored entry is
+    malformed — not an object, or carrying no well-formed sha256.
+
+    The wire cannot tell those apart, by design; the log can. A malformed
+    entry is a corrupt row an operator should hear about, so it gets one
+    WARNING. A missing message or a short array is an ordinary answer and
+    stays silent.
+    """
+    if index < 0:
+        raise ValidationFailed(f"attachment index must be >= 0, got {index}")
+    if index > MAX_JSONB_INDEX or not allowed_account_ids:
+        raise _attachment_absent(message_id, index)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT m.attachments -> %s::int FROM messages m "
+            "WHERE m.id = %s AND m.account_id = ANY(%s)",
+            (index, message_id, allowed_account_ids),
+        )
+        row = cur.fetchone()
+    entry = None if row is None else row[0]
+    if entry is None:
+        raise _attachment_absent(message_id, index)
+    # The column has no CHECK, so a restore or a hand UPDATE can put anything
+    # here. `_parse_sha256_hex` is the one definition of a valid sha256; its
+    # refusal is folded into the shared 404 rather than shown to a caller
+    # whose request was well formed.
+    sha256 = entry.get("sha256") if isinstance(entry, dict) else None
+    try:
+        sha_bytes = _parse_sha256_hex(sha256)
+    except ValidationFailed as exc:
+        logger.warning(
+            "malformed attachments entry: message_id=%d index=%d: %s",
+            message_id, index, exc,
+        )
+        raise _attachment_absent(message_id, index) from exc
+    filename = entry.get("filename")
+    return MessageAttachment(
+        # Re-encoded from the parsed bytes, so it is canonical lowercase and
+        # the ETag matches the sha route's for the same blob.
+        sha256=sha_bytes.hex(),
+        # A non-string name is as good as none: falling back to the
+        # sha-prefix name beats a Python repr in the download dialog.
+        filename=filename if isinstance(filename, str) else None,
+    )
 
 
 def _caller_can_read_blob(
@@ -108,7 +210,7 @@ def get_attachment_blob_info(
     Lightweight probe used by the streaming route before evaluating the
     conditional-GET preconditions (#62). Enforces the same ACL check as
     ``open_attachment_bytes`` so a 404 still wins over a 304 for callers
-    who cannot read the blob, but skips the ``Path.exists()`` / file-open
+    who cannot read the blob, but skips the file open
     work and the JSONB filename scan that are wasted when
     ``If-None-Match`` is going to short-circuit to 304.
 
@@ -133,20 +235,25 @@ def _open_blob_file_at(path: str, sha256_hex: str) -> BinaryIO:
     so the file open doesn't re-run the ACL EXISTS predicate and the
     ``attachment_blobs`` SELECT that the probe just ran (#64).
 
-    The ``Path.exists()`` check stays so a blob deleted between probe
-    and open surfaces as ``NotFound`` rather than a mid-stream
-    ``FileNotFoundError``. Caller closes the returned file. Raises
-    ``NotFound`` if the on-disk file is missing.
+    A blob missing on disk — including one deleted between probe and open —
+    surfaces as ``NotFound`` rather than an unhandled ``FileNotFoundError``:
+    the open is attempted and its failure caught, so there is no
+    ``exists()``/``open()`` window to race. Caller closes the returned file.
 
     Underscore-prefixed and accepts a raw ``path`` rather than ``conn``:
     both make it obvious at every call site that this skips ACL on
     purpose, so it can't be reached for "by accident" the way the prior
     ``open_attachment_bytes(..., prefetched=...)`` kwarg could (#67).
     """
-    p = Path(path)
-    if not p.exists():
-        raise NotFound(f"attachment {sha256_hex} file missing at {path}")
-    return p.open("rb")
+    try:
+        return Path(path).open("rb")
+    except FileNotFoundError as exc:
+        # The path is logged, never sent: it is the server's filesystem
+        # layout, and the caller can act on "missing" without it.
+        logger.warning(
+            "attachment blob file missing: sha256=%s path=%s", sha256_hex, path,
+        )
+        raise NotFound(f"attachment {sha256_hex} file missing") from exc
 
 
 def open_attachment_bytes(
@@ -209,11 +316,40 @@ def get_attachment_filename(
     return str(row[0])
 
 
-def get_attachment_text(
-    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
-) -> str:
-    """Return extracted text for a blob. Raises NotFound if not yet extracted
-    or if the caller cannot read any carrying message.
+def text_window_from_query(offset: str | None, limit: str | None) -> TextWindow:
+    """The wire's ``offset``/``limit`` as a window; anything malformed is a 400.
+
+    The one place a query string becomes a :class:`TextWindow`, shared by both
+    text routes so they cannot word a refusal two ways. Parsed with
+    ``parse_int_id`` so a malformed value is problem+json, never FastAPI's 422
+    array (#370). A consequence: ``offset=-1`` is refused as "offset must be
+    a base-10 integer" before ``text_window_error`` could word it as "must be >= 0" —
+    the wording every other integer parameter on /v1 already has.
+    """
+    off = 0 if offset is None else parse_int_id(offset, field="offset")
+    lim = None if limit is None else parse_int_id(limit, field="limit")
+    problem = text_window_error(off, lim)
+    if problem is not None:
+        raise ValidationFailed(problem)
+    return TextWindow(offset=off, limit=lim)
+
+
+def get_attachment_text_page(
+    conn: psycopg.Connection,
+    sha256_hex: str,
+    *,
+    allowed_account_ids: list[int],
+    window: TextWindow,
+) -> TextPage:
+    """One character window of a blob's extracted text, with its total length.
+
+    Raises ``NotFound`` if the text is not yet extracted or the caller cannot
+    read any carrying message. ``window`` has no default: ``TextWindow()`` is
+    the whole text, and a caller that meant a page must say so (#234's shape).
+
+    Not cheaper in the database than the whole text: the value is
+    TOAST-compressed, so every window decompresses all of it. What a window
+    buys is the size of the response.
     """
     sha_bytes = _parse_sha256_hex(sha256_hex)
     if not _caller_can_read_blob(
@@ -221,11 +357,37 @@ def get_attachment_text(
     ):
         raise NotFound(f"no extracted text for attachment {sha256_hex}")
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT extracted_text FROM attachment_text WHERE sha256 = %s",
-            (sha_bytes,),
-        )
+        # substring() is strict: substring(x from n for NULL) returns NULL, not
+        # x from n to the end. So the no-limit case can't collapse into the
+        # one-statement form below with a NULL `for` — that would silently
+        # empty every read that has no limit.
+        if window.sql_for is None:
+            cur.execute(
+                "SELECT substring(extracted_text from %s::int), "
+                "       length(extracted_text) "
+                "FROM attachment_text WHERE sha256 = %s",
+                (window.sql_from, sha_bytes),
+            )
+        else:
+            cur.execute(
+                "SELECT substring(extracted_text from %s::int for %s::int), "
+                "       length(extracted_text) "
+                "FROM attachment_text WHERE sha256 = %s",
+                (window.sql_from, window.sql_for, sha_bytes),
+            )
         row = cur.fetchone()
     if row is None:
         raise NotFound(f"no extracted text for attachment {sha256_hex}")
-    return row[0]
+    return window.page(row[0], int(row[1]))
+
+
+def get_attachment_text(
+    conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
+) -> str:
+    """Return extracted text for a blob. Raises NotFound if not yet extracted
+    or if the caller cannot read any carrying message.
+    """
+    return get_attachment_text_page(
+        conn, sha256_hex,
+        allowed_account_ids=allowed_account_ids, window=TextWindow(),
+    ).text

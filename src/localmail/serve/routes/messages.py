@@ -9,11 +9,19 @@ from typing import Any, List
 from fastapi import APIRouter, Depends, Query, Request, Response
 
 from localmail.api.acl import allowed_account_ids
+from localmail.api.attachments import (
+    _open_blob_file_at,
+    get_attachment_blob_info,
+    get_attachment_text_page,
+    resolve_message_attachment,
+    text_window_from_query,
+)
 from localmail.api.browse import list_messages
 from localmail.api.browse_cursor import decode_browse_cursor
 from localmail.api.ids import parse_int_id
 from localmail.api.messages import get_message, get_message_raw
 from localmail.serve.middleware import get_authenticated_user
+from localmail.serve.routes.blob_response import blob_response, not_modified
 
 router = APIRouter()
 
@@ -95,3 +103,67 @@ def raw(
         allowed = allowed_account_ids(conn, user.id)
         body = get_message_raw(conn, mid, allowed_account_ids=allowed)
     return Response(content=body, media_type="message/rfc822")
+
+
+@router.get("/{message_id}/attachments/{index}")
+def message_attachment(
+    message_id: str,
+    index: str,
+    request: Request,
+    user=Depends(get_authenticated_user),
+) -> Response:
+    """Attachment ``index`` (0-based, in ``get_message``'s order) of a message.
+
+    The same bytes, Range, ETag and force-download rules as
+    ``/v1/attachments/{sha256}``. The difference is the name: the
+    ``Content-Disposition`` carries this entry's own filename, where the sha
+    route can only pick one of the names a blob is carried under.
+    """
+    mid = parse_int_id(message_id, field="message_id")
+    idx = parse_int_id(index, field="index")
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        allowed = allowed_account_ids(conn, user.id)
+        entry = resolve_message_attachment(
+            conn, mid, idx, allowed_account_ids=allowed,
+        )
+        mime, size, path = get_attachment_blob_info(
+            conn, entry.sha256, allowed_account_ids=allowed,
+        )
+        cached = not_modified(request, entry.sha256)
+        if cached is not None:
+            return cached
+        fp = _open_blob_file_at(path, entry.sha256)
+    return blob_response(
+        request, sha256=entry.sha256, mime=mime, size=size, fp=fp,
+        filename=entry.filename,
+    )
+
+
+@router.get("/{message_id}/attachments/{index}/text")
+def message_attachment_text(
+    message_id: str,
+    index: str,
+    request: Request,
+    offset: str | None = Query(None),
+    limit: str | None = Query(None),
+    user=Depends(get_authenticated_user),
+) -> dict[str, object]:
+    """Extracted text of attachment ``index``, paged by character.
+
+    Every parameter is judged before the connection opens, so a malformed
+    request is a 400 even for a caller granted nothing.
+    """
+    mid = parse_int_id(message_id, field="message_id")
+    idx = parse_int_id(index, field="index")
+    window = text_window_from_query(offset, limit)
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        allowed = allowed_account_ids(conn, user.id)
+        entry = resolve_message_attachment(
+            conn, mid, idx, allowed_account_ids=allowed,
+        )
+        page = get_attachment_text_page(
+            conn, entry.sha256, allowed_account_ids=allowed, window=window,
+        )
+    return page.to_wire()

@@ -806,6 +806,7 @@ src/localmail/
   daemon.py         # Daemon class: signal handling, per-account thread spawn
   shutdown_budget.py # remaining_seconds/supervisor_kill_after (pure) +
                     #   wind_down_threads — the one shutdown budget (#221 A)
+  api/search_projection.py # pure: HIT_FIELDS / fields_error / snippet_chars_error / project_hit (slice E)
   search/           # hybrid search subsystem (Phases 1 + 2)
     __init__.py     # public API: create_searcher, Searcher, SearchPage, SearchResult
     arms.py         # retrieval arms: arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
@@ -3244,6 +3245,33 @@ for the full design.
     between probe and open is a 404, not a 500; a NULL `mime_type` is served
     as `application/octet-stream` rather than raising on `.lower()`; and
     `parse_int_id` maps Python's 4300-digit `int()` limit to a 400.
+- **Search hits can be projected and their snippet sized (kastellan slice E).**
+  Design:
+  [docs/superpowers/specs/2026-09-19-search-hit-projection-design.md](docs/superpowers/specs/2026-09-19-search-hit-projection-design.md).
+  `POST /v1/search` takes `fields` (each hit gets exactly the named keys) and
+  `snippet_chars` (window width, `1..search.snippet_max_chars`, default cap
+  1000). `api_minor` is **3**. The rules are the pure
+  [src/localmail/api/search_projection.py](src/localmail/api/search_projection.py).
+  - **`HIT_FIELDS` is pinned equal to `_to_api_result`'s keys plus `snippet`.**
+    A hit key added later cannot go missing from the projection, and no name
+    can be permitted that the hit never carries.
+  - **`snippet` is selectable only.** The default response stays
+    byte-identical, which is why `snippet_html` keeps its misleading name.
+  - **The width is per page, not per pool.** `_build_results` builds snippets
+    from the full cached source text, so a continuation takes its own width
+    with no re-retrieval. `_build_results`' `snippet_width` is keyword-only
+    **with no default**: a call site that forgot it would silently serve the
+    configured width to a caller who asked for another.
+  - **The cap lives at the api boundary; the Searcher checks positivity
+    only.** The cap is an operator's bound for network callers, and
+    `make_snippet` is correct for any positive width.
+  - **No `ge`/`le` on the pydantic model.** That would answer 422 with an
+    array `detail` (#370); the pure rule answers a problem+json 400 naming
+    the range.
+  - **Both are gated ahead of the empty-ACL short-circuit** (#348's rule), and
+    pinned from a grant-nothing caller.
+  - **The date walk emits no snippet** (`_date_keyset_search`), so
+    `snippet_chars` sizes nothing there. Giving it snippets is out of scope.
 - **Browse & search pagination (PR #70)**:
   - `GET /v1/messages` is the canonical keyset browse endpoint, ordered
     `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC` with

@@ -8,6 +8,7 @@ import hashlib
 import logging
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
 from localmail.serve.app import create_app
@@ -103,7 +104,10 @@ def test_attachment_text(
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
     r = c.get(f"/v1/attachments/{sha}/text", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 200
-    assert r.json() == {"text": "Hello world"}
+    assert r.json() == {
+        "text": "Hello world", "offset": 0, "limit": None,
+        "total": 11, "next_offset": None,
+    }
 
 
 def test_attachment_text_not_extracted(
@@ -115,6 +119,65 @@ def test_attachment_text_not_extracted(
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
     r = c.get(f"/v1/attachments/{sha}/text", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 404
+
+
+def _seed_text_blob(conn, tmp_path: Path, sha: str, text: str) -> None:
+    _seed_blob_with_carrier(conn, tmp_path, sha, b"%PDF")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO attachment_text (sha256, extractor, extracted_text) "
+            "VALUES (%s, 'pypdf', %s)",
+            (bytes.fromhex(sha), text),
+        )
+    conn.commit()
+
+
+def test_attachment_text_pages_by_character(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path, grant_alice_all_accounts,
+) -> None:
+    sha = "e1" * 32
+    _seed_text_blob(db_conn, tmp_path, sha, "Hello world")
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}/text?offset=6&limit=3",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {
+        "text": "wor", "offset": 6, "limit": 3, "total": 11, "next_offset": 9,
+    }
+
+
+@pytest.mark.parametrize("query", ["offset=-1", "offset=x", "limit=0", "limit=1.5"])
+def test_a_bad_window_is_problem_json_not_422(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+    grant_alice_all_accounts, query: str,
+) -> None:
+    sha = "e2" * 32
+    _seed_text_blob(db_conn, tmp_path, sha, "Hello world")
+    grant_alice_all_accounts()
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}/text?{query}",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["type"] == "/problems/validation-failed"
+
+
+def test_a_bad_window_is_a_400_even_for_a_caller_granted_nothing(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+) -> None:
+    sha = "e3" * 32
+    _seed_text_blob(db_conn, tmp_path, sha, "Hello world")
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None))
+    r = c.get(
+        f"/v1/attachments/{sha}/text?limit=0",
+        headers={"Authorization": f"Bearer {api_token}"},
+    )
+    assert r.status_code == 400
 
 
 def test_stream_attachment_emits_content_disposition_attachment(

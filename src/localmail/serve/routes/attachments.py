@@ -4,7 +4,7 @@
 """Attachment streaming + extracted-text routes, addressed by content hash."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 
 from localmail.api.acl import allowed_account_ids
@@ -12,7 +12,8 @@ from localmail.api.attachments import (
     _open_blob_file_at,
     get_attachment_blob_info,
     get_attachment_filename,
-    get_attachment_text,
+    get_attachment_text_page,
+    text_window_from_query,
 )
 from localmail.serve.middleware import get_authenticated_user
 from localmail.serve.routes.blob_response import blob_response, not_modified
@@ -71,10 +72,22 @@ def stream_blob(
 def attachment_text(
     sha256: str,
     request: Request,
+    offset: str | None = Query(None),
+    limit: str | None = Query(None),
     user=Depends(get_authenticated_user),
-) -> dict[str, str]:
+) -> dict[str, object]:
+    """Extracted text, paged by character. Omit both for the whole text.
+
+    ``offset``/``limit`` arrive as strings so a malformed one is a 400
+    problem+json rather than FastAPI's 422 (#370). The window is judged
+    before the connection opens, so it is a 400 even for a caller granted
+    nothing.
+    """
+    window = text_window_from_query(offset, limit)
     pool = request.app.state.pool
     with pool.connection() as conn:
         allowed = allowed_account_ids(conn, user.id)
-        text = get_attachment_text(conn, sha256, allowed_account_ids=allowed)
-    return {"text": text}
+        page = get_attachment_text_page(
+            conn, sha256, allowed_account_ids=allowed, window=window,
+        )
+    return page.to_wire()

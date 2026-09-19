@@ -236,9 +236,15 @@ advance.
 conversion to Postgres' 1-based position is only sound under that check. Written
 apart, relaxing the check silently makes `substring(… from 0 …)` return one
 character fewer than asked — the co-location argument `PREFIX_READ_BYTES` and
-`prefix_is_truncated` make in `header_block.py`. The accessor still calls
-`text_window_error` itself to raise `ValidationFailed`; `__post_init__` is the
-by-construction backstop no reachable input hits (`ResolvedVersion`'s shape).
+`prefix_is_truncated` make in `header_block.py`. The wire becomes a window in
+exactly one place, `api.attachments.text_window_from_query(offset, limit)`,
+which parses both with `parse_int_id` and raises `ValidationFailed` with
+`text_window_error`'s wording; both text routes call it. `__post_init__` is the
+by-construction backstop no reachable HTTP input hits (`ResolvedVersion`'s
+shape); a library caller constructing a bad `TextWindow` directly gets its
+`ValueError` before any IO. *(Planning correction: an earlier wording had the
+accessor call `text_window_error` itself. The accessor takes a constructed
+window, so it cannot see an invalid one.)*
 
 #### The accessor
 
@@ -315,14 +321,20 @@ routes' new keys are additive and need no signal of their own.
   404s, 400 problem+json for a non-digit index; the 304 spy on this module's
   `_open_blob_file_at`; text — paging, `next_offset`, the 400s.
 - **`tests/test_serve_attachments_routes.py`** gains the text paging on the sha
-  route. Its existing tests stay unchanged and green, which is the pin that
-  the extraction moved no behaviour.
+  route. Its streaming tests stay unchanged and green, which is the pin that
+  the extraction moved no behaviour. **Correction, found while planning:** an
+  earlier wording said *all* its existing tests stay unchanged. Two do not —
+  `test_attachment_text` there and `test_serve_acl_routes.py`'s text test
+  assert the body with `==`, so they gain the four new keys. That is the
+  additive wire change stated in §3, not a regression. The MCP pin
+  (`test_mcp_tools.py`) is unchanged because MCP is.
 - **Acceptance** (`tests/test_attachment_index_acceptance.py`): a message built
   by `_eml.two_attachments_same_name()` — two `note.txt` parts, different bytes
   — serves `file-one` at index 0 and `file-two` at index 1, each under its own
   name; the text route pages; and `/v1/attachments/{sha256}` answers
   byte-identically to a golden captured before the extraction.
-- **`tests/test_serve_version_route.py`**: `api_minor == 2`.
+- **`tests/test_serve_version_route.py`**: `api_minor >= 2`, the `>=` its
+  `headers=list` sibling uses, so a later bump does not break it.
 
 ## Documentation
 

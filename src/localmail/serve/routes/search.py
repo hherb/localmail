@@ -87,6 +87,20 @@ class SearchRequest(BaseModel):
     # Opt-in LLM query rewrite (Phase 4). Ignored gracefully when the server
     # has no rewriter configured — the response's rewrite_skipped reflects it.
     smart: bool = False
+    # Slice E: project each hit to exactly these keys (`snippet` is the
+    # plain-text name for `snippet_html`), and size the snippet window.
+    # Deliberately no `min_length`/`ge`/`le`: pydantic would answer 422 with
+    # an array `detail` (#370), and `run_search`'s pure rules answer a
+    # problem+json 400 that names the problem. A non-list `fields` is a type
+    # error on a known field and stays the 422 that #370 tracks.
+    fields: list[str] | None = None
+    # `int | bool`, not a bare `int`: pydantic v2's lax mode coerces a JSON
+    # `true` to `1` for a plain `int` field, so `{"snippet_chars": true}`
+    # would silently become a 1-character window under a 200 rather than the
+    # 400 `snippet_chars_error` gives it. Smart-union mode keeps a JSON
+    # `true` as a `bool` here, so it reaches that rule and is refused by name
+    # — the pure rule stays the one authority.
+    snippet_chars: int | bool | None = None
 
 
 def _unknown_field_error(req: SearchRequest) -> str | None:
@@ -138,4 +152,6 @@ def search_endpoint(
         sort_order=req.sort_order,
         cursor=req.cursor,
         smart=req.smart,
+        fields=req.fields,
+        snippet_chars=req.snippet_chars,
     )

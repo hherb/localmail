@@ -22,7 +22,10 @@ API_MAJOR = 1
 # client cannot tell from a missing message or index; and it ignores
 # offset/limit, answering 200 with the whole text and no next_offset — the
 # silent half, as with `headers=list` under 1.
-API_MINOR = 2
+# 3: `fields` and `snippet_chars` on POST /v1/search (kastellan slice E).
+# An older server refuses both with a 400 naming the unknown field (#364),
+# so this is the ask-first half rather than a silent one.
+API_MINOR = 3
 
 logger = logging.getLogger("localmail.serve")
 

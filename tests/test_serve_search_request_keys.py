@@ -55,7 +55,8 @@ def test_the_filter_model_accepts_exactly_the_supported_keys() -> None:
 
 def test_the_supported_field_list_is_the_request_model() -> None:
     assert sorted(SearchRequest.model_fields) == [
-        "cursor", "filters", "limit", "query", "smart", "sort", "sort_order",
+        "cursor", "fields", "filters", "limit", "query", "smart",
+        "snippet_chars", "sort", "sort_order",
     ]
 
 
@@ -183,8 +184,8 @@ def test_an_unknown_top_level_field_is_a_400_naming_it(
     assert r.status_code == 400, r.text
     assert r.headers["content-type"].startswith("application/problem+json")
     assert r.json()["detail"] == (
-        "unknown field 'order'; supported: cursor, filters, limit, query, smart, "
-        "sort, sort_order"
+        "unknown field 'order'; supported: cursor, fields, filters, limit, query, "
+        "smart, snippet_chars, sort, sort_order"
     )
     searcher.search.assert_not_called()
 
@@ -197,8 +198,8 @@ def test_several_unknown_top_level_fields_are_all_named(
                         {"query": "flight", "order": "asc", "page": 2})
     assert r.status_code == 400, r.text
     assert r.json()["detail"] == (
-        "unknown fields 'order', 'page'; supported: cursor, filters, limit, "
-        "query, smart, sort, sort_order"
+        "unknown fields 'order', 'page'; supported: cursor, fields, filters, "
+        "limit, query, smart, snippet_chars, sort, sort_order"
     )
     searcher.search.assert_not_called()
 

@@ -189,7 +189,7 @@ def test_pool_cursor_with_the_sort_the_pool_was_built_with_continues() -> None:
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
     run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                allowed_account_ids=[1], user_id=99, sort="rank", cursor=cursor)
-    s.continue_page.assert_called_once_with("tok-1", 2, user_id=99)
+    s.continue_page.assert_called_once_with("tok-1", 2, user_id=99, snippet_chars=None)
 
 
 def test_pool_cursor_whose_pool_is_gone_reports_an_expired_cursor() -> None:
@@ -212,7 +212,7 @@ def test_pool_cursor_without_a_stated_sort_costs_no_metadata_probe() -> None:
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
     run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                allowed_account_ids=[1], user_id=99, cursor=cursor)
-    s.continue_page.assert_called_once_with("tok-1", 2, user_id=99)
+    s.continue_page.assert_called_once_with("tok-1", 2, user_id=99, snippet_chars=None)
     s.get_pool_metadata.assert_not_called()
 
 

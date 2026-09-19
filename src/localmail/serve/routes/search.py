@@ -94,13 +94,24 @@ class SearchRequest(BaseModel):
     # problem+json 400 that names the problem. A non-list `fields` is a type
     # error on a known field and stays the 422 that #370 tracks.
     fields: list[str] | None = None
-    # `int | bool`, not a bare `int`: pydantic v2's lax mode coerces a JSON
-    # `true` to `1` for a plain `int` field, so `{"snippet_chars": true}`
-    # would silently become a 1-character window under a 200 rather than the
-    # 400 `snippet_chars_error` gives it. Smart-union mode keeps a JSON
-    # `true` as a `bool` here, so it reaches that rule and is refused by name
-    # — the pure rule stays the one authority.
-    snippet_chars: int | bool | None = None
+    # `Any`, not `int | bool` and not a bare `int`: pydantic's lax coercion is
+    # exactly what this field must not have. A plain `int` field silently
+    # coerces `"5"` and `5.0` to `5` — answered 200 under a request that named
+    # a string or a float, never the integer `snippet_chars_error` checked —
+    # and a genuinely non-numeric value (`1.5`, `"abc"`) gets pydantic's own
+    # 422 with an array `detail` (#370), not the problem+json 400
+    # `snippet_chars_error` gives it. `int | bool` fixed the `bool` half (a
+    # JSON `true` stayed a `bool` rather than coercing to `1`) but left the
+    # string/float coercions live. `Any` reaches every JSON value into
+    # `snippet_chars_error` unmodified, so that pure rule is the one
+    # authority: every refusal — bool, non-int, out-of-range — is its call,
+    # worded once, on the wire and for library callers alike.
+    snippet_chars: Any = Field(
+        default=None,
+        description=("Snippet window width in characters: an integer from 1 "
+                     "to [search] snippet_max_chars. Anything else is a "
+                     "400."),
+    )
 
 
 def _unknown_field_error(req: SearchRequest) -> str | None:

@@ -990,7 +990,9 @@ class Searcher:
         """
         if snippet_chars is None:
             return self._cfg.snippet_width_chars
-        if isinstance(snippet_chars, bool) or snippet_chars < 1:
+        if (isinstance(snippet_chars, bool)
+                or not isinstance(snippet_chars, int)
+                or snippet_chars < 1):
             raise ValueError(
                 f"snippet_chars must be a positive integer (got {snippet_chars!r})")
         return snippet_chars
@@ -1368,7 +1370,6 @@ class Searcher:
         effect there.
         """
         t0 = time.monotonic()
-        snippet_width = self._snippet_width(snippet_chars)
         # `sort` is *not* resolved here. Its resolution reads the query
         # (#324) — a query with no free text can only be served by the date
         # walk — and the query is not parsed yet, so `effective_sort` is
@@ -1433,6 +1434,12 @@ class Searcher:
                                                  sort_order=sort_order)
         if membership_error is not None:
             raise ValueError(membership_error)
+        # After membership, ahead of everything else (#348's ordering) — the
+        # cursor block, the rewriter, `parse_query`, any IO. A malformed
+        # `snippet_chars` from a library caller is a type error like the
+        # membership one above, not a cross-argument refusal, so it belongs
+        # beside it rather than after the guards that reason about the query.
+        snippet_width = self._snippet_width(snippet_chars)
         if keyset_cursor is not None:
             # The cursor's direction is the resolution's **third** source,
             # and the stated reading above cannot see it (#348 review). With

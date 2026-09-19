@@ -95,8 +95,26 @@ def test_cursor_dispatches_to_continue_page() -> None:
                      limit=2, allowed_account_ids=[1], user_id=99,
                      cursor=cursor)
     s.search.assert_not_called()
-    s.continue_page.assert_called_once_with("tok-1", 2, user_id=99)
+    s.continue_page.assert_called_once_with("tok-1", 2, user_id=99, snippet_chars=None)
     assert out["next_cursor"] == "tok-1:3"
+
+
+def test_cursor_dispatches_to_continue_page_with_snippet_chars() -> None:
+    """`_continue_or_grow` must forward `snippet_chars` to `continue_page`
+    (kastellan slice E) — nothing else pins this with a non-None value."""
+    s = MagicMock()
+    s.continue_page.return_value = _page(
+        results=[_result(2)], token="tok-1", pool_size=10,
+        page_size=2, has_more=True, can_grow=True, page=2,
+    )
+    s.config.snippet_max_chars = 1000
+    cursor = encode_search_cursor(SearchCursor(token="tok-1", page=2))
+    run_search(searcher=s, free_text="hello", filters={},
+              limit=2, allowed_account_ids=[1], user_id=99,
+              cursor=cursor, snippet_chars=77)
+    s.search.assert_not_called()
+    _, kwargs = s.continue_page.call_args
+    assert kwargs.get("snippet_chars") == 77
 
 
 def test_cache_miss_raises_search_cursor_expired() -> None:
@@ -143,6 +161,33 @@ def test_pool_exhausted_with_grow_pool_available_triggers_grow_pool() -> None:
     # Accessor is called with the user_id so the pool's ownership is enforced.
     s.get_pool_metadata.assert_called_once_with("tok-1", user_id=99)
     assert out["next_cursor"] == "tok-2:2"
+
+
+def test_grow_pool_forwards_snippet_chars() -> None:
+    """`_continue_or_grow` must forward `snippet_chars` to `grow_pool` too
+    (kastellan slice E) — the growth branch has no other pin for it."""
+    from localmail.search.page_cache import PageOutOfPoolError
+    from localmail.search.searcher import PoolMetadata
+    s = MagicMock()
+    s.continue_page.side_effect = PageOutOfPoolError("past pool")
+    s.get_pool_metadata.return_value = PoolMetadata(
+        candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
+        sort="rank", sort_order="desc", rankable=True,
+    )
+    s.config.candidates_per_arm = 50
+    s.config.candidates_per_arm_max = 800
+    s.config.snippet_max_chars = 1000
+    s.grow_pool.return_value = _page(
+        results=[_result(3)], token="tok-2", pool_size=20,
+        page_size=2, has_more=True, can_grow=True,
+    )
+    cursor = encode_search_cursor(SearchCursor(token="tok-1", page=5))
+    run_search(searcher=s, free_text="hello", filters={},
+              limit=2, allowed_account_ids=[1], user_id=99,
+              cursor=cursor, snippet_chars=77)
+    s.grow_pool.assert_called_once()
+    _, kwargs = s.grow_pool.call_args
+    assert kwargs.get("snippet_chars") == 77
 
 
 def test_pool_at_cap_returns_null_cursor_without_calling_grow_pool() -> None:

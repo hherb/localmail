@@ -3265,9 +3265,15 @@ for the full design.
   - **The cap lives at the api boundary; the Searcher checks positivity
     only.** The cap is an operator's bound for network callers, and
     `make_snippet` is correct for any positive width.
-  - **No `ge`/`le` on the pydantic model.** That would answer 422 with an
-    array `detail` (#370); the pure rule answers a problem+json 400 naming
-    the range.
+  - **`snippet_chars` is typed `Any` on the wire, not `int` (nor `int | bool`,
+    nor `ge`/`le`).** A bare `int` field lets pydantic's lax coercion silently
+    turn a JSON `"5"` or `5.0` into the integer `5` — a 200 under a request
+    that never named an integer — and a genuinely non-numeric value (`1.5`,
+    `"abc"`) gets pydantic's own 422 with an array `detail` (#370), never the
+    pure rule's problem+json 400. `int | bool` fixed only the `bool` half (a
+    JSON `true` used to coerce to `1`). `Any` reaches every JSON value into
+    `snippet_chars_error` unmodified, so that pure rule is the one authority:
+    bool, non-int, and out-of-range are all its call, worded once.
   - **Both are gated ahead of the empty-ACL short-circuit** (#348's rule), and
     pinned from a grant-nothing caller.
   - **The date walk emits no snippet** (`_date_keyset_search`), so

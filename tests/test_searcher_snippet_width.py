@@ -134,7 +134,7 @@ def test_grow_pool_takes_its_own_width(searcher) -> None:
     assert len(_snippet(grown)) <= 42
 
 
-@pytest.mark.parametrize("bad", [0, -5, True, False])
+@pytest.mark.parametrize("bad", [0, -5, True, False, "10", 1.5])
 def test_a_non_positive_width_is_refused_before_any_io(bad) -> None:
     pool = MagicMock()
     pool.connection.side_effect = AssertionError("touched the pool")
@@ -142,6 +142,24 @@ def test_a_non_positive_width_is_refused_before_any_io(bad) -> None:
                  rewriter=None)
     with pytest.raises(ValueError, match="snippet_chars"):
         s.search("zebra", allowed_account_ids=None, snippet_chars=bad)
+    pool.connection.assert_not_called()
+
+
+def test_sort_membership_is_checked_before_snippet_width() -> None:
+    """Both guards sit before any IO (#348/#349), and membership comes first
+    (#348) — the two-layers-order-one-rule-differently shape this codebase
+    keeps re-learning. A malformed ``sort`` and a malformed ``snippet_chars``
+    on the same call must surface the membership diagnosis, never the
+    snippet one, so a caller who mistyped both sees the guard that runs
+    first at the api boundary too (`run_search` checks membership ahead of
+    `snippet_chars_error`)."""
+    pool = MagicMock()
+    pool.connection.side_effect = AssertionError("touched the pool")
+    s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=None, reranker=None,
+                 rewriter=None)
+    with pytest.raises(ValueError, match="unknown sort"):
+        s.search("zebra", allowed_account_ids=None, sort="Date",
+                 snippet_chars=0)
     pool.connection.assert_not_called()
 
 

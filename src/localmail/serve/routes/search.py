@@ -88,11 +88,13 @@ class SearchRequest(BaseModel):
     # has no rewriter configured — the response's rewrite_skipped reflects it.
     smart: bool = False
     # Slice E: project each hit to exactly these keys (`snippet` is the
-    # plain-text name for `snippet_html`), and size the snippet window.
-    # Deliberately no `min_length`/`ge`/`le`: pydantic would answer 422 with
-    # an array `detail` (#370), and `run_search`'s pure rules answer a
-    # problem+json 400 that names the problem. A non-list `fields` is a type
-    # error on a known field and stays the 422 that #370 tracks.
+    # plain-text name for `snippet_html`). Deliberately no `min_length` —
+    # pydantic would answer 422 with an array `detail` (#370) where
+    # `fields_error` answers a problem+json 400 that names the offending
+    # name. The element type is left to pydantic, so a non-list `fields`, or
+    # a non-string in it, stays the 422 that #370 tracks, which makes
+    # `fields_error`'s first two branches library-only. That asymmetry with
+    # `snippet_chars` below is deliberate but unresolved — see #389.
     fields: list[str] | None = None
     # `Any`, not `int | bool` and not a bare `int`: pydantic's lax coercion is
     # exactly what this field must not have. A plain `int` field silently

@@ -75,6 +75,25 @@ def archive(db_dsn, db_conn):
         pool.close()
 
 
+@pytest.fixture
+def narrow_archive(db_dsn, db_conn):
+    """The same archive under an operator-lowered `snippet_max_chars`.
+
+    `archive` uses 1000, which is the *default*, so every test built on it
+    passes against a hardcoded `max_chars=1000` at the api gate — leaving the
+    knob's whole purpose, an operator's bound, unproven.
+    """
+    acct = _seed(db_conn)
+    cfg = SearchConfig(snippet_max_chars=300)
+    run_embed_worker_once(db_conn, cfg, _E())
+    pool = open_pool(db_dsn)
+    try:
+        yield acct, Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=None,
+                             rewriter=None)
+    finally:
+        pool.close()
+
+
 def _post(db_dsn, searcher, token, body):
     client = TestClient(create_app(db_dsn=db_dsn, searcher=searcher))
     return client.post("/v1/search", json=body,
@@ -121,7 +140,9 @@ def test_snippet_chars_widens_on_the_wire(archive, db_dsn, db_conn, api_user, ap
     r = _post(db_dsn, searcher, api_token,
               {"query": "zebra", "fields": ["snippet"], "snippet_chars": 800})
     assert r.status_code == 200, r.text
-    assert all(len(h["snippet"]) > 600 for h in r.json()["results"])
+    hits = r.json()["results"]
+    assert hits, "all() over [] is True; without this the only widening pin is vacuous"
+    assert all(len(h["snippet"]) > 600 for h in hits)
 
 
 def test_a_pool_continuation_is_projected_and_sized(archive, db_dsn, db_conn, api_user, api_token):
@@ -190,6 +211,30 @@ def test_a_bad_argument_is_refused_even_for_a_caller_granted_nothing(
     r = _post(db_dsn, searcher, api_token, {"query": "zebra", **extra})
     assert r.status_code == 400, r.text
     assert needle in r.json()["detail"]
+
+
+def test_the_cap_is_the_configured_one_not_a_constant(
+    narrow_archive, db_dsn, db_conn, api_user, api_token,
+):
+    # 500 is under the default 1000 and over this deployment's 300, so a
+    # hardcoded `max_chars=1000` at the gate answers 200 here.
+    acct, searcher = narrow_archive
+    _grant(db_conn, api_user.id, acct)
+    r = _post(db_dsn, searcher, api_token, {"query": "zebra", "snippet_chars": 500})
+    assert r.status_code == 400, r.text
+    assert "300" in r.json()["detail"]
+
+
+def test_a_width_at_the_configured_cap_is_accepted(
+    narrow_archive, db_dsn, db_conn, api_user, api_token,
+):
+    # The other direction: a cap read as a constant *lower* than configured
+    # would refuse this, and the test above alone would not notice.
+    acct, searcher = narrow_archive
+    _grant(db_conn, api_user.id, acct)
+    r = _post(db_dsn, searcher, api_token, {"query": "zebra", "snippet_chars": 300})
+    assert r.status_code == 200, r.text
+    assert r.json()["results"]
 
 
 def test_run_search_refuses_before_touching_the_searcher() -> None:

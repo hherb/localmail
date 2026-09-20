@@ -1064,9 +1064,11 @@ Legacy archives can backfill IMAP `INTERNALDATE` via
 
 - `fields`: a list of hit keys to return. Each hit then carries **exactly**
   those keys, in a fixed order. The permitted names are the default hit keys
-  plus `snippet`, the plain-text snippet. (`snippet_html` is the same text;
-  it has never held HTML.) The envelope (`next_cursor`, `sort_applied`,
-  `rankable`, `rewrite_*`, …) is never projected.
+  plus `snippet`, the plain-text snippet. (`snippet_html` is the same string
+  under its historical name: the server has never emitted markup into it, so
+  it is raw message text and a consumer rendering it as HTML must escape it.)
+  The envelope (`next_cursor`, `sort_applied`, `rankable`, `rewrite_*`, …) is
+  never projected.
 - `snippet_chars`: the width of the snippet window, between 1 and
   `[search] snippet_max_chars` (default 1000). A cut window may gain a `…`
   at either end, so the text is at most `snippet_chars + 2` characters.

@@ -574,5 +574,19 @@ def test_snippet_max_chars_equal_to_the_width_is_accepted() -> None:
 
 
 def test_snippet_max_chars_must_be_positive() -> None:
+    # Pins the outcome, not the mechanism: now that `snippet_width_chars` is
+    # floored too, any max below 1 is also below the width, so the model
+    # validator catches it as well. `ge=1` stays for the better message.
     with pytest.raises(ValidationError):
         SearchConfig(snippet_width_chars=1, snippet_max_chars=0)
+
+
+@pytest.mark.parametrize("width", [0, -5])
+def test_snippet_width_chars_must_be_positive(width: int) -> None:
+    # `Searcher._snippet_width` returns this unchecked whenever a caller
+    # states nothing, so a non-positive default empties every snippet
+    # archive-wide (negative: returns nearly the whole chunk) while a caller
+    # naming that same width explicitly is refused with a 400. The relative
+    # rule above does not cover it: 1000 >= 0 passes the validator.
+    with pytest.raises(ValidationError, match="snippet_width_chars"):
+        SearchConfig(snippet_width_chars=width)

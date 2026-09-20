@@ -3260,8 +3260,11 @@ for the full design.
   - **The width is per page, not per pool.** `_build_results` builds snippets
     from the full cached source text, so a continuation takes its own width
     with no re-retrieval. `_build_results`' `snippet_width` is keyword-only
-    **with no default**: a call site that forgot it would silently serve the
-    configured width to a caller who asked for another.
+    **with no default**, so omitting it is a `TypeError`: *a default* would
+    let a call site forget it and silently serve the configured width to a
+    caller who asked for another. Pinned by a signature test — every call
+    site passes it today, so a default would otherwise leave the suite
+    green.
   - **The cap lives at the api boundary; the Searcher checks positivity
     only.** The cap is an operator's bound for network callers, and
     `make_snippet` is correct for any positive width.
@@ -3278,6 +3281,22 @@ for the full design.
     pinned from a grant-nothing caller.
   - **The date walk emits no snippet** (`_date_keyset_search`), so
     `snippet_chars` sizes nothing there. Giving it snippets is out of scope.
+    The caller can still tell: `sort_applied == "date"` ⟺ the date walk ran
+    ⟺ `snippet` is `""`, on every path.
+  - **HTTP only — the MCP `search` tool takes neither.** `api_minor` is a
+    server-wide advertisement, so an agent reading `3` and naming `fields`
+    over `/mcp` has it **silently dropped**: FastMCP's `ArgModelBase` sets no
+    `extra` and there is no per-tool hook (#368). Widening the MCP tool is
+    its own slice; until then the version counter over-promises on that
+    transport.
+  - **`snippet_width_chars` is floored at 1**, beside `snippet_max_chars`'s
+    own `ge=1`. `_snippet_width` returns the configured width *unchecked*
+    whenever a caller states nothing, so a non-positive default empties every
+    snippet archive-wide — and negative is worse, since `make_snippet`'s
+    no-match branch is `chunk_text[:width]`, which returns nearly the whole
+    chunk. The relative rule (`max >= width`) does not cover it: `1000 >= 0`
+    passes. A caller naming that same width explicitly gets a 400, which is
+    the asymmetry the floor removes.
 - **Browse & search pagination (PR #70)**:
   - `GET /v1/messages` is the canonical keyset browse endpoint, ordered
     `COALESCE(internal_date, date_sent) DESC NULLS LAST, id DESC` with

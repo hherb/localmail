@@ -424,7 +424,12 @@ class SearchConfig(BaseModel):
     page_size_default: int = 20
     page_size_max: int = 200
     hnsw_ef_search: int = 64
-    snippet_width_chars: int = 200
+    # Floored for the reason `snippet_max_chars` is: `_snippet_width`
+    # returns this unchecked whenever a caller states nothing, so a
+    # non-positive value makes `make_snippet` return "……" for every hit
+    # — or, negative, nearly the whole chunk — archive-wide and silently,
+    # while a caller naming that same width explicitly gets a 400.
+    snippet_width_chars: int = Field(default=200, ge=1)
     # Upper bound for a caller's `snippet_chars` on POST /v1/search (slice E).
     # An operator's resource bound for network callers, not a correctness
     # limit — `make_snippet` handles any positive width. Must be >= the

@@ -32,6 +32,12 @@ def test_hit_fields_are_exactly_the_hit_keys_plus_snippet() -> None:
     # projection, and no name is permitted that the hit never carries.
     assert set(HIT_FIELDS) == set(_to_api_result(_result())) | {"snippet"}
     assert len(HIT_FIELDS) == len(set(HIT_FIELDS))
+    # Positional, because the module docstring's claim is positional ("the
+    # first eleven"). The set comparison above admits a reorder of
+    # `_to_api_result`, after which a projected hit's key order diverges from
+    # a default hit's and the claim is false with both assertions green.
+    assert tuple(HIT_FIELDS[:-1]) == tuple(_to_api_result(_result()))
+    assert HIT_FIELDS[-1] == "snippet"
 
 
 def test_hit_fields_order_is_the_documented_one() -> None:

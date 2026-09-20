@@ -23,8 +23,11 @@ API_MAJOR = 1
 # offset/limit, answering 200 with the whole text and no next_offset — the
 # silent half, as with `headers=list` under 1.
 # 3: `fields` and `snippet_chars` on POST /v1/search (kastellan slice E).
-# An older server refuses both with a 400 naming the unknown field (#364),
-# so this is the ask-first half rather than a silent one.
+# A server at api_minor >= 1 refuses both with a 400 naming the unknown field
+# (#364); one older than that has no unknown-field check and ignores them
+# silently. Bumped anyway, so a client can feature-detect without provoking a
+# refusal. HTTP only: the MCP `search` tool takes neither and #368 drops an
+# unknown tool argument silently, so this counter over-promises there.
 API_MINOR = 3
 
 logger = logging.getLogger("localmail.serve")

@@ -169,3 +169,21 @@ def test_continuations_refuse_a_non_positive_width_too(method) -> None:
                  reranker=None, rewriter=None)
     with pytest.raises(ValueError, match="snippet_chars"):
         getattr(s, method)("tok", 2, snippet_chars=0)
+
+
+@pytest.mark.parametrize("method", ["_build_results", "_search_with_parsed"])
+def test_snippet_width_is_keyword_only_with_no_default(method: str) -> None:
+    """The #234 shape, asserted rather than only claimed in a docstring.
+
+    Both methods' docstrings say a default would let a call site forget the
+    parameter and silently serve the configured width to a caller who asked
+    for another. Every call site passes it today, so giving either one a
+    default leaves the whole suite green and the guarantee gone — the
+    `allowed_account_ids` pin in test_search_acl_clamp.py exists for exactly
+    this reason.
+    """
+    import inspect
+
+    param = inspect.signature(getattr(Searcher, method)).parameters["snippet_width"]
+    assert param.default is inspect.Parameter.empty
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY

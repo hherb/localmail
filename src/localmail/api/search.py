@@ -262,7 +262,7 @@ def run_search(
     cursor: str | None = None,
     smart: bool = False,
     fields: list[str] | None = None,
-    snippet_chars: int | None = None,
+    snippet_chars: Any = None,  # pre-gate, so genuinely any JSON value
 ) -> dict[str, Any]:
     """Run a search (or continue an existing one) and return the API-shaped response.
 
@@ -310,6 +310,12 @@ def run_search(
     empty-ACL short-circuit, for the reason every stated-argument gate is.
     See ``search_projection`` and
     docs/superpowers/specs/2026-09-19-search-hit-projection-design.md.
+
+    ``snippet_chars`` is annotated ``Any``, not ``int | None``: the route
+    types the wire field ``Any`` precisely so every JSON value reaches
+    ``snippet_chars_error`` uncoerced, and this is the parameter it hands
+    them to — *before* the gate below narrows it. Everything downstream of
+    that gate (``_continue_or_grow``, ``Searcher``) is correctly ``int``.
     """
     # Membership first, ahead of every other gate here (#348). Two reasons,
     # and the second is why this is not merely tidy.
@@ -739,6 +745,11 @@ def _to_api_result(r: SearchResult) -> dict[str, Any]:
     same expression every recent-mail / sort=date SQL path uses. Returning
     a different column than the sort key made dates look out of order in
     the GUI whenever the two diverged.
+
+    A key added, removed or **reordered** here must be mirrored in
+    ``api.search_projection.HIT_FIELDS``, which a caller's ``fields`` is
+    validated against; pinned both ways (set and order) by
+    ``test_hit_fields_are_exactly_the_hit_keys_plus_snippet``.
     """
     received = r.internal_date or r.date_sent
     return {

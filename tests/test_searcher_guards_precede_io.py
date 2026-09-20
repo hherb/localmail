@@ -238,3 +238,22 @@ def test_the_rewriter_tripwire_is_reachable_too() -> None:
         searcher.search("invoice", allowed_account_ids=None, sort="date",
                         smart=True)
     pool.connection.assert_not_called()
+
+
+def test_the_snippet_width_guard_precedes_every_io_route_too() -> None:
+    """Slice E's guard is outside the family, so the table above misses it.
+
+    `Searcher._snippet_width` raises a bare `ValueError`, not a
+    `SearchArgumentRefused`, so `_family()` cannot reach it and this case is
+    written by hand. Its comment claims the resolution sits "ahead of
+    everything else — the cursor block, the rewriter, `parse_query`, any IO",
+    but its own pin in test_searcher_snippet_width.py arms the **pool
+    alone** — which is precisely what let the #308 guard sit below the smart
+    rewrite unnoticed until #349. `_searcher()` arms all three routes, so a
+    guard moved under the rewrite fails here with `_Rewriter`'s
+    AssertionError rather than the expected `ValueError`.
+    """
+    s, pool = _searcher()
+    with pytest.raises(ValueError, match="snippet_chars"):
+        s.search("zebra", allowed_account_ids=None, smart=True, snippet_chars=0)
+    pool.connection.assert_not_called()

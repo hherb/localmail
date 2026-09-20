@@ -51,6 +51,16 @@ dependencies = [
     "structlog>=24.1",
     "tiktoken>=0.13.0",
     "fastapi>=0.115",
+    # Declared because we import it (`anyio.to_thread` in serve/ and mcp/),
+    # and the floor is security-driven: Dependabot #80 (CRITICAL, TLSStream
+    # IDNA-2003 host-name encoding → certificate spoofing) and #79 (process-
+    # pool workers block on undrained stderr), both `< 4.14.2`. It arrived
+    # only transitively via fastapi/starlette/mcp, so like `transformers` there
+    # was no floor to read the range against — the lock held 4.13.0. Neither
+    # surface is on our path (no outbound anyio TLS: serve's TLS is uvicorn
+    # over stdlib ssl, the rewriter is sync httpx; no process pools), so this
+    # is hygiene, not an incident.
+    "anyio>=4.14.2",
     "uvicorn[standard]>=0.32",
     "argon2-cffi>=23.1",
     "nh3>=0.2.18",

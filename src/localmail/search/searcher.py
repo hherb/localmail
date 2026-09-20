@@ -42,6 +42,7 @@ from localmail.search.page_cache import (
 from localmail.search.query import ParsedQuery, parse_query
 from localmail.search.relevance_order import date_key, finite_scores, relevance_key
 from localmail.search.reranker import Reranker
+from localmail.search.snippet_width import snippet_width_error
 from localmail.search.rewrite_status import (
     APPLIED,
     FAILED,
@@ -983,18 +984,19 @@ class Searcher:
     def _snippet_width(self, snippet_chars: int | None) -> int:
         """Resolve a caller's snippet width; ``None`` is the configured default.
 
-        Positivity only — the upper cap is an operator's bound for *network*
-        callers and lives at the api boundary (``search_projection``). A
-        ``bool`` is refused because it is an ``int`` subclass. Raised before
+        Uncapped — the ceiling is an operator's bound for *network* callers,
+        applied at the api boundary by passing ``max_chars``; a library
+        caller asking for a 5,000-character window is not doing anything
+        wrong. The type and floor rule itself is
+        ``snippet_width.snippet_width_error``, shared with that boundary so
+        an identical mistake cannot earn two wordings (#390). Raised before
         any IO so a library caller's bug is loud and costs nothing.
         """
         if snippet_chars is None:
             return self._cfg.snippet_width_chars
-        if (isinstance(snippet_chars, bool)
-                or not isinstance(snippet_chars, int)
-                or snippet_chars < 1):
-            raise ValueError(
-                f"snippet_chars must be a positive integer (got {snippet_chars!r})")
+        error = snippet_width_error(snippet_chars, max_chars=None)
+        if error is not None:
+            raise ValueError(error)
         return snippet_chars
 
     def _build_results(

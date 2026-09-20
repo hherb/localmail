@@ -26,9 +26,10 @@ from localmail.api.search_cursor import (
     reject_pool_sort_mismatch,
     resolve_cursor_plan,
 )
-from localmail.api.search_projection import fields_error, project_hit, snippet_chars_error
+from localmail.api.search_projection import fields_error, project_hit
 from localmail.config import SearchConfig
 from localmail.search.query import ParsedQuery, QueryParseError, parse_query
+from localmail.search.snippet_width import snippet_width_error
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.rewrite_status import (
     CONTINUATION_PAGE,
@@ -313,7 +314,7 @@ def run_search(
 
     ``snippet_chars`` is annotated ``Any``, not ``int | None``: the route
     types the wire field ``Any`` precisely so every JSON value reaches
-    ``snippet_chars_error`` uncoerced, and this is the parameter it hands
+    ``snippet_width_error`` uncoerced, and this is the parameter it hands
     them to — *before* the gate below narrows it. Everything downstream of
     that gate (``_continue_or_grow``, ``Searcher``) is correctly ``int``.
     """
@@ -354,7 +355,7 @@ def run_search(
     # be reported as a completed one.
     if fields is not None and (error := fields_error(fields)) is not None:
         raise ValidationFailed(error)
-    if snippet_chars is not None and (error := snippet_chars_error(
+    if snippet_chars is not None and (error := snippet_width_error(
             snippet_chars, max_chars=searcher.config.snippet_max_chars)) is not None:
         raise ValidationFailed(error)
 

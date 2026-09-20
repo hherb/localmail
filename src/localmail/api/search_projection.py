@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
-"""Compact search hits: the `fields` projection and `snippet_chars` (slice E).
+"""Compact search hits: the `fields` projection (slice E).
 
-Pure — no IO. The one authority for which hit keys a caller may name and for
-the range a caller may ask a snippet to span. Each rule returns a message or
-``None`` (the ``account_names.account_name_error`` shape); the caller decides
-what an error *is* (``run_search`` raises ``ValidationFailed``, a 400).
+Pure — no IO. The one authority for which hit keys a caller may name. The
+rule returns a message or ``None`` (the
+``account_names.account_name_error`` shape); the caller decides what an
+error *is* (``run_search`` raises ``ValidationFailed``, a 400).
+
+The sibling argument, ``snippet_chars``, is **not** ruled on here: its type
+and floor are identical for a library caller, so they live in
+``search.snippet_width`` and this boundary supplies only the cap (#390).
 
 Spec: docs/superpowers/specs/2026-09-19-search-hit-projection-design.md
 """
@@ -53,31 +57,26 @@ def fields_error(fields: object) -> str | None:
             f"supported: {', '.join(HIT_FIELDS)}")
 
 
-def snippet_chars_error(value: object, *, max_chars: int) -> str | None:
-    """Why ``value`` cannot size a snippet window, or ``None`` when it can.
-
-    ``bool`` is refused explicitly: it is an ``int`` subclass, so ``True``
-    would otherwise read as a one-character window. Out of range is refused
-    rather than clamped — a silently clamped value is an answer to a
-    question the caller did not ask.
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        return f"snippet_chars must be an integer (got {value!r})"
-    if not 1 <= value <= max_chars:
-        return f"snippet_chars must be between 1 and {max_chars} (got {value})"
-    return None
-
-
 def project_hit(hit: dict[str, Any], fields: Sequence[str]) -> dict[str, Any]:
     """Return a new hit carrying exactly ``fields``, in ``HIT_FIELDS`` order.
 
-    ``fields`` must already have passed ``fields_error``. An unvalidated name
-    raises ``KeyError`` here rather than being dropped — a loud bug at the
-    one boundary that can still see it. ``hit`` is not mutated.
+    ``fields`` must already have passed ``fields_error``, and that
+    precondition is re-checked here rather than restated: an unvalidated
+    ``fields`` raises ``ValueError`` rather than being honoured — a loud bug
+    at the one boundary that can still see it. ``hit`` is not mutated.
+
+    The check *delegates* (#392). The hand-written guard it replaced
+    re-derived a subset of ``fields_error``'s judgement — names outside
+    ``HIT_FIELDS``, and nothing else — so an **empty** list, the one shape
+    ``fields_error`` calls a caller bug rather than a request, passed
+    through and returned a hit with no keys at all. ``run_search`` gates
+    ~250 lines before the call, with nothing between them carrying the fact
+    of validation, which is why the precondition is written down; the
+    enforcement has to be the rule itself, not a paraphrase of it. At
+    O(``len(HIT_FIELDS)``) per hit and ≤200 hits a page, it is free.
     """
+    if (error := fields_error(list(fields))) is not None:
+        raise ValueError(error)
     source = {**hit, "snippet": hit[_SNIPPET_ALIAS_OF]}
     wanted = set(fields)
-    for name in wanted:
-        if name not in HIT_FIELDS:
-            raise KeyError(name)
     return {name: source[name] for name in HIT_FIELDS if name in wanted}

@@ -68,20 +68,26 @@ SEARCH_METHOD = "search"
 
 #: Exceptions ``Searcher.search`` may raise without joining the family.
 #: Bare builtins only: they carry no claim of being a refusal type, so
-#: spelling one is a visible opt-out rather than a silent omission. The two
+#: spelling one is a visible opt-out rather than a silent omission. The three
 #: live uses are #333's membership checks (``ValueError``, kept outside the
-#: family by #348) and ``--smart`` with no rewriter configured
-#: (``RuntimeError``).
+#: family by #348), ``--smart`` with no rewriter configured
+#: (``RuntimeError``), and slice E's ``Searcher._snippet_width``
+#: (``ValueError``), whose boundary is ``run_search``'s ``snippet_chars``
+#: gate — strictly stronger than the guard, so no gate-accepted value can
+#: reach it. That third one is reached from ``continue_page``/``grow_pool``
+#: as well as ``search``, and ``run_search``'s pool branch carries no catch
+#: at all, so widening the gate without widening the guard is a 500.
 #:
 #: **The exemption is conditional, and this constant cannot express the
-#: condition.** Both live uses are safe only because a boundary answers them
-#: first — ``run_search`` mirrors the same membership rule ahead of the call,
-#: and computes ``effective_smart = smart and searcher.smart_available`` — so
-#: neither reaches a catch site. A *new* guard spelled ``raise
-#: ValueError(...)``, which is the shape both live examples model, passes
-#: this rule and is an unhandled 500 at both boundaries, exactly as the
-#: message below says. Adding a name here means checking that a boundary
-#: refuses it first; the rule reads spelling and cannot check that for you.
+#: condition.** All three live uses are safe only because a boundary answers
+#: them first — ``run_search`` mirrors the same membership rule ahead of the
+#: call, computes ``effective_smart = smart and searcher.smart_available``,
+#: and gates ``snippet_chars`` — so none reaches a catch site. A *new* guard
+#: spelled ``raise ValueError(...)``, which is the shape all three live
+#: examples model, passes this rule and is an unhandled 500 at both
+#: boundaries, exactly as the message below says. Adding a name here means
+#: checking that a boundary refuses it first; the rule reads spelling and
+#: cannot check that for you.
 ALLOWED_BARE_RAISES = frozenset({"ValueError", "RuntimeError"})
 
 

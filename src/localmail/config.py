@@ -424,7 +424,17 @@ class SearchConfig(BaseModel):
     page_size_default: int = 20
     page_size_max: int = 200
     hnsw_ef_search: int = 64
-    snippet_width_chars: int = 200
+    # Floored for the reason `snippet_max_chars` is: `_snippet_width`
+    # returns this unchecked whenever a caller states nothing, so a
+    # non-positive value makes `make_snippet` return "……" for every hit
+    # — or, negative, nearly the whole chunk — archive-wide and silently,
+    # while a caller naming that same width explicitly gets a 400.
+    snippet_width_chars: int = Field(default=200, ge=1)
+    # Upper bound for a caller's `snippet_chars` on POST /v1/search (slice E).
+    # An operator's resource bound for network callers, not a correctness
+    # limit — `make_snippet` handles any positive width. Must be >= the
+    # default width, or the default is a value the API refuses.
+    snippet_max_chars: int = Field(default=1000, ge=1)
 
     # --- reranker ---
     # Default OFF. The cross-encoder rerank pass is O(pool size) and the
@@ -612,6 +622,14 @@ class SearchConfig(BaseModel):
 
     # --- evaluation / logging (Phase 5) ---
     log_queries: bool = False
+
+    @model_validator(mode="after")
+    def _snippet_max_covers_the_default_width(self) -> SearchConfig:
+        if self.snippet_max_chars < self.snippet_width_chars:
+            raise ValueError(
+                f"snippet_max_chars ({self.snippet_max_chars}) must be >= "
+                f"snippet_width_chars ({self.snippet_width_chars})")
+        return self
 
 
 class UpgradeEstimateConfig(BaseModel):

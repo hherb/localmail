@@ -1058,6 +1058,33 @@ the SQL sorts by — so the displayed ordering always matches the field.
 Legacy archives can backfill IMAP `INTERNALDATE` via
 `localmail backfill-internal-date` once after upgrade.
 
+#### Compact hits: `fields` and `snippet_chars` (`api_minor` ≥ 3)
+
+`POST /v1/search` accepts two optional fields:
+
+- `fields`: a list of hit keys to return. Each hit then carries **exactly**
+  those keys, in a fixed order. The permitted names are the default hit keys
+  plus `snippet`, the plain-text snippet. (`snippet_html` is the same string
+  under its historical name: the server has never emitted markup into it, so
+  it is raw message text and a consumer rendering it as HTML must escape it.)
+  The envelope (`next_cursor`, `sort_applied`, `rankable`, `rewrite_*`, …) is
+  never projected.
+- `snippet_chars`: the width of the snippet window, between 1 and
+  `[search] snippet_max_chars` (default 1000). A cut window may gain a `…`
+  at either end, so the text is at most `snippet_chars + 2` characters.
+  Each page, continuations included, takes the width stated on its own
+  request.
+
+An unknown or empty `fields`, or an out-of-range or non-integer
+`snippet_chars`, is a 400 problem+json. That holds for a caller granted no
+accounts too. Omit both for today's response, unchanged.
+
+A search with no free text (filters only, or `sort=date`) takes the date walk,
+which returns an empty snippet. There `snippet_chars` has nothing to size.
+
+Example, the smallest useful hit for an agent:
+`{"query": "invoice", "fields": ["message_id", "subject", "date", "snippet"], "snippet_chars": 120}`.
+
 ## MCP server
 
 `localmail serve` can also expose the archive to AI agents over the

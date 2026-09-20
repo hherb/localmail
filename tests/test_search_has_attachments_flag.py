@@ -208,5 +208,5 @@ def test_a_message_deleted_before_hydration_reports_no_attachments() -> None:
     searcher = Searcher(pool=MagicMock(), cfg=SearchConfig(), embeddings=None,
                         reranker=None, rewriter=None)
     [result] = searcher._build_results([ghost], parse_query("x"), [0.5],
-                                       page=1, page_size=10)
+                                       page=1, page_size=10, snippet_width=200)
     assert result.has_attachments is False

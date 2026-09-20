@@ -556,3 +556,37 @@ def test_rewriter_max_expansion_terms_default():
     from localmail.config import SearchConfig
     cfg = SearchConfig()
     assert cfg.rewriter_max_expansion_terms == 8
+
+
+def test_snippet_max_chars_defaults_to_1000() -> None:
+    assert SearchConfig().snippet_max_chars == 1000
+
+
+def test_snippet_max_chars_below_the_default_width_is_rejected() -> None:
+    # Otherwise the default width would be a value the API refuses, and a
+    # caller could not state it explicitly.
+    with pytest.raises(ValidationError, match="snippet_max_chars"):
+        SearchConfig(snippet_width_chars=200, snippet_max_chars=199)
+
+
+def test_snippet_max_chars_equal_to_the_width_is_accepted() -> None:
+    assert SearchConfig(snippet_width_chars=300, snippet_max_chars=300).snippet_max_chars == 300
+
+
+def test_snippet_max_chars_must_be_positive() -> None:
+    # Pins the outcome, not the mechanism: now that `snippet_width_chars` is
+    # floored too, any max below 1 is also below the width, so the model
+    # validator catches it as well. `ge=1` stays for the better message.
+    with pytest.raises(ValidationError):
+        SearchConfig(snippet_width_chars=1, snippet_max_chars=0)
+
+
+@pytest.mark.parametrize("width", [0, -5])
+def test_snippet_width_chars_must_be_positive(width: int) -> None:
+    # `Searcher._snippet_width` returns this unchecked whenever a caller
+    # states nothing, so a non-positive default empties every snippet
+    # archive-wide (negative: returns nearly the whole chunk) while a caller
+    # naming that same width explicitly is refused with a 400. The relative
+    # rule above does not cover it: 1000 >= 0 passes the validator.
+    with pytest.raises(ValidationError, match="snippet_width_chars"):
+        SearchConfig(snippet_width_chars=width)

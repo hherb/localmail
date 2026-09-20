@@ -26,6 +26,7 @@ from localmail.api.search_cursor import (
     reject_pool_sort_mismatch,
     resolve_cursor_plan,
 )
+from localmail.api.search_projection import fields_error, project_hit, snippet_chars_error
 from localmail.config import SearchConfig
 from localmail.search.query import ParsedQuery, QueryParseError, parse_query
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
@@ -260,6 +261,8 @@ def run_search(
     sort_order: SortOrder | None = None,
     cursor: str | None = None,
     smart: bool = False,
+    fields: list[str] | None = None,
+    snippet_chars: Any = None,  # pre-gate, so genuinely any JSON value
 ) -> dict[str, Any]:
     """Run a search (or continue an existing one) and return the API-shaped response.
 
@@ -300,6 +303,19 @@ def run_search(
     / ``unparseable`` / ``not_configured`` / ``continuation_page``, or ``None``
     when there is no note). ``rewrite_skipped`` stays True only when a requested
     rewrite did not happen (rewriter unavailable, or the rewrite call failed).
+
+    ``fields`` projects each hit to exactly the named keys (the envelope is
+    never projected); ``snippet_chars`` sizes the snippet window, between 1
+    and ``search.snippet_max_chars``. Both are refused (400) before the
+    empty-ACL short-circuit, for the reason every stated-argument gate is.
+    See ``search_projection`` and
+    docs/superpowers/specs/2026-09-19-search-hit-projection-design.md.
+
+    ``snippet_chars`` is annotated ``Any``, not ``int | None``: the route
+    types the wire field ``Any`` precisely so every JSON value reaches
+    ``snippet_chars_error`` uncoerced, and this is the parameter it hands
+    them to — *before* the gate below narrows it. Everything downstream of
+    that gate (``_continue_or_grow``, ``Searcher``) is correctly ``int``.
     """
     # Membership first, ahead of every other gate here (#348). Two reasons,
     # and the second is why this is not merely tidy.
@@ -331,6 +347,16 @@ def run_search(
     membership_error = sort_membership_error(sort=sort, sort_order=sort_order)
     if membership_error is not None:
         raise ValidationFailed(membership_error)
+
+    # Slice E's two arguments, ahead of the empty-ACL short-circuit for the
+    # reason the membership gate above is: that branch's empty page reads as
+    # "no results", so a malformed request from a grant-nothing caller would
+    # be reported as a completed one.
+    if fields is not None and (error := fields_error(fields)) is not None:
+        raise ValidationFailed(error)
+    if snippet_chars is not None and (error := snippet_chars_error(
+            snippet_chars, max_chars=searcher.config.snippet_max_chars)) is not None:
+        raise ValidationFailed(error)
 
     # Filters next, keys and then values, for the reason the gate above
     # gives: ahead of the empty-ACL short-circuit, whose empty page reads as
@@ -471,7 +497,8 @@ def run_search(
             page = searcher.search(query, page_size=limit, user_id=user_id,
                                    sort=sort, sort_order=sort_order,
                                    smart=effective_smart,
-                                   allowed_account_ids=allowed_account_ids)
+                                   allowed_account_ids=allowed_account_ids,
+                                   snippet_chars=snippet_chars)
         except SearchArgumentRefused as exc:
             # The whole family, not the members this branch can name (#344).
             # It used to enumerate `(SortNotApplicable,
@@ -506,7 +533,8 @@ def run_search(
             page = searcher.search(query, page_size=limit, user_id=user_id,
                                    sort=plan.sort, sort_order=plan.sort_order,
                                    keyset_cursor=keyset,
-                                   allowed_account_ids=allowed_account_ids)
+                                   allowed_account_ids=allowed_account_ids,
+                                   snippet_chars=snippet_chars)
         except SearchArgumentRefused as exc:
             # The same family as the fresh branch (#344). It used to name
             # three members and argue, per member, which were unreachable
@@ -552,7 +580,8 @@ def run_search(
         # other way, which is #312's defect exactly.
         _check_pool_sort(searcher, parsed, requested_sort=sort,
                          requested_sort_order=sort_order, user_id=user_id)
-        page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg)
+        page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg,
+                                 snippet_chars=snippet_chars)
 
     next_cursor = _next_cursor(page, cfg=cfg)
     status: str
@@ -573,7 +602,11 @@ def run_search(
         else:
             status, note, code = NOT_REQUESTED, None, None
     return {
-        "results": [_to_api_result(r) for r in page.results],
+        "results": [
+            _to_api_result(r) if fields is None
+            else project_hit(_to_api_result(r), fields)
+            for r in page.results
+        ],
         "next_cursor": next_cursor,
         "total_estimate": None,
         "took_ms": page.timing_ms.get("total", 0.0),
@@ -618,9 +651,11 @@ def _check_pool_sort(
 
 def _continue_or_grow(
     searcher: Searcher, parsed: SearchCursor, *, user_id: int, cfg: SearchConfig,
+    snippet_chars: int | None,
 ) -> Any:
     try:
-        return searcher.continue_page(parsed.token, parsed.page, user_id=user_id)
+        return searcher.continue_page(parsed.token, parsed.page, user_id=user_id,
+                                      snippet_chars=snippet_chars)
     except CacheMissError as exc:
         raise SearchCursorExpired(f"cursor {parsed.token!r} not found") from exc
     except PageOutOfPoolError:
@@ -632,7 +667,8 @@ def _continue_or_grow(
                                      sort_applied=meta.sort,
                                      rankable=meta.rankable)
         new_cpa = min(meta.candidates_per_arm * 2, cfg.candidates_per_arm_max)
-        return searcher.grow_pool(parsed.token, new_cpa, user_id=user_id)
+        return searcher.grow_pool(parsed.token, new_cpa, user_id=user_id,
+                                  snippet_chars=snippet_chars)
 
 
 def _empty_grown_page(
@@ -709,6 +745,11 @@ def _to_api_result(r: SearchResult) -> dict[str, Any]:
     same expression every recent-mail / sort=date SQL path uses. Returning
     a different column than the sort key made dates look out of order in
     the GUI whenever the two diverged.
+
+    A key added, removed or **reordered** here must be mirrored in
+    ``api.search_projection.HIT_FIELDS``, which a caller's ``fields`` is
+    validated against; pinned both ways (set and order) by
+    ``test_hit_fields_are_exactly_the_hit_keys_plus_snippet``.
     """
     received = r.internal_date or r.date_sent
     return {

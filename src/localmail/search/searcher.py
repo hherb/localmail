@@ -980,6 +980,23 @@ class Searcher:
             })
         return out
 
+    def _snippet_width(self, snippet_chars: int | None) -> int:
+        """Resolve a caller's snippet width; ``None`` is the configured default.
+
+        Positivity only — the upper cap is an operator's bound for *network*
+        callers and lives at the api boundary (``search_projection``). A
+        ``bool`` is refused because it is an ``int`` subclass. Raised before
+        any IO so a library caller's bug is loud and costs nothing.
+        """
+        if snippet_chars is None:
+            return self._cfg.snippet_width_chars
+        if (isinstance(snippet_chars, bool)
+                or not isinstance(snippet_chars, int)
+                or snippet_chars < 1):
+            raise ValueError(
+                f"snippet_chars must be a positive integer (got {snippet_chars!r})")
+        return snippet_chars
+
     def _build_results(
         self,
         hydrated: list[dict],
@@ -989,6 +1006,8 @@ class Searcher:
         page_size: int,
         conn: psycopg.Connection | None = None,
         sort: SortMode = DEFAULT_SORT,
+        *,
+        snippet_width: int,
     ) -> list[SearchResult]:
         """Assemble SearchResult objects for one page from the ordered hydrated pool.
 
@@ -1044,7 +1063,7 @@ class Searcher:
             m = item["msg"]
             snip = make_snippet(
                 item["snippet_source_text"], terms,
-                width=self._cfg.snippet_width_chars,
+                width=snippet_width,
             )
             if h.best_chunk_table == "attachment_chunks":
                 source: Literal["header", "body", "attachment"] = "attachment"
@@ -1094,6 +1113,7 @@ class Searcher:
 
     def continue_page(
         self, search_token: str, page: int, *, user_id: int | None = None,
+        snippet_chars: int | None = None,
     ) -> SearchPage:
         """Serve subsequent pages from the cached pool. Raises if past pool's end.
 
@@ -1102,11 +1122,15 @@ class Searcher:
         match, the cache lookup is treated as a miss — the caller can fall
         back to a fresh search rather than reusing another user's pool.
 
+        ``snippet_chars`` sizes this page's snippet window (``None`` = the
+        configured default); it takes its own width, independent of page 1's.
+
         Zero DB round-trips when the page slice contains no attachment hits.
         Opens a short-lived connection only when filename resolution is needed
         (i.e. at least one hit in the hydrated pool has best_chunk_table ==
         'attachment_chunks').
         """
+        width = self._snippet_width(snippet_chars)
         import math
         entry = self._cache.get(search_token)  # may raise CacheMissError
         if user_id is not None and entry.get("user_id") != user_id:
@@ -1128,12 +1152,12 @@ class Searcher:
             with self._pool.connection() as conn:
                 results = self._build_results(
                     hydrated, entry["parsed"], entry["scores"], page, page_size,
-                    conn=conn, sort=sort,
+                    conn=conn, sort=sort, snippet_width=width,
                 )
         else:
             results = self._build_results(
                 hydrated, entry["parsed"], entry["scores"], page, page_size,
-                conn=None, sort=sort,
+                conn=None, sort=sort, snippet_width=width,
             )
         return SearchPage(
             results=results, page=page, page_size=page_size, pool_size=pool_size,
@@ -1148,13 +1172,19 @@ class Searcher:
 
     def grow_pool(
         self, search_token: str, candidates_per_arm: int, *, user_id: int | None = None,
+        snippet_chars: int | None = None,
     ) -> SearchPage:
         """Re-run the pipeline with a larger candidate pool. Returns page 1.
 
         ``user_id`` enforces the same cache-scoping invariant as
         :meth:`continue_page`: a cursor minted by user A is treated as
         unknown when presented under user B's identity.
+
+        ``snippet_chars`` sizes the returned page's snippet window (``None``
+        = the configured default); it takes its own width, independent of
+        whatever width the prior page used.
         """
+        width = self._snippet_width(snippet_chars)
         entry = self._cache.get(search_token)
         if user_id is not None and entry.get("user_id") != user_id:
             raise CacheMissError(search_token)
@@ -1167,13 +1197,15 @@ class Searcher:
                                         candidates_per_arm=candidates_per_arm,
                                         rerank_pool_size=rps, use_cache=True,
                                         user_id=user_id, sort=sort,
-                                        sort_order=entry["sort_order"])
+                                        sort_order=entry["sort_order"],
+                                        snippet_width=width)
         return page
 
     def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
                             rerank_pool_size, use_cache, user_id: int | None = None,
                             sort: SortMode,
-                            sort_order: SortOrder):
+                            sort_order: SortOrder,
+                            snippet_width: int):
         """Variant of search() that takes an already-parsed query.
 
         Connection scope: retrieval + hydrate inside one 'with' block. The
@@ -1190,6 +1222,11 @@ class Searcher:
         function over and silent. The single caller (``grow_pool``) forwards
         the values it read off the entry, so nothing is lost by making them
         unspellable-by-omission.
+
+        ``snippet_width`` is likewise required and keyword-only, the
+        ``_build_results`` shape: a default would let a caller forget it and
+        silently serve the configured width to a caller who asked for
+        another.
         """
         t0 = time.monotonic()
         timing: dict[str, float] = {"parse": 0.0}
@@ -1220,11 +1257,11 @@ class Searcher:
             with self._pool.connection() as conn:
                 results = self._build_results(hydrated, parsed, scores, page=1,
                                               page_size=page_size, conn=conn,
-                                              sort=sort)
+                                              sort=sort, snippet_width=snippet_width)
         else:
             results = self._build_results(hydrated, parsed, scores, page=1,
                                           page_size=page_size, conn=None,
-                                          sort=sort)
+                                          sort=sort, snippet_width=snippet_width)
         timing["total"] = (time.monotonic() - t0) * 1000
         token = uuid.uuid4().hex[:16] if use_cache else None
         if token:
@@ -1260,6 +1297,7 @@ class Searcher:
         sort: SortMode | None = None,
         sort_order: SortOrder | None = None,
         keyset_cursor: KeysetCursor | None = None,
+        snippet_chars: int | None = None,
     ) -> SearchPage:
         """Run the full search pipeline and return page 1.
 
@@ -1326,6 +1364,10 @@ class Searcher:
         to be refused for naming a rank path such a request never takes
         (#324). Checked before any IO, though after the parse the resolution
         now needs.
+
+        `snippet_chars` sizes the snippet window for this page (``None`` =
+        `snippet_width_chars`); the date walk emits no snippet, so it has no
+        effect there.
         """
         t0 = time.monotonic()
         # `sort` is *not* resolved here. Its resolution reads the query
@@ -1392,6 +1434,12 @@ class Searcher:
                                                  sort_order=sort_order)
         if membership_error is not None:
             raise ValueError(membership_error)
+        # After membership, ahead of everything else (#348's ordering) — the
+        # cursor block, the rewriter, `parse_query`, any IO. A malformed
+        # `snippet_chars` from a library caller is a type error like the
+        # membership one above, not a cross-argument refusal, so it belongs
+        # beside it rather than after the guards that reason about the query.
+        snippet_width = self._snippet_width(snippet_chars)
         if keyset_cursor is not None:
             # The cursor's direction is the resolution's **third** source,
             # and the stated reading above cannot see it (#348 review). With
@@ -1685,11 +1733,13 @@ class Searcher:
             with self._pool.connection() as conn:
                 results = self._build_results(hydrated, parsed, scores, page=1,
                                               page_size=effective_page_size, conn=conn,
-                                              sort=effective_sort)
+                                              sort=effective_sort,
+                                              snippet_width=snippet_width)
         else:
             results = self._build_results(hydrated, parsed, scores, page=1,
                                           page_size=effective_page_size, conn=None,
-                                          sort=effective_sort)
+                                          sort=effective_sort,
+                                          snippet_width=snippet_width)
         timing["total"] = (time.monotonic() - t0) * 1000
 
         token: str | None = None

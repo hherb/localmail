@@ -806,7 +806,7 @@ src/localmail/
   daemon.py         # Daemon class: signal handling, per-account thread spawn
   shutdown_budget.py # remaining_seconds/supervisor_kill_after (pure) +
                     #   wind_down_threads — the one shutdown budget (#221 A)
-  api/search_projection.py # pure: HIT_FIELDS / fields_error / snippet_chars_error / project_hit (slice E)
+  api/search_projection.py # pure: HIT_FIELDS / fields_error / project_hit (slice E)
   search/           # hybrid search subsystem (Phases 1 + 2)
     __init__.py     # public API: create_searcher, Searcher, SearchPage, SearchResult
     arms.py         # retrieval arms: arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
@@ -852,6 +852,9 @@ src/localmail/
                     #   owns the wire label's join and enforces its form at
                     #   class creation (#350), states the pre-IO contract
                     #   (#349)
+    snippet_width.py # pure: snippet_width_error — the one snippet-width
+                    #   type/floor rule, read by the api gate (capped) and
+                    #   by Searcher._snippet_width (uncapped) (#390)
 migrations/         # 0001_init.sql … 0036_api_keys.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
@@ -3265,9 +3268,39 @@ for the full design.
     caller who asked for another. Pinned by a signature test — every call
     site passes it today, so a default would otherwise leave the suite
     green.
-  - **The cap lives at the api boundary; the Searcher checks positivity
-    only.** The cap is an operator's bound for network callers, and
-    `make_snippet` is correct for any positive width.
+  - **The cap is an argument, not a second rule (#390).** The *policy* split
+    is real and stays: an operator's `snippet_max_chars` bounds what a
+    **network** caller may ask for, while `make_snippet` is correct for any
+    positive width, so a library caller asking for a 5,000-character window
+    is not doing anything wrong. What was wrong is that slice E expressed
+    that by hand-writing the **type check and the floor twice**, once per
+    layer, in two wordings — so `"10"` earned a different sentence at each
+    end, and a decision to accept (say) an integral `float` could land at one
+    layer and silently not at the other. The rule is now the pure
+    [src/localmail/search/snippet_width.py](src/localmail/search/snippet_width.py)`::snippet_width_error`,
+    which takes the cap as `max_chars`, **keyword-only with no default**:
+    `None` means uncapped, which is the *permissive* reading, so it must be
+    written rather than arrived at by forgetting the argument (#234's shape).
+    `run_search` passes `searcher.config.snippet_max_chars`;
+    `Searcher._snippet_width` passes `None`.
+    - **It lives under `search/`, not beside its api consumer**, because
+      `search/` must not import `api/` — that would be the first `search →
+      api` edge in the tree, and the Searcher is the layer with no cap.
+      `api/search_projection.py` rules on `fields` only now.
+    - **No wire behaviour changed**: the capped branch emits the same two
+      sentences the api boundary always did. The *Searcher's* wording moved
+      (`"must be a positive integer"` → the shared type/floor pair), which
+      is the one behaviour change #390 sanctions.
+    - **Bound by differential tests at both ends, plus a structural one.**
+      `tests/test_snippet_width.py` drives `run_search`'s gate and
+      `Searcher._snippet_width` and requires each to refuse exactly what the
+      rule refuses, with the rule's own message — the
+      `ALLOWLISTED_WHERE_SQL` ↔ `is_allowlisted` arrangement. `None` is the
+      one value both layers may disagree about, and they disagree for the
+      same reason: it means *unstated* at the call site, so it never reaches
+      the rule. The structural pin reads both sources for a hand-written
+      second copy, which the verdict differentials cannot see — a duplicated
+      but still-correct copy satisfies them.
   - **`snippet_chars` is typed `Any` on the wire, not `int` (nor `int | bool`,
     nor `ge`/`le`).** A bare `int` field lets pydantic's lax coercion silently
     turn a JSON `"5"` or `5.0` into the integer `5` — a 200 under a request
@@ -3275,8 +3308,28 @@ for the full design.
     `"abc"`) gets pydantic's own 422 with an array `detail` (#370), never the
     pure rule's problem+json 400. `int | bool` fixed only the `bool` half (a
     JSON `true` used to coerce to `1`). `Any` reaches every JSON value into
-    `snippet_chars_error` unmodified, so that pure rule is the one authority:
-    bool, non-int, and out-of-range are all its call, worded once.
+    `snippet_width_error` unmodified, so that pure rule is the one authority:
+    bool, non-int, and out-of-range are all its call, worded once — and since
+    #390 worded once for library callers too.
+  - **`project_hit` re-checks its precondition by calling the gate's rule,
+    not by paraphrasing it (#392).** It documented "``fields`` must already
+    have passed ``fields_error``" and then enforced a hand-written **subset**
+    of that judgement — names outside `HIT_FIELDS`, and nothing else. So an
+    **empty** `fields`, the one shape `fields_error` explicitly calls *"a
+    caller bug, not a request"*, passed through and returned hits carrying no
+    keys at all, silently; and with several unknown names the `KeyError`
+    named an arbitrary one, the guard iterating a `set`. Unreachable from the
+    wire (`run_search` gates first, and `project_hit` has one caller), which
+    is why it is a totality fix rather than a live defect — but the gate and
+    the use are ~250 lines apart in one function with nothing between them
+    carrying the fact of validation, which is the whole reason the
+    precondition is written down. It delegates now and raises `ValueError`
+    with the rule's own message. A validated `HitFields` newtype was
+    **rejected**: the gap a newtype closes is a second call site forgetting
+    to validate, and `project_hit` never leaves `run_search`'s frame — the
+    repo reaches for by-construction types when a value *crosses* something
+    (`KeysetCursor.walk`, `FiniteScores`, `ExtractedText`), and none of those
+    conditions hold here.
   - **Both are gated ahead of the empty-ACL short-circuit** (#348's rule), and
     pinned from a grant-nothing caller.
   - **The date walk emits no snippet** (`_date_keyset_search`), so
@@ -5783,6 +5836,33 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   Like `search_paging.ts`, **no rule there inspects the query** — the server
   decides "textless" only after lifting filter operators out, so reproducing
   `parse_query` in the client is the thing both files exist to avoid.
+- **The snippet is rendered as text; there is no `{@html}` sink on it
+  (#391).** `MessageListRow` used to render `{@html sanitizeSnippet(snippet)}`
+  — an allowlist restoring bare `<mark>`/`</mark>` through an otherwise-total
+  escape, whose docstring called it *"defense in depth against a sanitizer
+  bypass on the server side"*. **There is no server-side sanitizer to
+  bypass**: `make_snippet` only slices the chunk text and may add an ellipsis,
+  `grep -rn "mark>" src/` is empty and `git log -S "<mark>" -- src/` returns
+  nothing, so the allowlist could only ever restore tags that came from the
+  **message body** — rendering a quoted HTML mail, a code snippet or a bug
+  report as a highlight instead of as what it says.
+  - **It was never an XSS, and should not be read as one.** The escape
+    covered `&`, `<`, `>`, `"` and `'`, the two regexes were exact-match, no
+    attribute-bearing form survived, and a per-call nonce blocked placeholder
+    smuggling. `<mark>` carries no attributes and no script. The cost was
+    fidelity, and the fix is that the field now means what it says.
+  - **Option 1 of the issue, deliberately**: `{snippet}`, and
+    `snippet_sanitize.ts` deleted with its tests — not "keep it and correct
+    the docstring". Reserving the capability would keep the sink and the
+    fidelity bug for a server-side highlighter nobody has planned; if one is
+    ever written, `snippet_html` would need escaping done server-side and the
+    field name would finally mean something.
+  - **The deletion is pinned, not merely done.** `MessageListRow.test.ts`
+    requires a body containing the characters `<mark>` to reach the DOM as
+    text and `querySelector("mark")` to be null, so restoring the sink fails.
+    Note `MessageList.test.ts`' fixture **asserted the `<mark>` element**, and
+    was the only other occurrence in the tree: a test asserting a server
+    behaviour that does not exist. Its fixture is a real snippet now.
 - **Deliberately absent — do not "finish" without backend work first:**
   Gmail **Connect**. `POST /v1/admin/accounts/{id}/oauth/start` lives in
   `oauth_router.py`, which #203 did *not* swap to `require_admin()`, so it is

@@ -99,15 +99,18 @@ class SearchRequest(BaseModel):
     # `Any`, not `int | bool` and not a bare `int`: pydantic's lax coercion is
     # exactly what this field must not have. A plain `int` field silently
     # coerces `"5"` and `5.0` to `5` — answered 200 under a request that named
-    # a string or a float, never the integer `snippet_chars_error` checked —
+    # a string or a float, never the integer `snippet_width_error` checked —
     # and a genuinely non-numeric value (`1.5`, `"abc"`) gets pydantic's own
     # 422 with an array `detail` (#370), not the problem+json 400
-    # `snippet_chars_error` gives it. `int | bool` fixed the `bool` half (a
+    # `snippet_width_error` gives it. `int | bool` fixed the `bool` half (a
     # JSON `true` stayed a `bool` rather than coercing to `1`) but left the
     # string/float coercions live. `Any` reaches every JSON value into
-    # `snippet_chars_error` unmodified, so that pure rule is the one
-    # authority: every refusal — bool, non-int, out-of-range — is its call,
-    # worded once, on the wire and for library callers alike.
+    # `search.snippet_width.snippet_width_error` unmodified, so that pure
+    # rule is the one authority: every refusal — bool, non-int,
+    # out-of-range — is its call. Since #390 the Searcher reads the same
+    # rule, passing `max_chars=None`, so the type and floor really are
+    # worded once for the wire and for library callers alike; only the cap
+    # differs, because it is an operator's bound on *network* callers.
     snippet_chars: Any = Field(
         default=None,
         description=("Snippet window width in characters: an integer from 1 "

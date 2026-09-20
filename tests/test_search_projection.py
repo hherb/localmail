@@ -11,7 +11,6 @@ from localmail.api.search_projection import (
     HIT_FIELDS,
     fields_error,
     project_hit,
-    snippet_chars_error,
 )
 from localmail.search.searcher import SearchResult
 
@@ -110,23 +109,50 @@ def test_projection_does_not_mutate_the_hit() -> None:
 
 
 def test_an_unvalidated_name_raises_rather_than_dropping() -> None:
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError, match="bogus"):
         project_hit(_to_api_result(_result()), ["bogus"])
 
 
-@pytest.mark.parametrize("value", [1, 500, 1000])
-def test_snippet_chars_in_range_is_accepted(value: int) -> None:
-    assert snippet_chars_error(value, max_chars=1000) is None
+def test_an_empty_fields_raises_rather_than_returning_a_keyless_hit() -> None:
+    """#392: the guard re-derived a *subset* of `fields_error`'s judgement
+    by hand — names outside `HIT_FIELDS`, and nothing else — so the one
+    shape `fields_error` explicitly calls "a caller bug, not a request"
+    passed straight through and produced hits carrying no keys at all."""
+    with pytest.raises(ValueError, match="empty"):
+        project_hit(_to_api_result(_result()), [])
 
 
-@pytest.mark.parametrize("value", [0, -1, 1001])
-def test_snippet_chars_out_of_range_names_the_range(value: int) -> None:
-    msg = snippet_chars_error(value, max_chars=1000)
-    assert msg is not None
-    assert "1" in msg and "1000" in msg
+def test_the_precondition_is_the_gate_s_own_rule_not_a_restatement() -> None:
+    """Differential: `project_hit` raises iff `fields_error` reports, with
+    that message. The hand-written guard agreed with it on unknown names
+    and on nothing else."""
+    for fields in ([], ["bogus"], ["score", "bogus"], ["message_id", "snippet"]):
+        expected = fields_error(list(fields))
+        if expected is None:
+            project_hit(_to_api_result(_result()), fields)
+            continue
+        with pytest.raises(ValueError) as excinfo:
+            project_hit(_to_api_result(_result()), fields)
+        assert str(excinfo.value) == expected
 
 
-@pytest.mark.parametrize("value", [True, False, 1.5, "10", None])
-def test_snippet_chars_that_is_not_an_int_is_refused(value: object) -> None:
-    # bool is an int subclass; True would otherwise read as 1.
-    assert snippet_chars_error(value, max_chars=1000) is not None
+def test_several_unknown_names_are_all_reported() -> None:
+    """The old guard iterated a `set` and raised `KeyError` on an
+    arbitrary member, so a caller with two typos was told about one of
+    them, unpredictably."""
+    with pytest.raises(ValueError) as excinfo:
+        project_hit(_to_api_result(_result()), ["nope", "alsonope"])
+    assert "nope" in str(excinfo.value) and "alsonope" in str(excinfo.value)
+
+
+def test_a_non_list_sequence_is_still_accepted() -> None:
+    """The parameter is a `Sequence`, and `fields_error` requires a `list`
+    — so the delegation must normalise rather than refuse a tuple."""
+    out = project_hit(_to_api_result(_result()), ("score",))
+    assert out == {"score": 0.5}
+
+
+# `snippet_chars` is no longer ruled on here: since #390 its type and floor
+# are `search.snippet_width.snippet_width_error`, shared with the Searcher,
+# and this boundary supplies only the cap. Its tests live in
+# tests/test_snippet_width.py.

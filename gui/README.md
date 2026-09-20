@@ -167,8 +167,10 @@ Acceptance steps:
    empty query; the middle pane shows the most-recent across-all-accounts
    results.
 5. **Search bar.** Type `school` and press Enter — results with subject text
-   matching "school" appear, snippets highlight matches with yellow `<mark>`
-   background. Caption above the list shows "Search took N ms — M result(s)".
+   matching "school" appear, each with a snippet of the matching text
+   rendered as plain text (the server has never emitted highlight markup,
+   and since #391 the row has no `{@html}` sink that could render any).
+   Caption above the list shows "Search took N ms — M result(s)".
 6. **DSL.** Type `from:anna has:attachment after:2024-01-01` — only matching
    messages appear. Chips below the search bar show `From: anna`,
    `After: 2024-01-01`, `Has attachment` — click `×` on the "From: anna" chip

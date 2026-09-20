@@ -989,8 +989,14 @@ class Searcher:
         caller asking for a 5,000-character window is not doing anything
         wrong. The type and floor rule itself is
         ``snippet_width.snippet_width_error``, shared with that boundary so
-        an identical mistake cannot earn two wordings (#390). Raised before
-        any IO so a library caller's bug is loud and costs nothing.
+        an identical *type* mistake cannot earn two wordings (#390). The
+        **floor** refusal still differs between the layers, deliberately: a
+        capped caller is told the range, an uncapped one only the floor,
+        since naming a ceiling an uncapped caller does not have would send
+        them to a limit that does not apply. One rule, two audiences —
+        ``test_the_uncapped_floor_refusal_does_not_invent_a_ceiling``
+        requires the difference. Raised before any IO so a library caller's
+        bug is loud and costs nothing.
         """
         if snippet_chars is None:
             return self._cfg.snippet_width_chars

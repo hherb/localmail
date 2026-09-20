@@ -109,11 +109,6 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
   }
-  .snippet :global(mark) {
-    background: #fff0ae;
-    padding: 0 1px;
-    border-radius: 2px;
-  }
   .meta {
     margin-top: 2px;
     font-size: 11px;

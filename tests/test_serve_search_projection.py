@@ -180,7 +180,7 @@ _REFUSALS = [
     ({"snippet_chars": 1001}, "1000"),
     ({"snippet_chars": True}, "snippet_chars"),
     # `Any` on the wire (#370, F3): every non-integer must reach
-    # `snippet_chars_error` as a problem+json 400, never pydantic's own 422
+    # `snippet_width_error` as a problem+json 400, never pydantic's own 422
     # with an array `detail`, and never a silent coercion to `5`.
     ({"snippet_chars": "5"}, "snippet_chars"),
     ({"snippet_chars": 5.0}, "snippet_chars"),

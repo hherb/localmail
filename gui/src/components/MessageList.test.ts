@@ -155,7 +155,12 @@ describe("MessageList with search results", () => {
           from: { name: "Anna", address: "a@x" },
           to: [],
           date: null,
-          snippet_html: "…leaves at <mark>7:30</mark>…",
+          // A real snippet: `make_snippet` slices the chunk and may add an
+          // ellipsis at each end. It has never emitted `<mark>` (#391), so
+          // a fixture carrying one asserted a server behaviour that does
+          // not exist. A body that genuinely contains the characters
+          // `<mark>` renders as text — pinned in MessageListRow.test.ts.
+          snippet_html: "…leaves at 7:30 on Tuesday…",
           has_attachments: false,
           score: 0.5,
           matched_arms: ["bm25"],
@@ -166,7 +171,7 @@ describe("MessageList with search results", () => {
     render(MessageList);
     expect(screen.getByText(/Re: school/)).toBeTruthy();
     expect(screen.getByText(/Search took/)).toBeTruthy();
-    expect(screen.getByText(/7:30/).tagName.toLowerCase()).toBe("mark");
+    expect(screen.getByText(/leaves at 7:30 on Tuesday/)).toBeTruthy();
   });
 
   it("renders 'no matches' when results is empty and a query was submitted", () => {

@@ -1,6 +1,5 @@
 <script lang="ts">
   import { addressLabel, formatMessageDate, truncate } from "../lib/format";
-  import { sanitizeSnippet } from "../lib/snippet_sanitize";
   import { settings } from "../lib/stores/settings.svelte";
   import type { MessageAddress, MessageAccount } from "../lib/tauri";
 
@@ -38,7 +37,7 @@
   </div>
   <div class="subject">{truncate(subject, SUBJECT_TRUNCATE_CHARS) || "(no subject)"}</div>
   {#if snippet}
-    <div class="snippet">{@html sanitizeSnippet(snippet)}</div>
+    <div class="snippet">{snippet}</div>
   {/if}
   <div class="meta">
     {account.name ?? account.id}

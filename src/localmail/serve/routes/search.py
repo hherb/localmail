@@ -108,14 +108,20 @@ class SearchRequest(BaseModel):
     # `search.snippet_width.snippet_width_error` unmodified, so that pure
     # rule is the one authority: every refusal — bool, non-int,
     # out-of-range — is its call. Since #390 the Searcher reads the same
-    # rule, passing `max_chars=None`, so the type and floor really are
-    # worded once for the wire and for library callers alike; only the cap
-    # differs, because it is an operator's bound on *network* callers.
+    # rule, passing `max_chars=None`, so the *type* refusal is worded once
+    # for the wire and for library callers alike. The floor refusal is not:
+    # an uncapped caller is told the floor without a ceiling they do not
+    # have. Out-of-range does not reach a library caller at all.
+    #
+    # `null` is "unstated", not "anything else": the gate is `if
+    # snippet_chars is not None`, matching `query`/`sort`/`cursor`/`fields`,
+    # so the description says so rather than promising a 400 it will not
+    # give (#393 review).
     snippet_chars: Any = Field(
         default=None,
         description=("Snippet window width in characters: an integer from 1 "
-                     "to [search] snippet_max_chars. Anything else is a "
-                     "400."),
+                     "to [search] snippet_max_chars. Omit it, or send null, "
+                     "for the configured default. Anything else is a 400."),
     )
 
 

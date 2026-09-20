@@ -28,9 +28,16 @@ api`` edge in the tree, and the Searcher is the layer with no cap.
 """
 from __future__ import annotations
 
-#: The smallest useful window. `make_snippet` slices `chunk_text[:width]`
-#: on its no-match branch, so a non-positive width empties every snippet
-#: (and a negative one returns nearly the whole chunk).
+#: The smallest useful window, and the floor `SearchConfig`'s
+#: `snippet_width_chars` / `snippet_max_chars` are bounded by (`ge=1`; the
+#: three are bound together by a test, not by convention).
+#:
+#: Measured rather than reasoned: on `make_snippet`'s **no-match** branch,
+#: which slices `chunk_text[:width]`, width 0 returns `''` and a negative
+#: width returns nearly the whole chunk. On the **match** branch both
+#: return `'……'` — two ellipses around nothing. So a non-positive width
+#: does not fail the same way everywhere; it fails uselessly everywhere,
+#: which is what the floor is for.
 MIN_WIDTH = 1
 
 

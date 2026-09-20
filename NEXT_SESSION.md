@@ -153,6 +153,71 @@ other occurrence in the tree.
 Every mutation was restored from a scratchpad copy, never `git checkout`;
 `git status --short` was empty afterwards.
 
+## Review round on #393 (same PR, four reviewers)
+
+A comprehensive review of #393 ran before merge. **One regression, three
+pins weaker than they read, and four documentation claims that were false.**
+All fixed in this PR; two findings were out of scope and are filed.
+
+| finding | outcome |
+|---|---|
+| `project_hit` traversed `fields` **twice** — a one-shot iterable drained by `list(fields)` left `set(fields)` empty, returning a **keyless hit**, silently | **fixed**; this is #392's own defect reintroduced by #392's fix for a different input shape. `main` was single-traversal *by accident*. Pinned. |
+| The structural anti-duplication pin scanned `api/search_projection.py` — the module #390 moved the rule **out of** — and not `api/search.py`, which holds the capped gate | **fixed**: replaced by an AST rule over all four consumers |
+| …and its forbidden set held the two *type* wordings, **neither floor** wording | **fixed** by the same rule, which reads shape not text |
+| The wire sentence was **unpinned** — rewriting it left 154 tests passing, the route asserting only loose needles | **fixed**: asserted literally |
+| `test_the_capped_refusal_names_the_range` asserted `"1" in msg and "1000" in msg`; `"1000"` **contains** `"1"`, so the first conjunct was vacuous | **fixed**: each end asserted separately |
+| `gui/README.md`'s manual-QA step told a tester to confirm `<mark>` highlighting that #391 makes impossible | **fixed** |
+| `.snippet :global(mark)` CSS survived the deleted sink; `:global()` exempts it from svelte-check, so nothing warned | **deleted** |
+| "an identical mistake cannot earn two wordings" — false for the **floor** (`snippet_chars=0` earns two sentences, and a test *requires* it) | **fixed** in 3 places |
+| `project_hit`'s `O(len(HIT_FIELDS))` cost claim — the bound is `len(fields)`, which is uncapped on the wire | **corrected**; the cap itself is **#394** |
+| `MIN_WIDTH`'s "empties every snippet" — true of the no-match branch only; the match branch returns `'……'` | **fixed**, re-measured |
+| `snippet_chars` description promised a 400 for "anything else", but `null` is *unstated* | **fixed** |
+| CLAUDE.md's "only other occurrence in the tree" | **narrowed** to `gui/src`, which is what was true |
+
+**Filed, not fixed** — each is a decision rather than a defect in this change:
+
+- **#394** — `fields` is unbounded on the wire and revalidated per hit. The
+  exposure is **pre-existing** (`main` also traversed once per hit) and ~8×
+  amplified; 20,000 names × 200 hits = 212 ms against `main`'s 27.7 ms. A
+  `max_length` is a **wire contract change**, and #393 claims none.
+- **#395** — nothing forbids a *new* `{@html}` sink elsewhere in `gui/src`.
+  There are now zero, so the property is tree-wide, but only one component
+  test holds it. That is new coverage and a new rule module.
+
+### The new rule module
+
+`tests/_snippet_width_rules.py::snippet_width_duplication_error` reads the
+**AST** of all four consumers (`api/search.py`, `api/search_projection.py`,
+`search/searcher.py`, `serve/routes/search.py`) and reports the *shape* a
+hand-written copy must take: an `isinstance` test or an **ordering**
+comparison touching a snippet-named value. Notes for whoever touches it:
+
+- **Ordering only.** `is not None` is how both gates spell "unstated".
+- **Either side counts.** The first cut required a literal opposite and so
+  missed `n > cfg.snippet_max_chars` — a cap read off config, which is how a
+  copy at the route would most naturally read. Caught by its own test.
+- **A consumer not handed to it is reported**, not skipped. Silently scanning
+  less than it claims is exactly how the predecessor came to read the one
+  module that could no longer hold a copy.
+- **AST, not text**, for `_mentions_version_option`'s reason: every one of
+  those modules explains #390 in its own prose.
+
+### Verification after the review round
+
+| gate | result |
+|---|---|
+| pytest | **4035 passed, 0 skipped**, 3 warnings, 243 s (4028 + 7 net new) |
+| `gui/` vitest | **512 passed**, 49 files |
+| `svelte-check` | 326 files, **0 errors, 0 warnings** |
+| mypy | clean on all four changed modules |
+
+Mutations re-run, each caught: the double traversal (fails the new one-shot
+pin), an identically-worded copy in `api/search.py` **and** a verbatim floor
+copy in `searcher.py` (both fail the AST rule — **both passed the
+predecessor**), and a consumer dropped from the scanned set. Every mutation
+was restored from a scratchpad copy, never `git checkout`; `git status
+--short` was clean afterwards.
+
 ## What's next
 
 ### 0. **Merge #393** *(acceptance: open issues 40 → 37)*

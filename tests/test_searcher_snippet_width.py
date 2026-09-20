@@ -152,7 +152,7 @@ def test_sort_membership_is_checked_before_snippet_width() -> None:
     on the same call must surface the membership diagnosis, never the
     snippet one, so a caller who mistyped both sees the guard that runs
     first at the api boundary too (`run_search` checks membership ahead of
-    `snippet_chars_error`)."""
+    `snippet_width_error`)."""
     pool = MagicMock()
     pool.connection.side_effect = AssertionError("touched the pool")
     s = Searcher(pool=pool, cfg=SearchConfig(), embeddings=None, reranker=None,

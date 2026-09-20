@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Horst Herb
 
-"""The pure rules behind `fields` and `snippet_chars` (kastellan slice E)."""
+"""The pure rule behind `fields` (kastellan slice E).
+
+`snippet_chars` moved out in #390: its type and floor are
+`search.snippet_width.snippet_width_error`, shared with the Searcher, and
+this boundary supplies only the cap. Its tests are in
+tests/test_snippet_width.py.
+"""
 from __future__ import annotations
 
 import pytest
@@ -150,6 +156,33 @@ def test_a_non_list_sequence_is_still_accepted() -> None:
     — so the delegation must normalise rather than refuse a tuple."""
     out = project_hit(_to_api_result(_result()), ("score",))
     assert out == {"score": 0.5}
+
+
+def test_a_one_shot_iterable_is_projected_not_silently_emptied() -> None:
+    """`fields` is traversed exactly once.
+
+    The delegation's first cut read `list(fields)` for the check and
+    `set(fields)` for the projection. A generator is drained by the first,
+    so the second saw nothing and the comprehension returned `{}` — a hit
+    with no keys, silently, which is verbatim the outcome #392 removed for
+    an empty list. Not reachable from the wire (`run_search` passes the
+    pydantic `list[str]`), and the annotation is `Sequence[str]`, but CI
+    runs no mypy step so the annotation gates nothing.
+
+    The guard #392 replaced was single-traversal by accident — it read
+    `set(fields)` first and iterated *that*. This pin is what makes the
+    delegation single-traversal on purpose.
+    """
+    assert project_hit(_to_api_result(_result()), iter(["score"])) == {"score": 0.5}
+    assert project_hit(
+        _to_api_result(_result()), (n for n in ("subject", "score"))
+    ) == {"subject": "s", "score": 0.5}
+
+
+def test_a_one_shot_iterable_of_unknown_names_is_still_refused() -> None:
+    """The refusal path traverses too, so it must read the same binding."""
+    with pytest.raises(ValueError, match="bogus"):
+        project_hit(_to_api_result(_result()), iter(["bogus"]))
 
 
 # `snippet_chars` is no longer ruled on here: since #390 its type and floor

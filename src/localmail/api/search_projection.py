@@ -72,11 +72,24 @@ def project_hit(hit: dict[str, Any], fields: Sequence[str]) -> dict[str, Any]:
     through and returned a hit with no keys at all. ``run_search`` gates
     ~250 lines before the call, with nothing between them carrying the fact
     of validation, which is why the precondition is written down; the
-    enforcement has to be the rule itself, not a paraphrase of it. At
-    O(``len(HIT_FIELDS)``) per hit and ≤200 hits a page, it is free.
+    enforcement has to be the rule itself, not a paraphrase of it.
+
+    ``fields`` is materialised **once**, into ``names``, and both the check
+    and the projection read that binding. Traversing the parameter twice
+    drains a one-shot iterable on the first pass, so the second sees nothing
+    and the comprehension returns a hit with no keys — silently, and
+    verbatim the outcome the delegation above exists to end. The guard this
+    replaced read ``set(fields)`` first and iterated *that*, so it was
+    single-traversal by accident; the delegation has to be so on purpose.
+
+    Cost is O(``len(fields)`` × ``len(HIT_FIELDS)``) per hit — the bound is
+    the caller's list, not ``HIT_FIELDS``, since ``fields_error`` accepts
+    duplicates and the wire field is uncapped (#394). At a dozen names and
+    ≤200 hits a page that is a fraction of a millisecond.
     """
-    if (error := fields_error(list(fields))) is not None:
+    names = list(fields)
+    if (error := fields_error(names)) is not None:
         raise ValueError(error)
     source = {**hit, "snippet": hit[_SNIPPET_ALIAS_OF]}
-    wanted = set(fields)
+    wanted = set(names)
     return {name: source[name] for name in HIT_FIELDS if name in wanted}

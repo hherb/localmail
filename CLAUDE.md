@@ -3290,7 +3290,18 @@ for the full design.
     - **No wire behaviour changed**: the capped branch emits the same two
       sentences the api boundary always did. The *Searcher's* wording moved
       (`"must be a positive integer"` → the shared type/floor pair), which
-      is the one behaviour change #390 sanctions.
+      is the one behaviour change #390 sanctions. **Asserted literally**,
+      because that is the claim: rewriting the capped sentence used to leave
+      154 tests passing, the route-level refusals asserting only loose
+      needles (`"snippet_chars"`, `"1000"`) that survive any rewording.
+    - **Only the *type* refusal is worded once.** The **floor** refusal
+      differs by layer on purpose — a capped caller is told the range, an
+      uncapped one only the floor, since naming a ceiling they do not have
+      sends them to a limit that does not apply — and
+      `test_the_uncapped_floor_refusal_does_not_invent_a_ceiling` requires
+      it. Out-of-range does not reach a library caller at all. Three
+      docstrings claimed "an identical mistake cannot earn two wordings",
+      which `snippet_chars=0` falsifies; they say *type* now.
     - **Bound by differential tests at both ends, plus a structural one.**
       `tests/test_snippet_width.py` drives `run_search`'s gate and
       `Searcher._snippet_width` and requires each to refuse exactly what the
@@ -3298,9 +3309,26 @@ for the full design.
       `ALLOWLISTED_WHERE_SQL` ↔ `is_allowlisted` arrangement. `None` is the
       one value both layers may disagree about, and they disagree for the
       same reason: it means *unstated* at the call site, so it never reaches
-      the rule. The structural pin reads both sources for a hand-written
-      second copy, which the verdict differentials cannot see — a duplicated
-      but still-correct copy satisfies them.
+      the rule.
+    - **The structural pin reads the AST, and its first cut had two holes** —
+      each found by mutation, not by reading, which is the point. It grepped
+      two message literals across `api/search_projection.py` and
+      `searcher.py`: it scanned the module #390 moved the rule **out of**
+      and *not* `api/search.py`, which now holds the capped gate, so an
+      identically-worded copy at the real boundary passed it; and its
+      forbidden set held the two *type* wordings and **neither floor**
+      wording, so a verbatim third copy of the floor rule passed it too.
+      Both survived the whole suite. The rule is now
+      [tests/_snippet_width_rules.py](tests/_snippet_width_rules.py)`::snippet_width_duplication_error`,
+      which reads the *shape* a copy must take — an `isinstance` test or an
+      ordering comparison touching a snippet-named value — across all four
+      consumers, and **reports a consumer it was not handed** rather than
+      silently scanning less than it claims. Ordering only: `is not None` is
+      how both gates spell "unstated". Either side of the comparison counts
+      — `n > cfg.snippet_max_chars` is the same hand-written cap as
+      `snippet_chars < 1`, and requiring a literal opposite missed it. AST
+      rather than text for `_mentions_version_option`'s reason: every one of
+      those modules explains #390 in its own prose.
   - **`snippet_chars` is typed `Any` on the wire, not `int` (nor `int | bool`,
     nor `ge`/`le`).** A bare `int` field lets pydantic's lax coercion silently
     turn a JSON `"5"` or `5.0` into the integer `5` — a 200 under a request
@@ -3309,8 +3337,13 @@ for the full design.
     pure rule's problem+json 400. `int | bool` fixed only the `bool` half (a
     JSON `true` used to coerce to `1`). `Any` reaches every JSON value into
     `snippet_width_error` unmodified, so that pure rule is the one authority:
-    bool, non-int, and out-of-range are all its call, worded once — and since
-    #390 worded once for library callers too.
+    bool, non-int, and out-of-range are all its call. The *type* refusal is
+    worded once for the wire and for library callers alike; the floor's is
+    not, and out-of-range does not reach a library caller at all (see the
+    bullet above). **`null` is "unstated", not "anything else"**: the gate is
+    `if snippet_chars is not None`, matching `query`/`sort`/`cursor`/`fields`,
+    and the shipped field description promised a 400 it does not give — it
+    names the default now.
   - **`project_hit` re-checks its precondition by calling the gate's rule,
     not by paraphrasing it (#392).** It documented "``fields`` must already
     have passed ``fields_error``" and then enforced a hand-written **subset**
@@ -3330,6 +3363,28 @@ for the full design.
     repo reaches for by-construction types when a value *crosses* something
     (`KeysetCursor.walk`, `FiniteScores`, `ExtractedText`), and none of those
     conditions hold here.
+    - **`fields` is materialised once, and the first cut of the fix was not.**
+      It read `list(fields)` for the delegated check and `set(fields)` for the
+      projection — two traversals, so a one-shot iterable is drained by the
+      first, the second sees nothing, and the comprehension returns a hit with
+      **no keys**: verbatim the outcome #392 exists to end, reintroduced by
+      #392's own fix for a different input shape. The guard it replaced was
+      single-traversal *by accident* (it read `set(fields)` first and iterated
+      that), which is why nothing caught it. Not wire-reachable — `run_search`
+      passes the pydantic `list[str]` and the parameter is `Sequence[str]` —
+      but **CI runs no mypy step**, so that annotation gates nothing, exactly
+      as this file already records for ruff. Pinned now; nothing in the suite
+      passed a non-re-iterable before.
+    - **The cost is `O(len(fields) × len(HIT_FIELDS))` per hit, not
+      `O(len(HIT_FIELDS))`** — the docstring's own argument for why the
+      delegation is affordable was the part that did not hold. `fields_error`
+      walks the caller's list twice and tests membership against a **tuple**,
+      and `len(fields)` is unbounded on the wire: no `max_length`, and
+      duplicates are accepted by design, so every value is *valid* and the
+      gate never trips. Measured, 200 hits: 20,000 names cost **212 ms**
+      against `main`'s 27.7 ms. The exposure is **pre-existing** and ~8×
+      amplified, fails slow rather than wrong, and capping the wire field is
+      a contract change — **#394**, deliberately not folded into #390–#392.
   - **Both are gated ahead of the empty-ACL short-circuit** (#348's rule), and
     pinned from a grant-nothing caller.
   - **The date walk emits no snippet** (`_date_keyset_search`), so
@@ -5860,9 +5915,22 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   - **The deletion is pinned, not merely done.** `MessageListRow.test.ts`
     requires a body containing the characters `<mark>` to reach the DOM as
     text and `querySelector("mark")` to be null, so restoring the sink fails.
-    Note `MessageList.test.ts`' fixture **asserted the `<mark>` element**, and
-    was the only other occurrence in the tree: a test asserting a server
-    behaviour that does not exist. Its fixture is a real snippet now.
+    Note `MessageList.test.ts`' fixture **asserted the `<mark>` element** — a
+    test asserting a server behaviour that does not exist. Its fixture is a
+    real snippet now. It was the only other occurrence **under `gui/src`**,
+    which is not the same as the only one in the tree: `gui/README.md`'s
+    manual-QA script told a tester to confirm that "snippets highlight
+    matches with yellow `<mark>` background", and the shipped wording here
+    claimed the wider scope and so discouraged looking. That step is
+    corrected; the plan, spec and handoff documents keep their `<mark>`
+    references, being frozen records of what was believed at the time.
+  - **Nothing forbids a *new* `{@html}` sink elsewhere (#395, open).** There
+    are zero left in `gui/src`, so the property is now tree-wide, but the
+    only thing holding it is one component test on one field —
+    `{@html subject}` on another component is caught by nothing, and
+    `svelte-check` does not flag it. The rule module this repo would use
+    (`_rerank_wiring_rules.py`'s shape) is new coverage rather than a defect
+    in #391, hence the separate issue.
 - **Deliberately absent — do not "finish" without backend work first:**
   Gmail **Connect**. `POST /v1/admin/accounts/{id}/oauth/start` lives in
   `oauth_router.py`, which #203 did *not* swap to `require_admin()`, so it is

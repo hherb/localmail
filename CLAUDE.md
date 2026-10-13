@@ -1779,8 +1779,9 @@ so the two cannot drift. See
     `localmail retry-failed-extractions`.
   - `pyproject.toml`'s `[extraction]` extra installs **`ocrmac ; sys_platform ==
     'darwin'`** — a thin Apple Vision wrapper, no torch and no model downloads.
-    Linux gets no engine and degrades via `auto`; install `easyocr`/`rapidocr`
-    there to opt in. Measured on the live Mac archive: cold pipeline init ~100 s,
+    On Linux `auto` finds rapidocr instead, which docling pulls in
+    transitively (and which the October 2026 round had to cap, see below).
+    Measured on the live Mac archive: cold pipeline init ~100 s,
     then **~1.7 s/page warm** — docling caches the pipeline internally, so the
     per-blob `DocumentConverter()` construction is not worth caching ourselves.
 - **`ExtractedText` strips NUL bytes on construction, and that is a fix not a
@@ -2256,47 +2257,105 @@ never ships.
   sharded checkpoint index. The layout models come from the HF hub, never
   from mail. Revisit when a fixed release lands.
 
-**The October 2026 round (Dependabot #81–#114, 32 alerts) raised five floors
-and one npm lock, and only pypdf is on an attacker-controlled path.** Each
-floor's reasoning sits beside it in `pyproject.toml`.
+**The October 2026 round (Dependabot #81–#114) raised five floors, added two
+caps and one npm lock, and only pypdf is on an attacker-controlled path.** 32
+alerts were open: the range holds 34 numbers, and #100 and #102 (devalue) were
+auto-dismissed by Dependabot. Each floor's and cap's reasoning sits beside it
+in `pyproject.toml`.
 
-- **`pypdf>=6.19.0`** — eight HIGH DoS advisories (#105–#112), the same family
-  as #67–#69 and the same reach: `_extract_pdf` over an emailed PDF.
-- **`urllib3>=2.8.0`, `oauthlib>=4.0.0`, `pyjwt>=2.15.0` (in `[mcp]`), and
-  `docling>=2.118.1`** — all hygiene, and each **declared** because none was:
-  they arrived transitively with no floor to read the range against, the
-  `transformers` lesson.
-  - urllib3 talks only to Google and the HF hub.
-  - oauthlib's two advisories are in its *server* endpoints; localmail is
-    only ever the OAuth client.
-  - PyJWT is imported only by the MCP SDK's *client* credentials extension,
-    which the mounted server never loads (#90 is CRITICAL in name only here).
-  - docling's advisory is HTML browser-rendering, and `DoclingExtractor` is
-    PDF-only.
-- **docling is locked at 2.118.1, not the newest release, and that is the
-  load-bearing choice.** A plain `--upgrade-package docling` lands on 2.138,
-  which moves `docling-ibm-models` 3 → 4 — new layout models, so new
-  extraction output across the archive — for no security gain. The lock was
-  made with `-P 'docling==2.118.1' -P 'docling-slim==2.118.1'`. A later bare
-  `uv lock --upgrade` will take the major; treat that as its own change, with
+- **`pypdf>=6.19.0`**: eight HIGH DoS advisories (#105–#112), the same family
+  as #67–#69 and the same reach, `_extract_pdf` over an emailed PDF.
+- **`urllib3>=2.8.0`, `oauthlib>=4.0.0` and `pyjwt>=2.15.0` (in `[mcp]`)** are
+  hygiene, and each is **newly declared** because none was. They arrived
+  transitively with no floor to read the range against, the `transformers`
+  lesson.
+  - urllib3's only reverse dependency is `requests`. Its peers are Google, the
+    HF hub and rapidocr's model host (`modelscope.cn`); nothing mail-borne
+    reaches it.
+  - oauthlib's two advisories are in its *server* endpoints. localmail is only
+    ever the OAuth client (`InstalledAppFlow` and the admin `Flow`).
+  - `mcp` itself requires `pyjwt[crypto]`. In the MCP SDK only the *client*
+    credentials extension imports it, and the mounted server never loads that.
+    oauthlib's signed-token helpers and google-auth's `id_token` also import
+    it lazily, but `src/` calls none of them. So #90 is CRITICAL in name only
+    here.
+- **`docling>=2.118.1` was a raised floor, not a new one** (it was `>=2.94.0`).
+  #113 is filed against `docling-slim` and #114 against `docling`. docling
+  2.118.1 pins `docling-slim==2.118.1`, so one floor clears both. The
+  advisory is in HTML browser-rendering, and `DoclingExtractor` is PDF-only.
+- **docling is locked at 2.118.1, not the newest release.** A plain
+  `--upgrade-package docling` lands on 2.138, which moves `docling-ibm-models`
+  3 → 4 (new layout models) for no security gain. The lock was made with
+  `-P 'docling==2.118.1' -P 'docling-slim==2.118.1'`. A later bare
+  `uv lock --upgrade` will take that major; treat it as its own change, with
   its own OCR probe.
+  - **The pin did not hold the rest of the extraction stack still**, and an
+    earlier wording here implied it did. docling-slim 2.118.1 requires
+    `docling-parse>=7`, so the native PDF parser moved 6.2.0 → 7.22.3 (a
+    major, released the day before the lock). docling-core moved 2.78 →
+    2.101.1, and `doclang` 0.7.3 arrived as a new dependency.
+- **Two caps were needed, and the review found both** (`rapidocr<3.10`,
+  `opencv-python<5`, in `[extraction]`).
+  - **rapidocr 3.10.0 broke OCR outright.** docling 2.118.1's
+    `rapid_ocr_model` imports `COMMON_LANG_ALIASES` and `PP_OCRV6_LANGS` from
+    `rapidocr.utils.model_resolver`. 3.10.0 (released 2026-10-08) removed
+    both, but docling's declared range (`>=3.9.1,<4`) admits it, so the
+    resolver took it. Every rapidocr pass raised `ImportError`, which surfaces
+    as an `ExtractorConfigurationError` (#248). rapidocr is the engine `auto`
+    finds on Linux, so every scanned PDF on the DGX would have spent its
+    transient budget and been given up on.
+  - **The Mac never showed it**, because `auto` picks ocrmac there, and the
+    first probe ran only `auto`. Probe the engine each host actually uses.
+  - **The rapidocr re-resolution then put OpenCV 5 in the lock**: 3.10 swapped
+    to `opencv-python-headless`, uncapped, and the lock took 5.0.0.93. But
+    `docling-ibm-models` 3.13.2 (TableFormer) imports cv2 and declares
+    `<5.0.0.0`. docling requests neither of its OpenCV extras, so nothing
+    enforced that cap. It is enforced now, and the lock holds
+    `opencv-python` 4.14.0.94.
+- **docling 2.118 changed how it chooses what to OCR, and that changed
+  output.** The new default `OcrMode.DEFAULT` (= `PDF_AWARE_LAYOUT_REGIONS`)
+  OCRs each layout region; 2.97 OCRed the bitmap-covered page. Under ocrmac,
+  a scanned three-row table came back as loose lines with the table
+  structure gone and one cell (`3`) dropped. rapidocr was unaffected.
+  `extractor._ocr_the_whole_page` sets `OcrMode.FULL_PAGE` for every engine.
+  That is the right reading here anyway: `DoclingExtractor` only sees PDFs
+  the lightweight path found no text in, so its pages are images. It is
+  pinned by `test_pdf_pipeline_options_ocr_the_whole_page`, which skips in CI
+  because CI does not install `[extraction]`.
 - **Verified by a before/after probe, not by the suite**, for the reason
   `transformers` was: every docling test mocks the converter, and the OAuth
-  tests mock the flow. The probe recorded `LightweightExtractor` over seven
-  PDF shapes (outlines, page labels, embedded files, FlateDecode, multipage,
-  scanned), the consent URL and token-exchange request **both** production
-  flows build (`InstalledAppFlow`, admin `Flow`, HTTP transport mocked), and a
-  **real** `DoclingExtractor` pass over a scanned PDF (OCR) and a native one.
-  All three sections are **byte-identical** across the bump. Not kept, like
-  its predecessors.
+  tests mock the flow.
+  - **First pass:** `LightweightExtractor` over seven PDF shapes (outlines,
+    page labels, embedded files, FlateDecode, multipage, scanned), the consent
+    URL and token-exchange request **both** production flows build
+    (`InstalledAppFlow`, admin `Flow`, HTTP transport mocked), and one real
+    `DoclingExtractor` pass under `auto` over a one-line scanned PDF and a
+    native one. All byte-identical. That docling evidence was **too narrow to
+    see either defect above**.
+  - **Second pass, after the review:** `main` ran in its own worktree venv, so
+    `main` was compared with the branch. It ran a real `DoclingExtractor` over
+    three PDFs (a scanned invoice, a scanned table, a native table) under
+    **both** `rapidocr` and `auto` (= ocrmac on the Mac). All six outputs are
+    byte-identical to `main` with the caps and `FULL_PAGE` in place; before
+    them, three rapidocr outputs were `ImportError`s and two ocrmac outputs
+    differed. The probes are not kept, like their predecessors.
+  - **Not covered:** aarch64. The DGX's rapidocr and OpenCV run the same
+    Python with different native wheels, so a scanned PDF there is the
+    post-deploy check.
 - **docling 2.118 `torch.compile`s its layout model by default**, so the first
   extraction in a process now logs a block of `torch._dynamo` graph-break
   warnings (~35 lines, once per process) into `daemon.err.log`. The output is
   unchanged; this is noise, not a fault. Do not "fix" it without a reason.
-- **`npm audit fix` in `gui/` moved `devalue` 5.8.1 → 5.9.4** (#99–#104) and
-  `source-map-js` 1.2.1 → 1.2.2 (build-time, not yet raised by Dependabot),
-  lock-only. devalue's `stringify`/`uneval` run in Svelte's *server* render,
-  and the GUI is a client-only SPA.
+- **`npm audit fix` in `gui/` moved `devalue` 5.8.1 → 5.9.4** (#99, #101, #103,
+  #104) and `source-map-js` 1.2.1 → 1.2.2 (build-time, not yet raised by
+  Dependabot), lock-only. All four are hygiene for one reason that covers the
+  parse-side #99 as well as the `stringify`/`uneval` ones: devalue is
+  `"dev": true`, pulled in only by svelte. The GUI is plain Vite + Svelte with
+  no SvelteKit server, so devalue never touches a request.
+- **Filed, not fixed: #398.** Setting `extractor_ocr_engine = "ocrmac"`
+  explicitly fails every pass, because ocrmac wants `en-US` rather than `en`.
+  It is the same on `main`, and both deployments run `auto`, which does not
+  forward the language list.
 
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +

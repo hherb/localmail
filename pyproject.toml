@@ -18,6 +18,16 @@ dependencies = [
     "fastembed>=0.8.0",
     "google-auth>=2.30",
     "google-auth-oauthlib>=1.2",
+    # Transitive via google-auth-oauthlib → requests-oauthlib, and declared
+    # for the reason `transformers` is: there was no floor to read the range
+    # against and the lock sat inside it (3.3.1). Dependabot #84 (JSONP
+    # callback injection in `RevocationEndpoint`) and #85 (PKCE verifier
+    # timing) are both in oauthlib's *server* endpoints; localmail is only
+    # ever the OAuth *client* here (`oauth-login` and the admin Connect
+    # flow), so this is hygiene, not an incident. 4.0.0 is a major release;
+    # the consent URL and the token-exchange request both flows build were
+    # verified identical across the bump.
+    "oauthlib>=4.0.0",
     "html2text>=2024.2.26",
     # Floor is security-driven, and the floor is what fixes it: GHSA
     # (Dependabot #66) is algorithmic complexity in `Component.__eq__`,
@@ -43,8 +53,13 @@ dependencies = [
     # PDF emailed to the archive, so the input is attacker-controlled. The
     # blast radius was already bounded (a hostile PDF costs one extraction
     # slot, then poison-pills under #153's transient budget), which is why
-    # this is a floor bump and not an incident.
-    "pypdf>=6.16.1",
+    # this is a floor bump and not an incident. Raised again for eight more
+    # DoS advisories of the same family (Dependabot #105–#112, HIGH: page
+    # labels, indirect objects, /ToUnicode and font data, FlateDecode
+    # streams, embedded files, appearance streams), the last fixed in
+    # 6.19.0. Same reachability — an emailed PDF — and same verification:
+    # extraction byte-identical across the bump.
+    "pypdf>=6.19.0",
     "python-docx>=1.1",
     "python-pptx>=1.0",
     "striprtf>=0.0.26",
@@ -62,6 +77,12 @@ dependencies = [
     # is hygiene, not an incident.
     "anyio>=4.14.2",
     "uvicorn[standard]>=0.32",
+    # Transitive via requests (fastembed's and docling's model downloads,
+    # the OAuth token exchange), declared so the floor governs re-resolution:
+    # Dependabot #94–#96 (two HIGH) against < 2.8.0. Every peer it talks to
+    # is Google or the Hugging Face hub — nothing mail-borne reaches it — so
+    # this is hygiene, not an incident.
+    "urllib3>=2.8.0",
     "argon2-cffi>=23.1",
     "nh3>=0.2.18",
     "cryptography>=50.0.0",  # floor is security-driven: CVE-2026-69247 (Dependabot #57)
@@ -78,7 +99,14 @@ dependencies = [
 
 [project.optional-dependencies]
 extraction = [
-    "docling>=2.94.0",
+    # Floor is security-driven: Dependabot #113/#114 (`enable_local_fetch`
+    # not enforced in HTML browser-rendering mode), < 2.118.1. Unreachable
+    # here — `DoclingExtractor` is PDF-only, so docling never renders HTML —
+    # so this is hygiene. The lock takes 2.118.1 itself, not the newest
+    # release: newer ones move docling-ibm-models 3 → 4, i.e. new layout
+    # models, which would change extraction across the archive for no
+    # security gain. Verified with a real OCR pass before and after.
+    "docling>=2.118.1",
     # docling ships no OCR engine of its own, so a scanned PDF gets no text
     # unless one is installed (#248). ocrmac is a thin PyObjC wrapper around
     # Apple Vision: no torch, no model downloads, and native on the platform.
@@ -101,6 +129,12 @@ extraction = [
 ]
 mcp = [
     "mcp>=1.13.0",
+    # Arrives via `mcp[crypto]`, and only the SDK's *client* credentials
+    # extension imports it — the server localmail mounts never does — so
+    # Dependabot #81–#83 and #86–#93/#97/#98 (one CRITICAL) are hygiene.
+    # Declared for the `transformers` reason: no floor, and the lock at
+    # 2.13.0 sat inside every range. 2.15.0 is the last fix (#97).
+    "pyjwt>=2.15.0",
 ]
 
 [dependency-groups]

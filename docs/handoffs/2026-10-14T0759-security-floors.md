@@ -11,11 +11,11 @@
 >   all seven heartbeats current. The IDLE `BrokenPipeError` tracebacks in
 >   `daemon.err.log` are ordinary reconnects.
 > - **cleared the Dependabot backlog that had built up since the last
->   session**: **29 new alerts** (#81–#114), against the one the last handoff
+>   session**: **32 new alerts** (#81–#114), against the one the last handoff
 >   expected. Fixed in **PR #397** (see below), which leaves only #71 open.
 >
 > **Open issues: 39** (37 + #394, #395 filed by the #393 review). **Dependabot:
-> 30 open → 1 after #397 merges** (#71 `accelerate`, left open on purpose).
+> 33 open → 1 after #397 merges** (#71 `accelerate`, left open on purpose).
 >
 > **Three things to know before you touch anything.**
 >
@@ -128,7 +128,7 @@ it is noise in `daemon.err.log`. Recorded in CLAUDE.md.
 
 ## What's next
 
-### 0. **Merge #397, then deploy** *(acceptance: Dependabot 30 → 1)*
+### 0. **Merge #397, then deploy** *(acceptance: Dependabot 33 → 1)*
 - **You merge**, once `gh pr checks 397` is green on both legs (3.12 + 3.13).
 - **Mac:** `git checkout main && git pull`, then
   `uv sync --frozen --extra mcp --extra extraction`. That should be a no-op,
@@ -266,4 +266,4 @@ cd gui && npm test -- --run && npm run check && npm audit   # 512 / 0 errors / 0
 `c956678..77c75d8`, plus this handoff.
 
 The latest migration is still **`0036_api_keys.sql`**; the next free slot is
-`0037_*.sql`. **Open issues: 39. Dependabot: 30 open → 1 after #397.**
+`0037_*.sql`. **Open issues: 39. Dependabot: 33 open → 1 after #397.**

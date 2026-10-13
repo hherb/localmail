@@ -2256,7 +2256,7 @@ never ships.
   sharded checkpoint index. The layout models come from the HF hub, never
   from mail. Revisit when a fixed release lands.
 
-**The October 2026 round (Dependabot #81–#114, 29 alerts) raised five floors
+**The October 2026 round (Dependabot #81–#114, 32 alerts) raised five floors
 and one npm lock, and only pypdf is on an attacker-controlled path.** Each
 floor's reasoning sits beside it in `pyproject.toml`.
 

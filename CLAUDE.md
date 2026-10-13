@@ -2256,6 +2256,48 @@ never ships.
   sharded checkpoint index. The layout models come from the HF hub, never
   from mail. Revisit when a fixed release lands.
 
+**The October 2026 round (Dependabot #81–#114, 29 alerts) raised five floors
+and one npm lock, and only pypdf is on an attacker-controlled path.** Each
+floor's reasoning sits beside it in `pyproject.toml`.
+
+- **`pypdf>=6.19.0`** — eight HIGH DoS advisories (#105–#112), the same family
+  as #67–#69 and the same reach: `_extract_pdf` over an emailed PDF.
+- **`urllib3>=2.8.0`, `oauthlib>=4.0.0`, `pyjwt>=2.15.0` (in `[mcp]`), and
+  `docling>=2.118.1`** — all hygiene, and each **declared** because none was:
+  they arrived transitively with no floor to read the range against, the
+  `transformers` lesson.
+  - urllib3 talks only to Google and the HF hub.
+  - oauthlib's two advisories are in its *server* endpoints; localmail is
+    only ever the OAuth client.
+  - PyJWT is imported only by the MCP SDK's *client* credentials extension,
+    which the mounted server never loads (#90 is CRITICAL in name only here).
+  - docling's advisory is HTML browser-rendering, and `DoclingExtractor` is
+    PDF-only.
+- **docling is locked at 2.118.1, not the newest release, and that is the
+  load-bearing choice.** A plain `--upgrade-package docling` lands on 2.138,
+  which moves `docling-ibm-models` 3 → 4 — new layout models, so new
+  extraction output across the archive — for no security gain. The lock was
+  made with `-P 'docling==2.118.1' -P 'docling-slim==2.118.1'`. A later bare
+  `uv lock --upgrade` will take the major; treat that as its own change, with
+  its own OCR probe.
+- **Verified by a before/after probe, not by the suite**, for the reason
+  `transformers` was: every docling test mocks the converter, and the OAuth
+  tests mock the flow. The probe recorded `LightweightExtractor` over seven
+  PDF shapes (outlines, page labels, embedded files, FlateDecode, multipage,
+  scanned), the consent URL and token-exchange request **both** production
+  flows build (`InstalledAppFlow`, admin `Flow`, HTTP transport mocked), and a
+  **real** `DoclingExtractor` pass over a scanned PDF (OCR) and a native one.
+  All three sections are **byte-identical** across the bump. Not kept, like
+  its predecessors.
+- **docling 2.118 `torch.compile`s its layout model by default**, so the first
+  extraction in a process now logs a block of `torch._dynamo` graph-break
+  warnings (~35 lines, once per process) into `daemon.err.log`. The output is
+  unchanged; this is noise, not a fault. Do not "fix" it without a reason.
+- **`npm audit fix` in `gui/` moved `devalue` 5.8.1 → 5.9.4** (#99–#104) and
+  `source-map-js` 1.2.1 → 1.2.2 (build-time, not yet raised by Dependabot),
+  lock-only. devalue's `stringify`/`uneval` run in Svelte's *server* render,
+  and the GUI is a client-only SPA.
+
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
 MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for

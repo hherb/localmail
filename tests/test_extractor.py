@@ -886,3 +886,19 @@ def test_pdf_pipeline_options_reflect_the_configured_engine() -> None:
     off = _build_pdf_pipeline_options(SearchConfig(extractor_ocr_engine="none"))
     assert off is not None
     assert off.do_ocr is False
+
+
+@pytest.mark.parametrize("engine", ["auto", "rapidocr", "ocrmac"])
+def test_pdf_pipeline_options_ocr_the_whole_page(engine: str) -> None:
+    """docling 2.118's default OCRs layout regions, which lost a scanned
+    table's structure (and a cell) under ocrmac; the docling path only ever
+    sees image-only PDFs, so every engine is told to read the whole page."""
+    pytest.importorskip("docling")
+    from docling.datamodel.pipeline_options import OcrMode
+
+    from localmail.config import SearchConfig
+    from localmail.search.extractor import _build_pdf_pipeline_options
+
+    opts = _build_pdf_pipeline_options(SearchConfig(extractor_ocr_engine=engine))
+    assert opts is not None
+    assert opts.ocr_options.mode == OcrMode.FULL_PAGE

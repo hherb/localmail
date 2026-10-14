@@ -704,7 +704,27 @@ def _resolve_ocr_options(plan: OcrPlan, languages: list[str]) -> Any:
         raise ExtractorConfigurationError(
             unknown_engine_message(plan.engine_kind, known)
         )
-    return factory.create_options(kind=plan.engine_kind, lang=languages)
+    options = factory.create_options(kind=plan.engine_kind, lang=languages)
+    _ocr_the_whole_page(options)
+    return options
+
+
+def _ocr_the_whole_page(options: Any) -> None:
+    """Make docling OCR the whole page rather than its layout regions.
+
+    docling only ever sees a PDF the lightweight path found no text in, so its
+    pages are images and the whole page is the region worth reading. docling
+    2.118 changed the default (``OcrMode.DEFAULT`` = OCR each layout region,
+    minus PDF text cells); under ocrmac that lost a scanned table's structure
+    and dropped a cell outright, where the pre-2.118 behaviour — and
+    ``FULL_PAGE`` now — read it intact. rapidocr is unaffected either way.
+    A docling without ``OcrMode`` predates the change and is left alone.
+    """
+    try:
+        from docling.datamodel.pipeline_options import OcrMode
+    except ImportError:
+        return
+    options.mode = OcrMode.FULL_PAGE
 
 
 def _build_pdf_pipeline_options(cfg: SearchConfig) -> Any:

@@ -45,6 +45,22 @@ def test_build_disables_dns_rebinding_protection(db_dsn):
     assert security.enable_dns_rebinding_protection is False
 
 
+def test_build_leaves_token_resource_checks_to_our_verifier(db_dsn):
+    """The SDK's resource check refuses a token whose ``AccessToken.resource``
+    is not the server's, and mcp 3.0 turns it on whenever
+    ``resource_server_url`` is set. Opaque login tokens carry no resource, so
+    that default would lock out every bearer agent; ``access.load_access``
+    already enforces the RFC 8707 binding. Explicit False also silences the
+    1.30 DeprecationWarning that says the default is about to flip."""
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=False)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+    finally:
+        pool.close()
+    assert server.settings.auth is not None
+    assert server.settings.auth.validate_token_resource is False
+
+
 def test_get_message_publishes_the_three_header_modes(db_dsn):
     """The agent-facing schema is `server.py`'s, not `tools.py`'s (#308)."""
     pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)

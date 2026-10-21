@@ -2357,6 +2357,77 @@ in `pyproject.toml`.
   It is the same on `main`, and both deployments run `auto`, which does not
   forward the language list.
 
+**docling converts PDFs and nothing else, and before this it converted
+anything (the October 2026 second round, Dependabot #115–#132).** The round
+added 16 docling advisories (#116, #118–#131), every one in a non-PDF backend
+(HTML, JATS, ODF, ODS, LaTeX, BoxNote, `DoclingDocument` JSON) or in remote
+fetching. Fixed releases start at 2.131/2.132, and every one of them needs
+`docling-ibm-models>=4.0.2`, i.e. new layout models. Checking whether
+"`DoclingExtractor` is PDF-only" made them unreachable found it did not.
+
+- **The hole:** `DocumentConverter` admits every `InputFormat` unless given
+  `allowed_formats`, and it picks a backend by **sniffing the bytes** of our
+  extension-less blob path. Meanwhile `is_pdf` routed the blob there on a MIME
+  type and filename the sender wrote. Reproduced on the live install: HTML
+  bytes sent as `application/pdf` / `invoice.pdf` fail pypdf, fall back to
+  docling, and come back as extracted text from the **HTML backend**. That
+  put #122 (the unbounded `rowspan` DoS) on a mail-borne path.
+- **The ODT variant failed only because `odfdo` is not installed**, and it
+  failed in the wrong class. The `ImportError` read as a missing OCR engine,
+  so a hostile file was held on the transient budget and logged as "OCR
+  engine 'auto' is not usable". A future docling that pulls `odfdo` in would
+  have made #116 (local file read, contents embedded in the output, which we
+  store and serve) live.
+- **The fix is `extractor._pdf_only_converter_kwargs`**, applied to both
+  construction paths, the pipeline-options one and the bare fallback. It
+  closes the class for every docling version rather than chasing it per
+  advisory, and a disguised file is now refused as a plain `ExtractorError`,
+  a poison pill. It returns `{}` only when `InputFormat` cannot be imported,
+  i.e. docling is not installed, in which case no real converter exists.
+  CI's fakes take that branch.
+- **Pinned three ways** in `tests/test_docling_input_formats.py`:
+  - real docling refuses HTML and ODT labelled `.pdf`, asserting the
+    *class* (neither configuration nor transient);
+  - a positive control proves a real PDF still converts, so a converter
+    refusing everything cannot pass the refusals;
+  - a CI-runnable wiring test fakes `docling.datamodel.base_models` and
+    asserts both paths pass `allowed_formats=[PDF]`.
+
+  Mutation-proven: returning `{}` fails four tests, and the positive control
+  alone survives.
+- **The docling bump is deferred, by operator decision**, because the fix
+  makes those advisories unreachable while the bump changes extraction
+  output. docling stays on 2.118.1. The alerts are to be dismissed as
+  "vulnerable code not used" once this is on `main`, citing the restriction.
+  The 2.132 + ibm-models 4 change is its own PR, with a before/after OCR
+  probe under rapidocr **and** ocrmac.
+- **`mcp>=1.30.0` (#132) and `fsspec>=2026.6.0` (#117, newly declared) are
+  hygiene.**
+  - #132 is unbounded session accumulation in *stateful* Streamable HTTP;
+    localmail mounts with `stateless_http=True`, which the advisory exempts.
+    The lock is held on 1.x deliberately (`-P 'mcp==1.30.0'`): a plain
+    upgrade lands on **2.3**.
+  - fsspec's template injection needs `ReferenceFileSystem`, which nothing
+    here opens.
+- **mcp 1.30 announced a default flip that would have locked out every
+  bearer agent, and `validate_token_resource=False` is set now.** Unset, it
+  behaves as `False` and warns that 3.0 makes it `True` whenever
+  `resource_server_url` is set, which localmail always sets. The SDK check
+  refuses any token whose `AccessToken.resource` is not the server's, and
+  opaque `/v1/auth/login` tokens carry none. Explicit `False` is the honest
+  value: `access.load_access` already enforces the RFC 8707 binding, with
+  NULL meaning unrestricted. Pinned by
+  `test_build_leaves_token_resource_checks_to_our_verifier`. It also removed
+  ~90 suite warnings (one per built app).
+- **`rustls >= 0.23.45` in `gui/src-tauri/Cargo.toml`** (#115, TLS 1.3
+  handshake messages accepted across encryption levels). It is a **direct**
+  dependency of the GUI, the client every `serve` connection uses, so the
+  floor is declared in both its `[dependencies]` and `[dev-dependencies]`
+  entries; the lock took 0.23.46.
+- **`npm audit fix` moved vite 8.0.16 → 8.3.4** and its build-time toolchain.
+  It is lock-only, and the launch-editor advisories are dev-server only.
+  Dependabot had not raised them, `npm audit` did, so read both.
+
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
 MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for

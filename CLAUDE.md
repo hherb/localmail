@@ -2253,8 +2253,8 @@ never ships.
   yet; `npm audit` did, so read `npm audit` as well as the Dependabot list
   when touching `gui/`.
 - **Dependabot #71 (`accelerate <= 1.14.0`) is left open on purpose.** No fixed
-  release exists. It arrives via `docling-ibm-models` and `docling-slim`, both
-  under the `[extraction]` extra, and the path traversal needs a malicious
+  release exists. It arrives via `docling-slim[standard]` (ibm-models 4 no
+  longer depends on it), under the `[extraction]` extra, and the path traversal needs a malicious
   sharded checkpoint index. The layout models come from the HF hub, never
   from mail. Revisit when a fixed release lands.
 
@@ -2285,7 +2285,7 @@ in `pyproject.toml`.
   2.118.1 pins `docling-slim==2.118.1`, so one floor clears both. The
   advisory is in HTML browser-rendering, and `DoclingExtractor` is PDF-only.
 - **docling was locked at 2.118.1, not the newest release** (superseded:
-  it is on 2.141.0 since the third October round, below). A plain
+  it is on 2.141.0 since the deferred bump, below). A plain
   `--upgrade-package docling` lands on 2.138, which moves `docling-ibm-models`
   3 → 4 (new layout models) for no security gain. The lock was made with
   `-P 'docling==2.118.1' -P 'docling-slim==2.118.1'`. A later bare
@@ -2340,7 +2340,8 @@ in `pyproject.toml`.
     **both** `rapidocr` and `auto` (= ocrmac on the Mac). All six outputs are
     byte-identical to `main` with the caps and `FULL_PAGE` in place; before
     them, three rapidocr outputs were `ImportError`s and two ocrmac outputs
-    differed. The probes are not kept, like their predecessors.
+    differed. The probes were not kept, like their predecessors (one is
+    kept since the 2.141 bump: `tests/acceptance/probe_docling_ocr.py`).
   - **Not covered:** aarch64. The DGX's rapidocr and OpenCV run the same
     Python with different native wheels, so a scanned PDF there is the
     post-deploy check.
@@ -2348,22 +2349,25 @@ in `pyproject.toml`.
   extraction in a process now logs a block of `torch._dynamo` graph-break
   warnings (~35 lines, once per process) into `daemon.err.log`. The output is
   unchanged; this is noise, not a fault. Do not "fix" it without a reason.
+  (Gone on 2.141: the same probe logs 35 `_dynamo` lines on 2.118.1 and none
+  on 2.141.0, on the Mac.)
 - **`npm audit fix` in `gui/` moved `devalue` 5.8.1 → 5.9.4** (#99, #101, #103,
   #104) and `source-map-js` 1.2.1 → 1.2.2 (build-time, not yet raised by
   Dependabot), lock-only. All four are hygiene for one reason that covers the
   parse-side #99 as well as the `stringify`/`uneval` ones: devalue is
   `"dev": true`, pulled in only by svelte. The GUI is plain Vite + Svelte with
   no SvelteKit server, so devalue never touches a request.
-- **Filed, not fixed: #398.** Setting `extractor_ocr_engine = "ocrmac"`
-  explicitly fails every pass, because ocrmac wants `en-US` rather than `en`.
-  It is the same on `main`, and both deployments run `auto`, which does not
-  forward the language list.
+- **#398: on 2.118.1, setting `extractor_ocr_engine = "ocrmac"`
+  explicitly fails every pass**, because ocrmac wants `en-US` rather than
+  `en`, while `auto` did not forward the language list. Fixed with the 2.141
+  bump by the `iso:en` default (see the bump's bullets below).
 
 **docling converts PDFs and nothing else, and before this it converted
 anything (the October 2026 second round, Dependabot #115–#132).** The round
 added 15 docling advisories (#116, #118–#131), every one in a non-PDF backend
 (HTML, JATS, ODF, ODS, LaTeX, BoxNote, `DoclingDocument` JSON) or in remote
-fetching. Fixed releases start at 2.131/2.132, and every one of them needs
+fetching. #116 is fixed in 2.120.3, the rest in 2.131/2.132, and every
+release from there needs
 `docling-ibm-models>=4.0.2`, i.e. new layout models. Checking whether
 "`DoclingExtractor` is PDF-only" made them unreachable found it did not.
 
@@ -2419,35 +2423,71 @@ fetching. Fixed releases start at 2.131/2.132, and every one of them needs
   output. The 15 alerts were dismissed as "vulnerable code not used" once
   #399 was on `main`. The bump followed as its own PR (next bullet).
 - **docling `>=2.132.0`, locked at 2.141.0, with `docling-ibm-models` 4.0.3
-  (the third October round).** The floor is the highest first-patched
-  version across #116 and #118–#131. The lock is what an unconstrained
-  `--upgrade-package docling --upgrade-package docling-slim` resolves, so a
-  later re-lock does not move it again. Nothing else in the extraction stack
-  moved: docling-core, docling-parse, rapidocr, OpenCV and torch are
-  unchanged.
+  (the bump deferred from the second October round).** The floor is the
+  highest first-patched version across #116 and #118–#131. 2.141.0 was the
+  newest release on 2026-10-21, a day old; the next docling release moves a
+  bare `uv lock --upgrade`, so re-run the probe when it does.
+  - **What else moved:** docling-core, docling-parse, rapidocr, OpenCV and
+    torch are unchanged. The lock gains `langcodes` (docling-slim) and
+    `python-oxmsg` + `olefile` (`docling-slim[standard]`), and drops
+    `jsonlines`. `python-oxmsg` is an Outlook `.msg` reader, i.e. a new
+    non-PDF backend, so `_pdf_only_converter_kwargs` (#399) is now the only
+    thing between it and mail. The re-lock also re-scoped many dependency
+    markers (`sys_platform != 'emscripten'` and the like); not investigated,
+    and `--locked` passes in CI.
+  - **The OCR language default is `["iso:en"]` now, and that is the part
+    that changes production.** docling >= 2.132 maps an `iso:` value to each
+    engine's own code (ocrmac `en-US`, rapidocr `en`) and passes a bare value
+    to the engine untouched. Under the old `["en"]`, 2.141's `auto` *skipped
+    ocrmac* on the Mac (`OcrLanguageNotSupportedError`, caught, logged at
+    INFO) and picked rapidocr — so the deploy would have moved the Mac's
+    scanned-PDF OCR from Apple Vision to rapidocr with nothing reporting it.
+    The bump's first probe ran under that default and labelled its `auto`
+    cells "ocrmac"; they were rapidocr. Closes #398 too: an explicit ocrmac
+    accepts `iso:en`. The 2.132, 2.135 and 2.138 docling-slim wheels carry the
+    same resolver, so the floor holds. Pinned against real docling
+    by `tests/test_ocr_language_default.py` (skips without `[extraction]`, so
+    not on CI). **A `config.toml` that sets a bare `extractor_ocr_languages`
+    keeps the old behaviour**; the Mac's does not set it, the DGX's is
+    unchecked.
   - **Verified by `tests/acceptance/probe_docling_ocr.py`, which is kept in
     the tree now**, because the #397 and #399 probes lived in a scratchpad
     and were gone a session later. It runs a real `DoclingExtractor` over a
     scanned invoice, a scanned table and a native table, under each engine
     named, and prints JSON to diff between a venv on `main` and one on the
     branch. It is deliberately not a `run_*.py`: those are database harnesses
-    and must take the session lock (#337). `tests/test_docling_ocr_probe.py`
-    pins that the scanned fixtures have no text layer, so the probe cannot
-    compare two versions without ever running OCR.
-  - **Result, `main` (2.118.1) vs branch (2.141.0), on the Mac:** five of six
-    cells byte-identical under `auto` (ocrmac) and `rapidocr`. The sixth
-    *improved*. On `main`, `native_table` under rapidocr loses the Qty column
-    (`| Widget |  | 12.50 |`), in 3 of 3 runs, and 2.141 returns it. Still
-    unverified on aarch64.
+    and must take the session lock (#337).
+    - It records what makes two outputs attributable: package versions
+      (fixture builders included), platform, which `localmail` tree ran, the
+      OCR options production built per engine, and docling's own
+      engine-selection log lines (`ocr_selection`) — the line that would have
+      shown the ocrmac skip. Versions are read *before* the slow run.
+    - **It exits 1 when any cell errored or lacks a token its fixture holds**,
+      matched as whole tokens (a dropped `1` is a substring of `12.50`). Two
+      venvs failing the same way used to diff clean and exit 0.
+    - `tests/test_docling_ocr_probe.py` pins that the scanned fixtures have no
+      text layer, that every engine runs every fixture under its own name,
+      the exit status, the missing-text check and the versions block, each
+      mutation-proven.
+  - **Result, `main` (2.118.1) vs branch (2.141.0), on the Mac**, engines
+    `auto`, `rapidocr`, `ocrmac`. `ocr_selection` is `Auto OCR model selected
+    ocrmac.` on both. All three `auto` cells and both scanned `rapidocr` cells
+    are byte-identical. On `main`, every explicit `ocrmac` cell fails (#398)
+    and `native_table` under rapidocr loses the Qty column; the branch passes
+    all nine. Still unverified on aarch64.
   - **The branch was built in its own worktree and venv, not in the
     deployment tree.** docling is imported lazily per extraction, so syncing
     a new docling into the venv the daemon runs from changes what a *running*
-    daemon imports at its next scanned PDF, with no restart.
+    daemon imports at its next scanned PDF, with no restart — and one that
+    already imported docling can end up mixing old modules in memory with
+    new submodules from disk.
   - **The rapidocr cap is now conservative, not required.** docling 2.132+
     reads `list_supported_langs` and tolerates rapidocr 3.10, according to
     its own source. It stays: lifting it swaps OpenCV for
     `opencv-python-headless`, which is its own probe. The OpenCV `<5` cap is
-    still required, since ibm-models 4.0.3 still declares it.
+    still required: ibm-models 4.0.3's TableFormer still imports cv2, and the
+    package declares `<5` only inside its opencv extras, which docling does
+    not request.
   - **`_pdf_only_converter_kwargs` is untouched**, and its tests pass against
     2.141, both the real-docling refusals and the wiring fakes.
 - **`mcp>=1.30.0` (#132) and `fsspec>=2026.6.0` (#117, newly declared) are

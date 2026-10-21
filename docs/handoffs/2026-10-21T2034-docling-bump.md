@@ -14,6 +14,13 @@
 >   there.**
 > - **did the docling bump: PR #402**, verified by an OCR probe that is now
 >   kept in the tree.
+> - **review round on #402 (2026-10-22):** the first probe's `auto` cells
+>   were *rapidocr*, not ocrmac. Under the old `["en"]` language default,
+>   docling 2.141's `auto` skips ocrmac on the Mac and logs it only at INFO,
+>   so the deploy would have moved the Mac's OCR engine silently. Fixed by
+>   defaulting `extractor_ocr_languages` to `["iso:en"]`, which also closes
+>   #398. The probe now records which engine was selected and exits 1 on a
+>   failed or incomplete cell.
 >
 > **Open issues: 42. Dependabot: 4 open** — #71 (accelerate, no fix exists)
 > plus #115, #117 and #132. **Those three are fixed on `main`** (rustls
@@ -65,28 +72,38 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | SHA | What |
 |---|---|
-| `824c342` | `docling>=2.132.0` → lock 2.141.0, `docling-ibm-models` 3.13.2 → 4.0.3; the OCR probe and its fixture test; README (how to run the probe) and CLAUDE.md (the third October round) |
+| `824c342` | `docling>=2.132.0` → lock 2.141.0, `docling-ibm-models` 3.13.2 → 4.0.3; the OCR probe and its fixture test; README (how to run the probe) and CLAUDE.md (the deferred bump) |
+| review round | `extractor_ocr_languages` default `["iso:en"]` (closes #398) + `tests/test_ocr_language_default.py`; the probe records engine selection, OCR options, platform and more versions, and exits 1 on a failed or incomplete cell; doc corrections |
 
 Plus this handoff, in the same PR.
 
-**The probe result** (Mac, `main` and branch in separate venvs):
+**The probe result** (Mac, `main` and branch in separate venvs, re-run
+after the review with the hardened probe; `ocr_selection` is `Auto OCR model
+selected ocrmac.` on both sides):
 
 | cell | main (2.118.1) | branch (2.141.0) |
 |---|---|---|
-| scanned_invoice, auto (ocrmac) + rapidocr | `## Invoice 4711 Date 2026-10-21 Total 250 EUR` | identical |
-| scanned_table, both engines | full 3×3 table | identical |
-| native_table, auto | full table | identical |
-| native_table, rapidocr | **Qty column empty**, 3 of 3 runs | **full table** |
+| all three fixtures, `auto` | invoice text, full tables | identical |
+| scanned invoice + table, `rapidocr` | invoice text, full table | identical |
+| native_table, `rapidocr` | **Qty column empty** | **full table** |
+| all three fixtures, explicit `ocrmac` | **conversion fails** (#398) | full output |
 
-So the bump changed one output, and the change is a fix.
+Exit status: `main` 1 (four failed cells), branch 0. The first table in
+this handoff labelled its `auto` column "ocrmac"; on the branch it had been
+rapidocr, which is what the review found.
 
 **Two caps re-examined, both kept:**
 - **rapidocr `<3.10`** is now conservative rather than required. docling
   2.132+ reads `list_supported_langs`, per its own source, and tolerates
   3.10. Lifting it swaps OpenCV for `opencv-python-headless`, so it needs its
   own probe.
-- **OpenCV `<5`** is still required: `docling-ibm-models` 4.0.3 still
-  declares it.
+- **OpenCV `<5`** is still required: `docling-ibm-models` 4.0.3's
+  TableFormer still imports cv2, and the package declares `<5` only inside
+  its opencv extras, which docling does not request.
+
+**The lock moved more than the first write-up said:** it gains `langcodes`,
+`python-oxmsg` and `olefile` and drops `jsonlines`. `python-oxmsg` is an
+Outlook `.msg` backend that #399's PDF-only restriction keeps away from mail.
 
 ### Outside the PR (operational)
 
@@ -103,7 +120,13 @@ So the bump changed one output, and the change is a fix.
 | `tests/test_docling_input_formats.py` | passes against real docling 2.141 |
 | CI | see `gh pr checks 402`; I stopped at the push |
 
-- **+5 tests**, measured with `--collect-only`: `main` at `0b05382`
+- **After the review round:** **4056 passed, 0 failed**, 6 warnings, 294 s;
+  mypy clean, 160 files (`uvx mypy --python-executable .venv/bin/python`,
+  which does not re-sync the venv the way `uv run --with` can). +11 over
+  `main`: 8 in `tests/test_docling_ocr_probe.py`, 3 in
+  `tests/test_ocr_language_default.py` (real docling; they skip on CI, which
+  installs no `[extraction]`).
+- **+5 tests** (first commit), measured with `--collect-only`: `main` at `0b05382`
   collects **4045** and the branch **4050**, all 5 in
   `tests/test_docling_ocr_probe.py`. (Session 53's handoff said 4044 for
   `main`; its review round added one before merge.)
@@ -159,9 +182,9 @@ So the bump changed one output, and the change is a fix.
 ### 3. **Carried issues**
 - **Newest:** #401 (opaque-bearer `/mcp` does no RFC 8707 check on
   resource-bound tokens), #400 (docling converter-construction fallback drops
-  the OCR config silently), #398 (explicit `ocrmac` fails on language codes).
-  #400 and #398 sit in the code #402 touches the neighbourhood of, and are
-  the natural next extraction slice.
+  the OCR config silently; the probe now records the OCR options per engine,
+  which would show it). #398 is closed by #402. #400 is the natural next
+  extraction slice.
 - **Then:** #394, #395, #386, #389, #380, #383, #384, #377, #378, #369,
   #373, #372, #370, #371, #368, #365.
 - **Not filed yet:** `snippet_source="header"` mislabel on a whole-message
@@ -177,9 +200,9 @@ So the bump changed one output, and the change is a fix.
 
 ## Rulings made this session
 
-1. **Locked at 2.141.0, not 2.132.0.** 2.141 is what an unconstrained
-   re-lock picks, so the next `uv lock --upgrade` does not move docling
-   again. The probe covers it either way. *Cost if wrong:* nine more docling
+1. **Locked at 2.141.0, not 2.132.0.** 2.141 was the newest release at lock
+   time (a day old); the next docling release will move a bare `uv lock
+   --upgrade`, so re-run the probe then. *Cost if wrong:* nine more docling
    releases of untested-by-the-suite change. The probe is the mitigation,
    and it found only an improvement.
 2. **The rapidocr cap stays**, though no longer required. *Cost if wrong:*
@@ -190,6 +213,11 @@ So the bump changed one output, and the change is a fix.
    operator chose dismissal in session 53, conditional on #399 being on
    `main`, which it was.
 6. **Code and handoff are in one PR**, per the convention.
+7. **The fix is a new default (`["iso:en"]`), not code that adds `iso:` to
+   bare values.** A bare value now means "engine-native" in docling, and a
+   user who set one (tesserocr's `eng`, say) meant exactly that. *Cost if
+   wrong:* a `config.toml` that sets a bare `extractor_ocr_languages` keeps
+   the ocrmac skip; the Mac's sets none, the DGX's is unchecked.
 
 ## Open decisions & risks
 

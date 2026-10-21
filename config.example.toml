@@ -182,8 +182,10 @@ stale_seconds = 60
 # onnxruntime on Linux (a docling dependency; onnxruntime is already a core dep
 # via fastembed). Pin only to override — e.g. "none" to skip the OCR cost.
 # extractor_ocr_engine = "auto"
-# Languages passed to the OCR engine.
-# extractor_ocr_languages = ["en"]
+# Languages passed to the OCR engine. Write them as "iso:<BCP-47>" so docling
+# maps each to the engine's own code; a bare "en" is passed to the engine as-is,
+# and on macOS that makes "auto" skip ocrmac for rapidocr.
+# extractor_ocr_languages = ["iso:en"]
 
 # --- accounts -----------------------------------------------------------------
 

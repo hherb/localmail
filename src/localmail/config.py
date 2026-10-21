@@ -577,7 +577,12 @@ class SearchConfig(BaseModel):
     extractor_max_blob_bytes: int = 50 * 1024 * 1024
     extractor_max_extracted_chars: int = 1_000_000
     extractor_docling_max_pages: int = 200
-    extractor_ocr_languages: list[str] = Field(default_factory=lambda: ["en"])
+    # docling >= 2.132 reads an `iso:` value as a BCP-47 tag and maps it to each
+    # engine's own code (ocrmac `en-US`, rapidocr `en`); a bare value is passed
+    # to the engine untouched. Bare `"en"` made 2.141's `auto` skip ocrmac for
+    # rapidocr on the Mac with only an INFO line, and failed every explicit
+    # ocrmac pass (#398).
+    extractor_ocr_languages: list[str] = Field(default_factory=lambda: ["iso:en"])
     # Which OCR engine docling should use for scanned PDFs (#248).
     #
     # `"auto"` (default) is docling's own OcrAutoOptions: it probes ocrmac →

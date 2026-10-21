@@ -734,16 +734,23 @@ def _pdf_only_converter_kwargs() -> dict[str, Any]:
     the bytes of our extension-less blob path, while the MIME type and
     filename that routed the blob here are sender-supplied. Unrestricted, an
     HTML or ODT attachment labelled ``invoice.pdf`` fails pypdf, falls back to
-    docling and reaches its HTML/ODF backends (Dependabot #116, #118–#131).
+    docling and reaches its non-PDF backends (Dependabot #116, #118–#131).
     Restricted, docling refuses it as a conversion failure: a poison pill.
 
-    ``{}`` only when ``InputFormat`` is not importable, i.e. docling is not
-    installed — then there is no real converter to restrict (the test fakes).
+    Fails closed. This is only called once ``DocumentConverter`` imported, so
+    an unimportable ``InputFormat`` means a docling that moved it, not a
+    missing docling, and an unrestricted converter would silently reopen the
+    hole. The error is the install's fault, so it is a configuration error:
+    held on the transient budget, cleared by ``retry-failed-extractions``.
+    Tests that fake ``_try_import_docling`` stub this function too.
     """
     try:
         from docling.datamodel.base_models import InputFormat
-    except ImportError:
-        return {}
+    except ImportError as exc:
+        raise ExtractorConfigurationError(
+            f"docling is installed but InputFormat is not importable ({exc}); "
+            "refusing to build a converter that admits non-PDF input"
+        ) from exc
     return {"allowed_formats": [InputFormat.PDF]}
 
 

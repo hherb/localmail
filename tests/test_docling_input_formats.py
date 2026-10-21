@@ -68,6 +68,9 @@ def test_non_pdf_bytes_labelled_pdf_are_refused_as_a_bad_blob(
     assert not isinstance(
         excinfo.value, (ExtractorConfigurationError, TransientExtractorError)
     )
+    # docling's own wording for an allowed_formats refusal; pins the cause, not
+    # just the class, so an unrelated parse failure cannot pass for it.
+    assert "not allowed" in str(excinfo.value)
 
 
 def test_a_real_pdf_still_converts(tmp_path: Path) -> None:
@@ -147,3 +150,13 @@ def test_every_converter_is_built_pdf_only(
     assert len(built) == 1
     assert built[0]["allowed_formats"] == [_FakeInputFormat.PDF]
     assert ("format_options" in built[0]) is with_pipeline_options
+
+
+def test_an_unimportable_input_format_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A docling that moved ``InputFormat`` must not yield an unrestricted
+    converter: the restriction would vanish with nothing logged and CI green."""
+    monkeypatch.setitem(sys.modules, "docling.datamodel.base_models", None)
+    with pytest.raises(ExtractorConfigurationError):
+        ext_mod._pdf_only_converter_kwargs()

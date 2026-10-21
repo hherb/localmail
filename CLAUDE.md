@@ -2374,26 +2374,43 @@ fetching. Fixed releases start at 2.131/2.132, and every one of them needs
   put #122 (the unbounded `rowspan` DoS) on a mail-borne path.
 - **The ODT variant failed only because `odfdo` is not installed**, and it
   failed in the wrong class. The `ImportError` read as a missing OCR engine,
-  so a hostile file was held on the transient budget and logged as "OCR
-  engine 'auto' is not usable". A future docling that pulls `odfdo` in would
+  so a hostile file was held on the transient budget and logged as `OCR
+  engine 'auto' (search.extractor_ocr_engine) is not usable`. A future docling that pulls `odfdo` in would
   have made #116 (local file read, contents embedded in the output, which we
   store and serve) live.
 - **The fix is `extractor._pdf_only_converter_kwargs`**, applied to both
   construction paths, the pipeline-options one and the bare fallback. It
   closes the class for every docling version rather than chasing it per
   advisory, and a disguised file is now refused as a plain `ExtractorError`,
-  a poison pill. It returns `{}` only when `InputFormat` cannot be imported,
-  i.e. docling is not installed, in which case no real converter exists.
-  CI's fakes take that branch.
+  a poison pill.
+- **It fails closed** (review of #399). It first returned `{}` when
+  `InputFormat` could not be imported, on the theory that docling was then
+  absent. But it is only called after `DocumentConverter` imported, so that
+  branch is reachable in production only from a docling that *moved*
+  `InputFormat` — exactly the upgrade deferred below — and it would have
+  reopened every backend with nothing logged and CI green. It raises
+  `ExtractorConfigurationError` now: the install's fault, held on the #153
+  transient budget, cleared by `retry-failed-extractions`. The 8 tests that
+  fake `_try_import_docling` stub this function too; without the stub 3 fail
+  and **5 keep passing while testing nothing**, because
+  `ExtractorConfigurationError` is a `TransientExtractorError` and satisfies
+  their assertions before the fake `convert()` runs.
+- **Filed, not fixed, from the same review:** #400 (the pre-existing
+  `except Exception: converter = None` drops the OCR configuration silently,
+  and a construction failure in the bare fallback is poison-pilled as
+  `'unexpected'`) and #401 (the opaque-bearer `/mcp` path never checks a
+  token's RFC 8707 binding).
 - **Pinned three ways** in `tests/test_docling_input_formats.py`:
   - real docling refuses HTML and ODT labelled `.pdf`, asserting the
-    *class* (neither configuration nor transient);
+    *class* (neither configuration nor transient) and docling's own
+    "not allowed" wording, so an unrelated parse failure cannot pass;
   - a positive control proves a real PDF still converts, so a converter
     refusing everything cannot pass the refusals;
   - a CI-runnable wiring test fakes `docling.datamodel.base_models` and
-    asserts both paths pass `allowed_formats=[PDF]`.
+    asserts both paths pass `allowed_formats=[PDF]`;
+  - an unimportable `InputFormat` raises rather than returning `{}`.
 
-  Mutation-proven: returning `{}` fails four tests, and the positive control
+  Mutation-proven: returning `{}` fails five tests, and the positive control
   alone survives.
 - **The docling bump is deferred, by operator decision**, because the fix
   makes those advisories unreachable while the bump changes extraction
@@ -2414,11 +2431,16 @@ fetching. Fixed releases start at 2.131/2.132, and every one of them needs
   behaves as `False` and warns that 3.0 makes it `True` whenever
   `resource_server_url` is set, which localmail always sets. The SDK check
   refuses any token whose `AccessToken.resource` is not the server's, and
-  opaque `/v1/auth/login` tokens carry none. Explicit `False` is the honest
-  value: `access.load_access` already enforces the RFC 8707 binding, with
-  NULL meaning unrestricted. Pinned by
-  `test_build_leaves_token_resource_checks_to_our_verifier`. It also removed
-  ~90 suite warnings (one per built app).
+  **neither verifier populates it** — not `LocalmailTokenVerifier`, and not
+  `access.load_access` even for a resource-bound OAuth token — so `True`
+  would refuse every agent, OAuth clients included. Do not set it `True` on
+  an AS-only deployment. Explicit `False` is the honest value: on the AS path
+  `access.load_access` enforces the RFC 8707 binding itself, NULL meaning
+  unrestricted; the opaque path does no resource check, and mints no bound
+  tokens. Pinned by `test_build_leaves_token_resource_checks_to_our_verifier`,
+  which also asserts the warning stays out. Against `main` (mcp 1.28.1) it
+  *prevents* ~90 warnings the bump would add, one per built app; it removes
+  none.
 - **`rustls >= 0.23.45` in `gui/src-tauri/Cargo.toml`** (#115, TLS 1.3
   handshake messages accepted across encryption levels). It is a **direct**
   dependency of the GUI, the client every `serve` connection uses, so the
@@ -6281,7 +6303,10 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     reading is macOS-only. The control run on `main` at `815e74b` reads
     `2950 passed, 1 skipped` against 2951 collected, so the skip predates this
     work; do **not** read it as a missing uv extra (this repo's usual meaning
-    for a non-zero skip count) without checking a `main` run first.
+    for a non-zero skip count) without checking a `main` run first. The
+    count has grown since: `main` at `e91471e` reads `4 skipped` on CI, and
+    #399 adds 3 more (its real-docling tests, since CI installs no
+    `[extraction]`).
   - **Adding `pytest-xdist` needs `_db_session_lock.py` changed first.** It is
     not a dependency today. Each worker is its own process, so under one shared
     DSN exactly one acquires and the rest block for `DEFAULT_LOCK_TIMEOUT_S`

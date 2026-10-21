@@ -150,7 +150,8 @@ mcp = [
     # Floor is security-driven: Dependabot #132, unbounded session
     # accumulation in Streamable HTTP's *stateful* mode, < 1.30.0. localmail
     # mounts with `stateless_http=True`, which the advisory exempts, so this
-    # is hygiene. Kept on 1.x: an unconstrained upgrade lands on 2.x.
+    # is hygiene. Held on 1.x by the lock only (`-P 'mcp==1.30.0'`): no upper
+    # bound here, so a bare `uv lock --upgrade` lands on 2.x.
     "mcp>=1.30.0",
     # `mcp` requires `pyjwt[crypto]`, and only the SDK's *client* credentials
     # extension imports it — the server localmail mounts never does; the lazy

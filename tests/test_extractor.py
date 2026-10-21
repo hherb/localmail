@@ -461,6 +461,7 @@ def test_docling_extractor_passes_configured_max_pages_to_convert(
             return _FakeResult()
 
     monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _FakeConverter)
+    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
 
     pdf = tmp_path / "x.pdf"
     pdf.write_bytes(b"%PDF-1.4 dummy")
@@ -607,6 +608,7 @@ def test_docling_extract_classifies_requests_connection_error_transient(
         "_try_import_docling",
         lambda: _fake_converter_raising(lambda: req_err("max retries exceeded")),
     )
+    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
     p = tmp_path / "x.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -639,6 +641,7 @@ def test_docling_extract_classifies_transient_in_cause_chain(
         "_try_import_docling",
         lambda: _fake_converter_raising(_raise_wrapped),
     )
+    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
     p = tmp_path / "x.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -664,6 +667,7 @@ def test_docling_extract_keeps_value_error_as_permanent(
         "_try_import_docling",
         lambda: _fake_converter_raising(lambda: ValueError("corrupt PDF")),
     )
+    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
     p = tmp_path / "x.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -795,6 +799,7 @@ def test_a_missing_ocr_engine_package_is_a_configuration_error(
         "_try_import_docling",
         lambda: _fake_converter_raising(_raise_missing_easyocr),
     )
+    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
     p = tmp_path / "scan.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -824,6 +829,7 @@ def test_a_missing_ocr_engine_deep_in_the_cause_chain_still_classifies(
         "_try_import_docling",
         lambda: _fake_converter_raising(_raise_wrapped),
     )
+    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
     p = tmp_path / "scan.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -847,6 +853,7 @@ def test_a_corrupt_pdf_is_still_a_poison_pill_not_a_configuration_error(
         "_try_import_docling",
         lambda: _fake_converter_raising(lambda: ValueError("corrupt PDF")),
     )
+    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
     p = tmp_path / "x.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 

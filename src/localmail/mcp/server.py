@@ -106,8 +106,9 @@ def build_mcp_server(
             mcp_resource_url(str(config.resource_server_url))
         ),
         required_scopes=[],
-        # Our verifier enforces the RFC 8707 binding (access.load_access);
-        # the SDK's check would refuse resource-less login tokens.
+        # Neither verifier sets AccessToken.resource, so the SDK's check would
+        # refuse every token; on the AS path access.load_access enforces the
+        # RFC 8707 binding itself, and opaque login tokens are never bound.
         validate_token_resource=False,
     )
     common_kwargs: dict[str, Any] = dict(

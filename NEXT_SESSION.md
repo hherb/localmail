@@ -91,7 +91,8 @@ Reproduced against the live install:
   extracted by the **HTML backend**. That is #122, the `rowspan` DoS, on a
   mail-borne path.
 - **ODT labelled `invoice.pdf`** → stopped only by `odfdo` being absent.
-  It failed as "OCR engine 'auto' is not usable", so a hostile file was
+  It failed as `OCR engine 'auto' (search.extractor_ocr_engine) is not
+  usable`, so a hostile file was
   held on the *transient* budget instead of being poison-pilled.
 
 After the fix both are refused as plain `ExtractorError`s.
@@ -106,10 +107,11 @@ After the fix both are refused as plain `ExtractorError`s.
 | vite (npm audit only) | lock-only | launch-editor, dev server only |
 
 **mcp 1.30 also announced a breaking default.** `validate_token_resource`
-will default to `True` in 3.0, which would refuse every opaque login bearer
-token (they carry no resource). Set explicitly to `False`; our
-`access.load_access` already enforces RFC 8707. This also removed ~90 suite
-warnings.
+will default to `True` in 3.0, which would refuse every token: neither
+verifier populates `AccessToken.resource`, OAuth ones included. Set
+explicitly to `False`; on the AS path `access.load_access` enforces RFC 8707
+itself. Against `main` (mcp 1.28.1) this prevents ~90 warnings the bump
+would otherwise add.
 
 ## Verification (this Mac, all extras, at `beaf1fc`)
 
@@ -129,10 +131,16 @@ warnings.
   the MCP build test. (#397's handoff quoted 4035 for its first commit; its
   review round added 3 before merge.)
 - **The new docling tests skip in CI** (`importorskip("docling")`), except
-  the wiring test, which fakes the docling modules. Expect CI's pass count to
-  be 4 lower than macOS on top of the usual `1 skipped`.
+  the wiring test, which fakes the docling modules. CI measured: `4037
+  passed, 7 skipped`, against `main`'s `4034 passed, 4 skipped` — 3 new
+  skips (html, odt, the positive control); the MCP test runs there.
 - **Mutation:** making `_pdf_only_converter_kwargs` return `{}` fails 4
-  tests, and the positive control alone survives. The MCP test was RED first
+  tests (5 after the review round's fail-closed pin), and the positive
+  control alone survives.
+- **Review round:** the helper now fails closed instead of returning `{}`
+  when `InputFormat` is unimportable (see CLAUDE.md); the 8 fake-docling
+  tests stub it. Verified with docling blocked on `sys.meta_path`:
+  `84 passed, 7 skipped` over the three docling test files. The MCP test was RED first
   (`None is False`).
 - **18 warnings:** the known 3, two `hf_xet` from the fastembed smoke test,
   and ~13 torch/docling deprecations from the new real-docling tests. These

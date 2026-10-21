@@ -2359,7 +2359,7 @@ in `pyproject.toml`.
 
 **docling converts PDFs and nothing else, and before this it converted
 anything (the October 2026 second round, Dependabot #115–#132).** The round
-added 16 docling advisories (#116, #118–#131), every one in a non-PDF backend
+added 15 docling advisories (#116, #118–#131), every one in a non-PDF backend
 (HTML, JATS, ODF, ODS, LaTeX, BoxNote, `DoclingDocument` JSON) or in remote
 fetching. Fixed releases start at 2.131/2.132, and every one of them needs
 `docling-ibm-models>=4.0.2`, i.e. new layout models. Checking whether

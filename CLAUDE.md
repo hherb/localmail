@@ -860,7 +860,8 @@ tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
                     # run_browse_explain.py, run_chunk_insert_bench.py);
-                    # browse_explain_lib.py is a library, not an entry point
+                    # browse_explain_lib.py is a library, not an entry point;
+                    # probe_docling_ocr.py is a no-DB OCR before/after probe
     _harness_lock.py  # harness_db_lock + the AST rule requiring it (#337)
   conftest.py       # memory_keyring fixture, db_dsn/db_conn fixtures
   _eml.py           # MIME fixture builders (no .eml files on disk)
@@ -2283,7 +2284,8 @@ in `pyproject.toml`.
   #113 is filed against `docling-slim` and #114 against `docling`. docling
   2.118.1 pins `docling-slim==2.118.1`, so one floor clears both. The
   advisory is in HTML browser-rendering, and `DoclingExtractor` is PDF-only.
-- **docling is locked at 2.118.1, not the newest release.** A plain
+- **docling was locked at 2.118.1, not the newest release** (superseded:
+  it is on 2.141.0 since the third October round, below). A plain
   `--upgrade-package docling` lands on 2.138, which moves `docling-ibm-models`
   3 → 4 (new layout models) for no security gain. The lock was made with
   `-P 'docling==2.118.1' -P 'docling-slim==2.118.1'`. A later bare
@@ -2412,12 +2414,42 @@ fetching. Fixed releases start at 2.131/2.132, and every one of them needs
 
   Mutation-proven: returning `{}` fails five tests, and the positive control
   alone survives.
-- **The docling bump is deferred, by operator decision**, because the fix
+- **The docling bump was deferred, by operator decision**, because the fix
   makes those advisories unreachable while the bump changes extraction
-  output. docling stays on 2.118.1. The alerts are to be dismissed as
-  "vulnerable code not used" once this is on `main`, citing the restriction.
-  The 2.132 + ibm-models 4 change is its own PR, with a before/after OCR
-  probe under rapidocr **and** ocrmac.
+  output. The 15 alerts were dismissed as "vulnerable code not used" once
+  #399 was on `main`. The bump followed as its own PR (next bullet).
+- **docling `>=2.132.0`, locked at 2.141.0, with `docling-ibm-models` 4.0.3
+  (the third October round).** The floor is the highest first-patched
+  version across #116 and #118–#131. The lock is what an unconstrained
+  `--upgrade-package docling --upgrade-package docling-slim` resolves, so a
+  later re-lock does not move it again. Nothing else in the extraction stack
+  moved: docling-core, docling-parse, rapidocr, OpenCV and torch are
+  unchanged.
+  - **Verified by `tests/acceptance/probe_docling_ocr.py`, which is kept in
+    the tree now**, because the #397 and #399 probes lived in a scratchpad
+    and were gone a session later. It runs a real `DoclingExtractor` over a
+    scanned invoice, a scanned table and a native table, under each engine
+    named, and prints JSON to diff between a venv on `main` and one on the
+    branch. It is deliberately not a `run_*.py`: those are database harnesses
+    and must take the session lock (#337). `tests/test_docling_ocr_probe.py`
+    pins that the scanned fixtures have no text layer, so the probe cannot
+    compare two versions without ever running OCR.
+  - **Result, `main` (2.118.1) vs branch (2.141.0), on the Mac:** five of six
+    cells byte-identical under `auto` (ocrmac) and `rapidocr`. The sixth
+    *improved*. On `main`, `native_table` under rapidocr loses the Qty column
+    (`| Widget |  | 12.50 |`), in 3 of 3 runs, and 2.141 returns it. Still
+    unverified on aarch64.
+  - **The branch was built in its own worktree and venv, not in the
+    deployment tree.** docling is imported lazily per extraction, so syncing
+    a new docling into the venv the daemon runs from changes what a *running*
+    daemon imports at its next scanned PDF, with no restart.
+  - **The rapidocr cap is now conservative, not required.** docling 2.132+
+    reads `list_supported_langs` and tolerates rapidocr 3.10, according to
+    its own source. It stays: lifting it swaps OpenCV for
+    `opencv-python-headless`, which is its own probe. The OpenCV `<5` cap is
+    still required, since ibm-models 4.0.3 still declares it.
+  - **`_pdf_only_converter_kwargs` is untouched**, and its tests pass against
+    2.141, both the real-docling refusals and the wiring fakes.
 - **`mcp>=1.30.0` (#132) and `fsspec>=2026.6.0` (#117, newly declared) are
   hygiene.**
   - #132 is unbounded session accumulation in *stateful* Streamable HTTP;

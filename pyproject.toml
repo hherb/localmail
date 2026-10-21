@@ -83,6 +83,11 @@ dependencies = [
     # Hugging Face hub and rapidocr's model host (modelscope.cn) — nothing
     # mail-borne reaches it — so this is hygiene, not an incident.
     "urllib3>=2.8.0",
+    # Transitive via huggingface-hub (fastembed, docling), declared for the
+    # `transformers` reason. Dependabot #117 (HIGH) is template injection in
+    # `ReferenceFileSystem`, which only a `reference://` URL or a
+    # Kerchunk document reaches; nothing here opens either, so hygiene.
+    "fsspec>=2026.6.0",
     "argon2-cffi>=23.1",
     "nh3>=0.2.18",
     "cryptography>=50.0.0",  # floor is security-driven: CVE-2026-69247 (Dependabot #57)
@@ -142,7 +147,12 @@ extraction = [
     "transformers>=5.10.0",
 ]
 mcp = [
-    "mcp>=1.13.0",
+    # Floor is security-driven: Dependabot #132, unbounded session
+    # accumulation in Streamable HTTP's *stateful* mode, < 1.30.0. localmail
+    # mounts with `stateless_http=True`, which the advisory exempts, so this
+    # is hygiene. Held on 1.x by the lock only (`-P 'mcp==1.30.0'`): no upper
+    # bound here, so a bare `uv lock --upgrade` lands on 2.x.
+    "mcp>=1.30.0",
     # `mcp` requires `pyjwt[crypto]`, and only the SDK's *client* credentials
     # extension imports it — the server localmail mounts never does; the lazy
     # imports in oauthlib and google-auth's `id_token` are unused here — so

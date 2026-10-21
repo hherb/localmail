@@ -20,7 +20,9 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "json", "http2", "charset"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# 0.23.45 floor: Dependabot #115 (TLS 1.3 handshake messages accepted across
+# encryption levels). This is the client every serve connection goes through.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-async-persistent"] }
 anyhow = "1"
@@ -43,7 +45,7 @@ urlencoding = "2"
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
 
 [dev-dependencies]
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 rcgen = "0.13"
 mockito = "1"
 serial_test = "3"

@@ -727,6 +727,33 @@ def _ocr_the_whole_page(options: Any) -> None:
     options.mode = OcrMode.FULL_PAGE
 
 
+def _pdf_only_converter_kwargs() -> dict[str, Any]:
+    """``DocumentConverter`` kwargs admitting PDF input and nothing else.
+
+    docling admits every format by default and picks a backend by sniffing
+    the bytes of our extension-less blob path, while the MIME type and
+    filename that routed the blob here are sender-supplied. Unrestricted, an
+    HTML or ODT attachment labelled ``invoice.pdf`` fails pypdf, falls back to
+    docling and reaches its non-PDF backends (Dependabot #116, #118–#131).
+    Restricted, docling refuses it as a conversion failure: a poison pill.
+
+    Fails closed. This is only called once ``DocumentConverter`` imported, so
+    an unimportable ``InputFormat`` means a docling that moved it, not a
+    missing docling, and an unrestricted converter would silently reopen the
+    hole. The error is the install's fault, so it is a configuration error:
+    held on the transient budget, cleared by ``retry-failed-extractions``.
+    Tests that fake ``_try_import_docling`` stub this function too.
+    """
+    try:
+        from docling.datamodel.base_models import InputFormat
+    except ImportError as exc:
+        raise ExtractorConfigurationError(
+            f"docling is installed but InputFormat is not importable ({exc}); "
+            "refusing to build a converter that admits non-PDF input"
+        ) from exc
+    return {"allowed_formats": [InputFormat.PDF]}
+
+
 def _build_pdf_pipeline_options(cfg: SearchConfig) -> Any:
     """Build docling ``PdfPipelineOptions`` for ``cfg``, or ``None`` when the
     option classes are unavailable (older docling — caller falls back to a bare
@@ -878,6 +905,7 @@ class DoclingExtractor:
         # than being swallowed by the fallback: it is the operator's typo, and
         # silently running with docling's default would hide it forever.
         pipeline_options = _build_pdf_pipeline_options(self._cfg)
+        pdf_only = _pdf_only_converter_kwargs()
         converter = None
         if pipeline_options is not None:
             try:
@@ -890,11 +918,12 @@ class DoclingExtractor:
                             pipeline_options=pipeline_options
                         ),
                     },
+                    **pdf_only,
                 )
             except Exception:
                 converter = None
         if converter is None:
-            converter = DocumentConverter()
+            converter = DocumentConverter(**pdf_only)
 
         try:
             # The page cap is a convert-level argument on docling 2.x, not a

@@ -630,6 +630,11 @@ a perfectly fine PDF as failed):
 - **Poison-pill** — corrupt PDF, encrypted, parser raise, anything else.
   Recorded in `failed_extractions` with `retry_count += 1`, permanently
   skipped once `retry_count >= search.extract_worker_max_retries` (default 3).
+  That includes an attachment that **claims to be a PDF and is not one**: an
+  attachment's MIME type and filename are whatever the sender wrote, so the
+  docling fallback is restricted to PDF input and refuses an HTML or
+  OpenDocument file labelled `.pdf` instead of handing it to the backend for
+  that format.
 
 Extracted text is stripped of NUL bytes before it is stored (#249). Postgres `TEXT`
 rejects `\x00`, and a document that contains one would otherwise fail its

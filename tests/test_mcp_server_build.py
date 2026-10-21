@@ -3,6 +3,7 @@
 
 """build_mcp_server wires five tools onto a FastMCP instance."""
 import asyncio
+import warnings
 
 import pytest
 from psycopg_pool import ConnectionPool
@@ -43,6 +44,28 @@ def test_build_disables_dns_rebinding_protection(db_dsn):
     security = server.settings.transport_security
     assert security is not None
     assert security.enable_dns_rebinding_protection is False
+
+
+def test_build_leaves_token_resource_checks_to_our_verifier(db_dsn):
+    """The SDK's resource check refuses a token whose ``AccessToken.resource``
+    is not the server's, and mcp 3.0 turns it on whenever
+    ``resource_server_url`` is set. Neither of our verifiers populates
+    ``AccessToken.resource``, so that default would lock out every agent,
+    OAuth clients included; on the AS path ``access.load_access`` enforces the
+    RFC 8707 binding itself. Explicit False also keeps out the 1.30
+    DeprecationWarning saying the default is about to flip."""
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=False)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            server = build_mcp_server(
+                pool, searcher=None, config=McpConfig(enabled=True)
+            )
+    finally:
+        pool.close()
+    assert not [w for w in caught if "validate_token_resource" in str(w.message)]
+    assert server.settings.auth is not None
+    assert server.settings.auth.validate_token_resource is False
 
 
 def test_get_message_publishes_the_three_header_modes(db_dsn):

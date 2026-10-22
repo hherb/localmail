@@ -291,7 +291,7 @@ def test_search_config_phase2_defaults() -> None:
     assert cfg.extractor_max_blob_bytes == 50 * 1024 * 1024
     assert cfg.extractor_max_extracted_chars == 1_000_000
     assert cfg.extractor_docling_max_pages == 200
-    assert cfg.extractor_ocr_languages == ["en"]
+    assert cfg.extractor_ocr_languages == ["iso:en"]
     assert cfg.extractor_chardet_confidence_min == 0.5
 
     # Arm 4

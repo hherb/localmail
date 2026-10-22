@@ -595,6 +595,21 @@ that is roughly 5 GB of venv. The OCR engine does not use it.)
 Pin an engine only to override that choice — e.g. `"none"` to skip the OCR cost
 on a large archive, or a specific engine to force it.
 
+To check OCR on a host — after an upgrade, or on a new platform — run the probe.
+It extracts three generated PDFs (a scanned invoice, a scanned table, a native
+table) through the real docling pipeline and prints JSON, including which engine
+`auto` actually selected. It exits 1 when any engine failed or missed text the
+fixture holds. It touches no database:
+
+```bash
+uv run --extra extraction python tests/acceptance/probe_docling_ocr.py \
+    --engine auto --engine rapidocr --engine ocrmac   # drop ocrmac off macOS
+```
+
+OCR languages (`search.extractor_ocr_languages`, default `["iso:en"]`) take the
+`iso:` form so docling maps each to the engine's own code. A bare `"en"` is
+passed to the engine as-is, and on macOS that makes `auto` skip ocrmac.
+
 An engine that is *named* but not importable, or a name docling does not
 register, is a **configuration** error: one WARNING naming the problem, and the
 blob's extraction is **held** on the transient counter rather than failed, so

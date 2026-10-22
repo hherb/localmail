@@ -1,48 +1,51 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-10-21 (session 53).** `main` started this session at
-> **`e91471e`**. The operator merged #397 between sessions, and the Mac was
-> already deployed on it (both agents restarted 2026-10-14 18:32).
+> **Status as of 2026-10-21 (session 54).** `main` started this session at
+> **`0b05382`**: #399 had been merged at 10:16Z, just before the session began.
 >
 > This session:
-> - **verified the #397 deploy on the Mac**:
->   - `/v1/version` → `build_hash: e91471e`;
->   - installed versions: pypdf 6.20.1, rapidocr 3.9.2 (the cap held),
->     opencv-python 4.14.0.94;
->   - extraction running since the restart, and `transient_extractions` = 0.
-> - **found the DGX unreachable.** The tunnel probe on this Mac reports
->   `tunnel=FAIL lan=FAIL hub=ok`, so the DGX's #397 deploy and its
->   aarch64 OCR check are **still not done**.
-> - **found 18 new Dependabot alerts (#115–#132)**, 15 of them docling, and
->   discovered while triaging them that **docling was converting non-PDF
->   attachments**: an HTML file labelled `invoice.pdf` reached docling's HTML
->   backend. Fixed in **PR #399**, together with the other floors.
+> - **deployed #399 on the Mac.** `/v1/version` → `build_hash: 0b05382`, and
+>   `init-db` reports the schema up to date.
+> - **dismissed the 15 docling alerts** (#116, #118–#131) as `not_used`,
+>   citing #399's PDF-only restriction.
+> - **found the DGX unreachable again.** The tunnel was up 06:58–09:55Z today
+>   and has failed since. The Mac's end is up (`utun_rx` is a number), so it
+>   is the DGX side or the path. **#397 and #399 are still not deployed
+>   there.**
+> - **did the docling bump: PR #402**, verified by an OCR probe that is now
+>   kept in the tree.
+> - **review round on #402 (2026-10-22):** the first probe's `auto` cells
+>   were *rapidocr*, not ocrmac. Under the old `["en"]` language default,
+>   docling 2.141's `auto` skips ocrmac on the Mac and logs it only at INFO,
+>   so the deploy would have moved the Mac's OCR engine silently. Fixed by
+>   defaulting `extractor_ocr_languages` to `["iso:en"]`, which also closes
+>   #398. The probe now records which engine was selected and exits 1 on a
+>   failed or incomplete cell.
 >
-> **Open issues: 40. Dependabot: 19 open.** #399 closes #115, #117 and
-> #132. That leaves #71 (accelerate) and the 15 docling alerts this PR
-> deliberately does not bump (#116, #118–#131). Those are to be
-> **dismissed** after the merge (step 0), which takes it to **#71 alone**.
+> **Open issues: 42. Dependabot: 4 open** — #71 (accelerate, no fix exists)
+> plus #115, #117 and #132. **Those three are fixed on `main`** (rustls
+> 0.23.46, fsspec 2026.9.0, mcp 1.30.0 in the locks) and were still open 15
+> minutes after the merge. That is Dependabot's rescan lag; re-check before
+> doing anything about them.
 >
 > **Three things to know before you touch anything.**
 >
-> **(1) The Mac tree is on the PR branch, and the venv is synced to it.** Any
-> restart runs `fix/docling-pdf-only-and-floors`: mcp 1.30.0, fsspec
-> 2026.9.0, and the PDF-only restriction. That is safe (full suite green),
-> but if #399 is rejected, run `git checkout main && uv sync --frozen
-> --extra mcp --extra extraction` before the next restart.
+> **(1) The Mac deployment tree (`~/src/localmail`) is on `main`; #402 is in
+> a separate worktree, `~/src/localmail-docling`, with its own venv.**
+> docling is imported lazily per extraction, so syncing a new docling into
+> the venv the daemon runs from changes what a *running* daemon imports at
+> its next scanned PDF, with no restart. Build dependency bumps in a
+> worktree. Remove it once #402 merges (`git worktree remove
+> ../localmail-docling`).
 >
-> **(2) "docling is PDF-only" was a claim about our routing, not about
-> docling.** `DocumentConverter` admits every format by default and sniffs
-> the bytes. The restriction now lives in
-> `extractor._pdf_only_converter_kwargs`, and nothing else stands between a
-> sender-labelled `.pdf` and docling's other backends. **Do not remove it
-> during the docling bump.**
+> **(2) MCP is not enabled on the Mac** (no `[mcp]` section), so the
+> `validate_token_resource` check from #399 ("`/mcp` still accepts a
+> bearer") can only be done on the DGX, if it is enabled there.
 >
-> **(3) The docling 2.132 bump is still owed, as its own PR.** It forces
-> `docling-ibm-models` 3 → 4 (new layout models). Run a before/after OCR
-> probe under **rapidocr and ocrmac**, against `main` in its own worktree
-> venv. The last two sessions' probes were not kept, so write one again;
-> the shape is in CLAUDE.md's October 2026 entries.
+> **(3) The OCR probe lives in the tree now:**
+> `tests/acceptance/probe_docling_ocr.py`. It is not a `run_*.py` on
+> purpose: those are DB harnesses and must take the session lock, and a
+> no-DB `run_*.py` fails `test_the_db_entry_calls_are_the_ones_the_harnesses_actually_use`.
 
 ## Project context (1-minute version)
 
@@ -65,148 +68,125 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### PR #399: `fix/docling-pdf-only-and-floors` (opened on `main`)
+### PR #402: `deps/docling-2.132` (opened on `main`)
 
 | SHA | What |
 |---|---|
-| `7b94283` | **Restrict docling to PDF input**: `_pdf_only_converter_kwargs` on both converter paths + `tests/test_docling_input_formats.py` |
-| `c4801dc` | `mcp>=1.30.0`, `fsspec>=2026.6.0`, `uv.lock`; `validate_token_resource=False` + its test |
-| `c0dce76` | GUI: `rustls >= 0.23.45` in `Cargo.toml` (lock 0.23.46); `npm audit fix` (vite 8.0.16 → 8.3.4) |
-| `beaf1fc` | README (the poison-pill bullet) and CLAUDE.md (the second October round) |
+| `824c342` | `docling>=2.132.0` → lock 2.141.0, `docling-ibm-models` 3.13.2 → 4.0.3; the OCR probe and its fixture test; README (how to run the probe) and CLAUDE.md (the deferred bump) |
+| review round | `extractor_ocr_languages` default `["iso:en"]` (closes #398) + `tests/test_ocr_language_default.py`; the probe records engine selection, OCR options, platform and more versions, and exits 1 on a failed or incomplete cell; doc corrections |
 
 Plus this handoff, in the same PR.
 
-**The finding that mattered.** The obvious triage was "every docling
-advisory is in a non-PDF backend and `DoclingExtractor` is PDF-only, so all
-15 are unreachable". The premise was false:
+**The probe result** (Mac, `main` and branch in separate venvs, re-run
+after the review with the hardened probe; `ocr_selection` is `Auto OCR model
+selected ocrmac.` on both sides):
 
-- **Routing:** `is_pdf` routes on a MIME type and a filename, both written
-  by the sender.
-- **Conversion:** `DocumentConverter` had no `allowed_formats`, and it
-  chooses a backend by sniffing the bytes of the extension-less blob path.
-
-Reproduced against the live install:
-
-- **HTML labelled `invoice.pdf`** → pypdf fails → docling fallback →
-  extracted by the **HTML backend**. That is #122, the `rowspan` DoS, on a
-  mail-borne path.
-- **ODT labelled `invoice.pdf`** → stopped only by `odfdo` being absent.
-  It failed as `OCR engine 'auto' (search.extractor_ocr_engine) is not
-  usable`, so a hostile file was
-  held on the *transient* budget instead of being poison-pilled.
-
-After the fix both are refused as plain `ExtractorError`s.
-
-**Other alerts, all hygiene:**
-
-| alert | floor | why it is hygiene |
+| cell | main (2.118.1) | branch (2.141.0) |
 |---|---|---|
-| #132 mcp | `>=1.30.0` (lock held on 1.x; unconstrained → 2.3) | stateful-mode session leak; we run `stateless_http=True`, which the advisory exempts |
-| #117 fsspec (HIGH) | `>=2026.6.0`, newly declared | needs `ReferenceFileSystem`; nothing opens it |
-| #115 rustls | `>= 0.23.45` in `Cargo.toml` | GUI client TLS; a direct dependency |
-| vite (npm audit only) | lock-only | launch-editor, dev server only |
+| all three fixtures, `auto` | invoice text, full tables | identical |
+| scanned invoice + table, `rapidocr` | invoice text, full table | identical |
+| native_table, `rapidocr` | **Qty column empty** | **full table** |
+| all three fixtures, explicit `ocrmac` | **conversion fails** (#398) | full output |
 
-**mcp 1.30 also announced a breaking default.** `validate_token_resource`
-will default to `True` in 3.0, which would refuse every token: neither
-verifier populates `AccessToken.resource`, OAuth ones included. Set
-explicitly to `False`; on the AS path `access.load_access` enforces RFC 8707
-itself. Against `main` (mcp 1.28.1) this prevents ~90 warnings the bump
-would otherwise add.
+Exit status: `main` 1 (four failed cells), branch 0. The first table in
+this handoff labelled its `auto` column "ocrmac"; on the branch it had been
+rapidocr, which is what the review found.
 
-## Verification (this Mac, all extras, at `beaf1fc`)
+**Two caps re-examined, both kept:**
+- **rapidocr `<3.10`** is now conservative rather than required. docling
+  2.132+ reads `list_supported_langs`, per its own source, and tolerates
+  3.10. Lifting it swaps OpenCV for `opencv-python-headless`, so it needs its
+  own probe.
+- **OpenCV `<5`** is still required: `docling-ibm-models` 4.0.3's
+  TableFormer still imports cv2, and the package declares `<5` only inside
+  its opencv extras, which docling does not request.
+
+**The lock moved more than the first write-up said:** it gains `langcodes`,
+`python-oxmsg` and `olefile` and drops `jsonlines`. `python-oxmsg` is an
+Outlook `.msg` backend that #399's PDF-only restriction keeps away from mail.
+
+### Outside the PR (operational)
+
+- Mac deploy of `0b05382` (both agents kickstarted).
+- 15 Dependabot dismissals.
+
+## Verification (Mac, worktree venv, all extras, at `824c342`)
 
 | gate | result |
 |---|---|
-| pytest | **4044 passed, 0 failed**, 18 warnings, 291 s |
-| mypy | Success, **160** files |
-| `cargo test --locked` | 109 passed |
-| `cargo clippy --all-targets -D warnings` | clean |
-| `gui/` vitest | **512 passed**, 49 files |
-| `svelte-check` | 326 files, 0 errors |
-| `npm run build` / `npm audit` | built / 0 vulnerabilities |
-| CI | see `gh pr checks 399`; I stopped at the push |
+| pytest | **4050 passed, 0 failed**, 6 warnings, 326 s |
+| mypy | Success, **160** files (`uv run --with mypy`; the worktree venv has no mypy) |
+| `uv lock --check` | clean |
+| `tests/test_docling_input_formats.py` | passes against real docling 2.141 |
+| CI | see `gh pr checks 402`; I stopped at the push |
 
-- **+6 tests**, measured with `--collect-only`: `main` at `e91471e`
-  collects **4038** and the branch **4044**. That is 5 in the new file plus
-  the MCP build test. (#397's handoff quoted 4035 for its first commit; its
-  review round added 3 before merge.)
-- **The new docling tests skip in CI** (`importorskip("docling")`), except
-  the wiring test, which fakes the docling modules. CI measured: `4037
-  passed, 7 skipped`, against `main`'s `4034 passed, 4 skipped` — 3 new
-  skips (html, odt, the positive control); the MCP test runs there.
-- **Mutation:** making `_pdf_only_converter_kwargs` return `{}` fails 4
-  tests (5 after the review round's fail-closed pin), and the positive
-  control alone survives.
-- **Review round:** the helper now fails closed instead of returning `{}`
-  when `InputFormat` is unimportable (see CLAUDE.md); the 8 fake-docling
-  tests stub it. Verified with docling blocked on `sys.meta_path`:
-  `84 passed, 7 skipped` over the three docling test files. The MCP test was RED first
-  (`None is False`).
-- **18 warnings:** the known 3, two `hf_xet` from the fastembed smoke test,
-  and ~13 torch/docling deprecations from the new real-docling tests. These
-  were 106 before the `validate_token_resource` change.
-- **Load** was 20–40 all session, with another repo's pytest running beside
-  it. No timing is comparable.
+- **After the review round:** **4056 passed, 0 failed**, 6 warnings, 294 s;
+  mypy clean, 160 files (`uvx mypy --python-executable .venv/bin/python`,
+  which does not re-sync the venv the way `uv run --with` can). +11 over
+  `main`: 8 in `tests/test_docling_ocr_probe.py`, 3 in
+  `tests/test_ocr_language_default.py` (real docling; they skip on CI, which
+  installs no `[extraction]`).
+- **+5 tests** (first commit), measured with `--collect-only`: `main` at `0b05382`
+  collects **4045** and the branch **4050**, all 5 in
+  `tests/test_docling_ocr_probe.py`. (Session 53's handoff said 4044 for
+  `main`; its review round added one before merge.)
+- **Warnings 18 → 6:** docling 2.141 emits far fewer torch/docling
+  deprecations from the real-docling tests.
+- **GUI untouched**, so cargo/vitest were not re-run.
+- **Load** was ~8 all session. No timing is comparable.
 
 ## What's next
 
-### 0. **Merge #399, deploy, dismiss** *(acceptance: Dependabot → #71 only)*
-- **You merge**, once `gh pr checks 399` is green on both legs.
+### 0. **Merge #402, deploy** *(acceptance below)*
+- **You merge**, once `gh pr checks 402` is green on both legs.
 - **Mac:** `git checkout main && git pull`, then `uv sync --frozen --extra
-  mcp --extra extraction` (a no-op: the venv is already synced), then
+  mcp --extra extraction` (this one installs the new docling), then
   `kickstart -k` both agents.
-- **Then dismiss the 15 docling alerts.** Do it **only once #399 is on
-  `main`**, or the reason is false.
-  ```bash
-  for n in 116 118 119 120 121 122 123 124 125 126 127 128 129 130 131; do
-    gh api -X PATCH repos/hherb/localmail/dependabot/alerts/$n \
-      -f state=dismissed -f dismissed_reason=not_used \
-      -f dismissed_comment="DoclingExtractor restricts DocumentConverter to InputFormat.PDF (#399); this advisory is in a non-PDF backend or remote fetch. Bump to >=2.132 tracked separately (ibm-models 4)."
-  done
-  ```
-  - #117 is fsspec and is closed by the floor, so it is not in the list.
-  - #126/#127 and #128/#129 are docling/docling-slim pairs, all in the
-    list.
+- **Then remove the worktree** (Things to know, (1)).
 - **Acceptance:**
   - `/v1/version` = the merge commit;
-  - `gh api …/dependabot/alerts` lists **#71 only** a few minutes after the
-    merge (alerts lag);
-  - `/mcp` still accepts a login bearer token (the
-    `validate_token_resource` change).
+  - `uv pip show docling` → 2.141.0;
+  - **the first scanned PDF after the restart extracts** — check
+    `transient_extractions` stays at 0 and a new `attachment_text` row has
+    `extractor` starting `docling`;
+  - Dependabot lists **#71 only** (#115/#117/#132 should have closed by
+    then; if not, inspect each alert's `fixed_at`).
 
-### 1. **The DGX: restore reachability, then deploy #397 + #399**
+### 1. **The DGX: restore reachability, then deploy #397 + #399 + #402**
 - **Triage per the `dgx-network-drops` memory:** `journalctl --list-boots`
-  first, then the persistent probe logs. Its LAN IP moves (DHCP).
+  first, then the persistent probe logs. Its LAN IP moves (DHCP), and this
+  Mac was on a different network (10.3.10.x) this session, so the LAN path
+  was not available either.
+- **Today's tunnel transitions** (from `~/localmail-probe/tunnel-probe.log`):
+  FAIL from 2026-10-20 01:49Z to 22:16Z, again 22:21Z → 2026-10-21 06:44Z,
+  up 06:58–09:55Z, then FAIL. **Read the DGX's own probe log for those
+  windows before hypothesising** — the memory lists five refuted theories.
 - **Acceptance:**
   - both units report `NRestarts=0` and `build_hash` = the `main` merge
     commit;
-  - `uv pip show pypdf` → 6.20.1;
-  - **a scanned PDF extracts with text under rapidocr on aarch64**
-    (`extractor = 'docling'`, non-empty text). This is carried from #397 and
-    is still the only check of the rapidocr/OpenCV caps on that wheel set.
+  - `uv pip show pypdf docling` → 6.20.1 / 2.141.0;
+  - **`uv run python tests/acceptance/probe_docling_ocr.py --engine auto`**
+    returns the invoice and both tables with text (`auto` = rapidocr there).
+    This is the first aarch64 check of the rapidocr/OpenCV caps *and* of
+    ibm-models 4;
+  - if `[mcp]` is enabled there, `/mcp` `tools/list` with an API key
+    returns the five tools (mint one with `add-api-key`, remove it after).
 
-### 2. **docling 2.132 + ibm-models 4, as its own PR**
-- **Acceptance:**
-  - a before/after OCR probe (scanned invoice, scanned table, native table)
-    under rapidocr **and** ocrmac, `main` vs branch, each in its own
-    worktree venv;
-  - the differences are explained, or the bump is held;
-  - `_pdf_only_converter_kwargs` is untouched and its tests still pass.
-
-### 3. **kastellan** (carried, yours)
+### 2. **kastellan** (carried, yours)
 - Ask whether it still wants slice C (`/problems/token-expired`); its API
   key never expires.
 - Tell it about `?headers=list` (api_minor ≥ 1), attachment index paging
   (≥ 2; never compute the offset from `text.length`), and `fields` /
   `snippet_chars` (≥ 3).
 
-### 4. **Carried issues**
-- **Most recent:**
-  - #398 (explicit `ocrmac` engine fails on language codes);
-  - #394 (`fields` unbounded; a wire-contract change);
-  - #395 (a rule module forbidding new `{@html}` sinks).
-- **Earlier:** #386, #389, #380, #383, #384, #377, #378, #369, #373, #372,
-  #370, #371, #368, #365.
+### 3. **Carried issues**
+- **Newest:** #401 (opaque-bearer `/mcp` does no RFC 8707 check on
+  resource-bound tokens), #400 (docling converter-construction fallback drops
+  the OCR config silently; the probe now records the OCR options per engine,
+  which would show it). #398 is closed by #402. #400 is the natural next
+  extraction slice.
+- **Then:** #394, #395, #386, #389, #380, #383, #384, #377, #378, #369,
+  #373, #372, #370, #371, #368, #365.
 - **Not filed yet:** `snippet_source="header"` mislabel on a whole-message
   lexical win.
 - **Larger work:**
@@ -214,78 +194,75 @@ would otherwise add.
   - #374 + #305 (the `cli.py` refactor, 2177 lines);
   - #358/#357, #330/#327/#328, #319/#318/#320 (the next migration slot is
     `0037_*.sql`), #340, #363, #285 (ruff in CI);
+  - lifting the rapidocr cap, with its own probe;
   - admin GUI phase 5, the Users panel;
   - robustness: #218, #226, #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The new alerts came before the carried plan.** The DGX deploy was
-   blocked anyway, and the triage found a live mail-borne path. *Cost if
-   wrong:* none; nothing else was blocked.
-2. **The docling bump was deferred and the alerts are to be dismissed**
-   (operator's choice of three). The restriction makes them unreachable,
-   while the bump changes extraction output. *Cost if wrong:* a non-PDF
-   advisory that somehow reaches the PDF backend stays unfixed until the
-   bump PR.
-3. **The fix restricts formats rather than validating bytes ourselves.**
-   docling already knows how to refuse a format, and a second sniffer would
-   be a second authority. *Cost if wrong:* we trust docling's PDF format
-   check.
-4. **`_pdf_only_converter_kwargs` fails open (`{}`) when `InputFormat` is
-   unimportable.** That happens only without docling, where no real
-   converter exists; CI's fakes need it. *Cost if wrong:* a docling
-   installed without `InputFormat`, which the `>=2.118.1` floor rules out.
-5. **The dismissals wait for the merge**, so the dismissal reason is true
-   when it is written.
-6. **`validate_token_resource=False`, not `True`.** `True` would refuse every
-   opaque login token. *Cost if wrong:* none in behaviour, since unset already
-   meant False.
-7. **Code and handoff are in one PR**, per the convention.
+1. **Locked at 2.141.0, not 2.132.0.** 2.141 was the newest release at lock
+   time (a day old); the next docling release will move a bare `uv lock
+   --upgrade`, so re-run the probe then. *Cost if wrong:* nine more docling
+   releases of untested-by-the-suite change. The probe is the mitigation,
+   and it found only an improvement.
+2. **The rapidocr cap stays**, though no longer required. *Cost if wrong:*
+   none; we just do not get rapidocr 3.10.
+3. **The probe is in the tree, not the scratchpad**, and not named `run_*`.
+4. **The bump was built in a worktree**, to keep the live venv on `main`.
+5. **The 15 dismissals went ahead** without a fresh confirmation: the
+   operator chose dismissal in session 53, conditional on #399 being on
+   `main`, which it was.
+6. **Code and handoff are in one PR**, per the convention.
+7. **The fix is a new default (`["iso:en"]`), not code that adds `iso:` to
+   bare values.** A bare value now means "engine-native" in docling, and a
+   user who set one (tesserocr's `eng`, say) meant exactly that. *Cost if
+   wrong:* a `config.toml` that sets a bare `extractor_ocr_languages` keeps
+   the ocrmac skip; the Mac's sets none, the DGX's is unchecked.
 
 ## Open decisions & risks
 
-1. **#399 is open and yours to merge**, then dismiss (step 0).
-2. **The Mac runs the branch on its next restart** (Things to know, (1)).
-3. **The DGX has not received #397 or #399.** Its aarch64 OCR is unverified.
+1. **#402 is open and yours to merge** (step 0).
+2. **The DGX has not received #397, #399 or #402.** Its aarch64 OCR is
+   unverified for all three. Deploy them together, then run the probe.
+3. **ibm-models 4 is new layout models.** The probe covers three synthetic
+   PDFs. Real scanned mail is more varied, so watch the first day of
+   extractions on the Mac (`attachment_text` with `extractor LIKE
+   'docling%'`, and `transient_extractions`).
 4. **oauthlib 4.0 and docling-parse 7 (from #397) are still lightly
-   exercised.** If `oauth-login` or native-PDF fallback extraction
-   misbehaves, suspect them first.
-5. **A future docling or extra that installs `odfdo`** would have made #116
-   live before this fix; with it, it is refused. Keep the restriction.
-6. **`api_minor` stays 3.** Nothing on the wire changed.
-7. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
-8. **Never run two pytest sessions against one test database.** Another
-   repo's pytest sharing the machine is fine; it uses its own database.
-9. **Restore a mutation from a file copy, never with `git checkout`.**
-10. **The test DB is on port 5532**, the same cluster as the live archive.
-11. **Always sync with `--extra mcp --extra extraction` on both hosts**, and
+   exercised.**
+5. **`api_minor` stays 3.** Nothing on the wire changed.
+6. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
+7. **Never run two pytest sessions against one test database.** That
+   includes the worktree: it shares `localmail_test`, and the session lock
+   would make a second run wait.
+8. **Restore a mutation from a file copy, never with `git checkout`.**
+9. **The test DB is on port 5532**, the same cluster as the live archive.
+10. **Always sync with `--extra mcp --extra extraction` on both hosts**, and
     use `~/.local/bin/uv` on the DGX.
-12. **`uv sync --dry-run` is not read-only; `uv lock --dry-run` is.**
-13. **The scratchpad does not survive between sessions.** Last session's
-    probe script was gone; keep anything reusable in the tree or in this
-    file.
-14. **No ROADMAP.md.** That `/nextsession` step is a no-op.
+11. **`uv sync --dry-run` is not read-only; `uv lock --dry-run` is.**
+12. **No ROADMAP.md.** That `/nextsession` step is a no-op.
 
 ## Exact commands to resume
 
 ```bash
 cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
-git status && git branch --show-current
+git status && git branch --show-current  # expect main
 git log --oneline -1 origin/main         # THE authority
+git worktree list                        # ../localmail-docling until #402 merges
 
-# Is #399 merged?
-gh pr view 399 --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "-")"'
-gh pr checks 399
-git log --oneline main..origin/fix/docling-pdf-only-and-floors   # non-empty after merge = stranded
-gh issue list --limit 100 --json number --jq length      # 40
+# Is #402 merged?
+gh pr view 402 --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "-")"'
+gh pr checks 402
+git log --oneline main..origin/deps/docling-2.132   # non-empty after merge = stranded
+gh issue list --limit 100 --json number --jq length      # 42
 gh api --paginate repos/hherb/localmail/dependabot/alerts \
   --jq '.[] | select(.state=="open") | "\(.number)\t\(.dependency.package.name)"'
 
 # Deployment health
 launchctl list | grep localmail
 curl -sk https://127.0.0.1:8443/v1/version
-tail -3 ~/localmail-probe/tunnel-probe.log     # tunnel/lan FAIL = DGX unreachable
+tail -3 ~/localmail-probe/tunnel-probe.log     # tunnel FAIL + utun_rx=<number> = DGX side
 ssh -o ConnectTimeout=8 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 
 # Deploy after merge — Mac:
@@ -294,27 +271,30 @@ ssh -o ConnectTimeout=8 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 #   unset VIRTUAL_ENV && uv run localmail init-db      # expect "schema already up to date"
 #   launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
 #   launchctl kickstart -k gui/$(id -u)/com.localmail.serve
+#   git worktree remove ../localmail-docling && git branch -D deps/docling-2.132
 # DGX:
 #   ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra extraction --extra mcp'
 #   ssh 10.0.0.3 'systemctl --user restart localmail-daemon localmail-serve'
+#   ssh 10.0.0.3 'cd ~/src/localmail && ~/.local/bin/uv run python tests/acceptance/probe_docling_ocr.py --engine auto'
 
 # Load before trusting any timing.
 uptime; ps -A -o pid,pcpu,etime,comm -r | head -6
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4044 passed (macOS, all extras)
-unset VIRTUAL_ENV && uv run mypy src/localmail     # Success, 160 files
-cd gui && npm test -- --run && npm run check && npm audit   # 512 / 0 errors / 0 vulns
+unset VIRTUAL_ENV && uv run pytest -q              # 4050 passed (macOS, all extras)
+unset VIRTUAL_ENV && uv run --with mypy mypy src/localmail     # Success, 160 files
+cd gui && npm test -- --run && npm run check && npm audit
 cd gui/src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
 
 # This change directly:
-unset VIRTUAL_ENV && uv run pytest -q tests/test_docling_input_formats.py tests/test_mcp_server_build.py
+unset VIRTUAL_ENV && uv run pytest -q tests/test_docling_ocr_probe.py tests/test_docling_input_formats.py
+unset VIRTUAL_ENV && uv run python tests/acceptance/probe_docling_ocr.py --engine auto --engine rapidocr
 ```
 
-`main` was **`e91471e`** at session start and is unchanged. This session left
-**one PR**: **#399** on `fix/docling-pdf-only-and-floors`, commits
-`7b94283..beaf1fc`, plus this handoff.
+`main` was **`0b05382`** at session start and is unchanged. This session left
+**one PR**: **#402** on `deps/docling-2.132`, commit `824c342`, plus this
+handoff.
 
 The latest migration is still **`0036_api_keys.sql`**; the next free slot is
-`0037_*.sql`. **Open issues: 40. Dependabot: 19 open → #71 alone after #399
-merges and the 15 dismissals land.**
+`0037_*.sql`. **Open issues: 42. Dependabot: #71, plus #115/#117/#132
+awaiting rescan.**

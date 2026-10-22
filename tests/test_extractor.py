@@ -415,7 +415,7 @@ def test_docling_extractor_accepts_config() -> None:
 
     de = DoclingExtractor()
     assert de._cfg.extractor_docling_max_pages == 200
-    assert de._cfg.extractor_ocr_languages == ["en"]
+    assert de._cfg.extractor_ocr_languages == ["iso:en"]
 
     custom = SearchConfig(
         extractor_docling_max_pages=50,

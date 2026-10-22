@@ -2522,6 +2522,50 @@ release from there needs
   It is lock-only, and the launch-editor advisories are dev-server only.
   Dependabot had not raised them, `npm audit` did, so read both.
 
+**The third October 2026 round (Dependabot #136–#167) bumped three and left
+Pillow open, by operator decision.** Nothing in it is mail-reachable, measured
+rather than argued.
+
+- **Pillow 13.0.0 (29 alerts, 3 CRITICAL) is blocked by fastembed.** Every
+  fastembed release up to 0.9.0, and its `main`, declares `pillow<13`; the fix
+  is upstream PR qdrant/fastembed#830. Nothing else caps it: a uv
+  `override-dependencies = ["pillow>=13.0.0"]` resolves cleanly. The override
+  was **rejected**: Pillow 13 is a major (with API removals) under docling,
+  torchvision and rapidocr, and the exposure did not justify it. When #830
+  ships, bump fastembed's git `rev` and Pillow together, then run the OCR
+  probe on both hosts.
+  - **Why waiting is safe:** a scanned PDF is mostly embedded JPEG, and
+    docling-parse's default config *does* hand embedded JPEG/JP2 bytes to
+    `PIL.Image.open`. So this was measured: a spy on `Image.open` around a real
+    `DoclingExtractor` pass over a PDF with a `/DCTDecode` image, under `auto`
+    (ocrmac) and `rapidocr`. The embedded JPEG never reached it. pdfium
+    decodes it, and the one call is docling re-reading its own temp file of
+    the rendered page. A docling upgrade can change that, so re-measure
+    before relying on it. The script was not kept.
+- **`pypdf>=6.21.1`** (#148, LOW): needs `page.images`, which `_extract_pdf`
+  never calls. Verified on **300 real archive PDFs**: `LightweightExtractor`
+  output is byte-identical under 6.20.1 and 6.21.2, and the 17 that raise
+  raise the same type in both.
+- **`certifi>=2026.10.19`** (#138, CRITICAL, newly declared): compromised
+  emSign intermediates. The bump removes **one** root, `emSign ECC Root CA -
+  G3` (C1, C3 and G1 remain in the bundle; compared old against new). certifi
+  is the trust store for httpx and requests only: Google OAuth, model
+  downloads, the cloud rewriters.
+  - **IMAP is not covered, and it is the connection that carries the
+    credentials.** `imap_client.open_connection` passes no `ssl_context`, so
+    imapclient calls `ssl.create_default_context()`, which reads the **OS**
+    store. Both hosts' stores still hold G3 on 2026-10-22: the Mac's
+    `/etc/ssl/cert.pem` names it, and the DGX has
+    `/etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem`. Dependabot cannot see
+    that half; it closes with an OS / `ca-certificates` update, not here.
+    Re-check both stores after the next OS update.
+- **`vitest ^4.1.12`** (#136, #137): dev-only. The lock also moved its
+  transitive `chai` 6.2.2 → 6.3.0 and `tinyrainbow` 3.1.1 → 3.2.0. `npm audit`
+  is clean after it.
+- **The re-lock rewrote nvidia/cuda markers again** (dropping
+  `sys_platform == 'linux'`). `uv export --all-extras --all-groups` from the
+  two locks differs only in certifi and pypdf, so the rewrite is equivalent.
+
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
 MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for

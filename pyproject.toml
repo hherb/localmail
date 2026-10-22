@@ -58,8 +58,10 @@ dependencies = [
     # labels, indirect objects, /ToUnicode and font data, FlateDecode
     # streams, embedded files, appearance streams), the last fixed in
     # 6.19.0. Same reachability — an emailed PDF — and same verification:
-    # extraction byte-identical across the bump.
-    "pypdf>=6.19.0",
+    # extraction byte-identical across the bump. Raised to 6.21.1 for
+    # Dependabot #148 (LOW, unvalidated JPEG data loading), which needs
+    # `page.images`; `_extract_pdf` never calls it, so that one is hygiene.
+    "pypdf>=6.21.1",
     "python-docx>=1.1",
     "python-pptx>=1.0",
     "striprtf>=0.0.26",
@@ -83,6 +85,14 @@ dependencies = [
     # Hugging Face hub and rapidocr's model host (modelscope.cn) — nothing
     # mail-borne reaches it — so this is hygiene, not an incident.
     "urllib3>=2.8.0",
+    # The CA bundle behind requests and httpx, declared for the
+    # `transformers` reason: Dependabot #138 (CRITICAL), compromised emSign
+    # intermediates. 2026.10.19 drops one root, emSign ECC Root CA - G3. It
+    # governs the HTTPS paths (Google OAuth, model downloads, the cloud
+    # rewriters), never a mail-borne input. It does NOT govern IMAP:
+    # imapclient uses ssl.create_default_context(), i.e. the OS store, which
+    # still carries G3 on both hosts (see CLAUDE.md).
+    "certifi>=2026.10.19",
     # Transitive via huggingface-hub (fastembed, docling), declared for the
     # `transformers` reason. Dependabot #117 (HIGH) is template injection in
     # `ReferenceFileSystem`, which only a `reference://` URL or a

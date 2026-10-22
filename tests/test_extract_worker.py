@@ -143,7 +143,7 @@ def test_a_missing_ocr_engine_never_burns_the_poison_pill_budget(
 
     monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _FakeConverter)
     monkeypatch.setattr(ew_mod, "_try_import_docling", lambda: _FakeConverter)
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
     monkeypatch.setattr(
         ext_mod.LightweightExtractor,
         "extract",

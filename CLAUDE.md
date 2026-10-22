@@ -2384,8 +2384,9 @@ release from there needs
   engine 'auto' (search.extractor_ocr_engine) is not usable`. A future docling that pulls `odfdo` in would
   have made #116 (local file read, contents embedded in the output, which we
   store and serve) live.
-- **The fix is `extractor._pdf_only_converter_kwargs`**, applied to both
-  construction paths, the pipeline-options one and the bare fallback. It
+- **The fix is `extractor._pdf_only_converter_kwargs`** (renamed
+  `_converter_kwargs` by #400, which also moved the pipeline options into it
+  and deleted the second, bare construction path — see below). It
   closes the class for every docling version rather than chasing it per
   advisory, and a disguised file is now refused as a plain `ExtractorError`,
   a poison pill.
@@ -2405,7 +2406,30 @@ release from there needs
   `except Exception: converter = None` drops the OCR configuration silently,
   and a construction failure in the bare fallback is poison-pilled as
   `'unexpected'`) and #401 (the opaque-bearer `/mcp` path never checks a
-  token's RFC 8707 binding).
+  token's RFC 8707 binding). **#400 is fixed now; #401 is open.**
+- **#400: there is one converter, configured, or none.** The fallback is
+  deleted rather than logged, by operator decision. It existed for docling
+  builds without the option classes, which the `docling>=2.132` floor no
+  longer admits, so the only way left to reach it was a broken install. And
+  what it produced there was an extraction made with docling's default OCR
+  engine, languages and mode, stored as an `attachment_text` row that
+  nothing ever re-extracts: the one-way door `type-skipped` documents.
+  - `_converter_kwargs(cfg)` returns `allowed_formats` and `format_options`
+    together and fails closed on an unimportable `InputFormat` or
+    `PdfFormatOption`; `_build_pdf_pipeline_options` raises on an
+    unimportable `PdfPipelineOptions` rather than returning `None`. A
+    `DocumentConverter(...)` that raises is wrapped too. All three are
+    `ExtractorConfigurationError`: held on the #153 transient budget,
+    cleared by `retry-failed-extractions`, never an `'unexpected'` poison
+    pill. Construction never sees the blob, so none of it is the blob's
+    fault.
+  - **No new log line.** The worker already logs every transient or
+    configuration error as a per-blob WARNING carrying the exception text,
+    which is what the issue asked for.
+  - The fakes that stubbed `_pdf_only_converter_kwargs` stub
+    `_converter_kwargs` now. Each new pin was mutation-checked: restoring
+    the fallback, returning `None` for missing pipeline options, and
+    dropping `format_options` each fail exactly the test written for it.
 - **Pinned three ways** in `tests/test_docling_input_formats.py`:
   - real docling refuses HTML and ODT labelled `.pdf`, asserting the
     *class* (neither configuration nor transient) and docling's own
@@ -2413,8 +2437,10 @@ release from there needs
   - a positive control proves a real PDF still converts, so a converter
     refusing everything cannot pass the refusals;
   - a CI-runnable wiring test fakes `docling.datamodel.base_models` and
-    asserts both paths pass `allowed_formats=[PDF]`;
-  - an unimportable `InputFormat` raises rather than returning `{}`.
+    asserts the converter gets `allowed_formats=[PDF]` (since #400 there is
+    one path, and the test also asserts its `format_options`);
+  - an unimportable `InputFormat` (or, since #400, `PdfFormatOption`)
+    raises rather than returning `{}`.
 
   Mutation-proven: returning `{}` fails five tests, and the positive control
   alone survives.
@@ -2431,7 +2457,8 @@ release from there needs
     torch are unchanged. The lock gains `langcodes` (docling-slim) and
     `python-oxmsg` + `olefile` (`docling-slim[standard]`), and drops
     `jsonlines`. `python-oxmsg` is an Outlook `.msg` reader, i.e. a new
-    non-PDF backend, so `_pdf_only_converter_kwargs` (#399) is now the only
+    non-PDF backend, so `_pdf_only_converter_kwargs` (#399; `_converter_kwargs`
+    since #400) is now the only
     thing between it and mail. The re-lock also re-scoped many dependency
     markers (`sys_platform != 'emscripten'` and the like); not investigated,
     and `--locked` passes in CI.

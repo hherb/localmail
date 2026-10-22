@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -717,7 +718,10 @@ def test_resolve_ocr_options_asks_the_factory_for_the_configured_kind(
     from localmail.ocr_policy import plan_ocr
 
     factory = _FakeOcrFactory(["auto", "easyocr", "ocrmac"])
-    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: factory)
+    monkeypatch.setattr(ext_mod, "_import_ocr_factory", lambda: factory)
+    # The fake options are not docling's; FULL_PAGE is pinned against real
+    # docling by test_pdf_pipeline_options_ocr_the_whole_page.
+    monkeypatch.setattr(ext_mod, "_ocr_the_whole_page", lambda options: None)
 
     opts = ext_mod._resolve_ocr_options(plan_ocr("ocrmac"), ["en", "de"])
 
@@ -733,23 +737,36 @@ def test_resolve_ocr_options_returns_none_when_ocr_is_disabled(
     from localmail.ocr_policy import plan_ocr
 
     factory = _FakeOcrFactory(["auto"])
-    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: factory)
+    monkeypatch.setattr(ext_mod, "_import_ocr_factory", lambda: factory)
 
     assert ext_mod._resolve_ocr_options(plan_ocr("none"), ["en"]) is None
     assert factory.created == []
 
 
-def test_resolve_ocr_options_returns_none_when_the_factory_is_unavailable(
-    monkeypatch,
-) -> None:
-    """An older docling without the factory must fall back to its own default
-    rather than raise — the pre-#248 code had the same tolerance."""
+def test_an_unusable_ocr_factory_fails_closed(monkeypatch) -> None:
+    """#400: leaving ``ocr_options`` unset runs docling's own engine, languages
+    and region mode, and that extraction is stored for good. The floor ships
+    the factory, so its absence is a broken install: a configuration error."""
     import localmail.search.extractor as ext_mod
     from localmail.ocr_policy import plan_ocr
+    from localmail.search.extractor import ExtractorConfigurationError
 
-    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: None)
+    monkeypatch.setitem(sys.modules, "docling.models.factories", None)
 
-    assert ext_mod._resolve_ocr_options(plan_ocr("easyocr"), ["en"]) is None
+    with pytest.raises(ExtractorConfigurationError):
+        ext_mod._resolve_ocr_options(plan_ocr("easyocr"), ["en"])
+
+
+def test_an_unimportable_ocr_mode_fails_closed(monkeypatch) -> None:
+    """#400: without ``OcrMode`` the page is OCRed per layout region, which
+    lost a scanned table's structure; that must not be stored silently."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import ExtractorConfigurationError
+
+    monkeypatch.setitem(sys.modules, "docling.datamodel.pipeline_options", None)
+
+    with pytest.raises(ExtractorConfigurationError):
+        ext_mod._ocr_the_whole_page(object())
 
 
 def test_an_unknown_ocr_engine_is_a_configuration_error(monkeypatch) -> None:
@@ -763,7 +780,7 @@ def test_an_unknown_ocr_engine_is_a_configuration_error(monkeypatch) -> None:
     )
 
     monkeypatch.setattr(
-        ext_mod, "_try_import_ocr_factory", lambda: _FakeOcrFactory(["auto", "easyocr"])
+        ext_mod, "_import_ocr_factory", lambda: _FakeOcrFactory(["auto", "easyocr"])
     )
 
     with pytest.raises(ExtractorConfigurationError) as excinfo:

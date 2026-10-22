@@ -2398,14 +2398,17 @@ release from there needs
   reopened every backend with nothing logged and CI green. It raises
   `ExtractorConfigurationError` now: the install's fault, held on the #153
   transient budget, cleared by `retry-failed-extractions`. The 8 tests that
-  fake `_try_import_docling` stub this function too; without the stub 3 fail
+  fake `_try_import_docling` stub this function too (9 since #400, the
+  wiring tests excepted, which install fake docling modules); measured on
+  #399's function, without the stub 3 fail
   and **5 keep passing while testing nothing**, because
   `ExtractorConfigurationError` is a `TransientExtractorError` and satisfies
   their assertions before the fake `convert()` runs.
 - **Filed, not fixed, from the same review:** #400 (the pre-existing
   `except Exception: converter = None` drops the OCR configuration silently,
-  and a construction failure in the bare fallback is poison-pilled as
-  `'unexpected'`) and #401 (the opaque-bearer `/mcp` path never checks a
+  and a construction failure in the bare fallback is poison-pilled — under
+  `'docling'`, not `'unexpected'` as filed: `_process_blob` records a
+  docling raise under `dl.name`) and #401 (the opaque-bearer `/mcp` path never checks a
   token's RFC 8707 binding). **#400 is fixed now; #401 is open.**
 - **#400: there is one converter, configured, or none.** The fallback is
   deleted rather than logged, by operator decision. It existed for docling
@@ -2418,11 +2421,27 @@ release from there needs
     together and fails closed on an unimportable `InputFormat` or
     `PdfFormatOption`; `_build_pdf_pipeline_options` raises on an
     unimportable `PdfPipelineOptions` rather than returning `None`. A
-    `DocumentConverter(...)` that raises is wrapped too. All three are
-    `ExtractorConfigurationError`: held on the #153 transient budget,
-    cleared by `retry-failed-extractions`, never an `'unexpected'` poison
-    pill. Construction never sees the blob, so none of it is the blob's
-    fault.
+    `DocumentConverter(...)` that raises is wrapped too, and the options
+    are built *inside* that guard, so a non-import failure there (a
+    pydantic `ValidationError` on a bad language list) is wrapped as well.
+    Each is an `ExtractorConfigurationError`: held on the #153 transient
+    budget, cleared by `retry-failed-extractions`, never a `'docling'`
+    poison pill. Construction never sees the blob, so none of it is the
+    blob's fault. (The two import sites convert `ImportError` only; any
+    other exception raised *while importing* reaches the guard instead.)
+  - **The same silent default sat one call deeper (review of #404).**
+    `_try_import_ocr_factory` caught `Exception` and returned `None`, so
+    `ocr_options` was left unset — on docling 2.141 that is `auto`,
+    `lang=[]` and region mode, i.e. every setting this bullet protects,
+    dropped with no log line. And `_ocr_the_whole_page` skipped a missing
+    `OcrMode`, storing a region-mode extraction. Both were "older docling"
+    tolerances the floor no longer admits. `_import_ocr_factory` (renamed:
+    it no longer returns `None`) and `_ocr_the_whole_page` raise
+    `ExtractorConfigurationError` now. `PdfFormatOption` was inside the
+    guarded `try` before #400 and briefly was not; it is again. **Filed,
+    not fixed: #405** — `_try_import_docling` reads a *broken* docling
+    import as "not installed", so a partial `uv sync` writes scanned PDFs
+    off as `lightweight-empty`, the same one-way door one step earlier.
   - **No new log line.** The worker already logs every transient or
     configuration error as a per-blob WARNING carrying the exception text,
     which is what the issue asked for.
@@ -2430,6 +2449,12 @@ release from there needs
     `_converter_kwargs` now. Each new pin was mutation-checked: restoring
     the fallback, returning `None` for missing pipeline options, and
     dropping `format_options` each fail exactly the test written for it.
+    The review round added six more, each caught by its own test: the
+    factory or `OcrMode` silent again, the options built outside the guard,
+    the guard narrowed to `TypeError`, and `cfg` replaced by `SearchConfig()`
+    in either `_converter_kwargs` or `extract` — the last **survived every
+    test** until the wiring test asserted the extractor's own config reaches
+    the pipeline (its stub had ignored its argument).
 - **Pinned three ways** in `tests/test_docling_input_formats.py`:
   - real docling refuses HTML and ODT labelled `.pdf`, asserting the
     *class* (neither configuration nor transient) and docling's own
@@ -2515,7 +2540,8 @@ release from there needs
     still required: ibm-models 4.0.3's TableFormer still imports cv2, and the
     package declares `<5` only inside its opencv extras, which docling does
     not request.
-  - **`_pdf_only_converter_kwargs` is untouched**, and its tests pass against
+  - **`_pdf_only_converter_kwargs` (`_converter_kwargs` since #400) is
+    untouched**, and its tests pass against
     2.141, both the real-docling refusals and the wiring fakes.
 - **`mcp>=1.30.0` (#132) and `fsspec>=2026.6.0` (#117, newly declared) are
   hygiene.**

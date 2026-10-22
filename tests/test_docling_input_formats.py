@@ -137,13 +137,21 @@ def test_the_converter_is_built_pdf_only_with_the_configured_pipeline(
         def convert(self, source: str, **kwargs: object) -> _Result:
             return _Result()
 
+    cfg = SearchConfig(extractor_ocr_engine="none")
+    seen: list[SearchConfig] = []
+
+    def _pipeline_for(given: SearchConfig) -> object:
+        seen.append(given)
+        return pipeline
+
     monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _Converter)
-    monkeypatch.setattr(ext_mod, "_build_pdf_pipeline_options", lambda cfg: pipeline)
+    monkeypatch.setattr(ext_mod, "_build_pdf_pipeline_options", _pipeline_for)
     blob = tmp_path / "x"
     blob.write_bytes(b"%PDF-1.4 dummy")
 
-    DoclingExtractor().extract(blob, "application/pdf")
+    DoclingExtractor(cfg).extract(blob, "application/pdf")
 
+    assert seen == [cfg] and seen[0] is cfg, "the operator's config must reach the pipeline"
     assert len(built) == 1
     assert built[0]["allowed_formats"] == [_FakeInputFormat.PDF]
     assert built[0]["format_options"] == {
@@ -180,19 +188,20 @@ def test_unimportable_pipeline_options_fail_closed(
         ext_mod._build_pdf_pipeline_options(SearchConfig())
 
 
+@pytest.mark.parametrize("error", [TypeError, ValueError, RuntimeError])
 def test_a_converter_that_will_not_build_is_held_not_defaulted(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    error: type[Exception], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """#400: a construction failure used to fall back to a default converter,
     dropping the OCR config silently; and if that construction failed too, the
-    raw exception was poison-pilled as 'unexpected'. It is the install's
+    raw exception was poison-pilled under 'docling'. It is the install's
     fault, so it is a configuration error, and nothing else is constructed."""
     attempts: list[dict[str, object]] = []
 
     class _Unbuildable:
         def __init__(self, **kwargs: object) -> None:
             attempts.append(kwargs)
-            raise TypeError("unexpected keyword argument 'allowed_formats'")
+            raise error("unexpected keyword argument 'allowed_formats'")
 
     monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _Unbuildable)
     monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
@@ -202,4 +211,24 @@ def test_a_converter_that_will_not_build_is_held_not_defaulted(
     with pytest.raises(ExtractorConfigurationError) as excinfo:
         DoclingExtractor().extract(blob, "application/pdf")
     assert len(attempts) == 1
-    assert isinstance(excinfo.value.__cause__, TypeError)
+    assert isinstance(excinfo.value.__cause__, error)
+
+
+def test_options_that_will_not_build_are_held_not_poison_pilled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Building the options sees only the config, never the blob, so a
+    non-import failure there (a pydantic ``ValidationError`` on a bad language
+    list, say) is a configuration error too, not a poison pill."""
+
+    def _bad_options(cfg: SearchConfig) -> object:
+        raise ValueError("lang: input should be a valid list")
+
+    monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: object)
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", _bad_options)
+    blob = tmp_path / "x"
+    blob.write_bytes(b"%PDF-1.4 dummy")
+
+    with pytest.raises(ExtractorConfigurationError) as excinfo:
+        DoclingExtractor().extract(blob, "application/pdf")
+    assert isinstance(excinfo.value.__cause__, ValueError)

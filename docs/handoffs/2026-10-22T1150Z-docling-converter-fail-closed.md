@@ -69,9 +69,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   inside `except Exception: converter = None`, then fell back to a bare
   `DocumentConverter(**pdf_only)`. Any construction failure discarded the
   OCR engine, languages and `FULL_PAGE` with no log line. If the bare
-  construction failed too, the raw exception escaped every classifying
-  `try`, and the worker recorded each docling-bound PDF as an
-  `'unexpected'` poison pill.
+  construction failed too, the raw exception escaped the extractor's
+  classifying `try`s, and the worker recorded each docling-bound PDF as a
+  poison pill under `'docling'` (`dl.name`; only its outer safety net
+  records `'unexpected'`).
 - **The fix.** `_pdf_only_converter_kwargs()` is now `_converter_kwargs(cfg)`,
   returning `allowed_formats` and `format_options` together.
   - It fails closed on an unimportable `InputFormat` or `PdfFormatOption`.
@@ -79,6 +80,16 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
     `PdfPipelineOptions`; it used to return `None`.
   - A raising `DocumentConverter(...)` is wrapped too.
   - All three raise `ExtractorConfigurationError`.
+  - **Review round:** the same silent default sat one call deeper, and is
+    closed too. `_try_import_ocr_factory` (now `_import_ocr_factory`)
+    returned `None` on any failure, leaving `ocr_options` unset (docling's
+    `auto`, `lang=[]`, region mode); `_ocr_the_whole_page` skipped a
+    missing `OcrMode`. Both raise now. The options are also built inside
+    the construction guard, so a non-import failure there (a pydantic
+    `ValidationError`) is held rather than poison-pilled; `PdfFormatOption`
+    had been inside that guard before #400. Filed from the same review:
+    #405 (a broken docling import reads as "not installed" and writes
+    scanned PDFs off as `lightweight-empty`).
 - **No new log line.** The worker already logs every transient or
   configuration error as a per-blob WARNING with the exception text.
 - **Tests (`tests/test_docling_input_formats.py`).**
@@ -88,6 +99,13 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
     kept.
   - The 8 fakes that stubbed `_pdf_only_converter_kwargs` stub
     `_converter_kwargs`.
+  - Review round: the wiring test asserts the extractor's own `cfg` reaches
+    the pipeline (dropping it survived every test before); construction
+    failures are parametrized over `TypeError`/`ValueError`/`RuntimeError`;
+    an options failure is held; the factory and `OcrMode` refusals have
+    their own tests; the #248 worker test also runs with construction
+    failing and asserts no `attachment_text` row. Six mutations, each
+    caught by its own test.
 
 ### Outside the PR (operational)
 

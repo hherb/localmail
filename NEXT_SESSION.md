@@ -79,7 +79,10 @@ family 4.1.11 → 4.1.12, chai 6.2.2 → 6.3.0, tinyrainbow 3.1.1 → 3.2.0.
   re-reading its own temp file of the rendered page; pdfium decodes the
   embedded JPEG.
 - **pypdf #148** needs `page.images`, which `_extract_pdf` never calls.
-- **certifi** is the outbound TLS trust store; vitest is dev-only.
+- **certifi** is the trust store for httpx/requests only, and 2026.10.19
+  drops one root (`emSign ECC Root CA - G3`). **IMAP uses the OS store**,
+  which still holds G3 on both hosts (review follow-up; see task 2a).
+  vitest is dev-only.
 
 ### Outside the PR (operational)
 
@@ -130,6 +133,14 @@ family 4.1.11 → 4.1.12, chai 6.2.2 → 6.3.0, tinyrainbow 3.1.1 → 3.2.0.
 ### 2. **Watch #402's first scanned PDF on the Mac** (Things to know, (2))
 - **Acceptance:** a new `attachment_text` row with `extractor LIKE
   'docling@2.141%'` and non-empty text, and `transient_extractions` still 0.
+
+### 2a. **emSign G3 in the OS trust stores** (IMAP's half of #138)
+- IMAP builds `ssl.create_default_context()`, so certifi does not reach it.
+  Check after each OS / `ca-certificates` update:
+  `grep -c "emSign ECC Root CA - G3" /etc/ssl/cert.pem` (Mac) and
+  `ls /etc/ssl/certs | grep -i emsign_ecc_root_ca_-_g3` (DGX).
+- **Acceptance:** G3 is gone from both, or the operator decides to distrust
+  it locally.
 
 ### 3. **kastellan** (carried, yours)
 - Ask whether it still wants slice C (`/problems/token-expired`); its API

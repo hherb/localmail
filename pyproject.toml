@@ -86,11 +86,12 @@ dependencies = [
     # mail-borne reaches it — so this is hygiene, not an incident.
     "urllib3>=2.8.0",
     # The CA bundle behind requests and httpx, declared for the
-    # `transformers` reason: Dependabot #138 (CRITICAL) is emSign roots whose
-    # intermediate keys were compromised, removed in 2026.10.19. It governs
-    # our outbound TLS (Google OAuth, model downloads, the cloud rewriters),
-    # never a mail-borne input, so this is hygiene; but a trust-store fix is
-    # worth taking promptly.
+    # `transformers` reason: Dependabot #138 (CRITICAL), compromised emSign
+    # intermediates. 2026.10.19 drops one root, emSign ECC Root CA - G3. It
+    # governs the HTTPS paths (Google OAuth, model downloads, the cloud
+    # rewriters), never a mail-borne input. It does NOT govern IMAP:
+    # imapclient uses ssl.create_default_context(), i.e. the OS store, which
+    # still carries G3 on both hosts (see CLAUDE.md).
     "certifi>=2026.10.19",
     # Transitive via huggingface-hub (fastembed, docling), declared for the
     # `transformers` reason. Dependabot #117 (HIGH) is template injection in

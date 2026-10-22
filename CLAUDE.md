@@ -2547,8 +2547,21 @@ rather than argued.
   output is byte-identical under 6.20.1 and 6.21.2, and the 17 that raise
   raise the same type in both.
 - **`certifi>=2026.10.19`** (#138, CRITICAL, newly declared): compromised
-  emSign roots. It is the trust store for outbound TLS only.
-- **`vitest ^4.1.12`** (#136, #137): dev-only. `npm audit` is clean after it.
+  emSign intermediates. The bump removes **one** root, `emSign ECC Root CA -
+  G3` (C1, C3 and G1 remain in the bundle; compared old against new). certifi
+  is the trust store for httpx and requests only: Google OAuth, model
+  downloads, the cloud rewriters.
+  - **IMAP is not covered, and it is the connection that carries the
+    credentials.** `imap_client.open_connection` passes no `ssl_context`, so
+    imapclient calls `ssl.create_default_context()`, which reads the **OS**
+    store. Both hosts' stores still hold G3 on 2026-10-22: the Mac's
+    `/etc/ssl/cert.pem` names it, and the DGX has
+    `/etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem`. Dependabot cannot see
+    that half; it closes with an OS / `ca-certificates` update, not here.
+    Re-check both stores after the next OS update.
+- **`vitest ^4.1.12`** (#136, #137): dev-only. The lock also moved its
+  transitive `chai` 6.2.2 → 6.3.0 and `tinyrainbow` 3.1.1 → 3.2.0. `npm audit`
+  is clean after it.
 - **The re-lock rewrote nvidia/cuda markers again** (dropping
   `sys_platform == 'linux'`). `uv export --all-extras --all-groups` from the
   two locks differs only in certifi and pypdf, so the rewrite is equivalent.

@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -461,7 +462,7 @@ def test_docling_extractor_passes_configured_max_pages_to_convert(
             return _FakeResult()
 
     monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _FakeConverter)
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
 
     pdf = tmp_path / "x.pdf"
     pdf.write_bytes(b"%PDF-1.4 dummy")
@@ -608,7 +609,7 @@ def test_docling_extract_classifies_requests_connection_error_transient(
         "_try_import_docling",
         lambda: _fake_converter_raising(lambda: req_err("max retries exceeded")),
     )
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
     p = tmp_path / "x.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -641,7 +642,7 @@ def test_docling_extract_classifies_transient_in_cause_chain(
         "_try_import_docling",
         lambda: _fake_converter_raising(_raise_wrapped),
     )
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
     p = tmp_path / "x.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -667,7 +668,7 @@ def test_docling_extract_keeps_value_error_as_permanent(
         "_try_import_docling",
         lambda: _fake_converter_raising(lambda: ValueError("corrupt PDF")),
     )
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
     p = tmp_path / "x.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -717,7 +718,10 @@ def test_resolve_ocr_options_asks_the_factory_for_the_configured_kind(
     from localmail.ocr_policy import plan_ocr
 
     factory = _FakeOcrFactory(["auto", "easyocr", "ocrmac"])
-    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: factory)
+    monkeypatch.setattr(ext_mod, "_import_ocr_factory", lambda: factory)
+    # The fake options are not docling's; FULL_PAGE is pinned against real
+    # docling by test_pdf_pipeline_options_ocr_the_whole_page.
+    monkeypatch.setattr(ext_mod, "_ocr_the_whole_page", lambda options: None)
 
     opts = ext_mod._resolve_ocr_options(plan_ocr("ocrmac"), ["en", "de"])
 
@@ -733,23 +737,36 @@ def test_resolve_ocr_options_returns_none_when_ocr_is_disabled(
     from localmail.ocr_policy import plan_ocr
 
     factory = _FakeOcrFactory(["auto"])
-    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: factory)
+    monkeypatch.setattr(ext_mod, "_import_ocr_factory", lambda: factory)
 
     assert ext_mod._resolve_ocr_options(plan_ocr("none"), ["en"]) is None
     assert factory.created == []
 
 
-def test_resolve_ocr_options_returns_none_when_the_factory_is_unavailable(
-    monkeypatch,
-) -> None:
-    """An older docling without the factory must fall back to its own default
-    rather than raise — the pre-#248 code had the same tolerance."""
+def test_an_unusable_ocr_factory_fails_closed(monkeypatch) -> None:
+    """#400: leaving ``ocr_options`` unset runs docling's own engine, languages
+    and region mode, and that extraction is stored for good. The floor ships
+    the factory, so its absence is a broken install: a configuration error."""
     import localmail.search.extractor as ext_mod
     from localmail.ocr_policy import plan_ocr
+    from localmail.search.extractor import ExtractorConfigurationError
 
-    monkeypatch.setattr(ext_mod, "_try_import_ocr_factory", lambda: None)
+    monkeypatch.setitem(sys.modules, "docling.models.factories", None)
 
-    assert ext_mod._resolve_ocr_options(plan_ocr("easyocr"), ["en"]) is None
+    with pytest.raises(ExtractorConfigurationError):
+        ext_mod._resolve_ocr_options(plan_ocr("easyocr"), ["en"])
+
+
+def test_an_unimportable_ocr_mode_fails_closed(monkeypatch) -> None:
+    """#400: without ``OcrMode`` the page is OCRed per layout region, which
+    lost a scanned table's structure; that must not be stored silently."""
+    import localmail.search.extractor as ext_mod
+    from localmail.search.extractor import ExtractorConfigurationError
+
+    monkeypatch.setitem(sys.modules, "docling.datamodel.pipeline_options", None)
+
+    with pytest.raises(ExtractorConfigurationError):
+        ext_mod._ocr_the_whole_page(object())
 
 
 def test_an_unknown_ocr_engine_is_a_configuration_error(monkeypatch) -> None:
@@ -763,7 +780,7 @@ def test_an_unknown_ocr_engine_is_a_configuration_error(monkeypatch) -> None:
     )
 
     monkeypatch.setattr(
-        ext_mod, "_try_import_ocr_factory", lambda: _FakeOcrFactory(["auto", "easyocr"])
+        ext_mod, "_import_ocr_factory", lambda: _FakeOcrFactory(["auto", "easyocr"])
     )
 
     with pytest.raises(ExtractorConfigurationError) as excinfo:
@@ -799,7 +816,7 @@ def test_a_missing_ocr_engine_package_is_a_configuration_error(
         "_try_import_docling",
         lambda: _fake_converter_raising(_raise_missing_easyocr),
     )
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
     p = tmp_path / "scan.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -829,7 +846,7 @@ def test_a_missing_ocr_engine_deep_in_the_cause_chain_still_classifies(
         "_try_import_docling",
         lambda: _fake_converter_raising(_raise_wrapped),
     )
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
     p = tmp_path / "scan.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 
@@ -853,7 +870,7 @@ def test_a_corrupt_pdf_is_still_a_poison_pill_not_a_configuration_error(
         "_try_import_docling",
         lambda: _fake_converter_raising(lambda: ValueError("corrupt PDF")),
     )
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
     p = tmp_path / "x.pdf"
     p.write_bytes(b"%PDF-1.4 dummy")
 

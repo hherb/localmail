@@ -107,8 +107,9 @@ def test_extract_worker_indexes_a_blob_whose_text_contains_a_nul(
     )
 
 
+@pytest.mark.parametrize("stage", ["convert", "construct"])
 def test_a_missing_ocr_engine_never_burns_the_poison_pill_budget(
-    db_conn, tmp_path, monkeypatch
+    stage, db_conn, tmp_path, monkeypatch
 ) -> None:
     """#248 end-to-end: a scanned PDF that docling cannot OCR because no engine
     is installed must leave ``failed_extractions`` untouched.
@@ -119,6 +120,9 @@ def test_a_missing_ocr_engine_never_burns_the_poison_pill_budget(
     the archive's whole scanned corpus was being written off — 743 rows on the
     live Mac archive. It is bounded now by the *transient* budget instead, and
     ``retry-failed-extractions`` clears that once an engine is installed.
+
+    ``construct`` is #400: a converter that cannot be built as configured is
+    held the same way, rather than replaced by docling's defaults.
     """
     import localmail.search.extractor as ext_mod
 
@@ -127,7 +131,8 @@ def test_a_missing_ocr_engine_never_burns_the_poison_pill_budget(
 
     class _FakeConverter:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            if stage == "construct":
+                raise TypeError("unexpected keyword argument 'format_options'")
 
         def convert(self, source, **kwargs):
             _raise_missing_engine()
@@ -143,7 +148,7 @@ def test_a_missing_ocr_engine_never_burns_the_poison_pill_budget(
 
     monkeypatch.setattr(ext_mod, "_try_import_docling", lambda: _FakeConverter)
     monkeypatch.setattr(ew_mod, "_try_import_docling", lambda: _FakeConverter)
-    monkeypatch.setattr(ext_mod, "_pdf_only_converter_kwargs", lambda: {})
+    monkeypatch.setattr(ext_mod, "_converter_kwargs", lambda cfg: {})
     monkeypatch.setattr(
         ext_mod.LightweightExtractor,
         "extract",
@@ -165,9 +170,12 @@ def test_a_missing_ocr_engine_never_burns_the_poison_pill_budget(
             (sha,),
         )
         transient = cur.fetchone()
+        cur.execute("SELECT count(*) FROM attachment_text WHERE sha256 = %s", (sha,))
+        stored = cur.fetchone()
     assert failed is not None and failed[0] == 0, (
         "a missing OCR engine was recorded as a poison pill"
     )
+    assert stored == (0,), "a held blob must stay claimable, with no stored text"
     assert transient is not None and transient[0] == 1, (
         "the failure should be held on the bounded transient counter instead"
     )

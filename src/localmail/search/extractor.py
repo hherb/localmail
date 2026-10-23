@@ -661,44 +661,44 @@ def warn_ocr_engine_unavailable(engine: str, detail: str) -> None:
     )
 
 
-def _try_import_ocr_factory() -> Any:
-    """Return docling's OCR options factory, or ``None`` when unavailable.
+def _import_ocr_factory() -> Any:
+    """Return docling's OCR options factory.
 
     Typed ``Any`` rather than a docling class: docling lives in the optional
     ``[extraction]`` extra, so naming its types here (even under
     ``TYPE_CHECKING``) would fail mypy on an install without it.
 
-    Indirected for test monkeypatching, like ``_try_import_docling``. ``None``
-    covers both "docling is not installed" and "this docling build predates the
-    factory" — the caller then leaves ``ocr_options`` unset and lets docling
-    apply its own default, which is the tolerant behaviour the pre-#248 code had
-    for missing option classes.
+    Indirected for test monkeypatching, like ``_try_import_docling``. Only
+    reached once ``PdfPipelineOptions`` imported, and the ``docling>=2.132``
+    floor ships the factory, so a failure here is a broken install. It raises
+    ``ExtractorConfigurationError`` rather than leaving ``ocr_options`` unset:
+    docling's defaults would run the wrong engine, languages and mode, and the
+    extraction is stored for good (#400).
     """
     try:
         from docling.models.factories import get_ocr_factory
 
         return get_ocr_factory(allow_external_plugins=False)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise ExtractorConfigurationError(
+            f"docling's OCR factory is not usable ({type(exc).__name__}: {exc}); "
+            "refusing to extract without the configured OCR"
+        ) from exc
 
 
 def _resolve_ocr_options(plan: OcrPlan, languages: list[str]) -> Any:
     """Resolve ``plan.engine_kind`` to a docling OCR options object.
 
-    Returns ``None`` when OCR is disabled or the factory is unavailable — in
-    both cases the caller omits ``ocr_options`` entirely rather than guessing.
-
-    Raises ``ExtractorConfigurationError`` for a kind docling does not register.
+    Returns ``None`` when OCR is disabled, and the caller omits ``ocr_options``
+    entirely. Raises ``ExtractorConfigurationError`` for a kind docling does not
+    register, or when the factory itself is unusable (#400).
     Validating against the *live* registry rather than a literal list in our
     config is what keeps this correct across docling upgrades — engines get
     added and renamed (this build knows ``tesserocr``, not ``tesseract_cli``).
     """
     if plan.engine_kind is None:
         return None
-    factory = _try_import_ocr_factory()
-    if factory is None:
-        return None
-
+    factory = _import_ocr_factory()
     known = list(factory.registered_kind)
     if plan.engine_kind not in known:
         raise ExtractorConfigurationError(
@@ -718,57 +718,78 @@ def _ocr_the_whole_page(options: Any) -> None:
     minus PDF text cells); under ocrmac that lost a scanned table's structure
     and dropped a cell outright, where the pre-2.118 behaviour — and
     ``FULL_PAGE`` now — read it intact. rapidocr is unaffected either way.
-    A docling without ``OcrMode`` predates the change and is left alone.
+    The ``docling>=2.132`` floor ships ``OcrMode``, so its absence is a broken
+    install and raises rather than storing a region-mode extraction (#400).
     """
     try:
         from docling.datamodel.pipeline_options import OcrMode
-    except ImportError:
-        return
+    except ImportError as exc:
+        raise ExtractorConfigurationError(
+            f"docling is installed but OcrMode is not importable ({exc}); "
+            "refusing to OCR in docling's default region mode"
+        ) from exc
     options.mode = OcrMode.FULL_PAGE
 
 
-def _pdf_only_converter_kwargs() -> dict[str, Any]:
-    """``DocumentConverter`` kwargs admitting PDF input and nothing else.
+def _converter_kwargs(cfg: SearchConfig) -> dict[str, Any]:
+    """``DocumentConverter`` kwargs: PDF input only, with ``cfg``'s pipeline.
 
-    docling admits every format by default and picks a backend by sniffing
-    the bytes of our extension-less blob path, while the MIME type and
-    filename that routed the blob here are sender-supplied. Unrestricted, an
-    HTML or ODT attachment labelled ``invoice.pdf`` fails pypdf, falls back to
-    docling and reaches its non-PDF backends (Dependabot #116, #118–#131).
-    Restricted, docling refuses it as a conversion failure: a poison pill.
+    PDF only because docling admits every format by default and picks a
+    backend by sniffing the bytes of our extension-less blob path, while the
+    MIME type and filename that routed the blob here are sender-supplied.
+    Unrestricted, an HTML or ODT attachment labelled ``invoice.pdf`` fails
+    pypdf, falls back to docling and reaches its non-PDF backends (Dependabot
+    #116, #118–#131). Restricted, docling refuses it as a conversion failure:
+    a poison pill.
 
-    Fails closed. This is only called once ``DocumentConverter`` imported, so
-    an unimportable ``InputFormat`` means a docling that moved it, not a
-    missing docling, and an unrestricted converter would silently reopen the
-    hole. The error is the install's fault, so it is a configuration error:
-    held on the transient budget, cleared by ``retry-failed-extractions``.
-    Tests that fake ``_try_import_docling`` stub this function too.
+    Fails closed, for the restriction and the configuration alike. This is
+    only called once ``DocumentConverter`` imported, so an unimportable class
+    means a docling that moved it, not a missing docling. An unrestricted
+    converter would silently reopen the hole above; an unconfigured one would
+    store an extraction made with the wrong OCR engine, languages and mode,
+    and ``attachment_text`` rows are never re-extracted (#400). The error is
+    the install's fault, so it is a configuration error: held on the
+    transient budget, cleared by ``retry-failed-extractions``. Tests that fake
+    ``_try_import_docling`` stub this function too, except the wiring tests,
+    which install fake docling modules instead.
     """
     try:
         from docling.datamodel.base_models import InputFormat
+        from docling.document_converter import PdfFormatOption
     except ImportError as exc:
         raise ExtractorConfigurationError(
-            f"docling is installed but InputFormat is not importable ({exc}); "
-            "refusing to build a converter that admits non-PDF input"
+            f"docling is installed but its converter classes are not importable "
+            f"({exc}); refusing to build a converter that admits non-PDF input "
+            "or ignores the configured OCR"
         ) from exc
-    return {"allowed_formats": [InputFormat.PDF]}
+    pipeline = _build_pdf_pipeline_options(cfg)
+    return {
+        "allowed_formats": [InputFormat.PDF],
+        "format_options": {InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline)},
+    }
 
 
 def _build_pdf_pipeline_options(cfg: SearchConfig) -> Any:
-    """Build docling ``PdfPipelineOptions`` for ``cfg``, or ``None`` when the
-    option classes are unavailable (older docling — caller falls back to a bare
-    ``DocumentConverter()``).
+    """Build docling ``PdfPipelineOptions`` for ``cfg``.
 
     ``do_ocr`` and the engine both come from ``search.extractor_ocr_engine`` via
     the pure ``plan_ocr``. The pre-#248 code hardcoded ``do_ocr=True`` with
     ``EasyOcrOptions``, which overrode docling's own ``OcrAutoOptions`` default —
     the one that degrades to no-OCR instead of raising when no engine is
     installed.
+
+    An unimportable ``PdfPipelineOptions`` raises ``ExtractorConfigurationError``
+    rather than letting docling run its defaults (#400): the ``docling>=2.132``
+    floor has it, so its absence is a broken install, and a default-configured
+    extraction is stored for good.
     """
     try:
         from docling.datamodel.pipeline_options import PdfPipelineOptions
-    except Exception:
-        return None
+    except ImportError as exc:
+        raise ExtractorConfigurationError(
+            f"docling is installed but PdfPipelineOptions is not importable "
+            f"({exc}); refusing to extract without the configured OCR"
+        ) from exc
 
     plan = plan_ocr(cfg.extractor_ocr_engine)
     ocr_options = _resolve_ocr_options(plan, cfg.extractor_ocr_languages)
@@ -873,13 +894,12 @@ class DoclingExtractor:
         ExtractedText with text='' when docling produces no text (e.g.,
         the OCR pipeline fails to find any glyphs on a blank scan).
 
-        Passes extractor_ocr_languages from SearchConfig into
-        PdfPipelineOptions when the installed docling version exposes those
-        option classes (falling back to a default DocumentConverter() on older
-        builds — the language list is then best-effort). The page cap
-        extractor_docling_max_pages is a convert-level argument on docling 2.x,
-        so it is forwarded to converter.convert(..., max_num_pages=...) and
-        applies on both the option-class and fallback paths.
+        The converter carries the configured OCR engine, languages and mode
+        (``_converter_kwargs``); if it cannot be built that way, this raises
+        ExtractorConfigurationError rather than running docling's defaults
+        (#400). The page cap extractor_docling_max_pages is a convert-level
+        argument on docling 2.x, so it is forwarded to
+        converter.convert(..., max_num_pages=...).
         """
         DocumentConverter = _try_import_docling()
         if DocumentConverter is None:
@@ -897,33 +917,20 @@ class DoclingExtractor:
         except Exception:
             self_version = self.version
 
-        # Build pipeline options if the docling option-classes are importable.
-        # If the installed docling version doesn't expose these names, fall back
-        # to default DocumentConverter() so older builds still work.
-        #
-        # ExtractorConfigurationError (an unknown engine name) propagates rather
-        # than being swallowed by the fallback: it is the operator's typo, and
-        # silently running with docling's default would hide it forever.
-        pipeline_options = _build_pdf_pipeline_options(self._cfg)
-        pdf_only = _pdf_only_converter_kwargs()
-        converter = None
-        if pipeline_options is not None:
-            try:
-                from docling.datamodel.base_models import InputFormat
-                from docling.document_converter import PdfFormatOption
-
-                converter = DocumentConverter(
-                    format_options={
-                        InputFormat.PDF: PdfFormatOption(
-                            pipeline_options=pipeline_options
-                        ),
-                    },
-                    **pdf_only,
-                )
-            except Exception:
-                converter = None
-        if converter is None:
-            converter = DocumentConverter(**pdf_only)
+        # One converter, PDF-only and configured, or none (#400). There is no
+        # fallback to a bare DocumentConverter(): it dropped the OCR config
+        # silently, and its own failure was poison-pilled under 'docling'.
+        # Neither the options nor the converter see the blob, so any failure
+        # here is the install's or the config's.
+        try:
+            converter = DocumentConverter(**_converter_kwargs(self._cfg))
+        except ExtractorConfigurationError:
+            raise
+        except Exception as exc:
+            raise ExtractorConfigurationError(
+                f"docling DocumentConverter could not be built with the "
+                f"configured options: {exc}"
+            ) from exc
 
         try:
             # The page cap is a convert-level argument on docling 2.x, not a

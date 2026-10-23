@@ -614,7 +614,10 @@ An engine that is *named* but not importable, or a name docling does not
 register, is a **configuration** error: one WARNING naming the problem, and the
 blob's extraction is **held** on the transient counter rather than failed, so
 `retry_count` is never spent on a problem no retry can fix. Fix the config and
-run `localmail retry-failed-extractions` to release them.
+run `localmail retry-failed-extractions` to release them. The same holds when
+docling cannot build its converter with the configured OCR settings (a broken
+or half-upgraded docling): the PDF is held, never extracted with docling's
+defaults, because a stored extraction is not redone later.
 
 ### How extraction failures are classified
 

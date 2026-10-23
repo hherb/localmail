@@ -155,8 +155,9 @@ def _describe(exc: Exception) -> dict[str, str]:
 def _ocr_options(engine: str) -> object:
     """The OCR options production would hand docling for ``engine``.
 
-    Recorded because an extractor fallback can drop them and still produce
-    plausible text (#400); ``None`` means docling's own defaults ran.
+    Recorded because a dropped configuration still produces plausible text
+    (#400); ``None`` means OCR is disabled (``engine="none"``), and a broken
+    install records the refusal instead.
     """
     try:
         opts = getattr(_build_pdf_pipeline_options(SearchConfig(extractor_ocr_engine=engine)),

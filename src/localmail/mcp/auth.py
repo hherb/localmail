@@ -48,13 +48,12 @@ class LocalmailTokenVerifier(TokenVerifier):
 
 
 def user_id_from_access_token(access_token: AccessToken) -> int:
-    """Recover the localmail user id from a token minted by
-    LocalmailTokenVerifier (stored in `subject`).
+    """Recover the localmail user id from an AccessToken built by
+    `access.load_access`, which both /mcp verifiers use (stored in `subject`).
 
-    Raises ValueError if the token was not minted by this verifier (no
-    digit `subject`).
+    Raises ValueError if the token was not built there (no digit `subject`).
     """
     subject = access_token.subject
     if subject is None or not subject.isdigit():
-        raise ValueError("access token was not minted by LocalmailTokenVerifier")
+        raise ValueError("access token was not built by access.load_access")
     return int(subject)

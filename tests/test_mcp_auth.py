@@ -126,3 +126,51 @@ def test_the_opaque_server_checks_the_audience_its_config_derives(
     finally:
         pool.close()
 
+
+
+def _opaque_server(pool, **mcp):
+    from localmail.config import McpConfig
+    from localmail.mcp.server import build_mcp_server
+
+    return build_mcp_server(
+        pool, searcher=None,
+        config=McpConfig(enabled=True, resource_server_url="https://h", **mcp),
+    )
+
+
+def test_the_opaque_server_honours_configured_resource_indicators(
+    db_dsn, db_conn, api_user, oauth_client
+):
+    # Configured indicators replace the derived audience, as on the AS path,
+    # so a token bound behind a proxy's public URL keeps verifying.
+    public = _mint_bound(db_conn, api_user.id, "https://pub/mcp")
+    derived = _mint_bound(db_conn, api_user.id, _ACCEPTED)
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        verifier = _opaque_server(
+            pool, resource_indicators=["https://pub/mcp"]
+        )._token_verifier
+        assert asyncio.run(verifier.verify_token(public)) is not None
+        assert asyncio.run(verifier.verify_token(derived)) is None
+    finally:
+        pool.close()
+
+
+def test_an_all_malformed_resource_indicators_fails_the_opaque_build(db_dsn):
+    # A fragment passes pydantic's AnyHttpUrl but canonicalizes to nothing.
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        with pytest.raises(ValueError, match="resource_indicators"):
+            _opaque_server(pool, resource_indicators=["https://h/mcp#x"])
+    finally:
+        pool.close()
+
+
+def test_an_unbound_oauth_token_stays_unrestricted(
+    db_dsn, db_conn, api_user, oauth_client
+):
+    # NULL oauth_resource is unrestricted for OAuth rows too, not only logins.
+    raw = _mint_bound(db_conn, api_user.id, None)
+    at = _verify(db_dsn, raw, accepted_resources=["https://elsewhere/mcp"])
+    assert at is not None
+    assert at.client_id == oauth_client

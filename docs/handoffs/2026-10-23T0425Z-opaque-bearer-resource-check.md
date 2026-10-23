@@ -60,7 +60,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   it first).** The opaque path mints no bound tokens. But turning
   `authorization_server_enabled` off only swaps the verifier: the
   `api_tokens` rows the AS minted with `oauth_resource` set stay valid for
-  their TTL (≤1 h, the access-token TTL). `LocalmailTokenVerifier` called
+  their TTL (`oauth_access_token_ttl_s`, default 1 h, no upper bound). `LocalmailTokenVerifier` called
   `verify_token` alone, so those tokens were accepted with their audience
   unchecked. The flaw is narrow but real.
 - **The fix.**
@@ -70,7 +70,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   - `accepted_resources` is keyword-only with no default, because `None`
     means "skip the check" (#234's shape).
   - The accepted set comes from the new
-    `discovery.accepted_resources_for(config)`. `OAuthProvider.__init__`
+    `discovery.accepted_resources_for(config)`. `LocalmailASProvider.__init__`
     now uses that helper instead of its own inline copy.
   - The `CLIENT_ID` constant in `mcp/auth.py` is gone. `load_access`
     returns the token's real `oauth_client_id`, or the `"localmail"`
@@ -89,12 +89,27 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **Mutations, each caught by the intended test:** the verifier passing
   `None`, the server passing `[]`, and the server hard-coding a wrong
   audience.
+- **Review round (`/review-pr`, then fixed on the branch).**
+  - Those mutations pinned the *derived* audience only. No test configured
+    `resource_indicators`, so three bypasses of `accepted_resources_for`
+    (discovery, server, provider) survived. Added: configured indicators
+    through the opaque server and the AS provider, and the all-malformed
+    `ValueError` on the opaque build. Each bypass now fails its own test.
+  - `load_access` failed open when its binding read found no row (deleted
+    after `verify_token`). It returns `None` now, pinned by a test that
+    deletes the row in between.
+  - `load_access`'s `accepted_resources` has no default now; the bridge
+    tests write `accepted_resources=None`.
+  - Also added: an unbound OAuth-minted token stays unrestricted.
+  - Wording: `user_id_from_access_token`'s docstring and error, the
+    `create_app` comment, the TTL claim, and a "corrected by #401" note in
+    the 2026-07-22 resource-indicator spec.
 
-## Verification (Mac, `~/src/localmail` venv, all extras, at `954b856`)
+## Verification (Mac, `~/src/localmail` venv, all extras, review-round commit)
 
 | gate | result |
 |---|---|
-| pytest | **4068 passed, 0 failed**, 6 warnings, 354 s |
+| pytest (after the review round) | **4073 passed, 0 failed**, 6 warnings, 336 s |
 | mypy | Success, **160** files |
 | focused (`test_mcp_auth`, `test_api_key_verify`, `test_oauth_*`, `test_mcp_server_build`, `test_mcp_discovery`, `test_mcp_integration`) | 123 passed |
 | CI | see `gh pr checks`; I stopped at the push |
@@ -232,7 +247,7 @@ ssh 10.0.0.3 'ls /etc/ssl/certs | grep -ic emsign_ecc_root_ca_-_g3'
 uptime; ps -A -o pid,pcpu,etime,comm -r | head -6
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4068 passed (macOS, all extras)
+unset VIRTUAL_ENV && uv run pytest -q              # 4073 passed (macOS, all extras)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 160 files
 cd gui && npm test -- --run && npm run check && npm audit
 cd gui/src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings

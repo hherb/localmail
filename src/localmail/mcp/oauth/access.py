@@ -74,14 +74,15 @@ def load_access(
     conn: psycopg.Connection,
     raw_token: str,
     *,
-    accepted_resources: list[str] | None = None,
+    accepted_resources: list[str] | None,
 ) -> "AccessToken | None":
     """Verify an access token and return the SDK AccessToken, or None.
 
     When ``accepted_resources`` is given, a token bound to a resource
     (``oauth_resource IS NOT NULL``) is rejected unless its canonical resource is
     in the set (RFC 8707 audience enforcement at /mcp). A NULL resource is always
-    unrestricted; ``accepted_resources=None`` skips enforcement entirely.
+    unrestricted; ``accepted_resources=None`` skips enforcement entirely, which
+    is why it has no default (#234): skipping must be written, not forgotten.
     """
     from mcp.server.auth.provider import AccessToken
 
@@ -95,11 +96,16 @@ def load_access(
             (hash_token(raw_token),),
         )
         row = cur.fetchone()
-    bound_resource = row[1] if row else None
+    if row is None:
+        # Deleted between verify_token and this read: reading it as unbound
+        # would honour a bound token as unrestricted, so fail closed.
+        return None
+    client_id, bound_resource = row
     if accepted_resources is not None and bound_resource is not None:
         if canonicalize_resource(bound_resource) not in accepted_resources:
             return None
-    client_id = row[0] if row and row[0] is not None else _NO_OAUTH_CLIENT_ID
+    if client_id is None:
+        client_id = _NO_OAUTH_CLIENT_ID
     return AccessToken(
         token=raw_token, client_id=client_id, scopes=[], subject=str(user.id)
     )

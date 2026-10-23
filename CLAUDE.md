@@ -6169,7 +6169,8 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   - **The opaque-bearer verifier enforces the binding too (#401).** Flipping
     `authorization_server_enabled` off swaps the AS provider for
     `LocalmailTokenVerifier`, but the `api_tokens` rows the AS minted stay live
-    for their TTL (≤1 h). The verifier used to call `verify_token` alone, so
+    for their TTL (`oauth_access_token_ttl_s`: default 1 h, no upper bound).
+    The verifier used to call `verify_token` alone, so
     those tokens were accepted with their audience unchecked. It now calls
     `access.load_access` with the same accepted set, so there is one predicate
     for both branches. That set comes from `discovery.accepted_resources_for(config)`,
@@ -6181,6 +6182,22 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
     in `tests/test_mcp_auth.py`, including through `build_mcp_server`. Three
     mutations each fail: skipping the check, an empty set, and a hard-coded
     wrong audience.
+    - **Those three covered the *derived* audience only (review of #406).**
+      No test configured `resource_indicators`, so making
+      `accepted_resources_for` ignore it, or bypassing it in `server.py` or
+      `provider.py`, survived every MCP test — and the all-malformed claim
+      above had no test either. Both verifiers are now pinned with a
+      configured indicator, and the opaque build's `ValueError` is pinned
+      (`https://h/mcp#x`: a fragment passes pydantic and canonicalizes to
+      nothing). Each of the three bypasses fails its own test.
+    - **`load_access` fails closed when its binding read finds no row.** It
+      verifies, then re-reads `api_tokens` for the binding; a row deleted in
+      between read as "unbound", honouring a bound token as unrestricted.
+      Pre-existing on the AS path, now shared by both.
+    - **`load_access`'s own `accepted_resources` has no default now**, not
+      only the verifier's: the rule held at the verifier and not at the
+      function a third caller would reach. Tests that skip the check write
+      `accepted_resources=None`.
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`

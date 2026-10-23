@@ -44,12 +44,12 @@ def test_load_access_returns_subject(db_conn):
     uid = _seed(db_conn)
     raw = access.mint_access(db_conn, user_id=uid, client_id="cid", ttl_s=3600)
     db_conn.commit()
-    at = access.load_access(db_conn, raw)
+    at = access.load_access(db_conn, raw, accepted_resources=None)
     assert at is not None and at.subject == str(uid) and at.client_id == "cid"
 
 
 def test_load_unknown_returns_none(db_conn):
-    assert access.load_access(db_conn, "bogus") is None
+    assert access.load_access(db_conn, "bogus", accepted_resources=None) is None
 
 
 def test_revoke_access(db_conn):
@@ -58,7 +58,7 @@ def test_revoke_access(db_conn):
     db_conn.commit()
     assert access.revoke_access(db_conn, raw) is True
     db_conn.commit()
-    assert access.load_access(db_conn, raw) is None
+    assert access.load_access(db_conn, raw, accepted_resources=None) is None
 
 
 def _family_id(conn, raw):
@@ -104,9 +104,9 @@ def test_revoke_access_family_deletes_only_matching(db_conn):
     deleted = access.revoke_access_family(db_conn, fam)
     db_conn.commit()
     assert deleted == 1
-    assert access.load_access(db_conn, in_fam) is None
-    assert access.load_access(db_conn, other_fam) is not None
-    assert access.load_access(db_conn, no_fam) is not None
+    assert access.load_access(db_conn, in_fam, accepted_resources=None) is None
+    assert access.load_access(db_conn, other_fam, accepted_resources=None) is not None
+    assert access.load_access(db_conn, no_fam, accepted_resources=None) is not None
 
 
 def test_revoke_access_family_absent_returns_zero(db_conn):
@@ -168,7 +168,7 @@ def test_load_access_no_accepted_set_skips_enforcement(db_conn):
         resource="https://other/mcp",
     )
     db_conn.commit()
-    assert access.load_access(db_conn, raw) is not None  # accepted_resources=None
+    assert access.load_access(db_conn, raw, accepted_resources=None) is not None
 
 
 def test_load_access_canonicalizes_bound_resource_before_matching(db_conn):
@@ -193,6 +193,32 @@ def test_load_access_rejects_non_canonicalizable_bound_resource(db_conn):
         resource="not a url",
     )
     db_conn.commit()
+    assert access.load_access(
+        db_conn, raw, accepted_resources=["https://h/mcp"]
+    ) is None
+
+
+def test_a_bound_row_that_vanishes_after_verification_fails_closed(db_conn, monkeypatch):
+    # The row deleted between verify_token and the binding read must not be
+    # read as "unbound", which would honour a bound token as unrestricted.
+    uid = _seed(db_conn)
+    raw = access.mint_access(
+        db_conn, user_id=uid, client_id="cid", ttl_s=3600,
+        resource="https://other/mcp",
+    )
+    db_conn.commit()
+    real_verify = access.verify_token
+
+    def verify_then_delete(conn, token):
+        user = real_verify(conn, token)
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM api_tokens WHERE token_sha256 = %s",
+                (api_auth.hash_token(token),),
+            )
+        return user
+
+    monkeypatch.setattr(access, "verify_token", verify_then_delete)
     assert access.load_access(
         db_conn, raw, accepted_resources=["https://h/mcp"]
     ) is None

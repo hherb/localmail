@@ -183,7 +183,8 @@ def create_app(
     mcp_discovery_routes: list[Route] = []
     mcp_consent_routes: list[Route] = []
     if enable_mcp:
-        # Provider construction validates config that pydantic can't (e.g.
+        # MCP server construction (AS provider or opaque verifier alike)
+        # validates config that pydantic can't (e.g.
         # resolve_accepted_resources rejects an all-malformed resource_indicators
         # list) and so may raise after the pool is already open. Close it first to
         # honour the "never leak a connection on misconfig" invariant above.

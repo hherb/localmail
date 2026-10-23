@@ -5870,6 +5870,22 @@ for the full design.
         strips its quotes. `subject:""` parses as the free-text token
         `subject:`.
       - An empty string is still an absent filter.
+  - **A NUL (U+0000) anywhere in the query is refused (#377)**, by
+    `search/query.py::_reject_nul`, called per token inside `parse_query`.
+    Postgres `TEXT` cannot hold one, so it used to reach psycopg as a
+    `DataError` — an unhandled 500 on HTTP, an unmapped exception on MCP.
+    The rule sits in the **parser**, not in `build_query_string`, because
+    every path parses before any IO: `_gate_query` (ahead of the empty-ACL
+    short-circuit, mapped to a 400), `Searcher.search` (library and CLI
+    callers get a named `QueryParseError` instead of a `DataError`), and the
+    structured filters arrive composed into that same string. Every NUL lands
+    in some token (the tokenizer drops only whitespace and quote
+    characters), and the refusal names the operator that token belongs to,
+    else `query`. **Refused, not stripped** with `pgtext.strip_nuls`: that
+    rule is for *stored* text, and stripping a query answers a different
+    question with a 200. Pinned per field across parser, `run_search` (both
+    ACL shapes), the HTTP route and MCP `call_tool` in
+    `tests/test_search_nul.py`; deleting the call fails all 32 cases.
   - **`query`:** optional **and nullable** on HTTP and MCP (`str | None`,
     normalised to `""` at the transport). Only an *omitted* query worked at
     first, and `null` was the 422 above, which is what a client modelling

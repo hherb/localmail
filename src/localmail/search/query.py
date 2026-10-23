@@ -116,8 +116,31 @@ def _parse_has(value: str, current: bool | None) -> bool:
     return wanted
 
 
+def _reject_nul(tok: str) -> None:
+    """Refuse a token carrying U+0000, naming the operator it belongs to (#377).
+
+    Postgres ``TEXT`` cannot hold a NUL, so one reaching a query parameter
+    makes psycopg raise ``DataError`` — an unhandled 500 on HTTP, and an
+    unmapped exception on MCP. Refused, not stripped with
+    ``pgtext.strip_nuls``: a stripped query is a different question answered
+    as if it were the one asked (#364). Every NUL lands in some token, since
+    the tokenizer drops only whitespace and quote characters.
+    """
+    if "\x00" not in tok:
+        return
+    op = tok.partition(":")[0].lower() if ":" in tok else ""
+    field_name = op if op in _OPERATORS else "query"
+    raise QueryParseError(
+        f"{field_name}: contains a NUL character (U+0000), which cannot be searched"
+    )
+
+
 def parse_query(query: str) -> ParsedQuery:
-    """Decompose a query string into free text + structured filters."""
+    """Decompose a query string into free text + structured filters.
+
+    Raises ``QueryParseError`` for a malformed date, an empty ``lang:``, an
+    unknown or contradictory ``has:``, and a NUL anywhere in the query.
+    """
     free_parts: list[str] = []
     f_account_names: list[str] = []
     f_folders: list[str] = []
@@ -129,6 +152,7 @@ def parse_query(query: str) -> ParsedQuery:
     f_languages: list[str] = []
 
     for tok in _tokenize(query):
+        _reject_nul(tok)
         if ":" in tok:
             op, _, value = tok.partition(":")
             op_l = op.lower()

@@ -1011,7 +1011,11 @@ question with unfiltered results and a 200. `has_attachment: false` now means
 "only messages without attachments" (DSL `has:no-attachment`) where it used
 to be dropped. A filter value in the wrong format — a bad date, a non-numeric
 id, an empty `lang` or one containing whitespace or quotes — is a 400 even
-for a caller with no account grants. A value of the wrong JSON type is still
+for a caller with no account grants. So is a NUL character (U+0000) in
+`query`, `from`, `to`, `subject` or `lang`: Postgres text cannot hold one,
+and it used to be an unhandled 500
+([#377](https://github.com/hherb/localmail/issues/377)). It is refused rather
+than stripped, since a stripped query is a different question. A value of the wrong JSON type is still
 FastAPI's 422 where Pydantic cannot coerce it (a number for `lang`), and is
 coerced where it can (`"yes"` for `has_attachment` reads as `true`) —
 [#370](https://github.com/hherb/localmail/issues/370). An empty string for

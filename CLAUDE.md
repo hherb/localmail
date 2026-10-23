@@ -2439,10 +2439,28 @@ release from there needs
     tolerances the floor no longer admits. `_import_ocr_factory` (renamed:
     it no longer returns `None`) and `_ocr_the_whole_page` raise
     `ExtractorConfigurationError` now. `PdfFormatOption` was inside the
-    guarded `try` before #400 and briefly was not; it is again. **Filed,
-    not fixed: #405** — `_try_import_docling` reads a *broken* docling
-    import as "not installed", so a partial `uv sync` writes scanned PDFs
-    off as `lightweight-empty`, the same one-way door one step earlier.
+    guarded `try` before #400 and briefly was not; it is again.
+  - **#405: a docling that is present but will not import is held, not
+    "not installed".** `_try_import_docling` caught every `ImportError` and
+    returned `None`, so a partial `uv sync` stored `lightweight-empty` for
+    every scanned PDF: the same one-way door, one step earlier. It now asks
+    `importlib.util.find_spec("docling")` first, never the exception text:
+    `None` is the only "absent"; any failure after that, **including a
+    non-`ImportError`** (a native `.so` raising `OSError`, which used to
+    escape as an `'unexpected'` poison pill) and a `find_spec` that itself
+    raises, is an `ExtractorConfigurationError`. The worker calls it **only
+    for PDFs** now, since nothing else reaches docling and a broken docling
+    must not hold a text file. The failed import is retried per PDF, so a
+    repaired install is picked up without a restart. Pinned in
+    `tests/test_docling_import_state.py`, which fakes presence (patched
+    `find_spec`) and failure (`sys.modules["docling.document_converter"]`)
+    so it means the same with or without `[extraction]`; three mutations
+    (restore `except ImportError: return None`, drop the PDF gate, hoist
+    `find_spec` out of the `try`) each fail their own test. The same issue's
+    second half was wording: any `ImportError` out of `convert()` was logged
+    as "OCR engine … is not usable", so the line now says "a module docling
+    needs", names the engine as the likely one, and names the `uv sync`
+    repair.
   - **No new log line.** The worker already logs every transient or
     configuration error as a per-blob WARNING carrying the exception text,
     which is what the issue asked for.

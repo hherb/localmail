@@ -642,9 +642,12 @@ a perfectly fine PDF as failed):
   distinct *"giving up"* WARNING is logged; a successful extraction resets the
   counter (#153, resolved).
 - **Configuration** — an OCR engine that is named but not installed, or a name
-  docling does not register (#248). Not the blob's fault and not fixable by
-  retrying, so it is held on the same transient counter and **never** burns
-  `retry_count`; one WARNING per process names the engine and the way out.
+  docling does not register (#248), or a docling that is installed but cannot
+  be imported — a partial `uv sync` that dropped one of its dependencies
+  (#405). Not the blob's fault and not fixable by retrying, so it is held on
+  the same transient counter and **never** burns `retry_count`; one WARNING
+  per process names the engine and the way out. Only an install *without*
+  the `[extraction]` extra stores scanned PDFs as `lightweight-empty`.
 - **Poison-pill** — corrupt PDF, encrypted, parser raise, anything else.
   Recorded in `failed_extractions` with `retry_count += 1`, permanently
   skipped once `retry_count >= search.extract_worker_max_retries` (default 3).

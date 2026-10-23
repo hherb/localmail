@@ -892,6 +892,9 @@ def test_warn_ocr_engine_unavailable_is_one_shot_per_process(caplog) -> None:
     hits = [r for r in caplog.records if "easyocr" in r.getMessage()]
     assert len(hits) == 1
     assert "extractor_ocr_engine" in hits[0].getMessage()
+    # Any ImportError out of convert() lands here, not only a missing engine,
+    # so the line must also name the repair for a missing dependency (#405).
+    assert "uv sync --extra extraction" in hits[0].getMessage()
 
 
 def test_pdf_pipeline_options_reflect_the_configured_engine() -> None:

@@ -18,6 +18,7 @@ Exports:
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -604,14 +605,32 @@ def _try_import_docling() -> "type | None":
     """Return docling's `DocumentConverter` class, or `None` if docling
     is not installed.
 
+    Raises ``ExtractorConfigurationError`` when docling is installed but its
+    import fails (#405): a partial ``uv sync`` that dropped a dependency, a
+    half-upgraded venv, a native library that will not load. Answering "not
+    installed" there made the worker store ``lightweight-empty`` for every
+    scanned PDF, and a blob with an ``attachment_text`` row is never claimed
+    again, so repairing the install did not bring them back. Held instead,
+    they wait on the #153 transient budget for ``retry-failed-extractions``.
+
+    Absence is decided by ``find_spec``, never by reading the exception: any
+    failure past that point is the install's. A ``find_spec`` that itself
+    raises is not proof of absence, so it fails closed too.
+
     Indirected for test monkeypatching: tests replace this function to
     simulate the "missing" state without uninstalling docling.
     """
     try:
+        if importlib.util.find_spec("docling") is None:
+            return None
         from docling.document_converter import DocumentConverter
-        return DocumentConverter
-    except ImportError:
-        return None
+    except Exception as exc:
+        raise ExtractorConfigurationError(
+            f"docling is installed but cannot be imported "
+            f"({type(exc).__name__}: {exc}); repair the install with "
+            f"`uv sync --extra extraction`"
+        ) from exc
+    return DocumentConverter
 
 
 def warn_docling_missing() -> None:
@@ -644,19 +663,26 @@ def warn_ocr_engine_unavailable(engine: str, detail: str) -> None:
     PDF in the archive, and the pre-#248 behaviour flooded the log with the same
     EasyOCR message while quietly poison-pilling each document. Mirrors
     ``warn_docling_missing()``.
+
+    Worded as "a module docling needs", not "the OCR engine" (#405): any
+    ``ImportError`` out of ``convert()`` arrives here, and a missing layout-model
+    dependency sent the operator to ``extractor_ocr_engine`` for nothing.
     """
     global _OCR_ENGINE_WARNED
     if _OCR_ENGINE_WARNED:
         return
     _OCR_ENGINE_WARNED = True
     _LOG.warning(
-        "OCR engine %r (search.extractor_ocr_engine) is not usable: %s "
+        "docling could not import a module it needs to convert PDFs: %s "
+        "Most often that is the OCR engine %r (search.extractor_ocr_engine); "
+        "otherwise a docling dependency is missing, and `uv sync --extra "
+        "extraction` repairs it. "
         "Scanned PDFs will not be indexed until this is fixed; their extraction "
         "is being held, not failed, so `localmail retry-failed-extractions` "
-        "will pick them up afterwards. Set it to %r to accept that and stop "
-        "trying, or to 'auto' to use whichever engine is installed.",
-        engine,
+        "will pick them up afterwards. Set the engine to %r to accept that "
+        "and stop trying, or to 'auto' to use whichever engine is installed.",
         detail,
+        engine,
         OCR_DISABLED,
     )
 
@@ -851,8 +877,8 @@ def _exc_chain_has_import_error(exc: BaseException) -> bool:
     """True iff ``exc`` or anything in its cause/context chain is an
     ``ImportError``.
 
-    An ``ImportError`` escaping ``docling.convert()`` always means an optional
-    docling dependency is absent — in practice an OCR engine, which docling
+    An ``ImportError`` escaping ``docling.convert()`` always means a docling
+    dependency is absent — most often an OCR engine, which docling
     constructs lazily inside the pipeline and which is not one of its own
     requirements. Matching on the *type* rather than on the message text
     (``"EasyOCR is not installed..."``) keeps this working across docling
@@ -950,7 +976,8 @@ class DoclingExtractor:
                     self._cfg.extractor_ocr_engine, str(exc)
                 )
                 raise ExtractorConfigurationError(
-                    f"docling OCR engine unavailable: {exc}"
+                    f"docling could not import a module it needs "
+                    f"(most often the OCR engine): {exc}"
                 ) from exc
             if _exc_chain_has_transient_module(exc):
                 raise TransientExtractorError(

@@ -26,7 +26,10 @@ Per-blob decision tree
       - docling raised → record failure (extractor='docling').  Done.
       - docling empty + lw raised → record failure (extractor='lightweight').
       - docling empty + lw empty → INSERT sentinel ``extractor='lightweight-empty'``.
-   b. Non-PDF OR docling missing:
+   b. PDF AND docling installed but not importable → ``_try_import_docling``
+      raises ``ExtractorConfigurationError``; the blob is held on the
+      transient budget, nothing is written (#405).
+   c. Non-PDF OR docling missing:
       - If PDF and docling missing → emit one-shot WARNING via
         ``warn_docling_missing()``.
       - lw raised → record failure (extractor='lightweight').
@@ -502,7 +505,8 @@ def _process_blob(
 
     # Step 4: lightweight returned empty or raised.
     is_pdf = attachment_kind.is_pdf(mime_type, filename)
-    docling_avail = _try_import_docling() is not None
+    # Only a PDF ever reaches docling, so a broken docling holds nothing else.
+    docling_avail = is_pdf and _try_import_docling() is not None
 
     if is_pdf and docling_avail:
         # Step 4a: try docling fallback for PDFs.

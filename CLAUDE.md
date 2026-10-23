@@ -1773,7 +1773,9 @@ so the two cannot drift. See
     and the bound becomes the #153 transient budget — which exists for exactly
     this shape (not-the-blob's-fault, possibly permanent). Detection is
     `_exc_chain_has_import_error` — matching the **type**, never the message
-    text, since each engine words its own. A dedicated `attachment_text` sentinel
+    text, since each engine words its own. It catches *any* missing docling
+    dependency, not only an engine, which is why the WARNING since #405 says
+    "a module docling needs". A dedicated `attachment_text` sentinel
     was rejected: it would make the blob ineligible for re-claim, so fixing the
     config would silently *not* re-open the documents it was fixed for (the
     one-way door `type-skipped` documents). Recovery is
@@ -2439,10 +2441,7 @@ release from there needs
     tolerances the floor no longer admits. `_import_ocr_factory` (renamed:
     it no longer returns `None`) and `_ocr_the_whole_page` raise
     `ExtractorConfigurationError` now. `PdfFormatOption` was inside the
-    guarded `try` before #400 and briefly was not; it is again. **Filed,
-    not fixed: #405** — `_try_import_docling` reads a *broken* docling
-    import as "not installed", so a partial `uv sync` writes scanned PDFs
-    off as `lightweight-empty`, the same one-way door one step earlier.
+    guarded `try` before #400 and briefly was not; it is again.
   - **No new log line.** The worker already logs every transient or
     configuration error as a per-blob WARNING carrying the exception text,
     which is what the issue asked for.
@@ -2456,6 +2455,34 @@ release from there needs
     in either `_converter_kwargs` or `extract` — the last **survived every
     test** until the wiring test asserted the extractor's own config reaches
     the pipeline (its stub had ignored its argument).
+  - **#405: a docling that is present but will not import is held, not
+    "not installed".** `_try_import_docling` caught every `ImportError` and
+    returned `None`, so a partial `uv sync` stored `lightweight-empty` for
+    every scanned PDF: the same one-way door, one step earlier. It now asks
+    `importlib.util.find_spec("docling")` first, never the exception text:
+    `None` is the only "absent"; any failure after that, **including a
+    non-`ImportError`** (a native `.so` raising `OSError`, which used to
+    escape as an `'unexpected'` poison pill) and a `find_spec` that itself
+    raises, is an `ExtractorConfigurationError`. The worker calls it **only
+    for PDFs** now, since nothing else reaches docling and a broken docling
+    must not hold a text file. The failed import is retried per PDF, so a
+    repaired install is *usually* picked up without a restart — but only
+    the modules that failed leave `sys.modules`, so after repairing a
+    half-*upgraded* venv the retry loads new files beside old in-memory
+    ones (the mixing the 2.141 bullet warns about): restart then. Pinned in
+    `tests/test_docling_import_state.py`, which fakes presence (patched
+    `find_spec`) and failure (`sys.modules["docling.document_converter"]`)
+    so it means the same with or without `[extraction]`; three mutations
+    (restore `except ImportError: return None`, drop the PDF gate, hoist
+    `find_spec` out of the `try`) each fail their own test. The same issue's
+    second half was wording: any `ImportError` out of `convert()` was logged
+    as "OCR engine … is not usable", so the line now says "a module docling
+    needs", names the engine as the likely one, and names the `uv sync`
+    repair — with `--extra mcp`, per the uv footgun under Commands, as every
+    remedy string in `extractor.py` now does. **No log line was added**: a
+    broken import gets the worker's per-blob `transient extractor error`
+    WARNING only, not the one-shot engine WARNING, since it never reaches
+    `convert()`.
 - **Pinned three ways** in `tests/test_docling_input_formats.py`:
   - real docling refuses HTML and ODT labelled `.pdf`, asserting the
     *class* (neither configuration nor transient) and docling's own

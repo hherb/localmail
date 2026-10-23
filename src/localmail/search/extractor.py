@@ -593,8 +593,8 @@ class LightweightExtractor:
 # --- Docling (optional, OCR-capable) -----------------------------------------
 #
 # Docling is in the [extraction] uv extra — installed via
-# `uv sync --extra extraction`. The extractor lazy-imports it on first
-# call. When not installed, `warn_docling_missing()` emits exactly one
+# `uv sync --extra extraction --extra mcp`. The extractor lazy-imports it on
+# first call. When not installed, `warn_docling_missing()` emits exactly one
 # WARN per process pointing at the install hint, and .extract() raises
 # ExtractorError so the extract_worker records the failure cleanly.
 
@@ -628,7 +628,7 @@ def _try_import_docling() -> "type | None":
         raise ExtractorConfigurationError(
             f"docling is installed but cannot be imported "
             f"({type(exc).__name__}: {exc}); repair the install with "
-            f"`uv sync --extra extraction`"
+            f"`uv sync --extra extraction --extra mcp`"
         ) from exc
     return DocumentConverter
 
@@ -648,7 +648,7 @@ def warn_docling_missing() -> None:
     _LOG.warning(
         "docling is not installed; PDFs that lightweight cannot read "
         "will be marked as lightweight-empty. Install with "
-        "`uv sync --extra extraction` to enable OCR fallback for "
+        "`uv sync --extra extraction --extra mcp` to enable OCR fallback for "
         "scanned PDFs."
     )
 
@@ -657,7 +657,8 @@ _OCR_ENGINE_WARNED = False
 
 
 def warn_ocr_engine_unavailable(engine: str, detail: str) -> None:
-    """Emit a one-shot WARN per process naming the unusable OCR engine (#248).
+    """Emit a one-shot WARN per process when docling cannot import a module
+    it needs, naming the configured OCR engine as the likely one (#248).
 
     One line per *process*, not per blob: the daemon re-attempts every scanned
     PDF in the archive, and the pre-#248 behaviour flooded the log with the same
@@ -676,7 +677,7 @@ def warn_ocr_engine_unavailable(engine: str, detail: str) -> None:
         "docling could not import a module it needs to convert PDFs: %s "
         "Most often that is the OCR engine %r (search.extractor_ocr_engine); "
         "otherwise a docling dependency is missing, and `uv sync --extra "
-        "extraction` repairs it. "
+        "extraction --extra mcp` repairs it. "
         "Scanned PDFs will not be indexed until this is fixed; their extraction "
         "is being held, not failed, so `localmail retry-failed-extractions` "
         "will pick them up afterwards. Set the engine to %r to accept that "
@@ -916,9 +917,11 @@ class DoclingExtractor:
     ) -> ExtractedText:
         """Extract text from a PDF blob via docling.
 
-        Raises ExtractorError when docling is not installed. Returns
-        ExtractedText with text='' when docling produces no text (e.g.,
-        the OCR pipeline fails to find any glyphs on a blank scan).
+        Raises ExtractorError when docling is not installed, and
+        ExtractorConfigurationError when it is installed but will not import
+        (#405). Returns ExtractedText with text='' when docling produces no
+        text (e.g., the OCR pipeline fails to find any glyphs on a blank
+        scan).
 
         The converter carries the configured OCR engine, languages and mode
         (``_converter_kwargs``); if it cannot be built that way, this raises
@@ -931,7 +934,7 @@ class DoclingExtractor:
         if DocumentConverter is None:
             raise ExtractorError(
                 "docling not installed; install via "
-                "`uv sync --extra extraction`"
+                "`uv sync --extra extraction --extra mcp`"
             )
 
         try:
@@ -967,10 +970,10 @@ class DoclingExtractor:
                 max_num_pages=self._cfg.extractor_docling_max_pages,
             )
         except Exception as exc:
-            # A missing OCR engine surfaces as ImportError out of convert() —
-            # docling constructs the engine lazily inside the pipeline. It is an
-            # install problem, never the blob's fault, so it must not burn
-            # retry_count (#248).
+            # A missing docling dependency — most often the OCR engine, which
+            # docling constructs lazily inside the pipeline — surfaces as
+            # ImportError out of convert(). It is an install problem, never the
+            # blob's fault, so it must not burn retry_count (#248, #405).
             if _exc_chain_has_import_error(exc):
                 warn_ocr_engine_unavailable(
                     self._cfg.extractor_ocr_engine, str(exc)

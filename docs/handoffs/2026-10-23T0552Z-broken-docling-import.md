@@ -178,7 +178,9 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 2. **A failed docling import is retried per PDF rather than cached.** The
    cost is one failed import attempt per scanned PDF while the install is
    broken, bounded by the transient budget. The gain is that a repaired
-   install is picked up without restarting the daemon.
+   install is usually picked up without restarting the daemon. Not after a
+   half-upgrade: only the failed modules leave `sys.modules`, so the retry
+   mixes new files with old in-memory modules. Restart after repairing one.
 3. **Deploying #406 went ahead without a fresh confirmation**, following
    the handoff's step 0 and the precedent of sessions 54–57.
 4. **Code and handoff are in one PR**, per the convention.

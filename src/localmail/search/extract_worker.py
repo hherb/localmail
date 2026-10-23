@@ -26,7 +26,10 @@ Per-blob decision tree
       - docling raised → record failure (extractor='docling').  Done.
       - docling empty + lw raised → record failure (extractor='lightweight').
       - docling empty + lw empty → INSERT sentinel ``extractor='lightweight-empty'``.
-   b. Non-PDF OR docling missing:
+   b. PDF AND docling installed but not importable → ``_try_import_docling``
+      raises ``ExtractorConfigurationError``; the blob is held on the
+      transient budget, nothing is written (#405).
+   c. Non-PDF OR docling missing:
       - If PDF and docling missing → emit one-shot WARNING via
         ``warn_docling_missing()``.
       - lw raised → record failure (extractor='lightweight').

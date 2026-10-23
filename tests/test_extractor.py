@@ -879,12 +879,14 @@ def test_a_corrupt_pdf_is_still_a_poison_pill_not_a_configuration_error(
     assert not isinstance(excinfo.value, TransientExtractorError)
 
 
-def test_warn_ocr_engine_unavailable_is_one_shot_per_process(caplog) -> None:
+def test_warn_ocr_engine_unavailable_is_one_shot_per_process(
+    caplog, monkeypatch
+) -> None:
     """The daemon re-attempts every scanned PDF in the archive; one WARNING per
     process, not one per blob. Mirrors warn_docling_missing()."""
     import localmail.search.extractor as ext_mod
 
-    ext_mod._OCR_ENGINE_WARNED = False
+    monkeypatch.setattr(ext_mod, "_OCR_ENGINE_WARNED", False)
     with caplog.at_level(logging.WARNING, logger="localmail.search.extractor"):
         ext_mod.warn_ocr_engine_unavailable("easyocr", "EasyOCR is not installed.")
         ext_mod.warn_ocr_engine_unavailable("easyocr", "EasyOCR is not installed.")
@@ -894,7 +896,10 @@ def test_warn_ocr_engine_unavailable_is_one_shot_per_process(caplog) -> None:
     assert "extractor_ocr_engine" in hits[0].getMessage()
     # Any ImportError out of convert() lands here, not only a missing engine,
     # so the line must also name the repair for a missing dependency (#405).
-    assert "uv sync --extra extraction" in hits[0].getMessage()
+    assert "uv sync --extra extraction --extra mcp" in hits[0].getMessage()
+    # Pins the argument order: the detail and the engine land in their slots.
+    assert "needs to convert PDFs: EasyOCR is not installed." in hits[0].getMessage()
+    assert "the OCR engine 'easyocr'" in hits[0].getMessage()
 
 
 def test_pdf_pipeline_options_reflect_the_configured_engine() -> None:

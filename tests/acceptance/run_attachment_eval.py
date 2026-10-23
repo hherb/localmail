@@ -26,7 +26,8 @@ Prerequisites:
     freshly-migrated test DB (the script calls apply_migrations automatically).
   - Optional: install the [extraction] uv extra for docling OCR support.
     Without it the scanned-PDF fixture lands as 'lightweight-empty' (sentinel),
-    which counts against Gate A. Install with: uv sync --extra extraction
+    which counts against Gate A. Install with:
+    uv sync --extra extraction --extra mcp
 """
 
 from __future__ import annotations
@@ -46,7 +47,10 @@ from localmail.db import apply_migrations, open_pool
 from localmail.search.embed_worker import run_embed_worker_once
 from localmail.search.embeddings import FastEmbedBackend
 from localmail.search.extract_worker import run_extract_worker_once
-from localmail.search.extractor import _try_import_docling
+from localmail.search.extractor import (
+    ExtractorConfigurationError,
+    _try_import_docling,
+)
 from localmail.search.searcher import Searcher
 
 from tests._attachment_corpus import build_corpus
@@ -233,7 +237,11 @@ def main() -> int:
         or os.environ.get("LOCALMAIL_TEST_DSN")
         or "postgresql://localmail:local%40%40mail@localhost:5532/localmail_test"
     )
-    docling_available = _try_import_docling() is not None
+    try:
+        docling_available = _try_import_docling() is not None
+    except ExtractorConfigurationError as exc:
+        # A broken docling would skew Gate A either way; say so and stop.
+        raise SystemExit(str(exc)) from exc
     print(
         f"docling available: {docling_available}"
         + (" (scanned-PDF fixture included in Gate A denominator)" if docling_available

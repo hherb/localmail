@@ -645,9 +645,13 @@ a perfectly fine PDF as failed):
   docling does not register (#248), or a docling that is installed but cannot
   be imported — a partial `uv sync` that dropped one of its dependencies
   (#405). Not the blob's fault and not fixable by retrying, so it is held on
-  the same transient counter and **never** burns `retry_count`; one WARNING
-  per process names the engine and the way out. Only an install *without*
-  the `[extraction]` extra stores scanned PDFs as `lightweight-empty`.
+  the same transient counter and **never** burns `retry_count`. A missing
+  engine logs one WARNING per process naming it and the way out; a docling
+  that will not import logs the per-blob `transient extractor error`
+  WARNING, carrying the import error and the `uv sync` repair. A scanned
+  PDF is stored as `lightweight-empty` only when docling is not installed
+  at all, or ran and found no text (`extractor_ocr_engine = "none"`, or
+  `auto` with no engine installed).
 - **Poison-pill** — corrupt PDF, encrypted, parser raise, anything else.
   Recorded in `failed_extractions` with `retry_count += 1`, permanently
   skipped once `retry_count >= search.extract_worker_max_retries` (default 3).
@@ -1353,7 +1357,7 @@ uv run localmail lang-backfill --retry-declined
 uv run localmail lang-backfill --relabel
 
 # (Optional, Phase 2) Backfill attachment text for an existing archive.
-# Requires the docling optional dep: `uv sync --extra extraction`.
+# Requires the docling optional dep: `uv sync --extra extraction --extra mcp`.
 uv run localmail extract-backfill
 
 # Progress at any time (body_lang_populated / _pending / _declined):

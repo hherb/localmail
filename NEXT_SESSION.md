@@ -58,7 +58,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 - **The defect.** A NUL in `query`, `from`, `to`, `subject` or `lang`
   reached psycopg as `DataError` ("PostgreSQL text fields cannot contain
-  NUL"): an unhandled 500 on `/v1/search`, an unmapped exception on MCP.
+  NUL"): an unhandled 500 on `/v1/search`, and on MCP FastMCP's generic
+  `ToolError` carrying psycopg's raw text.
   For a caller granted nothing it was a 200 empty page instead (the
   empty-ACL short-circuit never touches SQL).
 - **The fix (`search/query.py`).** `_reject_nul(tok)`, called per token at
@@ -68,7 +69,9 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   - **Why the parser, not `build_query_string`:** every path parses before
     any IO. `_gate_query` already maps `QueryParseError` → `ValidationFailed`
     ahead of the empty-ACL short-circuit; `Searcher.search` parses too, so
-    library/CLI callers get a named error instead of `DataError`; and the
+    library callers get a named error instead of `DataError` (the CLI still
+    tracebacks on any `QueryParseError` — it catches `RuntimeError` only,
+    #305 — but argv cannot carry a NUL anyway); and the
     structured filters arrive composed into that same string.
   - **Complete by construction:** the tokenizer drops only whitespace and
     quote characters, so every NUL lands in some token. Operators typed in
@@ -81,6 +84,27 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **Mutation:** replacing the `_reject_nul(tok)` call with `pass` fails 32
   of 33 (the positive control is the survivor, as it should be).
 
+### Review round (`/pr-review-toolkit:review-pr`, then `/fixall`)
+
+- **A lone surrogate was the same 500.** JSON `"\ud800"` decodes to one,
+  `parse_query` passed it, and psycopg's UTF-8 encode raised
+  `UnicodeEncodeError` (confirmed against the test DB). The rule is renamed
+  `_reject_unstorable` and also refuses any token `str.encode("utf-8")`
+  rejects, with its own phrase (`lone surrogate (U+D800)`).
+- **Tests went from 33 to 84**: every case now runs for both characters;
+  parser cases added for `has:`, `after:`, `before:`, `folder_id:`, an
+  uppercase `FROM:` and a quoted phrase; a value that is only the bad
+  character; a real `Searcher` with a pool that raises when touched; every
+  wire assertion checks the phrase, not just the `field: ` prefix (`has:` and
+  `after:` have refusals of their own sharing it); MCP anchors on
+  `": <field>: contains a"`. The HTTP test sends hand-encoded JSON, since a
+  UTF-8 body encoder would refuse the surrogate before the request left.
+- **Mutation:** deleting the call fails 83 of 84 (control survives);
+  disabling only the surrogate branch fails exactly the 41 surrogate cases.
+- **Doc corrections:** the CLI claim above, the MCP wording, and
+  `api/search.py::_gate_query`'s docstring, which listed what `parse_query`
+  refuses and had not learned the NUL.
+
 ## Verification (Mac, `~/src/localmail` venv, all extras, `ca24cbf`)
 
 | gate | result |
@@ -89,6 +113,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | mypy | Success, **160** files |
 | focused (`test_search_nul`, `test_query_*`, `test_api_search*`, `test_serve_search_route`, `test_mcp_server_build`, `test_searcher*`) | 731 passed |
 | CI | see `gh pr checks`; I stopped at the push |
+| pytest after the review round | **4164 passed, 0 failed**, 6 warnings, 403 s |
+| mypy after the review round | Success, 160 files |
 
 - **Load** was 13–29 during the run (bmlibrarian's pytest was running
   against its own database), so no timing is comparable.

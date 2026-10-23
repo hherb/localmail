@@ -33,7 +33,7 @@ from localmail.config import McpConfig
 from localmail.header_block import HeaderMode
 import localmail.mcp.tools as tools
 from localmail.mcp.auth import LocalmailTokenVerifier, user_id_from_access_token
-from localmail.mcp.discovery import mcp_resource_url
+from localmail.mcp.discovery import accepted_resources_for, mcp_resource_url
 from localmail.search.searcher import Searcher
 
 SERVER_NAME = "localmail"
@@ -107,8 +107,8 @@ def build_mcp_server(
         ),
         required_scopes=[],
         # Neither verifier sets AccessToken.resource, so the SDK's check would
-        # refuse every token; on the AS path access.load_access enforces the
-        # RFC 8707 binding itself, and opaque login tokens are never bound.
+        # refuse every token; both verifiers go through access.load_access,
+        # which enforces the RFC 8707 binding itself (NULL = unrestricted).
         validate_token_resource=False,
     )
     common_kwargs: dict[str, Any] = dict(
@@ -139,7 +139,9 @@ def build_mcp_server(
     else:
         server = FastMCP(
             SERVER_NAME,
-            token_verifier=LocalmailTokenVerifier(pool),
+            token_verifier=LocalmailTokenVerifier(
+                pool, accepted_resources=accepted_resources_for(config)
+            ),
             auth=auth_settings,
             **common_kwargs,
         )

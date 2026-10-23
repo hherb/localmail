@@ -607,3 +607,24 @@ def test_exchange_fails_closed_when_the_minted_refresh_reads_back_absent(
     with pytest.raises(TokenError) as exc:
         anyio.run(p.exchange_authorization_code, _client(), loaded)
     assert exc.value.error == "invalid_grant"
+
+
+def test_load_access_token_honours_configured_resource_indicators(db_conn, db_pool):
+    p = _provider_cfg(
+        db_pool, resource_server_url="https://h",
+        resource_indicators=["https://pub/mcp"],
+    )
+    anyio.run(p.register_client, _client())
+    with db_pool.connection() as conn:
+        uid = api_auth.create_user(conn, "prov-configured-user", "pw")
+        public = access.mint_access(
+            conn, user_id=uid, client_id="cid", ttl_s=3600,
+            resource="https://pub/mcp",
+        )
+        derived = access.mint_access(
+            conn, user_id=uid, client_id="cid", ttl_s=3600,
+            resource="https://h/mcp",
+        )
+        conn.commit()
+    assert anyio.run(p.load_access_token, public) is not None
+    assert anyio.run(p.load_access_token, derived) is None

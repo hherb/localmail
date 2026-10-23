@@ -227,7 +227,9 @@ stuffing is bounded the same way.
   Real MCP clients work correctly.
 - **RFC 8707 resource indicators** are validated at `/authorize` (against
   `[mcp] resource_indicators`, default `<origin>/mcp`) and the bound audience is
-  carried onto the issued tokens and enforced at `/mcp`. Two SDK-imposed limits
+  carried onto the issued tokens and enforced at `/mcp` — also by the
+  opaque-bearer verifier, so switching the authorization server off does not
+  free its still-live tokens from their audience. Two SDK-imposed limits
   remain: the token-endpoint `resource` is validated at authorize time only, and
   a bad resource is reported as `invalid_request` (the SDK has no
   `invalid_target` code). A missing `resource` is accepted unless `[mcp]

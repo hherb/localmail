@@ -1,41 +1,32 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-10-22 (session 56).** `main` was **`7761530`** at
-> session start (#403 merged), and is unchanged.
+> **Status as of 2026-10-23 (session 57).** `main` was **`9023642`** at
+> session start (#404 merged, closing #400), and is unchanged.
 >
 > This session:
-> - **deployed #403 on both hosts.** `/v1/version` → `build_hash: 7761530`
->   on the Mac and the DGX; certifi 2026.10.19 and pypdf 6.21.2 on both;
->   DGX units `NRestarts=0`; `init-db` reports the schema up to date.
-> - **Dependabot #136, #137, #138 and #148 are fixed** (`fixed_at`
->   2026-10-22T11:26Z). Open: **#71** (accelerate, no fix exists) plus the
->   **29 Pillow alerts** (#139–#167, minus #148), still blocked on
->   fastembed#830, which is **open**.
-> - **removed the `localmail-sec` worktree** and its local branch. The
->   remote branch was already gone.
-> - **fixed #400: PR on `fix/400-docling-converter-fallback`.** By operator
->   decision it **fails closed** rather than taking the issue's "log and
->   wrap the fallback" route. See the ruling below.
+> - **deployed #404 on both hosts.** `/v1/version` → `build_hash: 9023642`
+>   on the Mac and the DGX; DGX units `active`, `NRestarts=0`. The local
+>   `fix/400-docling-converter-fallback` branch was deleted after checking
+>   that its tree equals `main` (squash merge).
+> - **fixed #401: PR on `fix/401-opaque-bearer-resource-check`.**
 >
-> **Open issues: 42 (with #405, filed in review), 41 once the PR merges** (`Closes #400`).
+> **Open issues: 41, 40 once the PR merges** (`Closes #401`).
 >
 > **Things to know before you touch anything.**
 >
 > **(1) The Mac deployment tree (`~/src/localmail`) is on the PR branch,
-> not `main`.** The running daemon imports docling lazily per extraction,
-> and this branch changes `extractor.py`, so a scanned PDF arriving before
-> the merge would run branch code. Its behaviour is identical on a healthy
-> install (the probe below shows it), but `git checkout main` after merging
-> is step 0 either way. Then `kickstart -k` both agents so the running
-> processes match the tree.
+> not `main`.** The branch touches only `mcp/`. `serve` runs with
+> `[mcp]` enabled, so the code that runs depends on whether `serve` has
+> been restarted, and it has not been. `git checkout main` after the merge
+> is step 0 either way.
 >
 > **(2) Still no scanned PDF on the Mac since the docling 2.141 deploy.**
-> The newest `docling%` row is `docling@2.97.0` from 2026-10-01, and
-> `transient_extractions` is 0. #402's acceptance is unobserved, not failed.
+> The newest `docling%` row is still `docling@2.97.0` from 2026-10-01, and
+> `transient_extractions` is 0.
 >
 > **(3) A leftover worktree, `.claude/worktrees/bottie-bearer-token-dbc203`**
-> (detached at `5b85180`), predates this session. I did not touch it; ask
-> before removing it.
+> (detached at `5b85180`), predates session 56. Untouched; ask before
+> removing it.
 
 ## Project context (1-minute version)
 
@@ -58,75 +49,72 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### PR: `fix/400-docling-converter-fallback` (opened on `main`)
+### PR: `fix/401-opaque-bearer-resource-check` (opened on `main`)
 
 | SHA | What |
 |---|---|
-| `8f66b97` | #400: one docling converter, PDF-only and configured, or an `ExtractorConfigurationError`; tests, CLAUDE.md, README |
-| handoff | this file + `docs/handoffs/2026-10-22T1150Z-docling-converter-fail-closed.md` |
+| `954b856` | #401: the opaque-bearer `/mcp` verifier enforces the RFC 8707 binding through `access.load_access`; tests, CLAUDE.md, README, `docs/mcp-usage.md` |
+| handoff | this file + `docs/handoffs/2026-10-23T0425Z-opaque-bearer-resource-check.md` |
 
-- **The defect.** `DoclingExtractor.extract` built a configured converter
-  inside `except Exception: converter = None`, then fell back to a bare
-  `DocumentConverter(**pdf_only)`. Any construction failure discarded the
-  OCR engine, languages and `FULL_PAGE` with no log line. If the bare
-  construction failed too, the raw exception escaped the extractor's
-  classifying `try`s, and the worker recorded each docling-bound PDF as a
-  poison pill under `'docling'` (`dl.name`; only its outer safety net
-  records `'unexpected'`).
-- **The fix.** `_pdf_only_converter_kwargs()` is now `_converter_kwargs(cfg)`,
-  returning `allowed_formats` and `format_options` together.
-  - It fails closed on an unimportable `InputFormat` or `PdfFormatOption`.
-  - `_build_pdf_pipeline_options` raises on an unimportable
-    `PdfPipelineOptions`; it used to return `None`.
-  - A raising `DocumentConverter(...)` is wrapped too.
-  - All three raise `ExtractorConfigurationError`.
-  - **Review round:** the same silent default sat one call deeper, and is
-    closed too. `_try_import_ocr_factory` (now `_import_ocr_factory`)
-    returned `None` on any failure, leaving `ocr_options` unset (docling's
-    `auto`, `lang=[]`, region mode); `_ocr_the_whole_page` skipped a
-    missing `OcrMode`. Both raise now. The options are also built inside
-    the construction guard, so a non-import failure there (a pydantic
-    `ValidationError`) is held rather than poison-pilled; `PdfFormatOption`
-    had been inside that guard before #400. Filed from the same review:
-    #405 (a broken docling import reads as "not installed" and writes
-    scanned PDFs off as `lightweight-empty`).
-- **No new log line.** The worker already logs every transient or
-  configuration error as a per-blob WARNING with the exception text.
-- **Tests (`tests/test_docling_input_formats.py`).**
-  - The wiring test now also asserts `format_options`.
-  - Each unimportable class fails closed (3 cases).
-  - An unbuildable converter is held, constructed once, with its cause
-    kept.
-  - The 8 fakes that stubbed `_pdf_only_converter_kwargs` stub
-    `_converter_kwargs`.
-  - Review round: the wiring test asserts the extractor's own `cfg` reaches
-    the pipeline (dropping it survived every test before); construction
-    failures are parametrized over `TypeError`/`ValueError`/`RuntimeError`;
-    an options failure is held; the factory and `OcrMode` refusals have
-    their own tests; the #248 worker test also runs with construction
-    failing and asserts no `attachment_text` row. Six mutations, each
-    caught by its own test.
+- **Reachability, measured by reading the code (the last handoff asked for
+  it first).** The opaque path mints no bound tokens. But turning
+  `authorization_server_enabled` off only swaps the verifier: the
+  `api_tokens` rows the AS minted with `oauth_resource` set stay valid for
+  their TTL (`oauth_access_token_ttl_s`, default 1 h, no upper bound). `LocalmailTokenVerifier` called
+  `verify_token` alone, so those tokens were accepted with their audience
+  unchecked. The flaw is narrow but real.
+- **The fix.**
+  - `LocalmailTokenVerifier(pool, *, accepted_resources)` now verifies
+    through `access.load_access`, the AS path's own check, so both
+    branches use one predicate.
+  - `accepted_resources` is keyword-only with no default, because `None`
+    means "skip the check" (#234's shape).
+  - The accepted set comes from the new
+    `discovery.accepted_resources_for(config)`. `LocalmailASProvider.__init__`
+    now uses that helper instead of its own inline copy.
+  - The `CLIENT_ID` constant in `mcp/auth.py` is gone. `load_access`
+    returns the token's real `oauth_client_id`, or the `"localmail"`
+    sentinel when there is none. On the opaque path no SDK route reads
+    `client_id`, since revocation is mounted only with the AS.
+  - **Side effect:** an all-malformed `resource_indicators` now also fails
+    the opaque build. `create_app` already closes the pool on that raise.
+- **Tests (`tests/test_mcp_auth.py`, +5):**
+  - a token bound to another resource is refused;
+  - a token bound to an accepted resource is honoured;
+  - an unbound login token stays unrestricted (positive control);
+  - omitting `accepted_resources` raises `TypeError`;
+  - end to end through `build_mcp_server`, the opaque server's verifier
+    refuses a token bound elsewhere and accepts one bound to its derived
+    audience.
+- **Mutations, each caught by the intended test:** the verifier passing
+  `None`, the server passing `[]`, and the server hard-coding a wrong
+  audience.
+- **Review round (`/review-pr`, then fixed on the branch).**
+  - Those mutations pinned the *derived* audience only. No test configured
+    `resource_indicators`, so three bypasses of `accepted_resources_for`
+    (discovery, server, provider) survived. Added: configured indicators
+    through the opaque server and the AS provider, and the all-malformed
+    `ValueError` on the opaque build. Each bypass now fails its own test.
+  - `load_access` failed open when its binding read found no row (deleted
+    after `verify_token`). It returns `None` now, pinned by a test that
+    deletes the row in between.
+  - `load_access`'s `accepted_resources` has no default now; the bridge
+    tests write `accepted_resources=None`.
+  - Also added: an unbound OAuth-minted token stays unrestricted.
+  - Wording: `user_id_from_access_token`'s docstring and error, the
+    `create_app` comment, the TTL claim, and a "corrected by #401" note in
+    the 2026-07-22 resource-indicator spec.
 
-### Outside the PR (operational)
-
-- Deployed #403 on the Mac and the DGX.
-- Removed the `localmail-sec` worktree.
-- Checked #2a: emSign ECC Root CA - G3 is **still present** in both OS
-  stores (`/etc/ssl/cert.pem` 2 matches on the Mac, 1 file on the DGX).
-
-## Verification (Mac, `~/src/localmail` venv, all extras, at `8f66b97`)
+## Verification (Mac, `~/src/localmail` venv, all extras, review-round commit)
 
 | gate | result |
 |---|---|
-| pytest | **4058 passed, 0 failed**, 6 warnings, 272 s (+2 net over `main`'s 4056) |
-| mypy | Success, **160** files (`uvx mypy --python-executable .venv/bin/python`) |
-| docling blocked on `sys.meta_path` (CI's shape) | the 4 affected files: 86 passed, 8 skipped (the real-docling tests) |
-| mutations | restoring the fallback, `return None` for missing pipeline options, and dropping `format_options` each fail exactly the test written for it |
-| `probe_docling_ocr.py --engine auto` | exit 0; `Auto OCR model selected ocrmac.`, `FULL_PAGE`, all three fixtures complete |
+| pytest (after the review round) | **4073 passed, 0 failed**, 6 warnings, 336 s |
+| mypy | Success, **160** files |
+| focused (`test_mcp_auth`, `test_api_key_verify`, `test_oauth_*`, `test_mcp_server_build`, `test_mcp_discovery`, `test_mcp_integration`) | 123 passed |
 | CI | see `gh pr checks`; I stopped at the push |
 
-- **Load** was 17–26, mostly Godot and a rustc build, so no timing is
-  comparable.
+- **Load** was 8–14 during the run, so no timing is comparable.
 - **GUI untouched**, so cargo and vitest were not re-run.
 
 ## What's next
@@ -135,33 +123,32 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **You merge**, once both CI legs are green.
 - **Mac:**
   1. `git checkout main && git pull`;
-  2. `kickstart -k` both agents (no sync needed, as no dependency changed);
-  3. `git branch -d fix/400-docling-converter-fallback`.
+  2. `launchctl kickstart -k gui/$(id -u)/com.localmail.serve`. This
+     changes only `mcp/`; restarting the daemon too is harmless;
+  3. delete the local branch. After a squash merge, `git branch -d` refuses,
+     so first check `git diff --stat main fix/401-opaque-bearer-resource-check`
+     is empty, then use `-D`.
 - **DGX:** `git pull --ff-only`, then restart both units.
 - **Acceptance:**
-  - `/v1/version` = the merge commit on both hosts;
-  - `gh issue view 400` is closed;
-  - `git log --oneline main..origin/fix/400-docling-converter-fallback`:
-    after a squash merge, compare trees rather than expecting this to be
-    empty.
+  - `/v1/version` reports the merge commit on both hosts;
+  - `gh issue view 401` is closed.
 
 ### 1. **Pillow 13, once fastembed lifts its cap** (carried)
-- Watch qdrant/fastembed#830 (`gh pr view 830 --repo qdrant/fastembed`).
+- qdrant/fastembed#830 was still **open** on 2026-10-23.
 - **When it merges:**
   1. Move `[tool.uv.sources] fastembed`'s `rev` to a commit that has it.
   2. Raise the dev group's `Pillow>=10.3` to `>=13.0.0` and re-lock.
   3. Run the full suite and `probe_docling_ocr.py` on **both** hosts
      (`--engine auto --engine rapidocr` on the Mac).
-- **Acceptance:** the lock holds Pillow 13.x, both probes exit 0, and the 29
-  Pillow alerts close.
+- **Acceptance:** the lock holds Pillow 13.x, both probes exit 0, and the
+  Pillow alerts close (28 open today: 21 `Pillow` + 7 `pillow`).
 
-### 2. **Watch the first scanned PDF on the Mac** (carried; Things to know, (2))
+### 2. **Watch the first scanned PDF on the Mac** (carried)
 - **Acceptance:** a new `attachment_text` row with `extractor LIKE
   'docling@2.141%'` and non-empty text, and `transient_extractions` still 0.
 
 ### 2a. **emSign G3 in the OS trust stores** (carried)
-- Still present on both hosts as of today. Re-check after each OS or
-  `ca-certificates` update (commands below).
+- Re-check after each OS or `ca-certificates` update (commands below).
 
 ### 3. **kastellan** (carried, yours)
 - Ask whether it still wants slice C (`/problems/token-expired`); its API
@@ -171,9 +158,15 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `snippet_chars` (≥ 3).
 
 ### 4. **Carried issues**
-- **Next small slice:** #401 (opaque-bearer `/mcp` does no RFC 8707 check
-  on resource-bound tokens). Note the opaque path mints no bound tokens, so
-  first measure whether a bound token can reach it at all.
+- **Next small slice:** #405. `_try_import_docling` reads a *broken*
+  docling import as "not installed", so a partial `uv sync` writes scanned
+  PDFs off as `lightweight-empty`, a one-way door.
+  - **Acceptance:** an `ImportError` from a *present* docling is held as an
+    `ExtractorConfigurationError` on the #153 transient budget, and no
+    `attachment_text` row is written for it.
+  - A genuinely absent docling still takes the lightweight path.
+  - Distinguish the two with `importlib.util.find_spec("docling")`, not by
+    reading the message.
 - **Then:** #394, #395, #386, #389, #380, #383, #384, #377, #378, #369,
   #373, #372, #370, #371, #368, #365.
 - **Not filed yet:** the `snippet_source="header"` mislabel on a
@@ -189,28 +182,22 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## Rulings made this session
 
-1. **#400 fails closed: the fallback is deleted, not logged** (operator
-   decision). The `docling>=2.132` floor guarantees the option classes, so
-   the fallback was reachable only from a broken install. There it stored an
-   extraction made with docling's defaults, which is never redone. *Cost if
-   wrong:* a docling that renames `PdfFormatOption` or `PdfPipelineOptions`
-   holds every scanned PDF on the transient budget until the code catches
-   up. That is loud, and `retry-failed-extractions` recovers it.
-2. **No extra log line for #400.** The worker's per-blob WARNING already
-   carries the exception. *Cost if wrong:* a WARNING per scanned PDF during
-   such an outage rather than one per process. Scanned PDFs are rare (none
-   in three weeks on the Mac).
-3. **Deploying #403 went ahead without a fresh confirmation**, following the
-   handoff's step 0 and the precedent of sessions 54 and 55.
-4. **Code and handoff are in one PR**, per the convention.
+1. **The opaque path reuses `access.load_access` rather than getting its own
+   check.** Two verifiers with one predicate is the
+   `credential_valid_sql` / `login_eligible_sql` call. *Cost if wrong:* one
+   extra primary-key SELECT per opaque `/mcp` request, which the AS path
+   already pays.
+2. **Deploying #404 went ahead without a fresh confirmation**, following
+   the handoff's step 0 and the precedent of sessions 54–56.
+3. **Code and handoff are in one PR**, per the convention.
 
 ## Open decisions & risks
 
-1. **29 Pillow alerts stay open**, 3 of them critical, until fastembed#830
-   ships. The no-reach claim rests on one measurement of docling 2.141's
-   default pipeline.
+1. **28 Pillow alerts stay open**, some critical, until fastembed#830 ships.
+   The claim that mail cannot reach them rests on one measurement of
+   docling 2.141's default pipeline.
 2. **The Mac's extraction path is still unexercised by real mail** under
-   docling 2.141 (Things to know, (2)).
+   docling 2.141.
 3. **The Mac tree is on the PR branch until step 0.**
 4. **`api_minor` stays 3.** Nothing on the wire changed.
 5. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
@@ -227,15 +214,15 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 ```bash
 cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
-git status && git branch --show-current  # fix/400-docling-converter-fallback until step 0
+git status && git branch --show-current  # fix/401-opaque-bearer-resource-check until step 0
 git log --oneline -1 origin/main         # THE authority
 git worktree list
 
 # Is the PR merged?
-gh pr list --state all --head fix/400-docling-converter-fallback --json number,state,mergeCommit
-gh issue list --limit 100 --json number --jq length       # 40 after the merge
+gh pr list --state all --head fix/401-opaque-bearer-resource-check --json number,state,mergeCommit
+gh issue list --limit 200 --json number --jq length       # 40 after the merge
 gh api --paginate repos/hherb/localmail/dependabot/alerts \
-  --jq '.[] | select(.state=="open") | "\(.number)\t\(.dependency.package.name)"'
+  --jq '.[] | select(.state=="open") | .dependency.package.name' | sort | uniq -c
 gh pr view 830 --repo qdrant/fastembed --json state,mergedAt   # the Pillow unblock
 
 # Deployment health
@@ -250,9 +237,9 @@ ssh 10.0.0.3 'ls /etc/ssl/certs | grep -ic emsign_ecc_root_ca_-_g3'
 
 # After merge — Mac:
 #   git checkout main && git pull
-#   launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
 #   launchctl kickstart -k gui/$(id -u)/com.localmail.serve
-#   git branch -d fix/400-docling-converter-fallback
+#   git diff --stat main fix/401-opaque-bearer-resource-check   # empty ⇒ safe
+#   git branch -D fix/401-opaque-bearer-resource-check
 # DGX:
 #   ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && systemctl --user restart localmail-daemon localmail-serve'
 
@@ -260,19 +247,18 @@ ssh 10.0.0.3 'ls /etc/ssl/certs | grep -ic emsign_ecc_root_ca_-_g3'
 uptime; ps -A -o pid,pcpu,etime,comm -r | head -6
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4058 passed (macOS, all extras)
+unset VIRTUAL_ENV && uv run pytest -q              # 4073 passed (macOS, all extras)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 160 files
 cd gui && npm test -- --run && npm run check && npm audit
 cd gui/src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
 
 # This change directly:
-unset VIRTUAL_ENV && uv run pytest -q tests/test_docling_input_formats.py tests/test_extractor.py tests/test_extract_worker.py
-unset VIRTUAL_ENV && uv run python tests/acceptance/probe_docling_ocr.py --engine auto
+unset VIRTUAL_ENV && uv run pytest -q tests/test_mcp_auth.py tests/test_api_key_verify.py tests/test_oauth_provider.py tests/test_mcp_server_build.py
 ```
 
-`main` was **`7761530`** at session start and is unchanged. This session left
-**one PR** on `fix/400-docling-converter-fallback`: commit `8f66b97` plus this
-handoff.
+`main` was **`9023642`** at session start and is unchanged. This session left
+**one PR** on `fix/401-opaque-bearer-resource-check`: commit `954b856` plus
+this handoff.
 
 The latest migration is still **`0036_api_keys.sql`**; the next free slot is
-`0037_*.sql`. **Open issues: 42 (41 after the merge).**
+`0037_*.sql`. **Open issues: 41 (40 after the merge).**

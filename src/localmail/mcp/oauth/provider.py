@@ -32,13 +32,10 @@ from pydantic import AnyUrl
 from psycopg_pool import ConnectionPool
 
 from localmail.config import McpConfig
-from localmail.mcp.discovery import mcp_resource_url
+from localmail.mcp.discovery import accepted_resources_for
 from localmail.mcp.oauth import access, clients, codes, refresh
 from localmail.mcp.oauth.consent_state import ConsentPayload, encode_consent_state
-from localmail.mcp.oauth.resource_indicator import (
-    decide_resource,
-    resolve_accepted_resources,
-)
+from localmail.mcp.oauth.resource_indicator import decide_resource
 
 logger = logging.getLogger("localmail.mcp.oauth")
 
@@ -62,11 +59,7 @@ class LocalmailASProvider(
         self._cfg = config
         self._key = signing_key
         self._consent_path = consent_path
-        self._accepted = resolve_accepted_resources(
-            [str(u) for u in config.resource_indicators]
-            if config.resource_indicators else None,
-            mcp_resource_url(str(config.resource_server_url)),
-        )
+        self._accepted = accepted_resources_for(config)
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return await anyio.to_thread.run_sync(self._get_client_sync, client_id)

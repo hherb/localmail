@@ -76,6 +76,8 @@ The installed `mcp` SDK (`.venv/.../mcp/server/auth/`) gives us:
   verified by `LocalmailTokenVerifier`, which performs no resource check — they
   revert to unrestricted. Toggling AS mode is a privileged admin action, so this
   is outside the threat model; noted for completeness.
+  **Corrected by #401:** `LocalmailTokenVerifier` now verifies through
+  `load_access` with the same accepted set, so such tokens keep their binding.
 
 ## Approach (decisions taken)
 

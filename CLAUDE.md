@@ -2409,7 +2409,8 @@ release from there needs
   and a construction failure in the bare fallback is poison-pilled — under
   `'docling'`, not `'unexpected'` as filed: `_process_blob` records a
   docling raise under `dl.name`) and #401 (the opaque-bearer `/mcp` path never checks a
-  token's RFC 8707 binding). **#400 is fixed now; #401 is open.**
+  token's RFC 8707 binding). **Both are fixed now** (#401: see the RFC 8707
+  bullet under the MCP server section).
 - **#400: there is one converter, configured, or none.** The fallback is
   deleted rather than logged, by operator decision. It existed for docling
   builds without the option classes, which the `docling>=2.132` floor no
@@ -2561,8 +2562,8 @@ release from there needs
   would refuse every agent, OAuth clients included. Do not set it `True` on
   an AS-only deployment. Explicit `False` is the honest value: on the AS path
   `access.load_access` enforces the RFC 8707 binding itself, NULL meaning
-  unrestricted; the opaque path does no resource check, and mints no bound
-  tokens. Pinned by `test_build_leaves_token_resource_checks_to_our_verifier`,
+  unrestricted. Since #401 the opaque path goes through it too (it still mints
+  no bound tokens, but honours the ones an earlier AS-on run minted). Pinned by `test_build_leaves_token_resource_checks_to_our_verifier`,
   which also asserts the warning stays out. Against `main` (mcp 1.28.1) it
   *prevents* ~90 warnings the bump would add, one per built app; it removes
   none.
@@ -6165,6 +6166,21 @@ agents. Mounted into the existing `serve` FastAPI app at `/mcp` over
   columns. **Accepted SDK limitations:** the SDK swallows the token-endpoint
   `resource` (validated at authorize time only) and lacks an `invalid_target`
   error code (a bad resource → `invalid_request`).
+  - **The opaque-bearer verifier enforces the binding too (#401).** Flipping
+    `authorization_server_enabled` off swaps the AS provider for
+    `LocalmailTokenVerifier`, but the `api_tokens` rows the AS minted stay live
+    for their TTL (≤1 h). The verifier used to call `verify_token` alone, so
+    those tokens were accepted with their audience unchecked. It now calls
+    `access.load_access` with the same accepted set, so there is one predicate
+    for both branches. That set comes from `discovery.accepted_resources_for(config)`,
+    which the provider also uses. `accepted_resources` is keyword-only with no
+    default: `None` means "skip the check", so it must not be reachable by
+    omission (#234). One more PK SELECT per opaque `/mcp` request, as the AS path
+    already paid. An all-malformed `resource_indicators` now also fails the
+    opaque build, which `create_app` already handles by closing the pool. Pinned
+    in `tests/test_mcp_auth.py`, including through `build_mcp_server`. Three
+    mutations each fail: skipping the check, an empty set, and a hard-coded
+    wrong audience.
 - **Integration test** [tests/test_mcp_integration.py](tests/test_mcp_integration.py):
   runs uvicorn in a thread + a real `mcp` client over Streamable HTTP, asserting
   the 5-tool list + ACL scoping (marked `integration`, skipped if the `mcp`

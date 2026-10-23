@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from pydantic import AnyHttpUrl
 
 from localmail.config import McpConfig
+from localmail.mcp.oauth.resource_indicator import resolve_accepted_resources
 
 if TYPE_CHECKING:
     from starlette.routing import Route
@@ -53,6 +54,20 @@ def resolve_authorization_servers(
     an empty list); an explicit non-empty list wins.
     """
     return configured if configured else [issuer_url]
+
+
+def accepted_resources_for(config: McpConfig) -> list[str]:
+    """The RFC 8707 audiences a token bound to a resource may carry at /mcp.
+
+    One rule for both `/mcp` verifiers: the AS provider and the opaque-bearer
+    `LocalmailTokenVerifier` (#401). Raises ValueError on an all-malformed
+    `resource_indicators`, so a misconfig surfaces at server build.
+    """
+    return resolve_accepted_resources(
+        [str(u) for u in config.resource_indicators]
+        if config.resource_indicators else None,
+        mcp_resource_url(str(config.resource_server_url)),
+    )
 
 
 def build_protected_resource_routes(config: McpConfig) -> list[Route]:

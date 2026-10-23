@@ -114,7 +114,9 @@ def test_the_mcp_verifier_accepts_a_key(db_conn):
 
             return _cm()
 
-    verifier = LocalmailTokenVerifier(_OneConnPool())  # type: ignore[arg-type]
+    verifier = LocalmailTokenVerifier(  # type: ignore[arg-type]
+        _OneConnPool(), accepted_resources=["https://h/mcp"]
+    )
     access = anyio.run(verifier.verify_token, "lmk_raw")
     assert access is not None
     assert access.subject == str(uid)

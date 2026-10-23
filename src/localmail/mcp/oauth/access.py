@@ -27,9 +27,8 @@ from localmail.mcp.oauth.resource_indicator import canonicalize_resource
 if TYPE_CHECKING:
     from mcp.server.auth.provider import AccessToken
 
-# Sentinel client_id for api_tokens rows with no OAuth client (i.e. login-issued
-# tokens via /v1/auth/login, where oauth_client_id is NULL). Matches the
-# CLIENT_ID constant the opaque-bearer LocalmailTokenVerifier uses.
+# Sentinel client_id for api_tokens rows with no OAuth client (login-issued
+# tokens via /v1/auth/login and API keys, where oauth_client_id is NULL).
 _NO_OAUTH_CLIENT_ID = "localmail"
 
 

@@ -116,8 +116,40 @@ def _parse_has(value: str, current: bool | None) -> bool:
     return wanted
 
 
+def _reject_unstorable(tok: str) -> None:
+    """Refuse a token Postgres cannot take as text, naming its operator (#377).
+
+    Two shapes, one outcome. Postgres ``TEXT`` cannot hold a NUL, so psycopg
+    raises ``DataError``; and a lone surrogate (JSON ``"\\ud800"`` decodes to
+    one) is not encodable as UTF-8, so psycopg raises ``UnicodeEncodeError``.
+    Neither is an ``APIError``, so each was an unhandled 500 on HTTP and, on
+    MCP, FastMCP's generic ``ToolError`` carrying psycopg's raw text.
+
+    Refused, not stripped with ``pgtext.strip_nuls``: a stripped query is a
+    different question answered as if it were the one asked (#364). Every
+    character lands in some token, since the tokenizer drops only whitespace
+    and quote characters.
+    """
+    if "\x00" in tok:
+        problem = "a NUL character (U+0000)"
+    else:
+        try:
+            tok.encode("utf-8")
+            return
+        except UnicodeEncodeError as exc:
+            problem = f"a lone surrogate (U+{ord(tok[exc.start]):04X})"
+    op = tok.partition(":")[0].lower() if ":" in tok else ""
+    field_name = op if op in _OPERATORS else "query"
+    raise QueryParseError(f"{field_name}: contains {problem}, which cannot be searched")
+
+
 def parse_query(query: str) -> ParsedQuery:
-    """Decompose a query string into free text + structured filters."""
+    """Decompose a query string into free text + structured filters.
+
+    Raises ``QueryParseError`` for a malformed date, an empty ``lang:``, an
+    unknown or contradictory ``has:``, and a NUL or lone surrogate anywhere in
+    the query.
+    """
     free_parts: list[str] = []
     f_account_names: list[str] = []
     f_folders: list[str] = []
@@ -129,6 +161,7 @@ def parse_query(query: str) -> ParsedQuery:
     f_languages: list[str] = []
 
     for tok in _tokenize(query):
+        _reject_unstorable(tok)
         if ":" in tok:
             op, _, value = tok.partition(":")
             op_l = op.lower()

@@ -5870,6 +5870,33 @@ for the full design.
         strips its quotes. `subject:""` parses as the free-text token
         `subject:`.
       - An empty string is still an absent filter.
+  - **A NUL (U+0000) or a lone surrogate anywhere in the query is refused
+    (#377)**, by `search/query.py::_reject_unstorable`, called per token
+    inside `parse_query`. Postgres `TEXT` cannot hold a NUL (psycopg raises
+    `DataError`), and a lone surrogate — JSON `"\ud800"` decodes to one and
+    pydantic's `str` accepts it — cannot be encoded as UTF-8 (psycopg raises
+    `UnicodeEncodeError`). Both were an unhandled 500 on HTTP and, on MCP,
+    FastMCP's generic `ToolError` carrying psycopg's raw text. The surrogate
+    half was found in review; #377 named only the NUL.
+    The rule sits in the **parser**, not in `build_query_string`, because
+    every path parses before any IO: `_gate_query` (ahead of the empty-ACL
+    short-circuit, mapped to a 400), `Searcher.search` (a library caller gets
+    a named `QueryParseError` before any connection opens), and the
+    structured filters arrive composed into that same string. **The CLI is
+    not covered by that**: `cli.py`'s search catches `RuntimeError` only, so
+    it still tracebacks on any `QueryParseError` (#305 tracks widening it) —
+    moot for a NUL, which argv cannot carry. Every character lands in some
+    token (the tokenizer drops only whitespace and quote characters), and the
+    refusal names the operator that token belongs to, else `query`.
+    **Refused, not stripped** with `pgtext.strip_nuls`: that rule is for
+    *stored* text, and stripping a query answers a different question with a
+    200. Pinned per field and per character across parser, a real `Searcher`,
+    `run_search` (both ACL shapes), the HTTP route and MCP `call_tool` in
+    `tests/test_search_nul.py`. The refusal's phrase is asserted, not just
+    its `field: ` prefix, because `has:` and `after:` have refusals of their
+    own sharing it. Mutation-checked: deleting the call fails 83 of 84 (the
+    positive control survives), and disabling only the surrogate branch fails
+    exactly the 41 surrogate cases.
   - **`query`:** optional **and nullable** on HTTP and MCP (`str | None`,
     normalised to `""` at the transport). Only an *omitted* query worked at
     first, and `null` was the 422 above, which is what a client modelling

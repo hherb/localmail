@@ -223,12 +223,16 @@ def _gate_query(query: str) -> ParsedQuery:
     """Parse the query composed from the caller's filters, or refuse it.
 
     ``parse_query`` raises ``QueryParseError`` for a malformed ``after:``/
-    ``before:`` date, an empty ``lang:`` value, and (#364) an unknown
-    ``has:`` value or a contradictory ``has:`` pair. It is a bare
+    ``before:`` date, an empty ``lang:`` value, (#364) an unknown ``has:``
+    value or a contradictory ``has:`` pair, and (#377) a NUL or lone
+    surrogate anywhere in the query, which Postgres cannot take as text — so
+    this gate is where those become a 400, ahead of the empty-ACL
+    short-circuit. It is a bare
     ``ValueError``, and ``serve.app`` registers a handler for ``APIError``
     only — so it escaped ``run_search`` as an **unhandled 500 with no
-    problem+json body**, and reached the MCP tool as an exception no
-    ``ToolError`` mapping covers. ``query="invoice after:last-week"`` is
+    problem+json body**, and reached the MCP tool as FastMCP's generic
+    ``ToolError`` wrapping the raw exception text rather than as one of our
+    own mappings. ``query="invoice after:last-week"`` is
     exactly the shape an LLM agent emits.
 
     The **composed** string, not the raw request field, because a ``has:``

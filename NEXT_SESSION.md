@@ -62,7 +62,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **The fix (`api/search_projection.py`).** `MAX_FIELDS = 48` (4 × the 12
   hit fields, a literal so a new hit field does not move a documented
   limit). `fields_error` refuses a longer list **before reading any
-  element**: `fields names N entries; at most 48 are accepted (12 hit
+  element**: `fields has N entries; at most 48 are accepted (12 hit
   fields exist)`. Membership is a `frozenset`. Duplicates stay accepted.
   - **Why `fields_error`, not `Field(max_length=…)`:** pydantic answers that
     with a 422 array `detail` (#370); the rule answers problem+json, ahead of

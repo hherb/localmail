@@ -54,7 +54,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | SHA | What |
 |---|---|
 | `32b06b7` | #394: `fields` over 48 entries is a 400 naming the cap; frozenset membership; tests, CLAUDE.md, README |
-| handoff | this file + `docs/handoffs/2026-10-24T0200Z-cap-search-fields.md` |
+| handoff | `NEXT_SESSION.md` + this file |
 
 - **The defect.** `fields` had no length bound and accepts duplicates, so
   the caller chose `len(fields)`, and `project_hit`'s per-hit re-check
@@ -62,7 +62,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **The fix (`api/search_projection.py`).** `MAX_FIELDS = 48` (4 × the 12
   hit fields, a literal so a new hit field does not move a documented
   limit). `fields_error` refuses a longer list **before reading any
-  element**: `fields names N entries; at most 48 are accepted (12 hit
+  element**: `fields has N entries; at most 48 are accepted (12 hit
   fields exist)`. Membership is a `frozenset`. Duplicates stay accepted.
   - **Why `fields_error`, not `Field(max_length=…)`:** pydantic answers that
     with a 422 array `detail` (#370); the rule answers problem+json, ahead of

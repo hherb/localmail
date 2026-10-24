@@ -61,7 +61,7 @@ def fields_error(fields: object) -> str | None:
         return ("fields must not be empty; omit it for the full hit, or name "
                 f"at least one of: {', '.join(HIT_FIELDS)}")
     if len(fields) > MAX_FIELDS:
-        return (f"fields names {len(fields)} entries; at most {MAX_FIELDS} "
+        return (f"fields has {len(fields)} entries; at most {MAX_FIELDS} "
                 f"are accepted ({len(HIT_FIELDS)} hit fields exist)")
     if any(not isinstance(name, str) for name in fields):
         return "fields must contain only strings"

@@ -15,6 +15,7 @@ import pytest
 from localmail.api.search import _to_api_result
 from localmail.api.search_projection import (
     HIT_FIELDS,
+    MAX_FIELDS,
     fields_error,
     project_hit,
 )
@@ -85,6 +86,34 @@ def test_a_non_string_element_is_refused(bad: list) -> None:
 
 def test_a_non_list_is_refused() -> None:
     assert fields_error("message_id") is not None
+
+
+def test_the_cap_is_pinned_and_admits_every_honest_call() -> None:
+    # Against a literal, not against its own derivation: a cap that moved
+    # with HIT_FIELDS would let both sides of any comparison move together.
+    assert MAX_FIELDS == 48
+    assert MAX_FIELDS >= len(HIT_FIELDS)  # naming every field once fits
+
+
+def test_a_list_at_the_cap_is_accepted() -> None:
+    assert fields_error(["score"] * MAX_FIELDS) is None
+
+
+def test_a_list_over_the_cap_is_refused_naming_the_cap_and_the_count() -> None:
+    # #394: duplicates are accepted, so without a cap the caller chooses
+    # len(fields), and project_hit's per-hit check costs that times 200 hits.
+    msg = fields_error(["score"] * (MAX_FIELDS + 1))
+    assert msg is not None
+    assert f"{MAX_FIELDS + 1} entries" in msg
+    assert f"at most {MAX_FIELDS}" in msg
+
+
+def test_the_cap_is_decided_before_any_element_is_read() -> None:
+    # The gate's own cost is bounded too: an over-long list is refused on its
+    # length, so the element walks below it never see it.
+    msg = fields_error([object()] * (MAX_FIELDS + 1))
+    assert msg is not None
+    assert f"at most {MAX_FIELDS}" in msg
 
 
 def test_duplicates_are_accepted_and_collapse() -> None:

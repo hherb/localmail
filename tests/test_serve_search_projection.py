@@ -176,6 +176,9 @@ def test_a_keyset_continuation_is_projected(archive, db_dsn, db_conn, api_user, 
 _REFUSALS = [
     ({"fields": ["bogus"]}, "'bogus'"),
     ({"fields": []}, "empty"),
+    # #394: valid names, over the cap. Literal 48, so a cap that drifted
+    # upward with its derivation still fails here.
+    ({"fields": ["score"] * 49}, "at most 48"),
     ({"snippet_chars": 0}, "snippet_chars"),
     ({"snippet_chars": 1001}, "1000"),
     ({"snippet_chars": True}, "snippet_chars"),

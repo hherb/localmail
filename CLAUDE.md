@@ -3776,6 +3776,17 @@ for the full design.
       against `main`'s 27.7 ms. The exposure is **pre-existing** and ~8×
       amplified, fails slow rather than wrong, and capping the wire field is
       a contract change — **#394**, deliberately not folded into #390–#392.
+    - **#394 capped it in `fields_error`, not on the wire field.**
+      `MAX_FIELDS = 48` (4 × the 12 hit fields, written as a literal so
+      adding a hit field does not silently move a documented limit), judged
+      **before** any element is read so the gate's own cost is bounded, and
+      membership is a `frozenset`. Not `Field(max_length=…)`: pydantic
+      answers that with a 422 array `detail` (#370), where the rule answers
+      problem+json naming the cap — and it sits ahead of the empty-ACL
+      short-circuit with the rest of `fields_error`. Duplicates stay
+      accepted. `api_minor` stays 3: only a list no honest caller sends
+      changes answer. Hoisting the per-hit re-check out of `project_hit`
+      was the other option and was rejected — it reopens #392.
   - **Both are gated ahead of the empty-ACL short-circuit** (#348's rule), and
     pinned from a grant-nothing caller.
   - **The date walk emits no snippet** (`_date_keyset_search`), so

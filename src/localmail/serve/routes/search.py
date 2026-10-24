@@ -94,7 +94,9 @@ class SearchRequest(BaseModel):
     # name. The element type is left to pydantic, so a non-list `fields`, or
     # a non-string in it, stays the 422 that #370 tracks, which makes
     # `fields_error`'s first two branches library-only. That asymmetry with
-    # `snippet_chars` below is deliberate but unresolved — see #389.
+    # `snippet_chars` below is deliberate but unresolved — see #389. No
+    # `max_length` for the same reason: the length cap (#394) is
+    # `fields_error`'s, so it too answers problem+json naming the cap.
     fields: list[str] | None = None
     # `Any`, not `int | bool` and not a bare `int`: pydantic's lax coercion is
     # exactly what this field must not have. A plain `int` field silently

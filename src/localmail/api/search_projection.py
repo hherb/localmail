@@ -32,24 +32,40 @@ HIT_FIELDS: tuple[str, ...] = (
 
 _SNIPPET_ALIAS_OF = "snippet_html"
 
+_KNOWN = frozenset(HIT_FIELDS)
+
+#: The longest ``fields`` list accepted (#394). Duplicates are accepted, so
+#: without a cap the caller chooses ``len(fields)``, and ``project_hit``'s
+#: per-hit re-check costs that times every hit on the page. Four times the
+#: number of hit fields admits any honest call, repeats included, by a wide
+#: margin; a literal rather than ``4 * len(HIT_FIELDS)`` so adding a hit
+#: field does not silently move a documented wire limit.
+MAX_FIELDS = 48
+
 
 def fields_error(fields: object) -> str | None:
     """Why ``fields`` cannot be honoured, or ``None`` when it can.
 
     Refused: a non-list, an empty list (hits with no keys is a caller bug,
-    not a request), a non-string element, and any name outside
-    ``HIT_FIELDS`` — all of them named, so the caller can fix the call.
-    Duplicates are accepted: the projection is a mapping, so they collapse
-    without losing anything.
+    not a request), a list longer than ``MAX_FIELDS``, a non-string element,
+    and any name outside ``HIT_FIELDS`` — all of them named, so the caller
+    can fix the call. Duplicates are accepted: the projection is a mapping,
+    so they collapse without losing anything.
+
+    The length is judged before any element is read, so the gate's own cost
+    is bounded by the cap too.
     """
     if not isinstance(fields, list):
         return "fields must be a list of hit field names"
     if not fields:
         return ("fields must not be empty; omit it for the full hit, or name "
                 f"at least one of: {', '.join(HIT_FIELDS)}")
+    if len(fields) > MAX_FIELDS:
+        return (f"fields names {len(fields)} entries; at most {MAX_FIELDS} "
+                f"are accepted ({len(HIT_FIELDS)} hit fields exist)")
     if any(not isinstance(name, str) for name in fields):
         return "fields must contain only strings"
-    unknown = sorted({name for name in fields if name not in HIT_FIELDS})
+    unknown = sorted({name for name in fields if name not in _KNOWN})
     if not unknown:
         return None
     noun = "field" if len(unknown) == 1 else "fields"
@@ -82,10 +98,10 @@ def project_hit(hit: dict[str, Any], fields: Sequence[str]) -> dict[str, Any]:
     replaced read ``set(fields)`` first and iterated *that*, so it was
     single-traversal by accident; the delegation has to be so on purpose.
 
-    Cost is O(``len(fields)`` × ``len(HIT_FIELDS)``) per hit — the bound is
-    the caller's list, not ``HIT_FIELDS``, since ``fields_error`` accepts
-    duplicates and the wire field is uncapped (#394). At a dozen names and
-    ≤200 hits a page that is a fraction of a millisecond.
+    Cost is O(``len(fields)``) per hit, and ``len(fields)`` is at most
+    ``MAX_FIELDS``: ``fields_error`` refuses a longer list (#394), and
+    membership is a ``frozenset`` lookup. Before the cap the caller chose
+    the bound — 20,000 names cost 212 ms on 200 hits.
     """
     names = list(fields)
     if (error := fields_error(names)) is not None:

@@ -1109,8 +1109,9 @@ Legacy archives can backfill IMAP `INTERNALDATE` via
   Each page, continuations included, takes the width stated on its own
   request.
 
-An unknown or empty `fields`, or an out-of-range or non-integer
-`snippet_chars`, is a 400 problem+json. That holds for a caller granted no
+An unknown or empty `fields`, a `fields` list of more than 48 entries
+(duplicates count; there are 12 hit fields), or an out-of-range or
+non-integer `snippet_chars`, is a 400 problem+json. That holds for a caller granted no
 accounts too. Omit both for today's response, unchanged.
 
 A search with no free text (filters only, or `sort=date`) takes the date walk,

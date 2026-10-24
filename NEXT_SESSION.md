@@ -54,6 +54,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | SHA | What |
 |---|---|
 | `32b06b7` | #394: `fields` over 48 entries is a 400 naming the cap; frozenset membership; tests, CLAUDE.md, README |
+| `aabd681` | review fixes: route comment names the library-only branches correctly, cap message wording, handoff row |
 | handoff | this file + `docs/handoffs/2026-10-24T0200Z-cap-search-fields.md` |
 
 - **The defect.** `fields` had no length bound and accepts duplicates, so
@@ -74,9 +75,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `_REFUSALS` row → both the granted and grant-nothing route tests.
 - **Mutation:** `if len(fields) > MAX_FIELDS:` → `if False:` fails exactly
   the 4 cap tests (2 unit, 2 route).
-- **No review round was run.** Small diff; consider `/review-pr` anyway.
+- **Reviewed twice.** A self-review gave `aabd681`; a `/review-pr` pass
+  found no code issues, only these two doc rows.
 
-## Verification (Mac, `~/src/localmail` venv, all extras, `32b06b7`)
+## Verification (Mac, `~/src/localmail` venv, all extras, `32b06b7`; pytest re-run at `aabd681`: 4170 passed)
 
 | gate | result |
 |---|---|

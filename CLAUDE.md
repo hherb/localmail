@@ -2681,12 +2681,16 @@ and shipped in fastembed 0.9.1.
     failing, under the engine the DGX uses, so it decides the lock.
   - **Result on the Mac, `main` vs branch:** all nine cells (three fixtures ×
     `auto`, `rapidocr`, `ocrmac`) byte-identical, `ocr_selection` unchanged
-    (`ocrmac`), exit 0. Still unverified on aarch64.
+    (`ocrmac`), exit 0.
+  - **Result on the DGX (aarch64), `main` vs branch:** all six cells (`auto`,
+    which selects rapidocr there, and `rapidocr`) byte-identical, exit 0;
+    the embedding probe and the JPEG spy agree with the Mac. Run from a
+    throwaway worktree with its own venv, so the daemon's venv never saw it.
 - **The embedded-JPEG measurement was re-run, as the third round required.**
   A spy on `PIL.Image.open` around a real `DoclingExtractor` pass over a PDF
   with a bare `/DCTDecode` image (asserted, so a fixture that lost its JPEG
   fails instead of passing vacuously): **0** calls with JPEG bytes on
-  2.141.0 and on 2.142.1, under `auto` and `rapidocr`. 2.142.1 also stopped
+  2.141.0 and on 2.142.1, under `auto` and `rapidocr`, on both hosts. 2.142.1 also stopped
   re-reading its own rendered PNG, the one call 2.141 made. Not kept.
 - **`filelock>=4.2.1`** (#182 HIGH, #183/#184 LOW, newly declared; locked
   4.2.4) and **`setuptools>=84.1.0`** (#179 LOW, in `[extraction]` beside

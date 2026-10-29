@@ -163,7 +163,7 @@ def _caller_can_read_blob(
 
 def _lookup_blob_row(
     conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
-) -> tuple[str, int, str]:
+) -> tuple[str | None, int, str]:
     """Parse sha + ACL check + SELECT ``(mime_type, size_bytes, path)``.
 
     Single source of truth for every blob-row accessor. Path is selected
@@ -204,7 +204,7 @@ def get_attachment_metadata(
 
 def get_attachment_blob_info(
     conn: psycopg.Connection, sha256_hex: str, *, allowed_account_ids: list[int],
-) -> tuple[str, int, str]:
+) -> tuple[str | None, int, str]:
     """Return ``(mime_type, size_bytes, path)`` for a blob — DB-only, no file open.
 
     Lightweight probe used by the streaming route before evaluating the
@@ -261,7 +261,7 @@ def open_attachment_bytes(
     sha256_hex: str,
     *,
     allowed_account_ids: list[int],
-) -> tuple[BinaryIO, str, int]:
+) -> tuple[BinaryIO, str | None, int]:
     """Open the blob file for streaming. Returns ``(file, mime_type, size)``.
 
     Caller closes the file. Raises NotFound if the DB row is missing, the

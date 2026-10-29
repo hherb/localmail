@@ -59,10 +59,12 @@ def stream_blob(
         cached = not_modified(request, sha256)
         if cached is not None:
             return cached
-        fp = _open_blob_file_at(path, sha256)
         original = get_attachment_filename(
             conn, sha256, allowed_account_ids=allowed,
         )
+    # Opened only once the connection is released, so no DB error (nor the
+    # commit on exit) can drop the handle unclosed (#386).
+    fp = _open_blob_file_at(path, sha256)
     return blob_response(
         request, sha256=sha256, mime=mime, size=size, fp=fp, filename=original,
     )

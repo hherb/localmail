@@ -133,10 +133,11 @@ def message_attachment(
         cached = not_modified(request, entry.sha256)
         if cached is not None:
             return cached
-        fp = _open_blob_file_at(path, entry.sha256)
+    # Opened after the connection is released, as on the sha route (#386).
+    fp = _open_blob_file_at(path, entry.sha256)
     return blob_response(
         request, sha256=entry.sha256, mime=mime, size=size, fp=fp,
-        filename=entry.filename,
+        filename=entry.filename, log_context=f"message_id={mid} index={idx}",
     )
 
 

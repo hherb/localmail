@@ -667,3 +667,35 @@ def test_stream_range_does_not_warn_when_slice_is_fully_satisfiable(
     assert r.status_code == 206
     assert r.content == _PDF_PAYLOAD[:10]
     assert _truncation_warnings_for(caplog.records, sha) == []
+
+
+def test_a_filename_lookup_failure_leaves_no_blob_file_open(
+    db_dsn: str, api_token: str, db_conn, tmp_path: Path,
+    grant_alice_all_accounts, monkeypatch,
+) -> None:
+    """#386 item 1: the sha route opened the file before the filename query,
+    so a DB error there dropped the handle unclosed until GC. Every handle
+    the route opens must be closed (or, better, never opened) on that path."""
+    import localmail.serve.routes.attachments as routes
+
+    sha = "1d" * 32
+    _seed_blob_with_carrier(db_conn, tmp_path, sha, _PDF_PAYLOAD)
+    grant_alice_all_accounts()
+    opened: list = []
+    real_open = routes._open_blob_file_at
+
+    def spy(*args, **kwargs):
+        fp = real_open(*args, **kwargs)
+        opened.append(fp)
+        return fp
+
+    def boom(*args, **kwargs):
+        raise psycopg.OperationalError("connection lost")
+
+    monkeypatch.setattr(routes, "_open_blob_file_at", spy)
+    monkeypatch.setattr(routes, "get_attachment_filename", boom)
+    c = TestClient(create_app(db_dsn=db_dsn, searcher=None), raise_server_exceptions=False)
+    r = c.get(f"/v1/attachments/{sha}", headers={"Authorization": f"Bearer {api_token}"})
+    assert r.status_code == 500
+    # Never opened, not merely closed: the open comes after the DB work.
+    assert opened == [], "the blob was opened before the DB work finished"

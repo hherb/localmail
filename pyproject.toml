@@ -136,11 +136,12 @@ extraction = [
     # `extractor._pdf_only_converter_kwargs` already makes unreachable (#399),
     # so this is hygiene. It moves docling-ibm-models 3 → 4 (new layout
     # models); verified by `tests/acceptance/probe_docling_ocr.py` against
-    # main under rapidocr and ocrmac — see CLAUDE.md. The lock holds 2.142.1
-    # (`-P 'docling==2.142.1' -P 'docling-slim==2.142.1'`): 2.143.x and 2.144.0
-    # drop the Qty column of the probe's native table under rapidocr, and a
-    # bare `uv lock --upgrade` lands there.
-    "docling>=2.132.0",
+    # main under rapidocr and ocrmac — see CLAUDE.md. `pillow>=13.0.0` above
+    # makes the effective floor 2.142 (the first docling not capping Pillow
+    # below 13). The `<2.143` cap is there because 2.143.x and 2.144.0 drop the
+    # Qty column of the probe's native table under rapidocr; without it a bare
+    # `uv lock --upgrade` lands there. Lift it only with a passing probe run.
+    "docling>=2.132.0,<2.143",
     # docling ships no OCR engine of its own, so a scanned PDF gets no text
     # unless one is installed (#248). ocrmac is a thin PyObjC wrapper around
     # Apple Vision: no torch, no model downloads, and native on the platform.

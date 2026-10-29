@@ -23,8 +23,9 @@
 > nothing the daemon imports.
 >
 > **(2) docling is deliberately NOT the newest release.** It is locked at
-> 2.142.1 because 2.143.x/2.144.0 fail the OCR probe (below). A bare
-> `uv lock --upgrade` will undo that.
+> 2.142.1 because 2.143.x/2.144.0 fail the OCR probe (below), and
+> `pyproject.toml` caps `docling<2.143` so a bare `uv lock --upgrade` cannot
+> undo that. Lift the cap only with a passing probe on both hosts.
 >
 > **(3) Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.

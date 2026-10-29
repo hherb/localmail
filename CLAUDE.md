@@ -2613,13 +2613,12 @@ rather than argued.
   fastembed release up to 0.9.0, and its `main`, declares `pillow<13`; the fix
   is upstream PR qdrant/fastembed#830. "Nothing else caps it" was **wrong**:
   docling 2.141's whole stack (docling-slim, -core, -parse, -ibm-models) also
-  declared `pillow<13`. The override would have resolved anyway, since uv's
-  overrides replace those requirements too, which is how this went unnoticed. A uv
-  `override-dependencies = ["pillow>=13.0.0"]` resolves cleanly. The override
-  was **rejected**: Pillow 13 is a major (with API removals) under docling,
-  torchvision and rapidocr, and the exposure did not justify it. When #830
-  ships, bump fastembed's git `rev` and Pillow together, then run the OCR
-  probe on both hosts.
+  declared `pillow<13`. It went unnoticed because a uv
+  `override-dependencies = ["pillow>=13.0.0"]` replaces those requirements
+  too, so it resolved cleanly. The override was **rejected**: Pillow 13 is a
+  major (with API removals) under docling, torchvision and rapidocr, and the
+  exposure did not justify it. When #830 ships, bump fastembed's git `rev`
+  and Pillow together, then run the OCR probe on both hosts.
   - **Why waiting is safe:** a scanned PDF is mostly embedded JPEG, and
     docling-parse's default config *does* hand embedded JPEG/JP2 bytes to
     `PIL.Image.open`. So this was measured: a spy on `Image.open` around a real
@@ -2667,14 +2666,17 @@ and shipped in fastembed 0.9.1.
   alerts, 5 CRITICAL), for the `transformers` reason. The dev group's floor
   was raised to match.
 - **docling had to move, because the 2.141 stack caps Pillow below 13.** The
-  first docling to lift that is 2.142. The lock holds **2.142.1**
-  (`-P 'docling==2.142.1' -P 'docling-slim==2.142.1'`), not the newest:
+  first docling to lift that is 2.142, which `pillow>=13.0.0` makes the
+  effective floor. The lock holds **2.142.1**
+  (`-P 'docling==2.142.1' -P 'docling-slim==2.142.1'`), and `pyproject.toml`
+  caps `docling<2.143`:
   - **2.143.x and 2.144.0 regress the OCR probe.** `native_table` under
     rapidocr comes back with the Qty column empty (`3` and `1` missing),
     deterministically. Bisected: Pillow 12 vs 13, docling-parse 7.22 vs 7.24
     and ibm-models 4.0.3 vs 4.0.4 make no difference; docling 2.142.x passes
-    and 2.143.1 fails with everything else held. A bare `uv lock --upgrade`
-    lands on the failing release.
+    and 2.143.1 fails with everything else held. The cap is what stops a
+    bare `uv lock --upgrade` landing there; a `-P` pin alone does not survive
+    one. Lift it only with a passing probe on both hosts.
   - **It is not a production path today.** `DoclingExtractor` only sees PDFs
     the lightweight path found no text in, and `native_table` has a text
     layer. The scanned fixtures pass on every version. It is still the probe
@@ -2690,8 +2692,9 @@ and shipped in fastembed 0.9.1.
   A spy on `PIL.Image.open` around a real `DoclingExtractor` pass over a PDF
   with a bare `/DCTDecode` image (asserted, so a fixture that lost its JPEG
   fails instead of passing vacuously): **0** calls with JPEG bytes on
-  2.141.0 and on 2.142.1, under `auto` and `rapidocr`, on both hosts. 2.142.1 also stopped
-  re-reading its own rendered PNG, the one call 2.141 made. Not kept.
+  2.141.0 and on 2.142.1, under `auto` and `rapidocr`, on both hosts.
+  2.142.1 also stopped re-reading its own rendered PNG, the one call 2.141
+  made. Not kept.
 - **`filelock>=4.2.1`** (#182 HIGH, #183/#184 LOW, newly declared; locked
   4.2.4) and **`setuptools>=84.1.0`** (#179 LOW, in `[extraction]` beside
   torch, which pulls it in) are hygiene: `ReadWriteLock`/`SoftFileLock` and

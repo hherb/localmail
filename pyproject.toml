@@ -15,7 +15,23 @@ dependencies = [
     # diagnostic is asserted on `result.stderr`. On 8.1 those tests raise
     # `ValueError: stderr not separately captured` rather than fail honestly.
     "click>=8.2",
-    "fastembed>=0.8.0",
+    # 0.9.1 is the first PyPI release carrying both the EmbeddingGemma support
+    # we used to take from a git rev (PR #592) and the `pillow<14` widening
+    # (PR #830) that unblocks the floor below. Embeddings and rerank scores
+    # were verified bit-identical to the git rev before the source was dropped.
+    "fastembed>=0.9.1",
+    # Transitive via fastembed and docling, declared for the `transformers`
+    # reason: Dependabot #139–#181 (5 CRITICAL, 23 HIGH) against < 13.0.0, and
+    # the lock sat at 12.3.0. fastembed (< 0.9.1) and docling (< 2.142) both
+    # capped it below 13, which is what held this open. A scanned PDF's
+    # embedded JPEG was measured not to reach `PIL.Image.open` (pdfium decodes
+    # it), so this is hygiene, not an incident; re-measure after a docling bump.
+    "pillow>=13.0.0",
+    # Transitive via huggingface-hub and torch, declared for the `transformers`
+    # reason: Dependabot #182 (HIGH) and #183/#184 (LOW), < 4.2.1. All three
+    # are in `ReadWriteLock`/`SoftFileLock` or Windows-only, and only the model
+    # cache takes a lock here, so hygiene.
+    "filelock>=4.2.1",
     "google-auth>=2.30",
     "google-auth-oauthlib>=1.2",
     # Transitive via google-auth-oauthlib → requests-oauthlib, and declared
@@ -120,8 +136,12 @@ extraction = [
     # `extractor._pdf_only_converter_kwargs` already makes unreachable (#399),
     # so this is hygiene. It moves docling-ibm-models 3 → 4 (new layout
     # models); verified by `tests/acceptance/probe_docling_ocr.py` against
-    # main under rapidocr and ocrmac — see CLAUDE.md.
-    "docling>=2.132.0",
+    # main under rapidocr and ocrmac — see CLAUDE.md. `pillow>=13.0.0` above
+    # makes the effective floor 2.142 (the first docling not capping Pillow
+    # below 13). The `<2.143` cap is there because 2.143.x and 2.144.0 drop the
+    # Qty column of the probe's native table under rapidocr; without it a bare
+    # `uv lock --upgrade` lands there. Lift it only with a passing probe run.
+    "docling>=2.132.0,<2.143",
     # docling ships no OCR engine of its own, so a scanned PDF gets no text
     # unless one is installed (#248). ocrmac is a thin PyObjC wrapper around
     # Apple Vision: no torch, no model downloads, and native on the platform.
@@ -154,6 +174,10 @@ extraction = [
     # package we do not import follows ocrmac above, which is here for the same
     # reason: it shapes what docling does.
     "transformers>=5.10.0",
+    # Transitive via torch, declared for the `transformers` reason: Dependabot
+    # #179 (LOW), a Windows path escape during legacy wheel installation.
+    # Neither host is Windows and nothing installs wheels at runtime: hygiene.
+    "setuptools>=84.1.0",
 ]
 mcp = [
     # Floor is security-driven: Dependabot #132, unbounded session
@@ -174,7 +198,7 @@ mcp = [
 [dependency-groups]
 dev = [
     "pikepdf>=9.0",
-    "Pillow>=10.3",
+    "Pillow>=13.0.0",
     "pytest>=8.2",
     "pytest-cov>=5.0",
     "reportlab>=4.0",
@@ -226,5 +250,3 @@ python_executable = ".venv/bin/python"
 mypy_path = "src"
 ignore_missing_imports = true
 
-[tool.uv.sources]
-fastembed = { git = "https://github.com/qdrant/fastembed.git", rev = "87678dd784272f8e5d9fba034d7852d4233e58fd" }

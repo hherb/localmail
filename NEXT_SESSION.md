@@ -1,31 +1,33 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-10-24 (session 60).** `main` was **`ff0eddc`** at
-> session start (#408 merged, closing #377), and is unchanged.
+> **Status as of 2026-10-29 (session 61).** `main` was **`9154672`** at
+> session start (#409 merged, closing #394), and is unchanged.
 >
 > This session:
-> - **deployed #408 on both hosts.** `/v1/version` → `build_hash: ff0eddc`
+> - **deployed #409 on both hosts.** `/v1/version` → `build_hash: 9154672`
 >   on the Mac and the DGX; DGX units `active`. Local branch
->   `fix/377-nul-in-search-query` deleted (diff against `main` empty).
-> - **fixed #394: PR on `fix/394-cap-search-fields`.**
+>   `fix/394-cap-search-fields` deleted (diff against `main` empty).
+> - **closed carried item 2:** two `docling@2.141.0` rows exist on the Mac
+>   (2818 and 1660 chars of text, 2026-10-27/28); `transient_extractions` is 0.
+> - **fastembed#830 merged and shipped in fastembed 0.9.1**, so the Pillow
+>   bump went ahead: **PR #410 on `chore/pillow13-fastembed-091`.**
 >
-> **Open issues: 38, 37 once the PR merges** (`Closes #394`).
+> **Open issues: 37** (#410 closes Dependabot alerts, not issues).
 >
 > **Things to know before you touch anything.**
 >
-> **(1) The Mac deployment tree (`~/src/localmail`) is on the PR branch,
-> not `main`.** The change is in `api/search_projection.py` (serve only).
-> Neither agent was restarted after the branch switch, so the running code
-> is `ff0eddc`'s. `git checkout main` after the merge is step 0.
+> **(1) The PR was built in a worktree, `../localmail-pillow13`, with its own
+> venv.** The Mac deployment tree (`~/src/localmail`) is still on `main` at
+> `9154672`, and its venv still holds docling 2.141 / Pillow 12. After the
+> merge you **must** `uv sync` there (step 0). A `git pull` alone changes
+> nothing the daemon imports.
 >
-> **(2) Still no scanned PDF on the Mac since the docling 2.141 deploy.**
-> Newest `docling%` row is still `docling@2.97.0` (2026-10-01);
-> `transient_extractions` is 0.
+> **(2) docling is deliberately NOT the newest release.** It is locked at
+> 2.142.1 because 2.143.x/2.144.0 fail the OCR probe (below), and
+> `pyproject.toml` caps `docling<2.143` so a bare `uv lock --upgrade` cannot
+> undo that. Lift the cap only with a passing probe on both hosts.
 >
-> **(3) fastembed#830 is still open** (checked 2026-10-24), so the Pillow
-> alerts stay open.
->
-> **(4) Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
+> **(3) Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
 
 ## Project context (1-minute version)
@@ -49,137 +51,166 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### PR: `fix/394-cap-search-fields` (opened on `main`)
+### PR #410: `chore/pillow13-fastembed-091` (opened on `main`)
 
 | SHA | What |
 |---|---|
-| `32b06b7` | #394: `fields` over 48 entries is a 400 naming the cap; frozenset membership; tests, CLAUDE.md, README |
-| `aabd681` | review fixes: route comment names the library-only branches correctly, cap message wording, handoff row |
-| handoff | this file + `docs/handoffs/2026-10-24T0200Z-cap-search-fields.md` |
+| `8f9b169` | fastembed `>=0.9.1` from PyPI (git rev dropped); `pillow>=13.0.0`; docling locked 2.142.1; `filelock>=4.2.1`, `setuptools>=84.1.0`; CLAUDE.md round |
+| `250555e` | CLAUDE.md: the aarch64 probe result |
+| handoff | this file + `docs/handoffs/2026-10-28T2158Z-pillow13-fastembed-091.md` |
 
-- **The defect.** `fields` had no length bound and accepts duplicates, so
-  the caller chose `len(fields)`, and `project_hit`'s per-hit re-check
-  (#392) cost that × up to 200 hits (20,000 names: 212 ms).
-- **The fix (`api/search_projection.py`).** `MAX_FIELDS = 48` (4 × the 12
-  hit fields, a literal so a new hit field does not move a documented
-  limit). `fields_error` refuses a longer list **before reading any
-  element**: `fields has N entries; at most 48 are accepted (12 hit
-  fields exist)`. Membership is a `frozenset`. Duplicates stay accepted.
-  - **Why `fields_error`, not `Field(max_length=…)`:** pydantic answers that
-    with a 422 array `detail` (#370); the rule answers problem+json, ahead of
-    the empty-ACL short-circuit like the rest of `fields_error`.
-  - **Why not hoist the re-check out of `project_hit`:** it reopens #392.
-  - **`api_minor` stays 3**: only a list no honest caller sends changes.
-- **Tests:** 4 unit (cap pinned to literal 48, at-cap accepted, over-cap
-  message names count and cap, cap decided before element walk) + one
-  `_REFUSALS` row → both the granted and grant-nothing route tests.
-- **Mutation:** `if len(fields) > MAX_FIELDS:` → `if False:` fails exactly
-  the 4 cap tests (2 unit, 2 route).
-- **Reviewed twice.** A self-review gave `aabd681`; a `/review-pr` pass
-  found no code issues, only these two doc rows.
+- **Why docling moved.** docling 2.141's whole stack (slim, core, parse,
+  ibm-models) declares `pillow<13`, which the third round's "nothing else caps
+  it" missed. 2.142 is the first release to lift it.
+- **Why 2.142.1 and not 2.144.0.** On 2.143.x and 2.144.0,
+  `probe_docling_ocr.py`'s `native_table` under **rapidocr** comes back with
+  the Qty column empty. That reproduced 2 of 2 times.
+  - **Bisect:** Pillow 12 vs 13, docling-parse 7.22.3 vs 7.24.1 and
+    ibm-models 4.0.3 vs 4.0.4 each make no difference. docling 2.142.0 and
+    2.142.1 pass, and 2.143.1 fails with everything else held at the new
+    versions.
+  - **It is not a production path today:** `DoclingExtractor` only sees PDFs
+    with no text layer, and the scanned fixtures pass on every version.
+- **Lock moves:** docling/-slim 2.141.0 → 2.142.1, docling-core 2.101.1 →
+  2.105.0, docling-parse 7.22.3 → 7.24.1, ibm-models 4.0.3 → 4.0.4, doclang
+  0.7.3 → 0.8.0, fastembed 0.8.0 (git) → 0.9.1, filelock 3.29.0 → 4.2.4,
+  pillow 12.3.0 → 13.0.0, setuptools 83.0.0 → 84.2.1. Nothing else.
 
-## Verification (Mac, `~/src/localmail` venv, all extras, `32b06b7`; pytest re-run at `aabd681`: 4170 passed)
+## Verification
 
-| gate | result |
-|---|---|
-| pytest | **4170 passed, 0 failed**, 6 warnings, 314 s |
-| mypy | Success, 160 files |
-| CI | see `gh pr checks`; I stopped at the push |
+| check | Mac | DGX (aarch64) |
+|---|---|---|
+| `probe_docling_ocr.py`, `main` vs branch | 9/9 cells byte-identical (`auto`=ocrmac, `rapidocr`, `ocrmac`), exit 0 | 6/6 byte-identical (`auto`=rapidocr, `rapidocr`), exit 0 |
+| embedding + rerank probe (scratch, not kept) | full-vector hashes + scores bit-identical | bit-identical |
+| `/DCTDecode` JPEG reaching `PIL.Image.open` (scratch spy, not kept) | 0 on 2.141 and 2.142.1 | 0 |
+| pytest (branch venv) | **4170 passed**, 6 warnings, 275 s | — |
+| mypy | Success, 160 files | — |
+| CI | see `gh pr checks 410`; I stopped at the push | |
 
-- Load was 15–28 at the start of the run; no timing is comparable.
+- Load was 10–14 throughout (a bmlibrarian suite was running alongside on
+  its own DB); no timing is comparable.
+- The `rapid_ocr_model.py:658 DeprecationWarning` is pre-existing: `main`
+  emits it too.
 - GUI untouched, so cargo and vitest were not re-run.
 
 ## What's next
 
-### 0. **Merge the PR, return the Mac to `main`**
-- **You merge**, once both CI legs are green.
-- **Mac:** `git checkout main && git pull`; restart serve (and the daemon,
-  to keep both on one commit); then check
-  `git diff --stat main fix/394-cap-search-fields` is empty and
-  `git branch -D` it.
-- **DGX:** `git pull --ff-only`, restart both units.
-- **Acceptance:** `/v1/version` reports the merge commit on both hosts;
-  `gh issue view 394` is closed.
+### 0. **Merge #410, then sync both deployments**
+- **You merge**, once both CI legs are green. On merge, Dependabot should
+  close #139–#184 (pillow, filelock, setuptools).
+- **Mac:**
+  - `git pull`, then
+    `uv sync --frozen --extra mcp --extra extraction` in `~/src/localmail`.
+  - Restart **both** agents. docling is imported lazily, so a daemon left
+    running would mix old modules in memory with new ones from disk.
+  - Remove the worktree: `git worktree remove ../localmail-pillow13`, then
+    `git branch -D chore/pillow13-fastembed-091`.
+- **DGX:** `git pull --ff-only`,
+  `~/.local/bin/uv sync --frozen --extra mcp --extra extraction`, then
+  restart both units.
+- **Acceptance:**
+  - `/v1/version` reports the merge commit on both hosts.
+  - `.venv/bin/python -c "import PIL, docling; print(PIL.__version__)"`
+    prints 13.0.0 on both hosts.
+  - The open-alert listing shows only accelerate (#71) and rustls (#115).
 
-### 1. **Pillow 13, once fastembed lifts its cap** (carried)
-- qdrant/fastembed#830 still **open** on 2026-10-24.
-- When it merges: move `[tool.uv.sources] fastembed`'s `rev`, raise the dev
-  group's `Pillow>=10.3` to `>=13.0.0`, re-lock, run the full suite and
-  `probe_docling_ocr.py` on **both** hosts (`--engine auto --engine
-  rapidocr` on the Mac).
-- **Acceptance:** lock holds Pillow 13.x, both probes exit 0, alerts close.
+### 1. **Dismiss Dependabot #115 (rustls) as stale** (yours: outward action)
+- It reports `= 0.23.40`; `gui/src-tauri/Cargo.lock` holds 0.23.46.
+- **Acceptance:** alert closed. If it re-opens, check `cargo tree -i rustls`
+  for a second copy.
 
-### 2. **Watch the first scanned PDF on the Mac** (carried)
-- **Acceptance:** a new `attachment_text` row with `extractor LIKE
-  'docling@2.141%'` and non-empty text; `transient_extractions` still 0.
+### 2. **Watch for docling > 2.144** (new)
+- Re-run the probe under rapidocr against any new release. If `native_table`
+  passes, move the lock forward. Consider filing upstream: native PDF + a
+  `FULL_PAGE` rapidocr pass drops single-digit table cells from 2.143 on.
+  That issue would need a repro outside localmail.
+- **Acceptance:** lock on the newest release whose probe exits 0 on both
+  hosts.
 
 ### 2a. **emSign G3 in the OS trust stores** (carried)
-- Re-check after each OS or `ca-certificates` update (commands below).
+- Re-check after each OS or `ca-certificates` update (commands below). Mac
+  `/etc/ssl/cert.pem` still names it (count 2 on 2026-10-29).
 
 ### 3. **kastellan** (carried, yours)
 - Ask whether it still wants slice C (`/problems/token-expired`).
 - Tell it about `?headers=list` (api_minor ≥ 1), attachment index paging
-  (≥ 2), `fields` / `snippet_chars` (≥ 3) — and now the 48-entry `fields`
-  cap.
+  (≥ 2), `fields` / `snippet_chars` (≥ 3), and the 48-entry `fields` cap.
 
 ### 4. **Carried issues**
-- **Next small slice:** #395 — forbid a new `{@html}` sink in `gui/src`.
-  - **Acceptance:** a pure rule (the `_rerank_wiring_rules.py` shape) scans
-    every `.svelte` file under `gui/src` and reports any `{@html`; a test
-    runs it (in vitest or pytest) with a positive control proving it finds
-    one; zero hits on today's tree.
+- **Next small slice:** #395, which forbids a new `{@html}` sink in
+  `gui/src`.
+  - **Acceptance:**
+    - A pure rule (the `_rerank_wiring_rules.py` shape) scans every `.svelte`
+      file under `gui/src` and reports any `{@html`.
+    - A test runs it (in vitest or pytest), with a positive control proving
+      it finds one.
+    - Today's tree has zero hits.
 - **Then:** #386, #389, #380, #383, #384, #378, #369, #373, #372, #370,
   #371, #368, #365.
 - **Not filed yet:** the `snippet_source="header"` mislabel on a
   whole-message lexical win.
-- **Larger work:** #375; #374 + #305 (the `cli.py` refactor);
-  #358/#357, #330/#327/#328, #319/#318/#320 (next migration `0037_*.sql`),
-  #340, #363, #285; lifting the rapidocr cap; admin GUI phase 5 (Users
-  panel); robustness: #218, #226, #225/#227, #200/#211/#208, #206, #204, #25.
+- **Larger work:**
+  - #375; #374 + #305 (the `cli.py` refactor).
+  - #358/#357, #330/#327/#328, #319/#318/#320 (next migration `0037_*.sql`).
+  - #340, #363, #285.
+  - Lifting the rapidocr cap; admin GUI phase 5 (Users panel).
+  - Robustness: #218, #226, #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The cap is 48, the issue's own suggestion** (`len(HIT_FIELDS) * 4`).
-   Not asked of the operator: loosening later is compatible, and no honest
-   caller is near it. Say so if you disagree before merging.
-2. **Duplicates stay accepted**; refusing them was the other option and
-   would change answers for callers that do nothing wrong.
-3. **Deploying #408 went ahead without a fresh confirmation**, per the
-   handoff's step 0 and sessions 54–59.
-4. **Code and handoff are in one PR.**
+1. **The Pillow bump went ahead without asking**, because the third round
+   recorded the trigger ("when #830 ships, bump"). It needed one deviation
+   the handoff did not foresee: dropping the git source for PyPI rather
+   than moving the rev.
+2. **docling locked at 2.142.1, not newest.** This follows the probe's
+   exit status, the rule the probe was kept for. Say so before merging if
+   you would rather take 2.144 and accept the native-table difference.
+3. **filelock and setuptools were folded in** because they were open on the
+   same lock and cost no extra verification.
+4. **#395 deferred** to keep this PR one concern (dependencies) for review.
+5. **Deploying #409 went ahead without a fresh confirmation**, per the
+   handoff's step 0.
 
 ## Open decisions & risks
 
-1. **Pillow alerts stay open**, some critical, until fastembed#830 ships.
-2. **The Mac's extraction path is still unexercised by real mail** under
-   docling 2.141.
-3. **The Mac tree is on the PR branch until step 0.**
-4. **The cap is a wire-contract change** (a 49-entry `fields` that was a 200
-   is now a 400). Documented in README; `api_minor` unchanged.
-5. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
-6. **Never run two pytest sessions against one test database.**
-7. **Restore a mutation from a file copy, never with `git checkout`.**
-8. **The test DB is on port 5532**, the same cluster as the live archive.
-9. **Always sync with `--extra mcp --extra extraction` on both hosts**, and
+1. **A deployment left on `git pull` without `uv sync` silently keeps
+   Pillow 12 / docling 2.141.** Step 0 is two commands per host, not one.
+2. **The native-table regression in docling ≥ 2.143 is unexplained**, only
+   localised. If it reaches scanned tables in a later release, the probe's
+   `scanned_table` cell is what will catch it.
+3. **accelerate #71 has no fix**; unchanged.
+4. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
+5. **Never run two pytest sessions against one test database.**
+6. **Restore a mutation from a file copy, never with `git checkout`.**
+7. **The test DB is on port 5532**, the same cluster as the live archive.
+8. **Always sync with `--extra mcp --extra extraction` on both hosts**, and
    use `~/.local/bin/uv` on the DGX.
-10. **`uv sync --dry-run` is not read-only; `uv lock --dry-run` is.**
-11. **No ROADMAP.md.** That `/nextsession` step is a no-op.
+9. **`uv sync --dry-run` is not read-only; `uv lock --dry-run` is.**
+10. **No ROADMAP.md.** That `/nextsession` step is a no-op.
 
 ## Exact commands to resume
 
 ```bash
 cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
-git status && git branch --show-current  # fix/394-cap-search-fields until step 0
+git status && git branch --show-current  # main
 git log --oneline -1 origin/main         # THE authority
-git worktree list
+git worktree list                        # ../localmail-pillow13 until step 0
 
 # Is the PR merged?
-gh pr list --state all --head fix/394-cap-search-fields --json number,state,mergeCommit
-gh issue list --limit 200 --json number --jq length       # 37 after the merge
+gh pr view 410 --json state,mergeCommit
+gh issue list --limit 200 --json number --jq length       # 37
 gh api --paginate repos/hherb/localmail/dependabot/alerts \
   --jq '.[] | select(.state=="open") | .dependency.package.name' | sort | uniq -c
-gh pr view 830 --repo qdrant/fastembed --json state,mergedAt   # the Pillow unblock
+
+# After merge — Mac:
+#   git pull && unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
+#   launchctl kickstart -k gui/$(id -u)/com.localmail.serve
+#   launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
+#   .venv/bin/python -c "import PIL; print(PIL.__version__)"     # 13.0.0
+#   git worktree remove ../localmail-pillow13 && git branch -D chore/pillow13-fastembed-091
+# DGX:
+#   ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user restart localmail-daemon localmail-serve'
 
 # Deployment health
 launchctl list | grep localmail
@@ -191,15 +222,6 @@ psql -p 5532 -d localmail -Atc "select count(*) from transient_extractions"
 grep -c "emSign ECC Root CA - G3" /etc/ssl/cert.pem
 ssh 10.0.0.3 'ls /etc/ssl/certs | grep -ic emsign_ecc_root_ca_-_g3'
 
-# After merge — Mac:
-#   git checkout main && git pull
-#   launchctl kickstart -k gui/$(id -u)/com.localmail.serve
-#   launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
-#   git diff --stat main fix/394-cap-search-fields   # empty ⇒ safe
-#   git branch -D fix/394-cap-search-fields
-# DGX:
-#   ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && systemctl --user restart localmail-daemon localmail-serve'
-
 # Load before trusting any timing; no other localmail pytest may be running.
 uptime; pgrep -fl pytest
 
@@ -209,13 +231,13 @@ uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 160 fil
 cd gui && npm test -- --run && npm run check && npm audit
 cd gui/src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
 
-# This change directly:
-unset VIRTUAL_ENV && uv run pytest -q tests/test_search_projection.py tests/test_serve_search_projection.py
+# This change directly (probe; exits 1 on any failed cell):
+.venv/bin/python tests/acceptance/probe_docling_ocr.py --engine auto --engine rapidocr --engine ocrmac
 ```
 
-`main` was **`ff0eddc`** at session start and is unchanged. This session left
-**one PR** on `fix/394-cap-search-fields`: commit `32b06b7` plus this
-handoff.
+`main` was **`9154672`** at session start and is unchanged. This session left
+**one PR**, #410 on `chore/pillow13-fastembed-091`: commits `8f9b169` and
+`250555e`, plus this handoff.
 
 The latest migration is still **`0036_api_keys.sql`**; the next free slot is
-`0037_*.sql`. **Open issues: 38 (37 after the merge).**
+`0037_*.sql`. **Open issues: 37.**

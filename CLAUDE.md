@@ -2502,7 +2502,8 @@ release from there needs
   output. The 15 alerts were dismissed as "vulnerable code not used" once
   #399 was on `main`. The bump followed as its own PR (next bullet).
 - **docling `>=2.132.0`, locked at 2.141.0, with `docling-ibm-models` 4.0.3
-  (the bump deferred from the second October round).** The floor is the
+  (the bump deferred from the second October round).** (Superseded: locked
+  at 2.142.1 / ibm-models 4.0.4 since the fourth round, below.) The floor is the
   highest first-patched version across #116 and #118–#131. 2.141.0 was the
   newest release on 2026-10-21, a day old; the next docling release moves a
   bare `uv lock --upgrade`, so re-run the probe when it does.
@@ -2607,14 +2608,17 @@ release from there needs
 Pillow open, by operator decision.** Nothing in it is mail-reachable, measured
 rather than argued.
 
-- **Pillow 13.0.0 (29 alerts, 3 CRITICAL) is blocked by fastembed.** Every
+- **Pillow 13.0.0 (29 alerts, 3 CRITICAL) is blocked by fastembed** —
+  **resolved by the fourth round, below.** Every
   fastembed release up to 0.9.0, and its `main`, declares `pillow<13`; the fix
-  is upstream PR qdrant/fastembed#830. Nothing else caps it: a uv
-  `override-dependencies = ["pillow>=13.0.0"]` resolves cleanly. The override
-  was **rejected**: Pillow 13 is a major (with API removals) under docling,
-  torchvision and rapidocr, and the exposure did not justify it. When #830
-  ships, bump fastembed's git `rev` and Pillow together, then run the OCR
-  probe on both hosts.
+  is upstream PR qdrant/fastembed#830. "Nothing else caps it" was **wrong**:
+  docling 2.141's whole stack (docling-slim, -core, -parse, -ibm-models) also
+  declared `pillow<13`. It went unnoticed because a uv
+  `override-dependencies = ["pillow>=13.0.0"]` replaces those requirements
+  too, so it resolved cleanly. The override was **rejected**: Pillow 13 is a
+  major (with API removals) under docling, torchvision and rapidocr, and the
+  exposure did not justify it. When #830 ships, bump fastembed's git `rev`
+  and Pillow together, then run the OCR probe on both hosts.
   - **Why waiting is safe:** a scanned PDF is mostly embedded JPEG, and
     docling-parse's default config *does* hand embedded JPEG/JP2 bytes to
     `PIL.Image.open`. So this was measured: a spy on `Image.open` around a real
@@ -2646,6 +2650,58 @@ rather than argued.
 - **The re-lock rewrote nvidia/cuda markers again** (dropping
   `sys_platform == 'linux'`). `uv export --all-extras --all-groups` from the
   two locks differs only in certifi and pypdf, so the rewrite is equivalent.
+
+**The fourth October 2026 round (Dependabot #139–#184) closed Pillow, by moving
+fastembed to PyPI and docling to 2.142.1.** fastembed#830 merged on 2026-10-24
+and shipped in fastembed 0.9.1.
+
+- **fastembed comes from PyPI again (`>=0.9.1`).** The `[tool.uv.sources]` git
+  rev existed only for EmbeddingGemma support (fastembed PR #592), which 0.9.1
+  carries. A one-off probe embedded four multilingual documents and a query,
+  and reranked them, under both. The full vectors' hashes and the rerank
+  scores are **bit-identical** across 0.8.0 (the git rev) and 0.9.1. That is
+  what matters here: the stored `halfvec`s are only comparable to new query
+  vectors if the model output did not move.
+- **`pillow>=13.0.0` is declared in the core dependencies** (#139–#181: 41
+  alerts, 5 CRITICAL), for the `transformers` reason. The dev group's floor
+  was raised to match.
+- **docling had to move, because the 2.141 stack caps Pillow below 13.** The
+  first docling to lift that is 2.142, which `pillow>=13.0.0` makes the
+  effective floor. The lock holds **2.142.1**
+  (`-P 'docling==2.142.1' -P 'docling-slim==2.142.1'`), and `pyproject.toml`
+  caps `docling<2.143`:
+  - **2.143.x and 2.144.0 regress the OCR probe.** `native_table` under
+    rapidocr comes back with the Qty column empty (`3` and `1` missing),
+    deterministically. Bisected: Pillow 12 vs 13, docling-parse 7.22 vs 7.24
+    and ibm-models 4.0.3 vs 4.0.4 make no difference; docling 2.142.x passes
+    and 2.143.1 fails with everything else held. The cap is what stops a
+    bare `uv lock --upgrade` landing there; a `-P` pin alone does not survive
+    one. Lift it only with a passing probe on both hosts.
+  - **It is not a production path today.** `DoclingExtractor` only sees PDFs
+    the lightweight path found no text in, and `native_table` has a text
+    layer. The scanned fixtures pass on every version. It is still the probe
+    failing, under the engine the DGX uses, so it decides the lock.
+  - **Result on the Mac, `main` vs branch:** all nine cells (three fixtures ×
+    `auto`, `rapidocr`, `ocrmac`) byte-identical, `ocr_selection` unchanged
+    (`ocrmac`), exit 0.
+  - **Result on the DGX (aarch64), `main` vs branch:** all six cells (`auto`,
+    which selects rapidocr there, and `rapidocr`) byte-identical, exit 0;
+    the embedding probe and the JPEG spy agree with the Mac. Run from a
+    throwaway worktree with its own venv, so the daemon's venv never saw it.
+- **The embedded-JPEG measurement was re-run, as the third round required.**
+  A spy on `PIL.Image.open` around a real `DoclingExtractor` pass over a PDF
+  with a bare `/DCTDecode` image (asserted, so a fixture that lost its JPEG
+  fails instead of passing vacuously): **0** calls with JPEG bytes on
+  2.141.0 and on 2.142.1, under `auto` and `rapidocr`, on both hosts.
+  2.142.1 also stopped re-reading its own rendered PNG, the one call 2.141
+  made. Not kept.
+- **`filelock>=4.2.1`** (#182 HIGH, #183/#184 LOW, newly declared; locked
+  4.2.4) and **`setuptools>=84.1.0`** (#179 LOW, in `[extraction]` beside
+  torch, which pulls it in) are hygiene: `ReadWriteLock`/`SoftFileLock` and
+  Windows-only paths respectively.
+- **Dependabot #115 (rustls) is stale, not open.** It still reports
+  `= 0.23.40`, while `gui/src-tauri/Cargo.lock` has held 0.23.46 since the
+  second round. Dismiss it; do not chase it.
 
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +

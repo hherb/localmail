@@ -1015,10 +1015,14 @@ for a caller with no account grants. So is a NUL character (U+0000) or a
 lone surrogate (such as JSON `"\ud800"`) in `query`, `from`, `to`, `subject`
 or `lang`: Postgres text cannot hold either, and each used to be an unhandled
 500 ([#377](https://github.com/hherb/localmail/issues/377)). They are refused
-rather than stripped, since a stripped query is a different question. A value of the wrong JSON type is still
-FastAPI's 422 where Pydantic cannot coerce it (a number for `lang`), and is
-coerced where it can (`"yes"` for `has_attachment` reads as `true`) —
-[#370](https://github.com/hherb/localmail/issues/370). An empty string for
+rather than stripped, since a stripped query is a different question. A value of the wrong JSON type, or
+out of range (a number for `lang`, `"limit": 500`, a string for `fields`, a
+body that is not a JSON object), is a problem+json 400 too, its `detail` one
+`location: message` per error (`fields.1: Input should be a valid string`);
+it used to be FastAPI's 422 with an array `detail`
+([#370](https://github.com/hherb/localmail/issues/370)). That holds for
+`/v1/search` only; other routes still answer 422. Pydantic still coerces where
+it can (`"yes"` for `has_attachment` reads as `true`). An empty string for
 `from`, `to`, `subject` or a date is an absent filter. Every hit's
 `has_attachments` describes the message; it used to report whether the
 *matched text* came from an attachment. An attachment is any part

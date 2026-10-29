@@ -3792,8 +3792,10 @@ for the full design.
     nor `ge`/`le`).** A bare `int` field lets pydantic's lax coercion silently
     turn a JSON `"5"` or `5.0` into the integer `5` — a 200 under a request
     that never named an integer — and a genuinely non-numeric value (`1.5`,
-    `"abc"`) gets pydantic's own 422 with an array `detail` (#370), never the
-    pure rule's problem+json 400. `int | bool` fixed only the `bool` half (a
+    `"abc"`) got pydantic's own 422 with an array `detail`, never the pure
+    rule's problem+json 400 (since #370 the route class makes that a 400
+    too, but naming a location rather than the rule — and it cannot help the
+    coercion half, which never fails). `int | bool` fixed only the `bool` half (a
     JSON `true` used to coerce to `1`). `Any` reaches every JSON value into
     `snippet_width_error` unmodified, so that pure rule is the one authority:
     bool, non-int, and out-of-range are all its call. The *type* refusal is
@@ -3849,8 +3851,8 @@ for the full design.
       adding a hit field does not silently move a documented limit), judged
       **before** any element is read so the gate's own cost is bounded, and
       membership is a `frozenset`. Not `Field(max_length=…)`: pydantic
-      answers that with a 422 array `detail` (#370), where the rule answers
-      problem+json naming the cap — and it sits ahead of the empty-ACL
+      answered that with a 422 array `detail` (a 400 naming only a location
+      since #370), where the rule answers problem+json naming the cap — and it sits ahead of the empty-ACL
       short-circuit with the rest of `fields_error`. Duplicates stay
       accepted. `api_minor` stays 3: only a list no honest caller sends
       changes answer. Hoisting the per-hit re-check out of `project_hit`
@@ -5925,9 +5927,29 @@ for the full design.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.
-    `forbid` was not used: FastAPI answers it with a 422 whose `detail` is
-    an array, not problem+json. A type error on a known field still gets
-    that 422 (#370).
+    `forbid` was not used: FastAPI answered it with a 422 whose `detail` is
+    an array, not problem+json.
+  - **Every schema error on `/v1/search` is a problem+json 400 (#370, #389).**
+    The search router's `route_class` is
+    [src/localmail/serve/request_validation.py](src/localmail/serve/request_validation.py)`::ProblemJsonValidationRoute`,
+    which re-raises FastAPI's `RequestValidationError` as `ValidationFailed`,
+    so the existing `APIError` handler renders it. `detail` is the pure
+    `validation_detail`: one `loc: msg` per error, `body.` dropped,
+    `"; "`-joined. Before it a client rendering `detail` (kastellan) got a
+    string for one mistake and an array for the one beside it.
+    - **Scoped to the search router, not app-wide** (#370's option 1).
+      Option 2 changes every route's 422 and needs the GUI's and kastellan's
+      error handling checked first; `test_other_routes_keep_fastapis_422`
+      pins the scope.
+    - **#389 is closed by it rather than by typing `fields` as `Any`.**
+      Retyping covered 2 of #370's ~9 shapes, blanks the OpenAPI type, and
+      adds a second type check beside pydantic's. `snippet_chars` stays `Any`
+      for a different reason: lax coercion is a silent **200**, and a
+      handler only sees failures. `fields_error`'s type branches stay, for
+      library callers.
+    - **The GUI is unaffected in practice** — its body is built from typed
+      Rust structs — but note `search_paging.isCursorRejected` stops the
+      scroll on any 400, which is the right reading of a schema error too.
     - **An unknown MCP tool argument is still dropped (#368).** FastMCP's
       `ArgModelBase` sets no `extra`, and there is no supported per-tool
       hook, so "refused" is an HTTP property today.

@@ -13,8 +13,10 @@ from localmail.api.acl import allowed_account_ids
 from localmail.api.errors import FeatureUnavailable, ValidationFailed
 from localmail.api.search import run_search
 from localmail.serve.middleware import get_authenticated_user
+from localmail.serve.request_validation import ProblemJsonValidationRoute
 
-router = APIRouter()
+# Schema errors answer problem+json 400 like every other refusal here (#370).
+router = APIRouter(route_class=ProblemJsonValidationRoute)
 
 
 class SearchFiltersModel(BaseModel):
@@ -42,10 +44,10 @@ SEARCH_LIMIT_MAX = 200
 
 class SearchRequest(BaseModel):
     # "allow" so the route can refuse an unknown field by name rather than
-    # drop it (#364). "forbid" makes FastAPI answer 422 with an array
-    # `detail`, which is not problem+json, so a client that renders `detail`
-    # (the kastellan mail worker does) gets nothing it can act on. A type
-    # error on a known field is still that 422 (#370).
+    # drop it (#364). It was chosen because "forbid" meant FastAPI's 422 with
+    # an array `detail`. Since #370 the router's route class makes any schema
+    # error a problem+json 400, so "forbid" would no longer cost that; "allow"
+    # stays because `_unknown_field_error`'s wording is already the contract.
     model_config = {"extra": "allow"}
 
     # Optional, and nullable like every other optional field here: a
@@ -88,23 +90,22 @@ class SearchRequest(BaseModel):
     # has no rewriter configured — the response's rewrite_skipped reflects it.
     smart: bool = False
     # Slice E: project each hit to exactly these keys (`snippet` is the
-    # plain-text name for `snippet_html`). Deliberately no `min_length` —
-    # pydantic would answer 422 with an array `detail` (#370) where
-    # `fields_error` answers a problem+json 400 that names the offending
-    # name. The element type is left to pydantic, so a non-list `fields`, or
-    # a non-string in it, stays the 422 that #370 tracks, which makes
-    # `fields_error`'s non-list and non-string branches library-only. That
-    # asymmetry with `snippet_chars` below is deliberate but unresolved — see
-    # #389. No `max_length` for the same reason: the length cap (#394) is
-    # `fields_error`'s, so it too answers problem+json naming the cap.
+    # plain-text name for `snippet_html`). The element type is pydantic's:
+    # a non-list `fields`, or a non-string in it, is a schema error, which
+    # the route class answers as a problem+json 400 (#370, #389), so
+    # `fields_error`'s type branches serve library callers only. Not `Any`
+    # like `snippet_chars`: pydantic does not lax-coerce into `list[str]`, so
+    # there is no silent 200 to escape, and the OpenAPI schema keeps the
+    # type. No `min_length`/`max_length`: emptiness and the cap (#394) are
+    # `fields_error`'s, whose messages name the rule rather than a location.
     fields: list[str] | None = None
     # `Any`, not `int | bool` and not a bare `int`: pydantic's lax coercion is
     # exactly what this field must not have. A plain `int` field silently
     # coerces `"5"` and `5.0` to `5` — answered 200 under a request that named
-    # a string or a float, never the integer `snippet_width_error` checked —
-    # and a genuinely non-numeric value (`1.5`, `"abc"`) gets pydantic's own
-    # 422 with an array `detail` (#370), not the problem+json 400
-    # `snippet_width_error` gives it. `int | bool` fixed the `bool` half (a
+    # a string or a float, never the integer `snippet_width_error` checked.
+    # That silent 200 is the reason; the route class (#370) only turns a
+    # *failed* validation into problem+json, and coercion never fails.
+    # `int | bool` fixed the `bool` half (a
     # JSON `true` stayed a `bool` rather than coercing to `1`) but left the
     # string/float coercions live. `Any` reaches every JSON value into
     # `search.snippet_width.snippet_width_error` unmodified, so that pure

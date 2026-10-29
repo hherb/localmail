@@ -6456,6 +6456,11 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
       whitespace after the brace (`allow_whitespace()` in its `tag.js`), so
       `{ @html x}` is the same sink. Mutation-pinned, as is a sink planted in
       `MessageListRow.svelte`.
+    - **`bind:innerHTML`/`bind:outerHTML` are sinks too** (review of #411):
+      on a `contenteditable` element they render the bound string as markup.
+      `bind:textContent` is not. **Not covered:** a `.ts` action or helper
+      assigning `element.innerHTML` — a DOM call, not Svelte syntax; there is
+      none in `gui/src`.
     - **It runs in `python-ci`, not `gui-ci`**: it is a pure rule module in
       the house shape, and `python-ci`'s checkout includes `gui/`.
 - **Deliberately absent — do not "finish" without backend work first:**

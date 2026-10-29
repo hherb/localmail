@@ -51,7 +51,20 @@ def test_every_sink_is_reported_not_just_the_first() -> None:
     src = "{@html a}\n{@html b}\n"
     problem = html_sink_error({_ROW: src}, allowed=frozenset())
     assert problem is not None
-    assert ":1" in problem and ":2" in problem
+    assert "Row.svelte:1" in problem and "Row.svelte:2" in problem
+
+
+def test_binding_inner_or_outer_html_is_a_sink() -> None:
+    src = ("<div contenteditable bind:innerHTML={a}></div>\n"
+           "<div contenteditable bind:outerHTML={b}></div>\n")
+    problem = html_sink_error({_ROW: src}, allowed=frozenset())
+    assert problem is not None
+    assert "Row.svelte:1" in problem and "Row.svelte:2" in problem
+
+
+def test_binding_text_content_is_not_a_sink() -> None:
+    src = "<div contenteditable bind:textContent={a}></div>\n"
+    assert html_sink_error({_ROW: src}, allowed=frozenset()) is None
 
 
 def test_text_interpolation_is_not_a_sink() -> None:

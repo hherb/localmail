@@ -19,7 +19,12 @@ such prose today.
 
 The pattern allows whitespace after the brace because Svelte's parser does
 (``allow_whitespace()`` right after ``{`` in its ``tag.js``), so ``{ @html
-x}`` compiles to the same sink.
+x}`` compiles to the same sink. It also matches ``bind:innerHTML`` and
+``bind:outerHTML``, Svelte's other way to render a string as markup (on a
+``contenteditable`` element).
+
+Not covered: a ``.ts`` action or helper assigning ``element.innerHTML``.
+That is a DOM call, not Svelte syntax, and there is none in ``gui/src``.
 """
 from __future__ import annotations
 
@@ -27,7 +32,7 @@ import pathlib
 import re
 from collections.abc import Mapping
 
-HTML_SINK = re.compile(r"\{\s*@html\b")
+HTML_SINK = re.compile(r"\{\s*@html\b|\bbind:(?:inner|outer)HTML\b")
 
 #: Files (relative to ``gui/src``) allowed to carry a sink. Empty: rendering
 #: message HTML is the reading pane's sandboxed iframe ``srcdoc``, which is
@@ -55,5 +60,6 @@ def html_sink_error(sources: Mapping[pathlib.Path, str], *,
             for m in HTML_SINK.finditer(src)]
     if not hits:
         return None
-    return ("{@html} renders a string as markup; render it as text, or add "
+    return ("{@html} and bind:innerHTML/outerHTML render a string as markup; "
+            "render it as text, or add "
             "the file to ALLOWED_SINKS with the reason: " + ", ".join(hits))

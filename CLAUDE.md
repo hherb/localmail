@@ -789,6 +789,7 @@ src/localmail/
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
   pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
+                    #   + replace_surrogates — the one lone-surrogate rule (#380)
   text_window.py    # pure: TextWindow/TextPage — character paging of stored text (slice D)
   ocr_policy.py     # pure: plan_ocr / unknown_engine_message (#248)
   version_report.py # resolve_version + pure unknown_version_diagnostic (#291)
@@ -3631,6 +3632,16 @@ for the full design.
     serving path still discards its exception, and now runs per request rather
     than once at sync (#382); and the `substring()` prefix read may not be cheap
     if `raw_bytes` is LZ4-compressed in TOAST, which is unmeasured (#384).
+  - **A lone surrogate in a header value is replaced, at the same seam as the
+    NUL strip (#380).** The #314 fallback keeps a header's raw text, which for
+    8-bit bytes is surrogate-escaped, and Starlette's `JSONResponse` raises
+    `UnicodeEncodeError` on it — a 500 after the handler succeeded. Not
+    reachable from today's archive (the sync-time JSONB insert rejects such a
+    message), but #379 moved the guarantee off the database and onto
+    `header_block`, so `entries_from_message` now passes every value through
+    `pgtext.replace_surrogates`: one U+FFFD per surrogate, which is what the
+    parser's own success path renders for the same bytes. Pinned by raising at
+    the policy seam, since 3.13 parses the forms 3.12 chokes on.
   - **Two invariants here change no answer, so they are pinned structurally**
     (both mutations survived the whole suite when found). A `truncated=True`
     prefix that still holds the separator must be served *from it* — that is

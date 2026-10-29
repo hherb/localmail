@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Horst Herb
 
 """The header block: where it ends, what occurrences it holds, how they group."""
+import email.policy
 from typing import get_args
 
 import pytest
@@ -208,3 +209,35 @@ def test_the_block_scan_never_disagrees_with_the_stdlib_parse(raw):
         raw, _class=EmailMessage, policy=email.policy.default
     )
     assert parse_header_block(header_block_of_whole(raw)) == entries_from_message(whole)
+
+
+class _XAParseRaises(email.policy.EmailPolicy):
+    """Raise where the stdlib fails, for one header (the #314 seam).
+
+    A real failing input is interpreter-dependent (3.13 parses `<>`), so the
+    pin raises at the policy, as `test_parser.py` does for the same guard.
+    """
+
+    def header_fetch_parse(self, name, value):  # type: ignore[no-untyped-def]
+        if name.lower() == "x-a":
+            raise IndexError("list index out of range")
+        return super().header_fetch_parse(name, value)
+
+
+def test_a_raw_fallback_with_8bit_bytes_still_renders_as_json(monkeypatch):
+    """The fallback value is surrogate-escaped; the renderer would 500 (#380).
+
+    Starlette encodes with `ensure_ascii=False` + UTF-8, so a lone surrogate
+    raises after the handler succeeded. Rendered through the real class.
+    """
+    from starlette.responses import JSONResponse
+
+    monkeypatch.setattr(email.policy, "default", _XAParseRaises())
+    entries = parse_header_block(b"X-A: \xfc\xfd\r\nSubject: ok\r\n")
+
+    assert entries == [
+        HeaderEntry(name="X-A", value="\ufffd\ufffd"),
+        HeaderEntry(name="Subject", value="ok"),
+    ]
+    JSONResponse(entries_to_wire(entries))
+    JSONResponse(group_entries(entries))

@@ -19,14 +19,22 @@ never got one (#249), so a NUL-carrying extraction failed its INSERT and was rec
 as a poison pill — permanently, since re-extracting the same bytes reproduces
 the same NUL. This module is the single implementation they now share.
 
-Pure: no IO, no imports beyond ``typing``.
+A lone surrogate is the other character a ``str`` can hold and UTF-8 cannot:
+psycopg raises ``UnicodeEncodeError`` on it, and so does the JSON renderer of
+every response. :func:`replace_surrogates` is that rule (#380).
+
+Pure: no IO, no imports beyond ``re`` and ``typing``.
 """
 
 from __future__ import annotations
 
+import re
 from typing import overload
 
 _NUL = "\x00"
+# Python never pairs surrogates inside a str, so every one is unencodable.
+_SURROGATE = re.compile("[\ud800-\udfff]")
+_REPLACEMENT = "\ufffd"
 
 
 @overload
@@ -64,3 +72,17 @@ def strip_nuls_all(xs: list[str]) -> list[str]:
     dropping an emptied entry would silently renumber the rest.
     """
     return [strip_nuls(x) for x in xs]
+
+
+def replace_surrogates(s: str) -> str:
+    """Return ``s`` with each surrogate code point replaced by U+FFFD.
+
+    The usual source is ``surrogateescape``: the stdlib email parser decodes a
+    raw 8-bit byte as ``\\udc80``-``\\udcff``, and a header it fails to parse
+    keeps that raw text (#314). One U+FFFD per byte is what the parser's own
+    success path renders for the same undecodable bytes, so the two agree.
+
+    Replaced, not stripped like a NUL: a dropped byte would join its
+    neighbours into a different word, while U+FFFD says something was there.
+    """
+    return _SURROGATE.sub(_REPLACEMENT, s)

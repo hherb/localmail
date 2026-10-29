@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Literal, get_args
 
-from localmail.pgtext import strip_nuls
+from localmail.pgtext import replace_surrogates, strip_nuls
 
 HeaderMode = Literal["compact", "full", "list"]
 
@@ -129,6 +129,9 @@ def entries_from_message(msg: EmailMessage) -> list[HeaderEntry]:
     costing the other headers (#314). Never `msg.items()`: it parses every
     value through the policy, so one unparsable header raises for the *whole*
     sequence and poisons the message.
+
+    The fallback keeps the surrogate-escaped bytes of an 8-bit value, which
+    no response can encode, so every value passes `replace_surrogates` (#380).
     """
     out: list[HeaderEntry] = []
     for name, raw_value in msg.raw_items():
@@ -136,7 +139,7 @@ def entries_from_message(msg: EmailMessage) -> list[HeaderEntry]:
             value = str(msg.policy.header_fetch_parse(name, raw_value))
         except Exception:
             value = raw_value
-        out.append(HeaderEntry(name=name, value=strip_nuls(value)))
+        out.append(HeaderEntry(name=name, value=strip_nuls(replace_surrogates(value))))
     return out
 
 

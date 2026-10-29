@@ -697,4 +697,5 @@ def test_a_filename_lookup_failure_leaves_no_blob_file_open(
     c = TestClient(create_app(db_dsn=db_dsn, searcher=None), raise_server_exceptions=False)
     r = c.get(f"/v1/attachments/{sha}", headers={"Authorization": f"Bearer {api_token}"})
     assert r.status_code == 500
-    assert all(fp.closed for fp in opened), "a blob handle leaked on the DB-error path"
+    # Never opened, not merely closed: the open comes after the DB work.
+    assert opened == [], "the blob was opened before the DB work finished"

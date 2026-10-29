@@ -155,9 +155,11 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 1. **Both hosts lag `main`**: the Mac runs `b6fd32f` and the DGX
    `a8aa2b5`. Each is self-consistent until it is redeployed.
-2. **The `fp.read(1)` overrun probe is outside the `OSError` logging.** An
-   EIO on exactly that one-byte read would propagate without the
-   "read failed" line. It is a narrow window, and accepted.
+2. **The `fp.read(1)` overrun probe has its own `OSError` guard** (review
+   follow-up). It runs after the whole body is sent, so an error there is
+   logged as `attachment stream overrun probe failed` and **not** re-raised:
+   re-raising dropped a download that had succeeded, under a uvicorn
+   traceback naming no blob.
 3. **The native-table regression in docling ≥ 2.143 is unexplained**, only
    localised.
 4. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**

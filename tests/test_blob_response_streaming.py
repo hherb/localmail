@@ -92,3 +92,15 @@ def test_a_range_never_reads_past_its_slice(caplog) -> None:
         body = b"".join(_stream_range(fp, ByteRange(start=2, end=4), _WHERE))
     assert body == b"234"
     assert caplog.records == []  # a range is a slice; the rest is not an overrun
+
+
+def test_a_read_error_in_the_overrun_probe_is_logged_and_the_body_completes(
+    caplog,
+) -> None:
+    # Read 1 serves the whole slice; read 2 is the probe past size_bytes.
+    fp = _Tracked(b"0123", fail_on_read=2)
+    with caplog.at_level(logging.WARNING, logger=_SERVE_LOGGER):
+        assert b"".join(_stream_full(fp, _WHERE, 4)) == b"0123"
+    assert fp.closed
+    [msg] = _messages(caplog, logging.ERROR)
+    assert "overrun probe failed" in msg and _WHERE in msg

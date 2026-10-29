@@ -149,7 +149,14 @@ def _stream_full(fp: BinaryIO, where: str, expected: int) -> Iterator[bytes]:
     """
     try:
         yield from _stream_slice(fp, 0, expected, where)
-        if fp.read(1):
+        try:
+            over = fp.read(1)
+        except OSError:
+            # The body is already complete, so log and finish rather than
+            # dropping a download that succeeded.
+            logger.exception("attachment stream overrun probe failed: %s", where)
+            over = b""
+        if over:
             logger.warning(
                 "attachment stream overran: %s file is longer than expected=%d",
                 where, expected,

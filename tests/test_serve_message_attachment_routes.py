@@ -389,11 +389,14 @@ def test_a_blob_granted_elsewhere_is_404_not_304_for_an_ungranted_message(
     assert r.status_code == 404
 
 
+@pytest.mark.parametrize("extra", [{}, {"Range": "bytes=0-9"}], ids=["full", "range"])
 def test_a_truncation_warning_names_the_message_and_index(
     db_dsn, api_token, db_conn, tmp_path, grant_alice_all_accounts, caplog,
+    extra: dict[str, str],
 ) -> None:
     """#386 item 4: a blob is shared by many messages, so on the index route
-    the #58 WARNING must say which request triggered it, not only the sha."""
+    the #58 WARNING must say which request triggered it, not only the sha —
+    on the 206 streamer as well as the 200 one."""
     import logging
 
     payload = b"0123456789"
@@ -402,8 +405,56 @@ def test_a_truncation_warning_names_the_message_and_index(
     (tmp_path / "blobs" / sha[:2] / sha[2:4] / sha).write_bytes(payload[:4])
     grant_alice_all_accounts()
     with caplog.at_level(logging.WARNING, logger="localmail.serve"):
-        r = _client(db_dsn).get(f"/v1/messages/{mid}/attachments/0", headers=_auth(api_token))
+        r = _client(db_dsn).get(
+            f"/v1/messages/{mid}/attachments/0", headers=_auth(api_token, **extra),
+        )
     assert r.content == payload[:4]
     [msg] = [rec.getMessage() for rec in caplog.records if "truncated" in rec.getMessage()]
     assert f"sha256={sha}" in msg
     assert f"message_id={mid}" in msg and "index=0" in msg
+
+
+def test_the_blob_is_not_opened_until_the_connection_is_released(
+    db_dsn, api_token, db_conn, tmp_path, grant_alice_all_accounts, monkeypatch,
+) -> None:
+    """#386 item 1 on the index route: if leaving the ``with`` block raises
+    (the commit, a dropped connection), no blob handle may have been opened."""
+    import contextlib
+
+    import localmail.serve.routes.messages as routes
+
+    mid, _ = _seed(db_conn, tmp_path, [("d.bin", b"payload", "application/octet-stream")])
+    grant_alice_all_accounts()
+    app = create_app(db_dsn=db_dsn, searcher=None)
+    pool = app.state.pool
+    real_connection = pool.connection
+    armed: list[bool] = []
+    opened: list = []
+    real_open = routes._open_blob_file_at
+    real_not_modified = routes.not_modified
+
+    def not_modified_spy(*args, **kwargs):
+        armed.append(True)  # we are inside the route's own connection block
+        return real_not_modified(*args, **kwargs)
+
+    @contextlib.contextmanager
+    def connection(*args, **kwargs):
+        with real_connection(*args, **kwargs) as conn:
+            yield conn
+            if armed:
+                raise psycopg.OperationalError("commit failed")
+
+    def open_spy(*args, **kwargs):
+        fp = real_open(*args, **kwargs)
+        opened.append(fp)
+        return fp
+
+    monkeypatch.setattr(routes, "not_modified", not_modified_spy)
+    monkeypatch.setattr(routes, "_open_blob_file_at", open_spy)
+    monkeypatch.setattr(pool, "connection", connection)
+    r = TestClient(app, raise_server_exceptions=False).get(
+        f"/v1/messages/{mid}/attachments/0", headers=_auth(api_token),
+    )
+    assert armed, "the spy never ran, so the failure was never injected"
+    assert r.status_code == 500
+    assert opened == [], "the blob was opened before the connection was released"

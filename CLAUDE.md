@@ -3524,7 +3524,10 @@ for the full design.
   size and logged as `attachment stream overran`, where it used to overrun
   `Content-Length` and make h11 abort with no localmail line. An `OSError`
   mid-read is logged at ERROR (`attachment stream read failed`, with the
-  bytes sent) and re-raised. Every line names `sha256=…`, and on the index
+  bytes sent) and re-raised. The trailing one-byte overrun probe is the
+  exception: it runs after the whole body is sent, so an error there is
+  logged (`overrun probe failed`) and **not** re-raised — re-raising drops a
+  download that succeeded. Every line names `sha256=…`, and on the index
   route `message_id=… index=…` too (`blob_response(log_context=…)`), since
   one blob is shared by many messages. Both routes call
   `_open_blob_file_at` **after** the `with pool.connection()` block: the

@@ -19,7 +19,11 @@ from tests import _eml
 
 
 def _pre_change_headers_dict(msg: EmailMessage) -> dict[str, list[str]]:
-    """The implementation this task replaces, kept as the oracle."""
+    """The implementation this task replaces, kept as the oracle.
+
+    It applies neither the NUL strip nor #380's surrogate rule, so it only
+    agrees with `_headers_dict` while no fixture carries a NUL or 8-bit bytes.
+    """
     out: dict[str, list[str]] = {}
     for name, raw_value in msg.raw_items():
         try:

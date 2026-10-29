@@ -52,16 +52,29 @@ def test_a_schema_error_is_a_problem_json_400_naming_the_field(db_dsn, api_token
     assert detail.startswith(f"{loc}: "), detail
 
 
-def test_a_body_that_is_not_json_is_a_400_too(db_dsn, api_token):
+@pytest.mark.parametrize(
+    ("content", "detail"),
+    [
+        # FastAPI's loc is ("body", <offset>); a bare offset would read as a field.
+        (b"{not json", "body: JSON decode error at position 1: "
+                       "Expecting property name enclosed in double quotes"),
+        # Not UTF-8: FastAPI raises its own bare 400, not a validation error.
+        (b'{"query": "\xff"}', "body: There was an error parsing the body"),
+    ],
+    ids=["malformed-json", "not-utf8"],
+)
+def test_a_body_that_does_not_parse_is_a_problem_json_400(db_dsn, api_token, content, detail):
     searcher = MagicMock()
     client = TestClient(create_app(db_dsn=db_dsn, searcher=searcher))
     r = client.post(
-        "/v1/search", content=b"{not json",
+        "/v1/search", content=content,
         headers={"Authorization": f"Bearer {api_token}",
                  "Content-Type": "application/json"},
     )
     assert r.status_code == 400, r.text
-    assert isinstance(r.json()["detail"], str)
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["detail"] == detail
+    searcher.search.assert_not_called()
 
 
 def test_other_routes_keep_fastapis_422(db_dsn, api_token):

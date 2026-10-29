@@ -130,17 +130,34 @@ def entries_from_message(msg: EmailMessage) -> list[HeaderEntry]:
     value through the policy, so one unparsable header raises for the *whole*
     sequence and poisons the message.
 
-    The fallback keeps the surrogate-escaped bytes of an 8-bit value, which
-    no response can encode, so every value passes `replace_surrogates` (#380).
+    The raw text of an 8-bit value is surrogate-escaped, which neither a
+    response nor a JSONB insert can encode, so the fallback decodes it the way
+    the parser's own success path does (`_decode_raw`), and every value then
+    passes `replace_surrogates` as the backstop (#380). This runs at sync too
+    (`parser._headers_dict`), so it decides what `messages.headers` stores.
     """
     out: list[HeaderEntry] = []
     for name, raw_value in msg.raw_items():
         try:
             value = str(msg.policy.header_fetch_parse(name, raw_value))
         except Exception:
-            value = raw_value
+            value = _decode_raw(raw_value)
         out.append(HeaderEntry(name=name, value=strip_nuls(replace_surrogates(value))))
     return out
+
+
+def _decode_raw(raw_value: str) -> str:
+    """Decode escaped bytes as UTF-8, as `email.utils._sanitize` does.
+
+    Valid UTF-8 comes back as text (`café`, not two U+FFFD), and an invalid
+    sequence becomes one U+FFFD. Replacing each escaped byte instead would
+    store and serve every non-ASCII character of a raw-UTF-8 header mangled.
+    """
+    try:
+        return raw_value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    except UnicodeEncodeError:
+        # A surrogate surrogateescape did not produce; replace_surrogates gets it.
+        return raw_value
 
 
 def parse_header_block(block: bytes) -> list[HeaderEntry]:

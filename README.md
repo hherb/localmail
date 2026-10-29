@@ -1018,7 +1018,9 @@ or `lang`: Postgres text cannot hold either, and each used to be an unhandled
 rather than stripped, since a stripped query is a different question. A value of the wrong JSON type, or
 out of range (a number for `lang`, `"limit": 500`, a string for `fields`, a
 body that is not a JSON object), is a problem+json 400 too, its `detail` one
-`location: message` per error (`fields.1: Input should be a valid string`);
+`location: message` per error (`fields.1: Input should be a valid string`).
+So is a body that is not JSON (`body: JSON decode error at position 1: …`) or
+not UTF-8 (`body: There was an error parsing the body`);
 it used to be FastAPI's 422 with an array `detail`
 ([#370](https://github.com/hherb/localmail/issues/370)). That holds for
 `/v1/search` only; other routes still answer 422. Pydantic still coerces where

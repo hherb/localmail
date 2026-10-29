@@ -32,3 +32,9 @@ def test_every_error_is_reported_in_order():
 def test_a_non_body_location_keeps_its_prefix():
     # A query or header parameter is not the body; saying so is the diagnosis.
     assert validation_detail([_err(("query", "limit"))]) == "query.limit: bad"
+
+
+def test_a_json_decode_error_keeps_body_and_names_the_position_and_reason():
+    err = {"type": "json_invalid", "loc": ("body", 13), "msg": "JSON decode error",
+           "ctx": {"error": "Expecting value"}}
+    assert validation_detail([err]) == "body: JSON decode error at position 13: Expecting value"

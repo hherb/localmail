@@ -241,3 +241,20 @@ def test_a_raw_fallback_with_8bit_bytes_still_renders_as_json(monkeypatch):
     ]
     JSONResponse(entries_to_wire(entries))
     JSONResponse(group_entries(entries))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"caf\xc3\xa9", b"a\xe9\x80b", b"\xf0\x9f\x98", b"\xfc\xfd", b"\xe2\x82\xac 5"],
+    ids=["utf8", "truncated-mid", "truncated-4byte", "invalid-bytes", "euro"],
+)
+def test_the_raw_fallback_renders_8bit_bytes_as_the_success_path_does(monkeypatch, raw):
+    """Raw UTF-8 decodes to text, an invalid sequence to one U+FFFD (#380).
+
+    The oracle is the stdlib's own rendering of the same bytes under a header
+    it *can* parse, so `café` stays `café` rather than `caf��`.
+    """
+    expected = parse_header_block(b"X-B: " + raw + b"\r\n")[0].value
+    monkeypatch.setattr(email.policy, "default", _XAParseRaises())
+
+    assert parse_header_block(b"X-A: " + raw + b"\r\n")[0].value == expected

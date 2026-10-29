@@ -14,7 +14,7 @@ rather than a property of the boundary. ``run_search`` type-hints both axes
 and checked neither, so the guarantee lived in each caller's schema:
 
 * HTTP (``serve/routes/search.py``) declares ``Literal``s, so pydantic
-  answers 422 before ``run_search``.
+  refuses it before ``run_search`` (a problem+json 400 since #370).
 * MCP (``mcp/server.py``) declares the same, so ``func_metadata`` rejects it.
 
 Both hold today. What did not hold is that a **third** consumer — the

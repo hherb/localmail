@@ -3635,13 +3635,27 @@ for the full design.
   - **A lone surrogate in a header value is replaced, at the same seam as the
     NUL strip (#380).** The #314 fallback keeps a header's raw text, which for
     8-bit bytes is surrogate-escaped, and Starlette's `JSONResponse` raises
-    `UnicodeEncodeError` on it — a 500 after the handler succeeded. Not
-    reachable from today's archive (the sync-time JSONB insert rejects such a
-    message), but #379 moved the guarantee off the database and onto
-    `header_block`, so `entries_from_message` now passes every value through
-    `pgtext.replace_surrogates`: one U+FFFD per surrogate, which is what the
-    parser's own success path renders for the same bytes. Pinned by raising at
-    the policy seam, since 3.13 parses the forms 3.12 chokes on.
+    `UnicodeEncodeError` on it — a 500 after the handler succeeded. The
+    sync-time JSONB insert rejected the same value (Postgres: "Unicode low
+    surrogate must follow a high surrogate"), so until this fix such a
+    message was a **poison pill**, and #379 had moved the serving guarantee
+    off the database onto `header_block`.
+    - **The fallback decodes the escaped bytes as UTF-8 with `"replace"`**
+      (`header_block._decode_raw`), exactly as `email.utils._sanitize` does on
+      the success path, then every value passes `pgtext.replace_surrogates` as
+      a backstop. **Replacing each escaped byte was the first cut and review
+      caught it**: raw UTF-8 (`caf\xc3\xa9`, RFC 6532's common case) came out
+      `caf��` where the success path says `café`, and a truncated sequence
+      got one U+FFFD per byte instead of one per sequence. The two agree only
+      on bytes that are invalid one by one, which is all the first test used.
+    - **It changes sync, not only serving.** `parser._headers_dict` is the
+      same walk, so such a message is now stored, U+FFFD and all, in
+      `messages.headers`, and an existing `failed_messages` row of that
+      cause succeeds on `retry-failed` (the Mac archive had none). Pinned at
+      `process_one_message` (`tests/test_sync_header_fallback.py`), through
+      both HTTP modes and the MCP serializer
+      (`tests/test_header_fallback_wire.py`), all by raising at the policy
+      seam, since 3.13 parses the forms 3.12 chokes on.
   - **Two invariants here change no answer, so they are pinned structurally**
     (both mutations survived the whole suite when found). A `truncated=True`
     prefix that still holds the separator must be served *from it* — that is
@@ -5937,6 +5951,13 @@ for the full design.
     `validation_detail`: one `loc: msg` per error, `body.` dropped,
     `"; "`-joined. Before it a client rendering `detail` (kastellan) got a
     string for one mistake and an array for the one beside it.
+    - **A body that does not parse is two more shapes, both mapped.**
+      Malformed JSON's `loc` is `("body", <char offset>)`, so dropping `body`
+      rendered `1: JSON decode error`, which reads as a list index; it is
+      `body: JSON decode error at position N: <reason>` now. A body that is
+      not UTF-8 never becomes a `RequestValidationError` at all — FastAPI
+      raises a bare `HTTPException(400)` — so the route class maps that too,
+      as `body: There was an error parsing the body`. Both found in review.
     - **Scoped to the search router, not app-wide** (#370's option 1).
       Option 2 changes every route's 422 and needs the GUI's and kastellan's
       error handling checked first; `test_other_routes_keep_fastapis_422`
@@ -6000,7 +6021,7 @@ for the full design.
     exactly the 41 surrogate cases.
   - **`query`:** optional **and nullable** on HTTP and MCP (`str | None`,
     normalised to `""` at the transport). Only an *omitted* query worked at
-    first, and `null` was the 422 above, which is what a client modelling
+    first, and `null` was FastAPI's 422, which is what a client modelling
     the field as `Option<String>` sends.
     - **The MCP half is pinned through `server.call_tool`**, not the raw
       function: the SDK's argument model is what rejected `null`.

@@ -75,10 +75,14 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   500 after the handler succeeded.
 - **Not reachable today**: the sync-time JSONB insert rejects such a
   message. #379 moved the guarantee off the database onto `header_block`.
+  *(Wrong as a description of the fix: the same walk feeds sync, so the
+  fix also turns that poison pill into a stored message. See "Review
+  round" below.)*
 - **The rule:** `pgtext.replace_surrogates`, beside `strip_nuls`. It
   replaces each surrogate code point with U+FFFD. That matches what the
   parser's own success path renders for the same bytes: on 3.13,
-  `X-A: \xfc\xfd` parses to `"��"`.
+  `X-A: \xfc\xfd` parses to `"��"`. *(True only for bytes invalid one
+  by one; superseded, see "Review round".)*
 - **Applied to every value**, after the `try/except`, so the success path is
   covered too. Header *names* are not passed through: the feedparser only
   admits printable ASCII there.
@@ -88,6 +92,26 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   → `café`). The fallback now shows `caf��` where a successful
   parse would show `café`. That costs fidelity only, on a path that is
   unreachable today.
+
+## Review round (PR #412)
+
+Four reviewers (code, tests, errors, comments). Fixed on the branch:
+
+- **UTF-8 recovery after all.** The fallback mangled raw UTF-8 (`café` →
+  `caf��`), and since `parser._headers_dict` is the same walk it would
+  have *stored* that. The fallback now decodes as `email.utils._sanitize`
+  does (`header_block._decode_raw`); `replace_surrogates` stays as the
+  backstop. Pinned against the stdlib's own rendering of the same bytes.
+- **Sync changes too**: such a message is now ingested, not a poison pill.
+  Pinned at `process_one_message`; HTTP `list`/`full` and the MCP
+  serializer are pinned end to end. The three fail without the fix.
+- **Malformed JSON** rendered `1: JSON decode error` (a char offset read
+  as a field); now `body: JSON decode error at position 1: <reason>`.
+- **A non-UTF-8 body** was FastAPI's bare `HTTPException(400)`, not
+  problem+json; the route class maps it too.
+- Stale "422" test comments fixed; the `snippet_chars` non-integer needles
+  now use `snippet_width_error`'s own wording, since a retyped `int` would
+  also have answered a 400 naming the field.
 
 ## Verification
 
@@ -178,7 +202,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 1. **#380 over #386 and #389**: #389 is a wire decision (yours), and #386
    has five parts. #380 was one pure rule at one call site.
-2. **U+FFFD per surrogate, not UTF-8 recovery.** It is one line and total.
+2. *(Reversed in the review round.)* **U+FFFD per surrogate, not UTF-8
+   recovery.** It is one line and total.
    It matches the success path's rendering of undecodable bytes. Recovery
    would need a second branch for surrogates outside `DC80–DCFF`, on a path
    that is unreachable today.

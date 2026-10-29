@@ -78,9 +78,9 @@ def replace_surrogates(s: str) -> str:
     """Return ``s`` with each surrogate code point replaced by U+FFFD.
 
     The usual source is ``surrogateescape``: the stdlib email parser decodes a
-    raw 8-bit byte as ``\\udc80``-``\\udcff``, and a header it fails to parse
-    keeps that raw text (#314). One U+FFFD per byte is what the parser's own
-    success path renders for the same undecodable bytes, so the two agree.
+    raw 8-bit byte as ``\\udc80``-``\\udcff``. This is the backstop, one U+FFFD
+    per surrogate; a caller holding escaped *bytes* should first decode them as
+    UTF-8, as ``header_block`` does, or valid UTF-8 comes out mangled.
 
     Replaced, not stripped like a NUL: a dropped byte would join its
     neighbours into a different word, while U+FFFD says something was there.

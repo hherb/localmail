@@ -181,14 +181,15 @@ _REFUSALS = [
     ({"fields": ["score"] * 49}, "at most 48"),
     ({"snippet_chars": 0}, "snippet_chars"),
     ({"snippet_chars": 1001}, "1000"),
-    ({"snippet_chars": True}, "snippet_chars"),
-    # `Any` on the wire (#370, F3): every non-integer must reach
-    # `snippet_width_error` as a problem+json 400, never pydantic's own 422
-    # with an array `detail`, and never a silent coercion to `5`.
-    ({"snippet_chars": "5"}, "snippet_chars"),
-    ({"snippet_chars": 5.0}, "snippet_chars"),
-    ({"snippet_chars": 1.5}, "snippet_chars"),
-    ({"snippet_chars": "abc"}, "snippet_chars"),
+    # `Any` on the wire: every non-integer must reach `snippet_width_error`,
+    # never a silent coercion to `5`. The needle is that rule's own wording:
+    # since #370 a pydantic type error is a problem+json 400 too, so a bare
+    # "snippet_chars" no longer tells `Any` from a retyped `int`.
+    ({"snippet_chars": True}, "must be an integer"),
+    ({"snippet_chars": "5"}, "must be an integer"),
+    ({"snippet_chars": 5.0}, "must be an integer"),
+    ({"snippet_chars": 1.5}, "must be an integer"),
+    ({"snippet_chars": "abc"}, "must be an integer"),
 ]
 
 

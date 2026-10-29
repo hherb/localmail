@@ -387,3 +387,23 @@ def test_a_blob_granted_elsewhere_is_404_not_304_for_an_ungranted_message(
         headers=_auth(api_token, **{"If-None-Match": f'"{sha}"'}),
     )
     assert r.status_code == 404
+
+
+def test_a_truncation_warning_names_the_message_and_index(
+    db_dsn, api_token, db_conn, tmp_path, grant_alice_all_accounts, caplog,
+) -> None:
+    """#386 item 4: a blob is shared by many messages, so on the index route
+    the #58 WARNING must say which request triggered it, not only the sha."""
+    import logging
+
+    payload = b"0123456789"
+    mid, shas = _seed(db_conn, tmp_path, [("d.bin", payload, "application/octet-stream")])
+    sha = shas[0]
+    (tmp_path / "blobs" / sha[:2] / sha[2:4] / sha).write_bytes(payload[:4])
+    grant_alice_all_accounts()
+    with caplog.at_level(logging.WARNING, logger="localmail.serve"):
+        r = _client(db_dsn).get(f"/v1/messages/{mid}/attachments/0", headers=_auth(api_token))
+    assert r.content == payload[:4]
+    [msg] = [rec.getMessage() for rec in caplog.records if "truncated" in rec.getMessage()]
+    assert f"sha256={sha}" in msg
+    assert f"message_id={mid}" in msg and "index=0" in msg

@@ -3515,7 +3515,24 @@ for the full design.
   ops signal. Don't try to "patch up" the wire here. If a downstream
   consumer ever needs a pre-stream sanity check, add a `stat()` gate
   before the headers go out; the issue body for #58 explicitly scoped
-  that out as not necessary.
+  that out as not necessary. (The streamers live in
+  `serve/routes/blob_response.py` since slice D; the path above is
+  historical.)
+- **The other stream failures are logged too, and the open comes last
+  (#386).** Both streamers go through one `_stream_slice`, which never
+  reads past its slice — so a file *longer* than `size_bytes` is cut at the
+  size and logged as `attachment stream overran`, where it used to overrun
+  `Content-Length` and make h11 abort with no localmail line. An `OSError`
+  mid-read is logged at ERROR (`attachment stream read failed`, with the
+  bytes sent) and re-raised. Every line names `sha256=…`, and on the index
+  route `message_id=… index=…` too (`blob_response(log_context=…)`), since
+  one blob is shared by many messages. Both routes call
+  `_open_blob_file_at` **after** the `with pool.connection()` block: the
+  sha route used to open before `get_attachment_filename`, so a DB error
+  there (or the commit on exit) dropped the handle unclosed until GC. Still
+  after `not_modified`, so the #62 spies are unaffected. `mime_type` is
+  typed `str | None` on the three blob-row accessors, matching the
+  nullable column.
 - **Conditional GET — ETag / If-None-Match / If-Range (#59)**: the
   attachment route advertises a **strong** ETag of `"<sha256-hex>"` on
   every 200 / 206 / 416 response — content-addressable URLs make the

@@ -102,7 +102,7 @@ def _fallback_filename(sha256_hex: str) -> str:
     return f"attachment-{sha256_hex[:_SHA_PREFIX_LEN_FOR_FALLBACK_NAME]}.bin"
 
 
-def _log_truncation(sha256_hex: str, expected: int, sent: int) -> None:
+def _log_truncation(where: str, expected: int, sent: int) -> None:
     """Surface a short-read against the DB-recorded blob size.
 
     By the time the streamer notices, headers are already flushed and the
@@ -110,49 +110,60 @@ def _log_truncation(sha256_hex: str, expected: int, sent: int) -> None:
     response — only flag it for ops to investigate (#58).
     """
     logger.warning(
-        "attachment stream truncated: sha256=%s expected=%d sent=%d",
-        sha256_hex, expected, sent,
+        "attachment stream truncated: %s expected=%d sent=%d",
+        where, expected, sent,
     )
 
 
-def _stream_full(fp: BinaryIO, sha256_hex: str, expected: int) -> Iterator[bytes]:
-    """Iterate the rest of ``fp`` in fixed chunks, closing on exit.
+def _stream_slice(
+    fp: BinaryIO, start: int, length: int, where: str,
+) -> Iterator[bytes]:
+    """Yield at most ``length`` bytes from ``start``; the caller closes ``fp``.
 
-    Logs a WARNING if the file ends before ``expected`` bytes have been
-    sent — i.e. on-disk blob is shorter than ``attachment_blobs.size_bytes``.
+    Never reads past the slice, so a file longer than recorded cannot overrun
+    ``Content-Length``. A short file logs the #58 WARNING; a read error is
+    logged against ``where`` and re-raised, since an EIO would otherwise end
+    the stream with nothing naming the blob (#386).
     """
     sent = 0
     try:
-        while chunk := fp.read(_CHUNK):
+        fp.seek(start)
+        while sent < length:
+            chunk = fp.read(min(_CHUNK, length - sent))
+            if not chunk:
+                _log_truncation(where, length, sent)
+                return
             sent += len(chunk)
             yield chunk
-        if sent < expected:
-            _log_truncation(sha256_hex, expected, sent)
+    except OSError:
+        logger.exception("attachment stream read failed: %s sent=%d", where, sent)
+        raise
+
+
+def _stream_full(fp: BinaryIO, where: str, expected: int) -> Iterator[bytes]:
+    """Stream the whole blob — exactly ``expected`` bytes — closing on exit.
+
+    A file longer than ``attachment_blobs.size_bytes`` is cut at the size
+    and logged: sending the excess would make h11 abort the response with no
+    localmail line at all (#386, the counterpart of #58's short read).
+    """
+    try:
+        yield from _stream_slice(fp, 0, expected, where)
+        if fp.read(1):
+            logger.warning(
+                "attachment stream overran: %s file is longer than expected=%d",
+                where, expected,
+            )
     finally:
         fp.close()
 
 
 def _stream_range(
-    fp: BinaryIO, byte_range: ByteRange, sha256_hex: str,
+    fp: BinaryIO, byte_range: ByteRange, where: str,
 ) -> Iterator[bytes]:
-    """Iterate exactly the bytes covered by ``byte_range``, closing on exit.
-
-    Seeks once to ``byte_range.start`` then reads in ``_CHUNK``-sized blocks
-    without slurping the whole blob into memory. Logs a WARNING if the file
-    runs short of the requested slice length.
-    """
-    sent = 0
+    """Stream exactly the bytes covered by ``byte_range``, closing on exit."""
     try:
-        fp.seek(byte_range.start)
-        remaining = byte_range.length
-        while remaining > 0:
-            chunk = fp.read(min(_CHUNK, remaining))
-            if not chunk:
-                _log_truncation(sha256_hex, byte_range.length, sent)
-                break
-            remaining -= len(chunk)
-            sent += len(chunk)
-            yield chunk
+        yield from _stream_slice(fp, byte_range.start, byte_range.length, where)
     finally:
         fp.close()
 
@@ -178,15 +189,19 @@ def blob_response(
     size: int,
     fp: BinaryIO,
     filename: str | None,
+    log_context: str = "",
 ) -> Response:
     """200 / 206 / 416 for an already-opened, ACL-cleared blob.
 
     Takes ownership of ``fp``: the streamer closes it, or this function does
     on the 416 branch. ``filename`` falls back to a sha-prefix name when it
     is ``None`` or blank. Every response carries the #32 force-download
-    headers and the strong ``ETag``.
+    headers and the strong ``ETag``. ``log_context`` is appended to the
+    sha in any stream log line — a blob is shared, so the index route names
+    the message and index that asked for it (#386).
     """
     etag = etag_for_sha256(sha256)
+    where = f"sha256={sha256} {log_context}".rstrip()
     disposition = _content_disposition(
         (filename or "").strip() or _fallback_filename(sha256)
     )
@@ -215,7 +230,7 @@ def blob_response(
 
     if byte_range is None:
         return StreamingResponse(
-            _stream_full(fp, sha256, size),
+            _stream_full(fp, where, size),
             media_type=response_mime,
             headers={
                 "Content-Length": str(size),
@@ -226,7 +241,7 @@ def blob_response(
         )
 
     return StreamingResponse(
-        _stream_range(fp, byte_range, sha256),
+        _stream_range(fp, byte_range, where),
         status_code=_HTTP_PARTIAL_CONTENT,
         media_type=response_mime,
         headers={

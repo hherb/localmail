@@ -874,6 +874,7 @@ tests/
                     #   every family raise site has its own provocation (#347)
   _rerank_wiring_rules.py  # pure AST rule: every .rerank( in src/ goes through
                     #   _safe_rerank, which holds both degradation guards (#361)
+  _html_sink_rules.py  # pure text rule: no {@html} sink in gui/src/**.svelte (#395)
   _multilingual_corpus.py  # synthetic 50-message corpus for multilingual eval
   fixtures/         # multilingual_queries.example.json
   test_*.py
@@ -6441,13 +6442,27 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     claimed the wider scope and so discouraged looking. That step is
     corrected; the plan, spec and handoff documents keep their `<mark>`
     references, being frozen records of what was believed at the time.
-  - **Nothing forbids a *new* `{@html}` sink elsewhere (#395, open).** There
-    are zero left in `gui/src`, so the property is now tree-wide, but the
-    only thing holding it is one component test on one field —
-    `{@html subject}` on another component is caught by nothing, and
-    `svelte-check` does not flag it. The rule module this repo would use
-    (`_rerank_wiring_rules.py`'s shape) is new coverage rather than a defect
-    in #391, hence the separate issue.
+  - **A new `{@html}` sink anywhere in `gui/src` fails pytest (#395).**
+    #391 left the property held by one component test on one field —
+    `{@html subject}` on another component passed `svelte-check` and every
+    test. [tests/_html_sink_rules.py](tests/_html_sink_rules.py)`::html_sink_error`
+    reads every `.svelte` file and reports each sink as `path:line`, with an
+    `ALLOWED_SINKS` allowlist that is empty (a new HTML surface should follow
+    the reading pane's sandboxed iframe `srcdoc` instead).
+    - **Text, not a parse tree**, unlike the Python rules: parsing Svelte from
+      Python needs a second parser, and the text match only fails closed (a
+      `{@html` in a markup comment is reported).
+    - **The pattern is `\{\s*@html\b`**, because Svelte's parser allows
+      whitespace after the brace (`allow_whitespace()` in its `tag.js`), so
+      `{ @html x}` is the same sink. Mutation-pinned, as is a sink planted in
+      `MessageListRow.svelte`.
+    - **`bind:innerHTML`/`bind:outerHTML` are sinks too** (review of #411):
+      on a `contenteditable` element they render the bound string as markup.
+      `bind:textContent` is not. **Not covered:** a `.ts` action or helper
+      assigning `element.innerHTML` — a DOM call, not Svelte syntax; there is
+      none in `gui/src`.
+    - **It runs in `python-ci`, not `gui-ci`**: it is a pure rule module in
+      the house shape, and `python-ci`'s checkout includes `gui/`.
 - **Deliberately absent — do not "finish" without backend work first:**
   Gmail **Connect**. `POST /v1/admin/accounts/{id}/oauth/start` lives in
   `oauth_router.py`, which #203 did *not* swap to `require_admin()`, so it is

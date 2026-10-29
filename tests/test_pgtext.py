@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from localmail.pgtext import strip_nuls, strip_nuls_all
+from localmail.pgtext import replace_surrogates, strip_nuls, strip_nuls_all
 
 
 class TestStripNuls:
@@ -61,3 +61,21 @@ class TestStripNulsAll:
         """A header list is positional; dropping an emptied entry would
         silently renumber the rest."""
         assert strip_nuls_all(["\x00", "keep", "\x00"]) == ["", "keep", ""]
+
+
+# --- replace_surrogates (#380) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dirty",
+    ["\udcfc", "\ud800", "\udfff", "\ud83d\ude00"],  # escaped byte, both ends, a split pair
+)
+def test_every_surrogate_becomes_one_replacement_character(dirty):
+    out = replace_surrogates(f"a{dirty}b")
+    assert out == "a" + "\ufffd" * len(dirty) + "b"
+    out.encode("utf-8")  # the whole point: no UnicodeEncodeError
+
+
+def test_clean_text_is_returned_unchanged():
+    clean = "caf\u00e9 \U0001f600 \ufffd"
+    assert replace_surrogates(clean) == clean

@@ -167,7 +167,10 @@ def test_search_sort_defaults_to_rank_when_omitted(
 def test_search_sort_invalid_value_is_rejected(
     db_dsn: str, api_token: str, db_conn, api_user,
 ) -> None:
-    """An out-of-enum `sort` value must 422, not silently fall back."""
+    """An out-of-enum `sort` value is refused, not silently fallen back from.
+
+    A problem+json 400 since #370, like every other refusal on the route.
+    """
     _seed_acct_and_grant(db_conn, api_user.id)
     app = create_app(db_dsn=db_dsn, searcher=_fake_searcher_returning_one_hit())
     c = TestClient(app)
@@ -176,7 +179,8 @@ def test_search_sort_invalid_value_is_rejected(
         json={"query": "hello", "filters": {}, "limit": 20, "sort": "popularity"},
         headers={"Authorization": f"Bearer {api_token}"},
     )
-    assert r.status_code == 422
+    assert r.status_code == 400
+    assert r.json()["detail"].startswith("sort: ")
 
 
 def test_sort_date_with_text_paginates_keyset_unbounded(

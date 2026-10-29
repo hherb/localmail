@@ -789,6 +789,7 @@ src/localmail/
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
   pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
+                    #   + replace_surrogates — the one lone-surrogate rule (#380)
   text_window.py    # pure: TextWindow/TextPage — character paging of stored text (slice D)
   ocr_policy.py     # pure: plan_ocr / unknown_engine_message (#248)
   version_report.py # resolve_version + pure unknown_version_diagnostic (#291)
@@ -3631,6 +3632,30 @@ for the full design.
     serving path still discards its exception, and now runs per request rather
     than once at sync (#382); and the `substring()` prefix read may not be cheap
     if `raw_bytes` is LZ4-compressed in TOAST, which is unmeasured (#384).
+  - **A lone surrogate in a header value is replaced, at the same seam as the
+    NUL strip (#380).** The #314 fallback keeps a header's raw text, which for
+    8-bit bytes is surrogate-escaped, and Starlette's `JSONResponse` raises
+    `UnicodeEncodeError` on it — a 500 after the handler succeeded. The
+    sync-time JSONB insert rejected the same value (Postgres: "Unicode low
+    surrogate must follow a high surrogate"), so until this fix such a
+    message was a **poison pill**, and #379 had moved the serving guarantee
+    off the database onto `header_block`.
+    - **The fallback decodes the escaped bytes as UTF-8 with `"replace"`**
+      (`header_block._decode_raw`), exactly as `email.utils._sanitize` does on
+      the success path, then every value passes `pgtext.replace_surrogates` as
+      a backstop. **Replacing each escaped byte was the first cut and review
+      caught it**: raw UTF-8 (`caf\xc3\xa9`, RFC 6532's common case) came out
+      `caf��` where the success path says `café`, and a truncated sequence
+      got one U+FFFD per byte instead of one per sequence. The two agree only
+      on bytes that are invalid one by one, which is all the first test used.
+    - **It changes sync, not only serving.** `parser._headers_dict` is the
+      same walk, so such a message is now stored, U+FFFD and all, in
+      `messages.headers`, and an existing `failed_messages` row of that
+      cause succeeds on `retry-failed` (the Mac archive had none). Pinned at
+      `process_one_message` (`tests/test_sync_header_fallback.py`), through
+      both HTTP modes and the MCP serializer
+      (`tests/test_header_fallback_wire.py`), all by raising at the policy
+      seam, since 3.13 parses the forms 3.12 chokes on.
   - **Two invariants here change no answer, so they are pinned structurally**
     (both mutations survived the whole suite when found). A `truncated=True`
     prefix that still holds the separator must be served *from it* — that is
@@ -3781,8 +3806,10 @@ for the full design.
     nor `ge`/`le`).** A bare `int` field lets pydantic's lax coercion silently
     turn a JSON `"5"` or `5.0` into the integer `5` — a 200 under a request
     that never named an integer — and a genuinely non-numeric value (`1.5`,
-    `"abc"`) gets pydantic's own 422 with an array `detail` (#370), never the
-    pure rule's problem+json 400. `int | bool` fixed only the `bool` half (a
+    `"abc"`) got pydantic's own 422 with an array `detail`, never the pure
+    rule's problem+json 400 (since #370 the route class makes that a 400
+    too, but naming a location rather than the rule — and it cannot help the
+    coercion half, which never fails). `int | bool` fixed only the `bool` half (a
     JSON `true` used to coerce to `1`). `Any` reaches every JSON value into
     `snippet_width_error` unmodified, so that pure rule is the one authority:
     bool, non-int, and out-of-range are all its call. The *type* refusal is
@@ -3838,8 +3865,8 @@ for the full design.
       adding a hit field does not silently move a documented limit), judged
       **before** any element is read so the gate's own cost is bounded, and
       membership is a `frozenset`. Not `Field(max_length=…)`: pydantic
-      answers that with a 422 array `detail` (#370), where the rule answers
-      problem+json naming the cap — and it sits ahead of the empty-ACL
+      answered that with a 422 array `detail` (a 400 naming only a location
+      since #370), where the rule answers problem+json naming the cap — and it sits ahead of the empty-ACL
       short-circuit with the rest of `fields_error`. Duplicates stay
       accepted. `api_minor` stays 3: only a list no honest caller sends
       changes answer. Hoisting the per-hit re-check out of `project_hit`
@@ -5914,9 +5941,36 @@ for the full design.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.
-    `forbid` was not used: FastAPI answers it with a 422 whose `detail` is
-    an array, not problem+json. A type error on a known field still gets
-    that 422 (#370).
+    `forbid` was not used: FastAPI answered it with a 422 whose `detail` is
+    an array, not problem+json.
+  - **Every schema error on `/v1/search` is a problem+json 400 (#370, #389).**
+    The search router's `route_class` is
+    [src/localmail/serve/request_validation.py](src/localmail/serve/request_validation.py)`::ProblemJsonValidationRoute`,
+    which re-raises FastAPI's `RequestValidationError` as `ValidationFailed`,
+    so the existing `APIError` handler renders it. `detail` is the pure
+    `validation_detail`: one `loc: msg` per error, `body.` dropped,
+    `"; "`-joined. Before it a client rendering `detail` (kastellan) got a
+    string for one mistake and an array for the one beside it.
+    - **A body that does not parse is two more shapes, both mapped.**
+      Malformed JSON's `loc` is `("body", <char offset>)`, so dropping `body`
+      rendered `1: JSON decode error`, which reads as a list index; it is
+      `body: JSON decode error at position N: <reason>` now. A body that is
+      not UTF-8 never becomes a `RequestValidationError` at all — FastAPI
+      raises a bare `HTTPException(400)` — so the route class maps that too,
+      as `body: There was an error parsing the body`. Both found in review.
+    - **Scoped to the search router, not app-wide** (#370's option 1).
+      Option 2 changes every route's 422 and needs the GUI's and kastellan's
+      error handling checked first; `test_other_routes_keep_fastapis_422`
+      pins the scope.
+    - **#389 is closed by it rather than by typing `fields` as `Any`.**
+      Retyping covered 2 of #370's ~9 shapes, blanks the OpenAPI type, and
+      adds a second type check beside pydantic's. `snippet_chars` stays `Any`
+      for a different reason: lax coercion is a silent **200**, and a
+      handler only sees failures. `fields_error`'s type branches stay, for
+      library callers.
+    - **The GUI is unaffected in practice** — its body is built from typed
+      Rust structs — but note `search_paging.isCursorRejected` stops the
+      scroll on any 400, which is the right reading of a schema error too.
     - **An unknown MCP tool argument is still dropped (#368).** FastMCP's
       `ArgModelBase` sets no `extra`, and there is no supported per-tool
       hook, so "refused" is an HTTP property today.
@@ -5967,7 +6021,7 @@ for the full design.
     exactly the 41 surrogate cases.
   - **`query`:** optional **and nullable** on HTTP and MCP (`str | None`,
     normalised to `""` at the transport). Only an *omitted* query worked at
-    first, and `null` was the 422 above, which is what a client modelling
+    first, and `null` was FastAPI's 422, which is what a client modelling
     the field as `Option<String>` sends.
     - **The MCP half is pinned through `server.call_tool`**, not the raw
       function: the SDK's argument model is what rejected `null`.

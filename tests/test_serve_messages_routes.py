@@ -10,7 +10,10 @@ from fastapi.testclient import TestClient
 from localmail.serve.app import create_app
 
 
-def _seed_msg(conn: psycopg.Connection) -> int:
+_RAW = b"Received: by 10.0.0.1\r\nFrom: a@x\r\nreceived: from relay\r\n\r\nhi"
+
+
+def _seed_msg(conn: psycopg.Connection, raw: bytes = _RAW) -> int:
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO accounts (name, email_address, imap_host, auth_method) "
@@ -28,9 +31,7 @@ def _seed_msg(conn: psycopg.Connection) -> int:
                                      size_bytes, headers, date_sent, date_received)
                VALUES (%s, '<m@x>', 'hello', 'a@x', 'Anna', 'hi', '<p>hi</p>', '[]'::jsonb,
                        %s, %s, 3, %s::jsonb, %s, %s) RETURNING id""",
-            (aid,
-             b"Received: by 10.0.0.1\r\nFrom: a@x\r\nreceived: from relay\r\n\r\nhi",
-             b"\x00" * 32, json.dumps({"From": ["a@x"]}),
+            (aid, raw, b"\x00" * 32, json.dumps({"From": ["a@x"]}),
              datetime(2026, 3, 4, tzinfo=timezone.utc), now),
         )
         row = cur.fetchone(); assert row is not None

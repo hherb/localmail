@@ -1,21 +1,17 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-10-29 (session 63).** `main` was **`a8aa2b5`** at
-> session start (#411 merged, with its `bind:innerHTML` review fix; #395
-> closed).
->
-> This session:
-> - **PR #412 on `fix/380-header-surrogates`, two fixes:**
->   - **#380** (commit `c644187`).
->   - **#370's envelope half + #389** (commit `eaf3139`): every schema error
->     on `/v1/search` is a problem+json 400, as you ruled.
-> - **DGX synced by you** to `a8aa2b5` (Pillow 13.0.0), after the classifier
->   refused it for me. Step 0 is done.
-> - **Mac untouched**: still `b6fd32f`. **#412 changes the wire** (422 → 400
->   on `/v1/search`), so redeploy both hosts after the merge (step 1).
->
-> **Open issues: 36** (34 once #412 merges; #370 stays open for its `lang`
+> **Status as of 2026-10-30 (session 64).** `main` was **`162422d`** at
+> session start (#412 merged; #380 and #389 closed; #370 open for its `lang`
 > question).
+>
+> This session: **PR on `fix/386-blob-streaming`**, one commit
+> (`90d0733`) closing all five items of #386.
+>
+> **Neither host was redeployed.** Mac runs `b6fd32f`, DGX `a8aa2b5`
+> (checked at session end via `/v1/version`). Both lag #412's wire change
+> (422 → 400 on `/v1/search`), so last session's step 1 is still open.
+>
+> **Open issues: 35** (34 once this PR merges).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -41,154 +37,97 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### PR #412 on `fix/380-header-surrogates` (based on `main` at `a8aa2b5`)
+### PR on `fix/386-blob-streaming` (based on `main` at `162422d`)
 
 | SHA | What |
 |---|---|
-| `c644187` | `pgtext.replace_surrogates` + its use in `header_block.entries_from_message`; 6 tests; CLAUDE.md |
-| `eaf3139` | `serve/request_validation.py` (route class + pure `validation_detail`); search router uses it; 16 tests; README, CLAUDE.md |
-| handoff | this file + `docs/handoffs/2026-10-29T1930Z-header-surrogates.md` |
+| `90d0733` | #386 items 1–5: `blob_response._stream_slice`, open-after-connection in both routes, `log_context`, `str \| None` mime; 8 tests; CLAUDE.md |
+| handoff | this file + `docs/handoffs/2026-10-30T0100Z-blob-streaming.md` |
 
-### #370 (envelope half) and #389: schema errors on `/v1/search` → 400
+### #386: blob streaming follow-ups
 
-- **Your ruling:** fix #370's option 1 rather than #389 as written.
-- **What changed:**
-  - The search router's `route_class` is `ProblemJsonValidationRoute`. It
-    re-raises FastAPI's `RequestValidationError` as `ValidationFailed`, and
-    the existing `APIError` handler renders that.
-  - `detail` is `validation_detail`: one `loc: msg` per error, with the
-    `body.` prefix dropped, joined by `; ` (for example
-    `fields.1: Input should be a valid string`).
-- **Wire change:** every schema error on `/v1/search` moves from 422 with an
-  array `detail` to a problem+json 400 with a string `detail`. Other routes
-  keep 422, and a test pins that scope.
-- **`fields` stays `list[str]`.** `snippet_chars` stays `Any`, because
-  coercion is a silent 200 that no handler sees. The code comments say
-  this.
-- **Left open in #370:** whether `lang` should accept a list on the wire.
-  The PR body says "Closes #389" and only refers to #370.
-
-- **The defect (#380):** the #314 fallback keeps a header's raw text when
-  the stdlib cannot parse it. For 8-bit bytes that text is
-  surrogate-escaped (`\udcfc`), and Starlette's `JSONResponse` raises
-  `UnicodeEncodeError` on it (verified: `surrogates not allowed`). That is a
-  500 after the handler succeeded.
-- **Not reachable today**: the sync-time JSONB insert rejects such a
-  message. #379 moved the guarantee off the database onto `header_block`.
-  *(Wrong as a description of the fix: the same walk feeds sync, so the
-  fix also turns that poison pill into a stored message. See "Review
-  round" below.)*
-- **The rule:** `pgtext.replace_surrogates`, beside `strip_nuls`. It
-  replaces each surrogate code point with U+FFFD. That matches what the
-  parser's own success path renders for the same bytes: on 3.13,
-  `X-A: \xfc\xfd` parses to `"��"`. *(True only for bytes invalid one
-  by one; superseded, see "Review round".)*
-- **Applied to every value**, after the `try/except`, so the success path is
-  covered too. Header *names* are not passed through: the feedparser only
-  admits printable ASCII there.
-- **Replaced, not stripped**: a dropped byte would join its neighbours into
-  a different word.
-- **Not done:** recovering UTF-8 from the escaped bytes (`caf\udcc3\udca9`
-  → `café`). The fallback now shows `caf��` where a successful
-  parse would show `café`. That costs fidelity only, on a path that is
-  unreachable today.
-
-## Review round (PR #412)
-
-Four reviewers (code, tests, errors, comments). Fixed on the branch:
-
-- **UTF-8 recovery after all.** The fallback mangled raw UTF-8 (`café` →
-  `caf��`), and since `parser._headers_dict` is the same walk it would
-  have *stored* that. The fallback now decodes as `email.utils._sanitize`
-  does (`header_block._decode_raw`); `replace_surrogates` stays as the
-  backstop. Pinned against the stdlib's own rendering of the same bytes.
-- **Sync changes too**: such a message is now ingested, not a poison pill.
-  Pinned at `process_one_message`; HTTP `list`/`full` and the MCP
-  serializer are pinned end to end. The three fail without the fix.
-- **Malformed JSON** rendered `1: JSON decode error` (a char offset read
-  as a field); now `body: JSON decode error at position 1: <reason>`.
-- **A non-UTF-8 body** was FastAPI's bare `HTTPException(400)`, not
-  problem+json; the route class maps it too.
-- Stale "422" test comments fixed; the `snippet_chars` non-integer needles
-  now use `snippet_width_error`'s own wording, since a retyped `int` would
-  also have answered a 400 naming the field.
+- **Item 1 (handle leak):** both routes call `_open_blob_file_at` **after**
+  the `with pool.connection()` block. The sha route used to open before
+  `get_attachment_filename`, so a DB error there (or the commit on exit)
+  left the file open until GC. It still runs after `not_modified`, so the
+  #62 spies are unaffected.
+- **Items 2 + 3:** both streamers go through one `_stream_slice`.
+  - It never reads past its slice. A file longer than `size_bytes` is cut
+    at the size and logged as `attachment stream overran`. Before, it
+    overran `Content-Length` and h11 aborted the response silently.
+  - An `OSError` mid-read is logged at ERROR (`attachment stream read
+    failed … sent=N`) and re-raised.
+- **Item 4:** `blob_response(log_context=…)`. The index route passes
+  `message_id=… index=…`, so every stream log line says which request
+  hit a shared blob. The sha route passes nothing.
+- **Item 5:** `mime_type` is `str | None` on `_lookup_blob_row`,
+  `get_attachment_blob_info` and `open_attachment_bytes`. The third was not
+  named in the issue; mypy found the lie propagating there.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | 6 new tests fail (ImportError / assertion) before the fix |
-| mutation: drop `replace_surrogates(...)` in `header_block.py` (restored from a scratch copy, run with `python -B`) | `test_a_raw_fallback_with_8bit_bytes_still_renders_as_json` fails, 35 pass |
-| pytest (macOS, all extras) | **4186 passed**, 6 warnings, 263 s |
-| mypy `src/localmail` | Success, 160 files |
-| mutation: `router = APIRouter()` (no route class) | 11 fail (10 new + the updated sort test) |
-| pytest after `eaf3139` (macOS, all extras) | **4202 passed** (4186 + 16), 344 s |
-| mypy after `eaf3139` | Success, 161 files |
-| CI | `c644187` green; see `gh pr checks 412` for `eaf3139` |
+| RED first | 5 new tests fail before the fix; 3 controls pass |
+| mutation: open before the filename lookup | `test_a_filename_lookup_failure_leaves_no_blob_file_open` fails |
+| mutation: overrun check disabled | the overrun test fails |
+| mutation: `except OSError` → `LookupError` | both read-error cases fail |
+| mutation: read to EOF (`while True`) | 5 fail, incl. the #58 no-warn pins |
+| mutation: drop `log_context` on the index route | the index truncation test fails |
+| pytest (macOS, all extras) | **4221 passed**, 6 warnings, 372 s |
+| mypy `src/localmail` | Success, 161 files |
+| CI | see `gh pr checks` on the PR |
 
-- Load was 13–24 during the run; timings are not comparable.
-- No GUI or Rust change, so vitest/cargo were not re-run.
+- Mutations were restored from scratchpad copies and run with `python -B`.
+- No baseline was taken on `main` this session, so 4221 is not compared
+  with anything. This session added 8 tests.
+- No GUI or Rust change, so vitest and cargo were not re-run.
 
 ## What's next
 
-### 0. ~~Sync the DGX~~ — done by you (`a8aa2b5`, Pillow 13.0.0)
-
-### 1. **Merge #412, then redeploy both hosts** (yours)
-- Check `gh issue view 380` and `gh issue view 389` after the merge; both
-  should be closed.
-- **Redeploy, because the wire changed:**
+### 1. **Merge this PR, then redeploy both hosts** (yours; carried from #412)
+- Check `gh issue view 386` after the merge; it should be closed.
+- **Redeploy.** #412 changed the wire, and this PR changes logging only.
   - Mac: `git pull`, `uv sync --frozen --extra mcp --extra extraction`,
     then kickstart both agents.
-  - DGX: the ssh one-liner from the last handoff.
-- **Acceptance:** `/v1/version` on each host reports the merge commit, and
-  `POST /v1/search` with `{"limit": 500}` answers 400 problem+json there.
+  - DGX: the ssh one-liner from an earlier handoff.
+- **Acceptance:**
+  - `/v1/version` on each host reports the merge commit.
+  - `POST /v1/search` with `{"limit": 500}` answers a 400 problem+json.
 
-### 2. **Tell kastellan** (yours)
+### 2. **Tell kastellan** (yours; carried)
 - Every schema error on `/v1/search` is now a problem+json 400 with a
-  string `detail` (`loc: msg; …`).
-- `api_minor` was not bumped: only malformed requests change answer.
+  string `detail` (`loc: msg; …`). `api_minor` was not bumped.
 
-### 3. **Next small slice: #386** (blob streaming follow-ups, 5 items)
-- **Item 1 is the real one:** the sha route opens the file before
-  `get_attachment_filename`, so a DB error leaks the handle until GC.
-  - **Fix:** look up the filename before the open. Both steps already come
-    after `not_modified`, which keeps the #62 ordering.
-  - **Acceptance:**
-    - A RED test makes `get_attachment_filename` raise and asserts the
-      handle is closed (spy `_open_blob_file_at` and return a tracked file).
-    - The #62 spies still pass.
-- **Items 2–4** are logging (an OSError mid-stream, a file overrunning
-  `Content-Length`, message id and index in the truncation WARNING).
-- **Item 5** is a type annotation. Do them in the same PR only if each one
-  stays small.
+### 3. **Next small slice: #370's remainder (`lang` as a list)**
+- `api.search._filter_tokens` already accepts a list, while
+  `SearchFiltersModel.lang` is `str | None`. Decide whether to widen it.
+  This is your call.
+- **Acceptance, if widened:**
+  - `{"filters": {"lang": ["en", "de"]}}` unions both.
+  - A list member with whitespace or a quote is a 400.
+  - The MCP `search` tool's `lang` gets the same type.
+  - The GUI wire test (`test_serve_search_request_keys.py`) still passes.
+  - Close #370.
+- **If not widened:** close #370 with that ruling.
 
-### 4. **Dependabot** — two open, both left open on purpose
+### 4. **Dependabot** — two open, both on purpose
 - **#71 accelerate:** no fix exists.
 - **#185 deepmerge:** no patched release; dev-scope only.
-  - **Acceptance:** bump when a fix exists (`npm audit fix`, then
-    `npm test -- --run && npm run check`).
 
 ### 5. **Watch for docling > 2.144** (carried)
 - Re-run the probe under rapidocr against any new release. If
   `native_table` passes, move the lock forward and lift the `docling<2.143`
   cap.
-- **Acceptance:** the lock is on the newest release whose probe exits 0 on
-  both hosts.
 
 ### 5a. **emSign G3 in the OS trust stores** (carried)
 - Re-check after each OS or `ca-certificates` update (commands below).
 
 ### 6. **kastellan, slice C** (carried, yours)
 - Ask whether it still wants slice C (`/problems/token-expired`).
-- Tell it about `?headers=list` (api_minor ≥ 1), attachment index paging
-  (≥ 2), and `fields` / `snippet_chars` (≥ 3) with the 48-entry cap.
 
 ### 7. **Carried issues**
-- **#370's remainder:** should `lang` accept a list on the wire?
-  `api.search._filter_tokens` already supports one, while
-  `SearchFiltersModel.lang` is `str | None`. Close #370 once that is
-  decided.
-- **Then:** #383, #384, #378, #369, #373, #372, #370, #371, #368, #365.
+- #383, #384, #378, #369, #373, #372, #371, #368, #365.
 - **Not filed yet:** the `snippet_source="header"` mislabel on a
   whole-message lexical win.
 - **Larger work:**
@@ -200,30 +139,25 @@ Four reviewers (code, tests, errors, comments). Fixed on the branch:
 
 ## Rulings made this session
 
-1. **#380 over #386 and #389**: #389 is a wire decision (yours), and #386
-   has five parts. #380 was one pure rule at one call site.
-2. *(Reversed in the review round.)* **U+FFFD per surrogate, not UTF-8
-   recovery.** It is one line and total.
-   It matches the success path's rendering of undecodable bytes. Recovery
-   would need a second branch for surrogates outside `DC80–DCFF`, on a path
-   that is unreachable today.
-3. **No Mac redeploy mid-session.** This was decided before `eaf3139`,
-   which does change the wire, so redeploy after the merge (step 1).
-4. **#389 is fixed through #370's option 1, not by typing `fields` as
-   `Any`** (your call):
-   - It covers every schema error on the route, not two.
-   - It keeps the OpenAPI type.
-   - It adds no second type check.
-   - It is scoped to `/v1/search`.
+1. **Open after releasing the connection, rather than closing `fp` on the
+   exception path.** It removes the handle from every DB failure window,
+   including the commit on exit that the issue names for the index route.
+   There is no new `try`.
+2. **One `_stream_slice` for both streamers.** A full GET is the slice
+   `[0, size)`. Only the full path checks for overrun: a range is a slice,
+   and bytes past it are not an error.
+3. **A read error is logged at ERROR; truncation and overrun at WARNING.**
+   A failed read is an I/O fault, while a size mismatch is a data
+   inconsistency.
+4. **All five items in one PR.** Each stayed small, as the issue required.
 
 ## Open decisions & risks
 
-1. **Both hosts lag `main` after #412 merges**: the Mac runs `b6fd32f`
-   and the DGX `a8aa2b5`. Each is self-consistent until redeployed.
-2. **The 422 → 400 change is visible to any client that branches on the
-   status code** for `/v1/search`. Only kastellan is known; the GUI sends
-   typed structs and treats a 400 on a paging request as final, which is
-   correct here too.
+1. **Both hosts lag `main`**: the Mac runs `b6fd32f` and the DGX
+   `a8aa2b5`. Each is self-consistent until it is redeployed.
+2. **The `fp.read(1)` overrun probe is outside the `OSError` logging.** An
+   EIO on exactly that one-byte read would propagate without the
+   "read failed" line. It is a narrow window, and accepted.
 3. **The native-table regression in docling ≥ 2.143 is unexplained**, only
    localised.
 4. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
@@ -244,8 +178,9 @@ git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 git worktree list
 
-gh pr view 412 --json state,mergeCommit
-gh issue list --limit 200 --json number --jq length       # 34 after #412
+gh pr list --head fix/386-blob-streaming --state all --json number,state,mergeCommit
+gh issue view 386 --json state
+gh issue list --limit 200 --json number --jq length       # 34 after the merge
 gh api --paginate repos/hherb/localmail/dependabot/alerts \
   --jq '.[] | select(.state=="open") | .dependency.package.name' | sort | uniq -c   # accelerate, deepmerge
 
@@ -261,16 +196,15 @@ ssh 10.0.0.3 'ls /etc/ssl/certs | grep -ic emsign_ecc_root_ca_-_g3'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4202 passed (macOS, all extras)
-uv run pytest -q tests/test_pgtext.py tests/test_header_block.py tests/test_request_validation.py tests/test_serve_search_schema_errors.py
+unset VIRTUAL_ENV && uv run pytest -q              # 4221 passed (macOS, all extras)
+uv run pytest -q tests/test_blob_response_streaming.py tests/test_serve_attachments_routes.py tests/test_serve_message_attachment_routes.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 161 files
 cd gui && npm test -- --run && npm run check && npm audit
 cd gui/src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
 ```
 
-`main` was **`a8aa2b5`** at session start and is unchanged. This session left
-**one PR**, #412 on `fix/380-header-surrogates`: commits `c644187` and
-`eaf3139`, plus this handoff.
+`main` was **`162422d`** at session start and is unchanged. This session left
+**one PR** on `fix/386-blob-streaming`: commit `90d0733`, plus this handoff.
 
 The latest migration is still **`0036_api_keys.sql`**; the next free slot is
 `0037_*.sql`.

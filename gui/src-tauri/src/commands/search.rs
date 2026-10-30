@@ -30,6 +30,12 @@ pub struct SearchFiltersWire {
     pub before: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_attachment: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -156,6 +162,9 @@ mod tests {
                 after: None,
                 before: None,
                 has_attachment: None,
+                date_from: None,
+                date_to: None,
+                lang: None,
             },
             limit: 50,
             cursor: None,
@@ -211,6 +220,32 @@ mod tests {
         r.sort = Some("date".into());
         let body = serde_json::to_string(&r).unwrap();
         assert!(body.contains("\"sort\":\"date\""));
+    }
+
+    #[test]
+    fn date_bounds_and_lang_survive_the_tauri_hop() {
+        // #371: serde drops unknown fields by default, so a key the TS side
+        // sets but this struct lacks vanishes at `invoke` with no error.
+        // Decode the body as the frontend sends it and re-encode it as the
+        // server receives it.
+        let sent = r#"{"query":"x","limit":50,"cursor":null,
+            "filters":{"account_ids":[],"folder_ids":[],"from":null,"to":null,
+                       "subject":null,"after":null,"before":null,
+                       "has_attachment":null,"date_from":"2024-01-01",
+                       "date_to":"2024-12-31","lang":"de"}}"#;
+        let r: SearchRequest = serde_json::from_str(sent).unwrap();
+        let body: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(body["filters"]["date_from"], "2024-01-01");
+        assert_eq!(body["filters"]["date_to"], "2024-12-31");
+        assert_eq!(body["filters"]["lang"], "de");
+    }
+
+    #[test]
+    fn unset_date_bounds_and_lang_are_omitted_from_the_wire() {
+        let body = serde_json::to_string(&req()).unwrap();
+        assert!(!body.contains("date_from"));
+        assert!(!body.contains("date_to"));
+        assert!(!body.contains("\"lang\""));
     }
 
     #[test]

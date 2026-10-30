@@ -96,6 +96,14 @@ describe("settings store", () => {
     expect(settings.snapshot.defaultLanguage).toBeNull();
   });
 
+  it("refuses a defaultLanguage the server would refuse or never match (#371)", () => {
+    for (const bad of ["en us", "en'", "english", "e"]) {
+      settings.setDefaultLanguage("de");
+      settings.setDefaultLanguage(bad);
+      expect(settings.snapshot.defaultLanguage).toBeNull();
+    }
+  });
+
   it("toggles debug", () => {
     settings.setDebug(true);
     expect(settings.snapshot.debug).toBe(true);

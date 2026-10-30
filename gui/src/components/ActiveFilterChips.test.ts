@@ -2,12 +2,13 @@ import { fireEvent, render, screen } from "@testing-library/svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ActiveFilterChips from "./ActiveFilterChips.svelte";
 import { search } from "../lib/stores/search.svelte";
+import { settings } from "../lib/stores/settings.svelte";
 
 vi.mock("../lib/tauri", () => ({ runSearch: vi.fn(async () => ({
   results: [], next_cursor: null, total_estimate: null, took_ms: 0,
 })) }));
 
-afterEach(() => { search.reset(); vi.clearAllMocks(); });
+afterEach(() => { search.reset(); settings.setDefaultLanguage(null); vi.clearAllMocks(); });
 
 describe("ActiveFilterChips", () => {
   it("renders nothing when no filters are set", () => {
@@ -96,6 +97,25 @@ describe("ActiveFilterChips", () => {
     expect(search.snapshot.tookMs).toBeNull();
     const { runSearch } = await import("../lib/tauri");
     expect(runSearch).not.toHaveBeenCalled();
+  });
+
+  it("shows the Settings default language as a chip with no ×, since it is applied (#371)", () => {
+    settings.setDefaultLanguage("de");
+    render(ActiveFilterChips);
+    expect(screen.getByText("Language: de (default)")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /remove language/i })).toBeNull();
+  });
+
+  it("an explicit language chip replaces the default one and stays removable", () => {
+    settings.setDefaultLanguage("de");
+    search.setFilters({
+      accountIds: [], folderIds: [], from: "", to: "", subject: "",
+      after: "", before: "", hasAttachment: null, language: "fr",
+    });
+    render(ActiveFilterChips);
+    expect(screen.getByText("Language: fr")).toBeTruthy();
+    expect(screen.queryByText(/\(default\)/)).toBeNull();
+    expect(screen.getByRole("button", { name: /remove language/i })).toBeTruthy();
   });
 
   it("does not show chips for accountIds/folderIds (tree owns those)", () => {

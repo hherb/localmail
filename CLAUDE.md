@@ -5922,7 +5922,7 @@ for the full design.
         and the chip is what is applied. A typed operator with no chip, or
         matching its chip, is left in the box, so nothing changes for a
         search that has no conflict. `has:` (refused on conflict) and
-        `lang:` (unioned, and dropped at the Tauri hop by #371) are not
+        `lang:` (unioned with the structured filter) are not
         touched, and a typed date is absorbed only when it is shaped like
         one (`after:last-week` stays in the query for the server to refuse).
         The popover seeds scalars typed-first to match.
@@ -5998,8 +5998,17 @@ for the full design.
       structs** and requires every field to be a supported key. With
       refusal, a Rust field the server lacks turns every GUI search into a
       400, and `gui-ci` mocks the server. The reader refuses `rename_all`
-      rather than guessing. Separately, the GUI drops `lang`/`date_from`/
-      `date_to` at the Tauri hop (#371).
+      rather than guessing. **It also reads the TS wire interfaces in
+      `gui/src/lib/api/search.ts` and requires every key there to be a Rust
+      field (#371).** serde drops unknown fields, so `lang`, `date_from` and
+      `date_to` were set by the frontend and silently discarded at `invoke`,
+      so the `lang` chip and the `defaultLanguage` setting never applied.
+      Both suites see only their own half, which is why the pin reads both
+      files. Two consequences of the setting going live: it is stored only
+      when shaped like an ISO 639-1 code (`en us` would make every search a
+      400, `english` would match nothing), and it renders as a read-only
+      `Language: xx (default)` chip, since it filters out every message
+      whose `body_lang` is NULL.
     - **`lang` takes a list on both transports** (`str | list[str]`, the
       rest of #370). `_filter_tokens` always unioned a list, so the wire was
       the only thing refusing it. Each member gets the single string's

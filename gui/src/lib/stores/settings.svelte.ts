@@ -61,7 +61,9 @@ function coercePageSize(v: unknown): number {
 function coerceDefaultLanguage(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const trimmed = v.trim().toLowerCase();
-  return trimmed.length > 0 ? trimmed : null;
+  // Sent as `lang` on every search (#371): anything but an ISO 639-1 code
+  // would make each one a 400 (`en us`) or match nothing (`english`).
+  return /^[a-z]{2}$/.test(trimmed) ? trimmed : null;
 }
 
 function loadInitial(): SettingsSnapshot {

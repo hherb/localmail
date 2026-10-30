@@ -6004,7 +6004,10 @@ for the full design.
       rest of #370). `_filter_tokens` always unioned a list, so the wire was
       the only thing refusing it. Each member gets the single string's
       refusals, and a bad member refuses the whole request rather than being
-      dropped beside its siblings. A non-string member is pydantic's 400:
+      dropped beside its siblings. An empty list is refused like `""`: the
+      old `lang_v != []` guard composed no token, so once the wire admitted
+      lists `[]` was a silent 200 over every language (review of #417).
+      A non-string member is pydantic's 400:
       v2 does not coerce an int to `str`. It is the model's first real
       union, so its schema errors carry pydantic's branch tag
       (`filters.lang.str: …; filters.lang.list[str].1: …`); left as is, since

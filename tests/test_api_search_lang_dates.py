@@ -74,6 +74,8 @@ def test_invalid_lang_raises():
         build_query_string(free_text="", filters={"lang": ""})
     with pytest.raises(ValidationFailed):
         build_query_string(free_text="", filters={"lang": ["en", ""]})
+    with pytest.raises(ValidationFailed, match="lang: empty list"):
+        build_query_string(free_text="", filters={"lang": []})
 
 
 @pytest.mark.parametrize("lang", [

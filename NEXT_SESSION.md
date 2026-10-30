@@ -8,7 +8,7 @@
 > - Opened a **PR on `fix/370-lang-list`** with one code commit
 >   (`05c6320`), which closes the rest of #370.
 >
-> **Open issues: 34** (33 once this PR merges and closes #370).
+> **Open issues: 37** (36 once this PR merges and closes #370).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -53,6 +53,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | SHA | What |
 |---|---|
 | `05c6320` | `lang` is `str \| list[str]` on `SearchFiltersModel` and on the MCP `search` tool. Adds 6 tests, updates 1 stale case, README, `docs/mcp-usage.md`, CLAUDE.md |
+| review fixes | `lang: []` is a 400 (it used to drop the filter silently); MCP `ToolError` pin for a bad member; this file corrected |
 | handoff | this file + `docs/handoffs/2026-10-30T0900Z-lang-list.md` |
 
 - **What changed:** `api.search._filter_tokens` always unioned a list, so
@@ -64,7 +65,11 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   - A bad member (`"e n"`) is a 400 with the existing wording, and the
     searcher is never called. So is a non-string member (`3`).
   - MCP: a list goes through `call_tool` to `filters`, and the published
-    `inputSchema` admits `array<string>`.
+    `inputSchema` admits `array<string>`. A bad member reaches the agent as
+    a `ToolError`.
+  - **Review fix:** `lang: []` used to compose no token, i.e. a 200 over
+    every language, once the list type let it through. It is refused now,
+    like `""`. Reverting the refusal fails exactly the two tests added for it.
 - **Stale case:** `test_serve_search_schema_errors.py` used `lang: ["en","de"]`
   as a schema error. It now uses `lang: 5`, whose location is
   `filters.lang.str`.
@@ -73,7 +78,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | check | result |
 |---|---|
-| RED first | 4 of the 6 new tests fail before the fix; the 2 controls pass |
+| RED first | 4 of the 6 original new tests fail before the fix. Of the 2 that pass, `test_a_single_lang_string_still_works` is a control; `test_a_non_string_list_member_is_a_400` passed before for the old reason (every list was a 400), so it guards a regression and pins nothing about the fix |
 | pytest (macOS, all extras) | **4230 passed**, 6 warnings, 209 s (machine load ~48 from other projects) |
 | mypy `src/localmail` | Success, 161 files |
 | CI | see `gh pr checks` on the PR |
@@ -96,7 +101,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 ### 2. **Tell kastellan** (yours; carried)
 - Every schema error on `/v1/search` is a problem+json 400 with a string
   `detail` (`loc: msg; …`).
-- `filters.lang` now takes a list.
+- `filters.lang` now takes a list; an empty list is a 400.
 - `api_minor` was **not** bumped for either change. Whether a widening
   deserves a bump is open; I kept to #412's precedent.
 
@@ -127,6 +132,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ### 7. **Carried issues**
 - #383, #384, #378, #369, #373, #372, #371, #368, #365.
+- **New, filed 2026-10-29:** #414 (daemon workers stall on unbounded pool connections), #415 (INTERNALDATE local time labelled UTC), #416 (Gmail IDLE drop logged as a crash).
 - **Not filed yet:** the `snippet_source="header"` mislabel on a
   whole-message lexical win.
 - **Larger work:**
@@ -176,7 +182,7 @@ git worktree list
 
 gh pr list --head fix/370-lang-list --state all --json number,state,mergeCommit
 gh issue view 370 --json state
-gh issue list --limit 200 --json number --jq length       # 33 after the merge
+gh issue list --limit 200 --json number --jq length       # 36 after the merge
 gh api --paginate repos/hherb/localmail/dependabot/alerts \
   --jq '.[] | select(.state=="open") | .dependency.package.name' | sort | uniq -c   # accelerate, deepmerge
 

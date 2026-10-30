@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from fastapi.testclient import TestClient
 from psycopg_pool import ConnectionPool
 
@@ -67,6 +68,18 @@ def test_a_list_member_that_would_retokenize_is_a_400(
     searcher.search.assert_not_called()
 
 
+def test_an_empty_lang_list_is_a_400_not_a_dropped_filter(
+    db_dsn, api_token, db_conn, api_user,
+):
+    """Refused like ``""``: unrefused it composed no token, so the search
+    silently matched every language."""
+    _seed_acct_and_grant(db_conn, api_user.id)
+    r, searcher = _post(db_dsn, api_token, {"lang": []})
+    assert r.status_code == 400
+    assert "lang: empty list not allowed" in r.json()["detail"]
+    searcher.search.assert_not_called()
+
+
 def test_a_non_string_list_member_is_a_400(db_dsn, api_token, db_conn, api_user):
     _seed_acct_and_grant(db_conn, api_user.id)
     r, searcher = _post(db_dsn, api_token, {"lang": ["en", 3]})
@@ -111,3 +124,18 @@ def test_the_published_mcp_schema_admits_a_lang_list(db_dsn):
         pool.close()
     lang = (tools["search"].inputSchema or {})["properties"]["lang"]
     assert {"type": "array", "items": {"type": "string"}} in lang["anyOf"]
+
+
+def test_a_bad_lang_member_reaches_an_agent_as_a_tool_error(db_dsn, monkeypatch):
+    """The real ``tool_search``: the per-member refusal must come back as a
+    clean ``ToolError``, not escape as an unhandled exception."""
+    import localmail.mcp.server as server_mod
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
+    pool, server = _mcp_server(db_dsn)
+    try:
+        with pytest.raises(ToolError, match="lang: expected a language code"):
+            asyncio.run(server.call_tool("search", {"lang": ["en", "e n"]}))
+    finally:
+        pool.close()

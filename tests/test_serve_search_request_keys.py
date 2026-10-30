@@ -110,6 +110,47 @@ def test_every_field_the_gui_sends_is_one_this_server_supports() -> None:
     assert _rust_wire_names(source, "SearchRequest") <= set(SearchRequest.model_fields)
 
 
+_GUI_SEARCH_TS = (Path(__file__).resolve().parents[1]
+                  / "gui" / "src" / "lib" / "api" / "search.ts")
+
+
+def _ts_interface_keys(source: str, interface: str) -> set[str]:
+    """The keys a TS ``interface`` in ``search.ts`` declares.
+
+    Strict for ``_rust_wire_names``' reason: every body line must be blank,
+    a ``//`` comment, or ``name: type;`` / ``name?: type;``.
+    """
+    match = re.search(rf"export interface {interface} \{{(.*?)\n\}}", source, re.S)
+    assert match, f"interface {interface} not found in {_GUI_SEARCH_TS}"
+    keys: set[str] = set()
+    for raw in match.group(1).splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        field = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\??\s*:.*;", line)
+        assert field, f"{interface}: line not modelled: {raw.strip()}"
+        keys.add(field.group(1))
+    assert keys, f"interface {interface}: no keys read"
+    return keys
+
+
+@pytest.mark.parametrize("name", ["SearchFiltersWire", "SearchRequest"])
+def test_every_key_the_gui_frontend_sets_survives_the_tauri_hop(name) -> None:
+    """serde ignores unknown fields, so a key the TS wire type sets and the
+    Rust struct lacks is dropped at ``invoke`` with no error (#371: ``lang``,
+    ``date_from`` and ``date_to`` were). Both the vitest and the cargo
+    suites see only their own half, so the pin has to read both."""
+    ts = _ts_interface_keys(_GUI_SEARCH_TS.read_text(), name)
+    assert ts <= _rust_wire_names(_GUI_SEARCH_RS.read_text(), name)
+
+
+def test_the_ts_key_reader_refuses_what_it_does_not_model() -> None:
+    source = ("export interface Demo {\n  query: string;\n"
+              "  [key: string]: unknown;\n}\n")
+    with pytest.raises(AssertionError, match="not modelled"):
+        _ts_interface_keys(source, "Demo")
+
+
 def test_the_rust_field_reader_honours_a_rename() -> None:
     """The reader's own negative control: a rename must replace the field
     name, or a renamed-to-unsupported key would pass the pin above."""

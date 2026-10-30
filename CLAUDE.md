@@ -6000,6 +6000,19 @@ for the full design.
       400, and `gui-ci` mocks the server. The reader refuses `rename_all`
       rather than guessing. Separately, the GUI drops `lang`/`date_from`/
       `date_to` at the Tauri hop (#371).
+    - **`lang` takes a list on both transports** (`str | list[str]`, the
+      rest of #370). `_filter_tokens` always unioned a list, so the wire was
+      the only thing refusing it. Each member gets the single string's
+      refusals, and a bad member refuses the whole request rather than being
+      dropped beside its siblings. An empty list is refused like `""`: the
+      old `lang_v != []` guard composed no token, so once the wire admitted
+      lists `[]` was a silent 200 over every language (review of #417).
+      A non-string member is pydantic's 400:
+      v2 does not coerce an int to `str`. It is the model's first real
+      union, so its schema errors carry pydantic's branch tag
+      (`filters.lang.str: …; filters.lang.list[str].1: …`); left as is, since
+      it still names the field. Pinned through both transports in
+      `tests/test_search_lang_list.py`, including the published MCP schema.
   - **Validation order:** filter values are validated **before** the empty-ACL
     short-circuit, since `run_search` composes and parses the query once,
     early (`_gate_query`), keeping only its free text. A malformed `date_from` from a grant-nothing

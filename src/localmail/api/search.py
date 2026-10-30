@@ -114,7 +114,7 @@ def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
     non-empty once its quotes are stripped. Unknown keys and malformed values
     are refused rather than dropped (#364). An empty string for `from`, `to`,
     `subject` or a date, and an empty id list, is an absent filter; an empty
-    `lang` is refused.
+    `lang`, string or list, is refused.
     """
     key_error = filter_key_error(filters)
     if key_error is not None:
@@ -153,8 +153,11 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
         out.append(f"before:{v}")
     if "lang" in filters:
         lang_v = filters["lang"]
-        if lang_v is not None and lang_v != []:
+        if lang_v is not None:
             values = lang_v if isinstance(lang_v, list) else [lang_v]
+            # Refused like "": an empty list silently matched every language.
+            if not values:
+                raise ValidationFailed("lang: empty list not allowed")
             for one in values:
                 s = str(one).strip().lower()
                 if not s:

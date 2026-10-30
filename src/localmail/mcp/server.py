@@ -63,7 +63,7 @@ def _build_filters(
     to: str | None,
     subject: str | None,
     has_attachment: bool | None,
-    lang: str | None,
+    lang: str | list[str] | None,
 ) -> dict[str, Any]:
     """Compose the filter dict `tool_search` forwards to `run_search`.
 
@@ -224,9 +224,9 @@ def build_mcp_server(
         has_attachment: Annotated[bool | None, Field(description=(
             "True for only messages with attachments, False for only those "
             "without; omit to match either."))] = None,
-        lang: Annotated[str | None, Field(description=(
+        lang: Annotated[str | list[str] | None, Field(description=(
             'Restrict to a detected body language by ISO 639-1 code '
-            '(e.g. "en", "de", "ja").'))] = None,
+            '(e.g. "en", "de", "ja"); a list matches any of them.'))] = None,
         smart: Annotated[bool, Field(description=(
             "Opt into an LLM query rewrite of the free-text query before "
             "searching (page 1 only): a richer vector query, synonym expansion "

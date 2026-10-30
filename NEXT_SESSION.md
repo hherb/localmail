@@ -1,17 +1,14 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-10-30 (session 64).** `main` was **`162422d`** at
-> session start (#412 merged; #380 and #389 closed; #370 open for its `lang`
-> question).
+> **Status as of 2026-10-30 (session 65).** `main` was **`661112a`** at
+> session start (#413 merged, #386 closed).
 >
-> This session: **PR on `fix/386-blob-streaming`**, one commit
-> (`90d0733`) closing all five items of #386.
+> This session:
+> - **Redeployed both hosts to `661112a`.**
+> - Opened a **PR on `fix/370-lang-list`** with one code commit
+>   (`05c6320`), which closes the rest of #370.
 >
-> **Neither host was redeployed.** Mac runs `b6fd32f`, DGX `a8aa2b5`
-> (checked at session end via `/v1/version`). Both lag #412's wire change
-> (422 → 400 on `/v1/search`), so last session's step 1 is still open.
->
-> **Open issues: 35** (34 once this PR merges).
+> **Open issues: 37** (36 once this PR merges and closes #370).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -37,79 +34,86 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### PR on `fix/386-blob-streaming` (based on `main` at `162422d`)
+### Redeploy (no commit)
+
+| host | before | after | check |
+|---|---|---|---|
+| Mac | `b6fd32f` | `661112a` | `/v1/version` `build_hash` = `661112a`; `pending_migrations` empty; docling/mcp/ocrmac import |
+| DGX | `a8aa2b5` | `661112a` | `build_hash` = `661112a`; `NRestarts=0` on both units; docling/mcp/rapidocr import |
+
+- **Mac:** `uv sync --frozen --extra mcp --extra extraction` was a no-op.
+  Both agents were restarted with `launchctl kickstart -k`.
+- **DGX:** the sync reinstalled one package (`nvidia-cusparselt-cu13`).
+- **Not checked live:** `{"limit":500}` → 400. An unauthenticated POST gets
+  a **401 first**, because auth runs before body validation, and I had no
+  credential. The suite pins the 400 (`test_serve_search_schema_errors.py`).
+
+### PR on `fix/370-lang-list` (based on `main` at `661112a`)
 
 | SHA | What |
 |---|---|
-| `90d0733` | #386 items 1–5: `blob_response._stream_slice`, open-after-connection in both routes, `log_context`, `str \| None` mime; 8 tests; CLAUDE.md |
-| handoff | this file + `docs/handoffs/2026-10-30T0100Z-blob-streaming.md` |
+| `05c6320` | `lang` is `str \| list[str]` on `SearchFiltersModel` and on the MCP `search` tool. Adds 6 tests, updates 1 stale case, README, `docs/mcp-usage.md`, CLAUDE.md |
+| review fixes | `lang: []` is a 400 (it used to drop the filter silently); MCP `ToolError` pin for a bad member; this file corrected |
+| handoff | this file + `docs/handoffs/2026-10-30T0900Z-lang-list.md` |
 
-### #386: blob streaming follow-ups
-
-- **Item 1 (handle leak):** both routes call `_open_blob_file_at` **after**
-  the `with pool.connection()` block. The sha route used to open before
-  `get_attachment_filename`, so a DB error there (or the commit on exit)
-  left the file open until GC. It still runs after `not_modified`, so the
-  #62 spies are unaffected.
-- **Items 2 + 3:** both streamers go through one `_stream_slice`.
-  - It never reads past its slice. A file longer than `size_bytes` is cut
-    at the size and logged as `attachment stream overran`. Before, it
-    overran `Content-Length` and h11 aborted the response silently.
-  - An `OSError` mid-read is logged at ERROR (`attachment stream read
-    failed … sent=N`) and re-raised.
-- **Item 4:** `blob_response(log_context=…)`. The index route passes
-  `message_id=… index=…`, so every stream log line says which request
-  hit a shared blob. The sha route passes nothing.
-- **Item 5:** `mime_type` is `str | None` on `_lookup_blob_row`,
-  `get_attachment_blob_info` and `open_attachment_bytes`. The third was not
-  named in the issue; mypy found the lie propagating there.
+- **What changed:** `api.search._filter_tokens` always unioned a list, so
+  only the two transport types changed. The MCP description now says "a
+  list matches any of them".
+- **Tests:** `tests/test_search_lang_list.py`.
+  - HTTP: a list reaches the searcher as two `lang:` tokens, and a single
+    string still works.
+  - A bad member (`"e n"`) is a 400 with the existing wording, and the
+    searcher is never called. So is a non-string member (`3`).
+  - MCP: a list goes through `call_tool` to `filters`, and the published
+    `inputSchema` admits `array<string>`. A bad member reaches the agent as
+    a `ToolError`.
+  - **Review fix:** `lang: []` used to compose no token, i.e. a 200 over
+    every language, once the list type let it through. It is refused now,
+    like `""`. Reverting the refusal fails exactly the two tests added for it.
+- **Stale case:** `test_serve_search_schema_errors.py` used `lang: ["en","de"]`
+  as a schema error. It now uses `lang: 5`, whose location is
+  `filters.lang.str`.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | 5 new tests fail before the fix; 3 controls pass |
-| mutation: open before the filename lookup | `test_a_filename_lookup_failure_leaves_no_blob_file_open` fails |
-| mutation: overrun check disabled | the overrun test fails |
-| mutation: `except OSError` → `LookupError` | both read-error cases fail |
-| mutation: read to EOF (`while True`) | 5 fail, incl. the #58 no-warn pins |
-| mutation: drop `log_context` on the index route | the index truncation test fails |
-| pytest (macOS, all extras) | **4221 passed**, 6 warnings, 372 s |
+| RED first | 4 of the 6 original new tests fail before the fix. Of the 2 that pass, `test_a_single_lang_string_still_works` is a control; `test_a_non_string_list_member_is_a_400` passed before for the old reason (every list was a 400), so it guards a regression and pins nothing about the fix |
+| pytest (macOS, all extras) | **4230 passed**, 6 warnings, 209 s (machine load ~48 from other projects) |
 | mypy `src/localmail` | Success, 161 files |
 | CI | see `gh pr checks` on the PR |
 
-- Mutations were restored from scratchpad copies and run with `python -B`.
-- No baseline was taken on `main` this session, so 4221 is not compared
-  with anything. This session added 8 tests.
-- No GUI or Rust change, so vitest and cargo were not re-run.
+- The mutation is the RED run: reverting either transport type fails that
+  transport's tests.
+- No baseline was taken on `main`, so 4230 is not compared with anything.
+- No GUI or Rust change, so vitest and cargo were not run. The GUI still
+  drops `lang` at the Tauri hop (#371).
 
 ## What's next
 
-### 1. **Merge this PR, then redeploy both hosts** (yours; carried from #412)
-- Check `gh issue view 386` after the merge; it should be closed.
-- **Redeploy.** #412 changed the wire, and this PR changes logging only.
-  - Mac: `git pull`, `uv sync --frozen --extra mcp --extra extraction`,
-    then kickstart both agents.
-  - DGX: the ssh one-liner from an earlier handoff.
-- **Acceptance:**
-  - `/v1/version` on each host reports the merge commit.
-  - `POST /v1/search` with `{"limit": 500}` answers a 400 problem+json.
+### 1. **Merge this PR, then redeploy** (yours)
+- After the merge, check `gh issue view 370`. It should be closed by
+  `Closes #370` in the PR body.
+- **Redeploy both hosts.** This is a wire widening: a request that was a
+  400 is now a 200. Use the same recipe as this session (commands below).
+- **Acceptance:** `/v1/version` on each host reports the merge commit.
 
 ### 2. **Tell kastellan** (yours; carried)
-- Every schema error on `/v1/search` is now a problem+json 400 with a
-  string `detail` (`loc: msg; …`). `api_minor` was not bumped.
+- Every schema error on `/v1/search` is a problem+json 400 with a string
+  `detail` (`loc: msg; …`).
+- `filters.lang` now takes a list; an empty list is a 400.
+- `api_minor` was **not** bumped for either change. Whether a widening
+  deserves a bump is open; I kept to #412's precedent.
 
-### 3. **Next small slice: #370's remainder (`lang` as a list)**
-- `api.search._filter_tokens` already accepts a list, while
-  `SearchFiltersModel.lang` is `str | None`. Decide whether to widen it.
-  This is your call.
-- **Acceptance, if widened:**
-  - `{"filters": {"lang": ["en", "de"]}}` unions both.
-  - A list member with whitespace or a quote is a 400.
-  - The MCP `search` tool's `lang` gets the same type.
-  - The GUI wire test (`test_serve_search_request_keys.py`) still passes.
-  - Close #370.
-- **If not widened:** close #370 with that ruling.
+### 3. **Next small slice: pick from the carried issues**
+- **#371** (the GUI drops `lang`/`date_from`/`date_to` at the Tauri hop) is
+  the natural follow-on now that `lang` is a list. It is a Rust + TS change.
+  - **Acceptance:** the Rust `SearchFiltersWire` carries the three fields,
+    and a lang chip reaches the server.
+  - `test_serve_search_request_keys.py` must still pass.
+  - Run `cargo test` and the vitest suite.
+- **#368** (MCP drops unknown tool args) needs an SDK hook that does not
+  exist. Leave it.
 
 ### 4. **Dependabot** — two open, both on purpose
 - **#71 accelerate:** no fix exists.
@@ -128,6 +132,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ### 7. **Carried issues**
 - #383, #384, #378, #369, #373, #372, #371, #368, #365.
+- **New, filed 2026-10-29:** #414 (daemon workers stall on unbounded pool connections), #415 (INTERNALDATE local time labelled UTC), #416 (Gmail IDLE drop logged as a crash).
 - **Not filed yet:** the `snippet_source="header"` mislabel on a
   whole-message lexical win.
 - **Larger work:**
@@ -139,37 +144,32 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## Rulings made this session
 
-1. **Open after releasing the connection, rather than closing `fp` on the
-   exception path.** It removes the handle from every DB failure window,
-   including the commit on exit that the issue names for the index route.
-   There is no new `try`.
-2. **One `_stream_slice` for both streamers.** A full GET is the slice
-   `[0, size)`. Only the full path checks for overrun: a range is a slice,
-   and bytes past it are not an error.
-3. **A read error is logged at ERROR; truncation and overrun at WARNING.**
-   A failed read is an I/O fault, while a size mismatch is a data
-   inconsistency.
-4. **All five items in one PR.** Each stayed small, as the issue required.
+1. **Widen `lang` (operator decision).** The api layer already unioned a
+   list, so a narrower wire type only hid a working feature.
+2. **A bad list member refuses the whole request.** This is the existing
+   `_filter_tokens` behaviour, and it matches "honoured or refused, never
+   dropped".
+3. **Pydantic's union branch tag stays in the error location**
+   (`filters.lang.str`, `filters.lang.list[str].1`). It still names the
+   field, and stripping it would add code to `validation_detail` for
+   cosmetics.
+4. **Redeploy before the PR**, to `661112a`, as the operator asked. This PR
+   needs one more redeploy after it merges.
 
 ## Open decisions & risks
 
-1. **Both hosts lag `main`**: the Mac runs `b6fd32f` and the DGX
-   `a8aa2b5`. Each is self-consistent until it is redeployed.
-2. **The `fp.read(1)` overrun probe has its own `OSError` guard** (review
-   follow-up). It runs after the whole body is sent, so an error there is
-   logged as `attachment stream overrun probe failed` and **not** re-raised:
-   re-raising dropped a download that had succeeded, under a uvicorn
-   traceback naming no blob.
-3. **The native-table regression in docling ≥ 2.143 is unexplained**, only
+1. **Should a wire widening bump `api_minor`?** Not done, following #412.
+   A client cannot discover the list form except by trying it.
+2. **The native-table regression in docling ≥ 2.143 is unexplained**, only
    localised.
-4. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
-5. **Never run two pytest sessions against one test database.**
-6. **Restore a mutation from a file copy, never with `git checkout`.**
-7. **The test DB is on port 5532**, the same cluster as the live archive.
-8. **Always sync with `--extra mcp --extra extraction` on both hosts**, and
+3. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
+4. **Never run two pytest sessions against one test database.**
+5. **Restore a mutation from a file copy, never with `git checkout`.**
+6. **The test DB is on port 5532**, the same cluster as the live archive.
+7. **Always sync with `--extra mcp --extra extraction` on both hosts**, and
    use `~/.local/bin/uv` on the DGX.
-9. **`uv sync --dry-run` is not read-only; `uv lock --dry-run` is.**
-10. **No ROADMAP.md.** That `/nextsession` step is a no-op.
+8. **`uv sync --dry-run` is not read-only; `uv lock --dry-run` is.**
+9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
 
 ## Exact commands to resume
 
@@ -180,17 +180,26 @@ git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 git worktree list
 
-gh pr list --head fix/386-blob-streaming --state all --json number,state,mergeCommit
-gh issue view 386 --json state
-gh issue list --limit 200 --json number --jq length       # 34 after the merge
+gh pr list --head fix/370-lang-list --state all --json number,state,mergeCommit
+gh issue view 370 --json state
+gh issue list --limit 200 --json number --jq length       # 36 after the merge
 gh api --paginate repos/hherb/localmail/dependabot/alerts \
   --jq '.[] | select(.state=="open") | .dependency.package.name' | sort | uniq -c   # accelerate, deepmerge
 
+# Redeploy — Mac (the repo is the install)
+unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
+.venv/bin/python -c "from localmail.config import load_config; from localmail.db import pending_migrations; print(pending_migrations(load_config().database.dsn))"
+launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
+launchctl kickstart -k gui/$(id -u)/com.localmail.serve
+curl -sk https://127.0.0.1:8443/v1/version
+
+# Redeploy — DGX
+ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user restart localmail-daemon localmail-serve'
+ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version; systemctl --user show -p NRestarts localmail-daemon localmail-serve'
+
 # Deployment health
 launchctl list | grep localmail
-curl -sk https://127.0.0.1:8443/v1/version
 tail -3 ~/localmail-probe/tunnel-probe.log
-ssh -o ConnectTimeout=8 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 grep -c "emSign ECC Root CA - G3" /etc/ssl/cert.pem
 ssh 10.0.0.3 'ls /etc/ssl/certs | grep -ic emsign_ecc_root_ca_-_g3'
 
@@ -198,15 +207,16 @@ ssh 10.0.0.3 'ls /etc/ssl/certs | grep -ic emsign_ecc_root_ca_-_g3'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4221 passed (macOS, all extras)
-uv run pytest -q tests/test_blob_response_streaming.py tests/test_serve_attachments_routes.py tests/test_serve_message_attachment_routes.py
+unset VIRTUAL_ENV && uv run pytest -q              # 4230 passed (macOS, all extras)
+uv run pytest -q tests/test_search_lang_list.py tests/test_serve_search_schema_errors.py tests/test_api_search_lang_dates.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 161 files
 cd gui && npm test -- --run && npm run check && npm audit
 cd gui/src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
 ```
 
-`main` was **`162422d`** at session start and is unchanged. This session left
-**one PR** on `fix/386-blob-streaming`: commit `90d0733`, plus this handoff.
+`main` was **`661112a`** at session start and is unchanged. This session left
+**one PR** on `fix/370-lang-list`: commit `05c6320`, plus this handoff. Both
+hosts run `661112a`.
 
 The latest migration is still **`0036_api_keys.sql`**; the next free slot is
 `0037_*.sql`.

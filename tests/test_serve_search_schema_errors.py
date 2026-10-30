@@ -27,7 +27,9 @@ _SCHEMA_ERRORS = [
     ({"limit": 500}, "limit"),
     ({"filters": {"has_attachment": "maybe"}}, "filters.has_attachment"),
     ({"filters": {"date_from": 20240101}}, "filters.date_from"),
-    ({"filters": {"lang": ["en", "de"]}}, "filters.lang"),
+    # A list is valid since #370 closed; a number is not. The union puts
+    # pydantic's branch tag in the location.
+    ({"filters": {"lang": 5}}, "filters.lang.str"),
     # #389: the two `fields` shapes that skipped `fields_error`.
     ({"fields": "subject"}, "fields"),
     ({"fields": ["snippet", 5]}, "fields.1"),

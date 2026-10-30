@@ -25,7 +25,8 @@ class SearchFiltersModel(BaseModel):
     date_from: str | None = None
     date_to: str | None = None
     has_attachment: bool | None = None
-    lang: str | None = None
+    # A list unions its languages; `_filter_tokens` always accepted one (#370).
+    lang: str | list[str] | None = None
     from_: str | None = Field(default=None, alias="from")
     to: str | None = None
     subject: str | None = None

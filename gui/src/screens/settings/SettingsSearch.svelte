@@ -49,16 +49,16 @@
   <div class="setting-card field-row">
     <div>
       <label for="settings-language">Default language filter</label>
-      <p>Optional BCP-47 tag used when a search does not specify its own language.</p>
+      <p>Optional two-letter ISO 639-1 code used when a search does not specify its own language. Anything else is not saved.</p>
     </div>
     <input
       id="settings-language"
       class="language"
       type="text"
-      maxlength="8"
+      maxlength="2"
       bind:value={langText}
       onblur={applyLanguage}
-      placeholder="e.g. en or en-GB"
+      placeholder="e.g. en"
     />
   </div>
 

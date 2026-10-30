@@ -76,6 +76,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **Behaviour change:** a user who set `defaultLanguage` now gets
   language-filtered results. It defaults to `null`, so no one else is
   affected.
+  - Review follow-up: the setting is now stored only when it is a
+    two-letter code (`coerceDefaultLanguage`), and it shows as a read-only
+    `Language: xx (default)` chip. Without these, a stale `en us` would 400
+    every search and the filter would hide undetected mail invisibly.
 - **Not done:** the GUI still sends `lang` as a single string. The server
   takes a list since #417, but no GUI control produces one.
 

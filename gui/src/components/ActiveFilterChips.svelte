@@ -1,7 +1,9 @@
 <script lang="ts">
   import { search } from "../lib/stores/search.svelte";
+  import { settings } from "../lib/stores/settings.svelte";
 
-  interface Chip { key: string; label: string; clear: () => void; }
+  // No `clear`: a read-only chip (the Settings default language, changed there).
+  interface Chip { key: string; label: string; clear?: () => void; }
 
   function chips(): Chip[] {
     const f = search.snapshot.filters;
@@ -28,11 +30,14 @@
     if (f.language) out.push({ key: "language", label: `Language: ${f.language}`, clear() {
       search.setFilters({ ...f, language: "" });
     }});
+    else if (settings.snapshot.defaultLanguage) out.push({
+      key: "language", label: `Language: ${settings.snapshot.defaultLanguage} (default)`,
+    });
     return out;
   }
 
   async function remove(c: Chip) {
-    c.clear();
+    c.clear?.();
     // If clearing this chip leaves nothing to scope by (no query, no other
     // chip, no account/folder narrowing), reset instead of submitting. An
     // empty-query search returns ~`rerank_pool_size` (20) arbitrary
@@ -50,11 +55,13 @@
     {#each chips() as c (c.key)}
       <li class="chip">
         <span>{c.label}</span>
-        <button
-          type="button"
-          aria-label="Remove {c.key}"
-          onclick={() => remove(c)}
-        >×</button>
+        {#if c.clear}
+          <button
+            type="button"
+            aria-label="Remove {c.key}"
+            onclick={() => remove(c)}
+          >×</button>
+        {/if}
       </li>
     {/each}
   </ul>

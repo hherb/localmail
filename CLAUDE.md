@@ -6001,9 +6001,14 @@ for the full design.
       rather than guessing. **It also reads the TS wire interfaces in
       `gui/src/lib/api/search.ts` and requires every key there to be a Rust
       field (#371).** serde drops unknown fields, so `lang`, `date_from` and
-      `date_to` were set by the frontend and silently discarded at `invoke`.
-      This meant the `lang` chip and the `defaultLanguage` setting never applied. Both
-      suites see only their own half, which is why the pin reads both files.
+      `date_to` were set by the frontend and silently discarded at `invoke`,
+      so the `lang` chip and the `defaultLanguage` setting never applied.
+      Both suites see only their own half, which is why the pin reads both
+      files. Two consequences of the setting going live: it is stored only
+      when shaped like an ISO 639-1 code (`en us` would make every search a
+      400, `english` would match nothing), and it renders as a read-only
+      `Language: xx (default)` chip, since it filters out every message
+      whose `body_lang` is NULL.
     - **`lang` takes a list on both transports** (`str | list[str]`, the
       rest of #370). `_filter_tokens` always unioned a list, so the wire was
       the only thing refusing it. Each member gets the single string's

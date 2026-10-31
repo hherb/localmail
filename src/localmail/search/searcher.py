@@ -732,11 +732,13 @@ class Searcher:
         which OR into the FTS match here exactly as they do in the hybrid arms.
         Structured filters
         (account_ids, folder_ids, from/to/subject substrings, date
-        ranges, has_attachment, lang) flow through ``_filter_sql`` either way.
+        ranges, has_attachment, lang) and the query's ``-word`` exclusions
+        flow through ``_message_where`` either way — the exclusions again
+        here so an OR-ed expansion term cannot bring an excluded word back.
         """
-        from localmail.search.arms import _filter_sql, build_lexical_tsquery
+        from localmail.search.arms import _message_where, build_lexical_tsquery
 
-        where_extra, where_params = _filter_sql(parsed.filters)
+        where_extra, where_params = _message_where(parsed)
         match_params: list[Any] = []
         # One call decides both which branch runs and what the cursor
         # records, so the two cannot disagree (#326).
@@ -825,7 +827,9 @@ class Searcher:
         )
         a1 = arm_bm25_messages(conn, parsed, self._cfg, limit=candidates_per_arm)
         a2 = arm_bm25_chunks(conn, parsed, self._cfg, limit=candidates_per_arm)
-        qvec = self._embeddings.embed_query(parsed.rewritten_text or parsed.free_text)
+        # Never empty here: a query with no positive term (`-acme`) is not
+        # rankable, so it takes the date walk instead (#419).
+        qvec = self._embeddings.embed_query(parsed.rewritten_text or parsed.semantic_text)
         a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
         a4 = arm_vector_attachment_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
         fused = rrf_fuse([a1, a2, a3, a4], k=self._cfg.rrf_k)
@@ -1039,7 +1043,7 @@ class Searcher:
         **not** add ``sort_order`` handling to that branch "for symmetry":
         it would be tested against code that never runs.
         """
-        terms = parsed.free_text.split()
+        terms = parsed.semantic_text.split()
         if sort == "date":
             ordered = sorted(
                 zip(hydrated, rerank_scores, strict=True),
@@ -1251,7 +1255,7 @@ class Searcher:
             snippets = [item["snippet_source_text"][:cap] for item in hydrated]
             scores = _safe_rerank(
                 self._reranker,
-                parsed.rewritten_text or parsed.free_text,
+                parsed.rewritten_text or parsed.semantic_text,
                 snippets,
                 fallback=[item["fused"].rrf_score for item in hydrated],
             )
@@ -1726,7 +1730,7 @@ class Searcher:
             ]
             scores = _safe_rerank(
                 reranker,
-                parsed.rewritten_text or parsed.free_text,
+                parsed.rewritten_text or parsed.semantic_text,
                 snippets_for_rerank,
                 fallback=[item["fused"].rrf_score for item in hydrated],
             )

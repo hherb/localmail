@@ -1409,6 +1409,22 @@ uv run localmail search "Heizung" --format json | jq
 uv run localmail search "minutes lang:en before:2025-06-01"   # language + date filters
 ```
 
+Free text requires every word, and accepts web-search syntax
+([#419](https://github.com/hherb/localmail/issues/419)): `invoice OR bill`
+matches either word (`or` in any case counts, so `cats or dogs` means
+either), `"payment overdue"` the exact phrase, and `invoice -anthropic`
+excludes a word. A dash standing alone (`Order confirmation - Qantas`) is a
+separator, not an exclusion. Single quotes do not make a phrase.
+
+An excluded word is excluded on every ordering, `--smart` synonyms included;
+it is matched against the message's subject, body and addresses, not its
+attachments. Required words and phrases are exact on `--sort date`; the
+default relevance ordering also returns semantic neighbours that lack them.
+A query of only exclusions (`-anthropic`) has nothing to rank, so it is
+answered date-ordered. The syntax is announced by `api_minor >= 4` on
+`GET /v1/version`; an older server reads `OR` and quotes as plain words and
+`-word` as a *required* word.
+
 DSL operators: `from:`, `to:`, `subject:`, `label:`, `account:`, `folder:`,
 `account_id:N`, `folder_id:N`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`,
 `lang:XX` (ISO 639-1 code; matches the `messages.body_lang` column populated

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Literal, get_args
 
-from localmail.search.keyset_walk import walk_for_text
+from localmail.search.query import semantic_text
 
 SortMode = Literal["rank", "date"]
 
@@ -78,8 +78,13 @@ def is_rankable(*, free_text: str) -> bool:
     the empty-ACL branch. Nothing rejects the pair at construction —
     ``SearchPage`` has no ``__post_init__`` — so a new emitter must join that
     list rather than assume it is protected.
+
+    It needs a **positive** term, not just free text (#419): ``-acme`` is
+    free text, so it still takes the text walk, but every row scores 0
+    against a pure negation and each arm's ``ORDER BY score LIMIT`` would
+    keep an arbitrary tie-set of the archive.
     """
-    return walk_for_text(free_text) == "text"
+    return bool(semantic_text(free_text))
 
 
 def resolve_sort(*, requested: SortMode | None, free_text: str) -> SortMode:
@@ -88,8 +93,10 @@ def resolve_sort(*, requested: SortMode | None, free_text: str) -> SortMode:
     ``free_text`` must already be ``parse_query(...).free_text``: the filter
     operators are lifted out by then, so ``subject:invoice`` — a non-empty
     *request field* — correctly reads as textless. The classification is
-    ``keyset_walk.walk_for_text``, the same one authority the cursor stamp
-    asks. The retrieval branch no longer asks it directly: it tests the sort
+    :func:`is_rankable` — a positive term, which since #419 is narrower than
+    the ``keyset_walk.walk_for_text`` the cursor stamp asks (``-acme`` takes
+    the text walk, date-ordered). The retrieval branch does not ask either
+    directly: it tests the sort
     this function resolved, so it cannot disagree with the prediction rather
     than merely happening to agree with it.
 
@@ -123,16 +130,17 @@ def sort_applicability_error(
     filter-only search the GUI issues; ``resolve_sort`` answers those with
     the branch that runs.
     """
-    if requested is None or walk_for_text(free_text) == "text":
+    if requested is None or is_rankable(free_text=free_text):
         return None
     if requested == TEXTLESS_SORT:
         return None
     return (
-        f"sort={requested!r} is not applicable to a query with no free text; "
+        f"sort={requested!r} is not applicable to a query with no free text "
+        "to rank; "
         f"pass sort={TEXTLESS_SORT!r} or omit sort. Relevance has nothing to "
         "rank against here — filter operators alone (subject:, from:, lang:, "
-        "has:attachment) leave no terms — so such a query is always answered "
-        "date-ordered."
+        "has:attachment) or -excluded words alone leave no terms — so such a "
+        "query is always answered date-ordered."
     )
 
 

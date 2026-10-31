@@ -125,3 +125,10 @@ def test_api_minor_announces_the_search_hit_projection(db_dsn: str) -> None:
     first."""
     body = _client(db_dsn).get("/v1/version").json()
     assert body["api_minor"] >= 3
+
+
+def test_api_minor_announces_web_search_query_syntax(db_dsn: str) -> None:
+    """An older server reads `OR`, quotes and `-word` as plain required words
+    and answers 200, so the version is the only signal (#419)."""
+    body = _client(db_dsn).get("/v1/version").json()
+    assert body["api_minor"] >= 4

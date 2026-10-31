@@ -837,15 +837,26 @@ def backfill_internal_date_cmd(
 ) -> None:
     """Set `messages.internal_date` by re-fetching INTERNALDATE from IMAP.
 
-    By default only rows where it is NULL (pre-migration-0018 syncs). With
-    `--refetch`, every row: dates synced before #415 are host-local time read
-    in the Postgres session's zone, off by hours. Only `FETCH UID
-    INTERNALDATE` is issued, so it is fast. Idempotent; safe to re-run.
+    By default only rows where it is NULL (pre-migration-0018 syncs, or rows
+    sync could not date). With `--refetch`, every row: dates synced before
+    #415 are host-local time read in the Postgres session's zone, and can be
+    off by hours. No message bodies are re-fetched, so it is fast. Each
+    mailbox is committed as it finishes; idempotent and safe to re-run.
+    Paused accounts are left out unless named with `--account`.
     """
     cfg = load_config(ctx.obj["config_path"])
     gmail_secrets = cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
-    total_scanned = total_updated = total_missing = 0
+    total_scanned = total_updated = total_missing = total_unusable = 0
+    total_skipped: list[str] = []
     with psycopg.connect(cfg.database.dsn, autocommit=False) as conn:
+        if not account_name:
+            paused = [r.name for r in list_accounts_full(conn)
+                      if r.auth_method != "archive" and not r.sync_enabled]
+            if paused:
+                click.echo(
+                    f"skipping paused account(s) {', '.join(paused)}; "
+                    f"name one with --account to include it"
+                )
         for row in _live_account_rows(conn, account_name):
             account = account_config_from_row(row)
             click.echo(f"--- backfilling {account.name} ---")
@@ -860,14 +871,23 @@ def backfill_internal_date_cmd(
             total_scanned += result.scanned
             total_updated += result.updated
             total_missing += result.missing
+            total_unusable += result.unusable
+            total_skipped += [f"{account.name}/{m}" for m in result.skipped_mailboxes]
             click.echo(
                 f"  {account.name}: {result.updated}/{result.scanned} updated, "
-                f"{result.missing} not on the server"
+                f"{result.missing} not on the server, "
+                f"{result.unusable} without a usable date"
             )
     click.echo(
         f"done: {total_updated} rows updated across {total_scanned} candidates; "
-        f"{total_missing} not on the server (left as they were)"
+        f"{total_missing} not on the server, {total_unusable} without a usable "
+        f"date (both left as they were)"
     )
+    if total_skipped:
+        raise click.ClickException(
+            f"skipped mailbox(es) {', '.join(total_skipped)}, whose messages are "
+            f"in no count above; run `localmail sync`, then re-run this command"
+        )
 
 
 @main.command("run")

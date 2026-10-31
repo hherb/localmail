@@ -57,16 +57,20 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - `imap_client.open_connection` sets `client.normalise_times = False`.
 - The pure `src/localmail/imap_dates.py::aware_internal_date` is used by
   sync and backfill. It passes an aware datetime through, and turns a naive
-  value or a non-datetime into `None`, stored as NULL, so search falls back
-  to `date_sent`.
+  value or a non-datetime into `None`. Sync stores that as NULL (search
+  falls back to `date_sent`) and logs one WARNING per pass; backfill leaves
+  the row as it was and counts it as `unusable`.
 - `backfill_internal_date(..., refetch=False)` now returns a
-  `BackfillResult(scanned, updated, missing)` dataclass.
+  `BackfillResult(scanned, updated, missing, unusable, skipped_mailboxes)`
+  dataclass (the last two from the review round, below).
   - **`refetch=True`** asks about every row and overwrites it
     `WHERE internal_date IS DISTINCT FROM`, so `updated` counts only real
     changes.
   - A message in several mailboxes gets the **earliest** INTERNALDATE.
   - A message the server no longer has keeps its old value and is counted
-    as `missing`.
+    as `missing`; one it returned without a usable date, as `unusable`.
+  - A mailbox it cannot read is reported and the CLI exits 1. Its messages
+    are in no count.
 - **The CLI** `backfill-internal-date [--account N] [--refetch]` now
   resolves DB accounts through `cli._live_account_rows`, shared with
   `sync`.
@@ -82,9 +86,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | check | result |
 |---|---|
 | RED first | `ModuleNotFoundError: localmail.imap_dates` (collection) |
-| new file `tests/test_internal_date_utc.py` | 15 passed |
+| new file `tests/test_internal_date_utc.py` | 25 passed (15 before the review round) |
 | 5 mutations (normalise line, sync guard, earliest `<`→`>`, `IS DISTINCT FROM` dropped, `--refetch` ignored) | each caught by its own test |
-| full `pytest -q` | **4307 passed**, 6 warnings, 220 s (load ~10–26) |
+| review round: 10 more (per-mailbox commit, `updated` by rowcount, broad SELECT catch, UIDVALIDITY skip, naive warning per message, `missing` conflated, exit 0 on skip, paused notice, backfill bypassing the guard, default-mode earliest) | each caught |
+| full `pytest -q` | **4317 passed**, 6 warnings, 251 s (4307 before the review round) |
 | touched files under `-W error` | 75 passed, no warnings |
 | `mypy src/localmail` | Success, 162 files |
 | CI | see `gh pr checks` |
@@ -96,6 +101,33 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **Not run against a real server:** the fix itself, i.e. `normalise_times`
   on a live IMAPClient. The library half is pinned by
   `parse_fetch_response(..., normalise_times=False)`.
+
+## Review round (same PR)
+
+Four reviewers (code, tests, error handling, docs). Fixed:
+
+- **Backfill committed nothing until every mailbox was fetched**, and its
+  first SELECT left a transaction (with read locks) open across all IMAP
+  traffic. It now ends the read transaction before any IMAP call and commits
+  each mailbox as it finishes. `updated` is computed against the value read,
+  not summed from `rowcount`, because a row can be written twice and end
+  where it began.
+- **Skipped mailboxes were in no count**, and the warning said "next regular
+  sync will refresh", which is false: `upsert_message` returns early for an
+  existing row. They are reported now, the CLI exits 1, and the warning names
+  the real remedy.
+- **`missing` conflated "not on the server" with "returned an unusable
+  date"**: split into `missing` and `unusable`.
+- **The SELECT catch was `except Exception`**, so a dead connection made every
+  later mailbox fail and the run "complete". Narrowed to `IMAPClientError`.
+- **The bare command skipped paused accounts silently** (the TOML-driven
+  version covered them). They are named now; not included, since a paused
+  account may have broken credentials and would abort the run.
+- **`sync_mailbox` stored NULL for a naive date silently**: one WARNING per
+  pass.
+- **Test gaps:** the UIDVALIDITY skip and backfill's own use of the guard had
+  no test, and the earliest-date test passed for "last mailbox wins". All
+  pinned. Nine mutations, each caught by its own test.
 
 ## What's next
 
@@ -114,8 +146,12 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
     `GET /v1/messages/{id}` `date` to within seconds (it is +11 h today).
   - On the Mac, the skew histogram has its peak at 0, not +2 h:
     `psql -p 5532 -d localmail -c "select round(extract(epoch from internal_date - date_sent)/1800)*0.5 h, count(*) from messages m join accounts a on a.id=m.account_id where internal_date is not null and date_sent is not null and a.auth_method<>'archive' group by 1 order by 2 desc limit 8"`
-  - The command's "not on the server" count is reported. Expect it to be
-    non-zero; those rows stay wrong.
+  - The command's "not on the server" and "without a usable date" counts
+    are reported. Expect the first to be non-zero; those rows stay wrong.
+  - If it exits 1 naming skipped mailboxes, run `localmail sync` and then
+    the command again.
+  - Paused accounts are named and skipped. Repair one with `--account NAME`
+    if its dates matter.
 - **Open after the repair:** the `missing` rows keep wrong dates. If the
   count is large, decide whether to NULL them, which makes search fall back
   to `date_sent`.
@@ -148,7 +184,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 2. **Repair by re-fetching from IMAP** (operator ruling). No SQL offset
    correction, and no `date_sent` heuristic.
 3. **Earliest INTERNALDATE across a message's mailboxes** wins on refetch.
-4. **A naive INTERNALDATE is stored as NULL**, not guessed.
+4. **A naive INTERNALDATE is never stored as a guess**: sync writes NULL,
+   backfill leaves the row alone.
 
 ## Open decisions & risks
 

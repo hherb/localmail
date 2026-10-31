@@ -1105,8 +1105,12 @@ session's time zone, so a hit could show a date hours in the future and
 `sort=date` misordered it against rows dated by `Date:`. New mail is stored
 correctly. Repair existing rows once with
 `localmail backfill-internal-date --refetch`, which re-reads every value from
-the server (body-free FETCHes only). Messages no longer on the server keep
-their old value; the command reports how many.
+the server (body-free FETCHes only). Restart the sync daemon first. Rows it
+cannot repair keep their old value and are counted: messages no longer on the
+server, and messages returned without a usable date. A mailbox it cannot read
+(refused, or its UIDVALIDITY changed) is named and the command exits 1; run
+`localmail sync`, then the command again. Paused accounts are named and
+skipped; repair one with `--account NAME`.
 
 #### Compact hits: `fields` and `snippet_chars` (`api_minor` ≥ 3)
 

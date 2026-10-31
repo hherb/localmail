@@ -787,6 +787,7 @@ src/localmail/
   secrets.py        # keyring wrapper
   oauth_gmail.py    # OAuth2 desktop flow + token refresh
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
+  imap_dates.py     # pure: aware_internal_date — the one INTERNALDATE rule (#415)
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
   pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
                     #   + replace_surrogates — the one lone-surrogate rule (#380)
@@ -943,7 +944,8 @@ subsystem before touching either column.
   usually accurate. Nullable.
 - `internal_date` — IMAP server INTERNALDATE (RFC 3501), "when this email
   arrived at the mailbox". Populated by `sync.py:upsert_message` on insert;
-  legacy rows (pre-migration-0018) are NULL until backfilled via
+  legacy rows (pre-migration-0018), and rows sync could not date, are NULL
+  until backfilled via
   `localmail backfill-internal-date`. Nullable.
   - **It is the instant the server reported, and must arrive aware (#415).**
     imapclient's default `normalise_times=True` returns a *naive* host-local
@@ -955,16 +957,27 @@ subsystem before touching either column.
     why no SQL offset can repair it. `open_connection` sets
     `normalise_times = False`; the pure
     [src/localmail/imap_dates.py](src/localmail/imap_dates.py)`::aware_internal_date`
-    stores a naive value as NULL rather than letting the session pick a zone,
-    and is shared by sync and backfill. `FakeIMAPClient` hands out aware
+    refuses a naive value rather than letting the session pick a zone,
+    and is shared by sync and backfill: sync stores NULL (with one WARNING
+    per mailbox pass), backfill leaves the row as it was. `FakeIMAPClient` hands out aware
     datetimes, i.e. behaves like the fixed client, which is why no sync test
     saw it. **Repair is `backfill-internal-date --refetch`**: every row is
     re-read from the server and overwritten (`IS DISTINCT FROM`, so `updated`
     counts real changes); a message in several mailboxes gets the
     **earliest** INTERNALDATE (Gmail reports one per message; elsewhere a
-    copy gets a later one); a message the server no longer has keeps its old
-    value and is reported as `missing`. Archive imports were never affected —
-    their dates are built aware in UTC.
+    copy a client APPENDed gets a later one). What it cannot repair it
+    reports, in three separate counts: `missing` (the server no longer has
+    it), `unusable` (it answered without a usable date), and skipped
+    mailboxes (SELECT refused, or UIDVALIDITY changed — exit 1, remedy
+    `sync` then re-run, since sync never rewrites `internal_date` on an
+    existing row). A message labelled only in a skipped mailbox is in no
+    count. Paused accounts are named and left out unless given with
+    `--account`. Each mailbox commits as it finishes and no transaction is
+    held across IMAP traffic, so an interrupted run keeps its work; only a
+    SELECT refusal is caught, a connection error aborts. Restart the daemon
+    before repairing, or an unfixed one keeps writing shifted values.
+    Archive imports were not affected by this defect — their dates are built
+    aware in UTC.
 - `date_received` — local sync timestamp, `NOT NULL`. Not a meaningful
   "received" date; reflects "when localmail wrote this row". Used by
   `/v1/changes` as a safe-horizon filter (`< now() - changes_safe_horizon_s`)

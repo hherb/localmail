@@ -124,9 +124,17 @@ export function extractDslFilters(query: string): ExtractedFilters {
  * every token after it, filters included. A token holding whitespace or an
  * apostrophe is therefore wrapped in `"`: inside it both tokenizers read `'`
  * as a literal, and no token contains a `"` to unbalance the wrapping.
+ *
+ * A leading `-` stays outside the quotes: the server reads `-"a b"` as
+ * excluding the phrase, and `"-a b"` as requiring it (#419).
  */
 export function joinTokens(tokens: string[]): string {
-  return tokens.map((tok) => (/[\s']/.test(tok) ? `"${tok}"` : tok)).join(" ");
+  return tokens
+    .map((tok) => {
+      if (!/[\s']/.test(tok)) return tok;
+      return tok.startsWith("-") ? `-"${tok.slice(1)}"` : `"${tok}"`;
+    })
+    .join(" ");
 }
 
 export function formatDslTokens(f: SearchFiltersUI): string {

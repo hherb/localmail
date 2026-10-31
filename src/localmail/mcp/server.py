@@ -151,8 +151,11 @@ def build_mcp_server(
         query: Annotated[str | None, Field(description=(
             "Free-text query matched against message subjects/bodies and "
             "extracted attachment text. Every word is required unless you "
-            'use web-search syntax: `invoice OR bill` (either), `"payment '
-            'overdue"` (exact phrase), `invoice -anthropic` (exclude a word). '
+            'use web-search syntax: `invoice OR bill` (either; `or` in any '
+            'case), `"payment overdue"` (exact phrase), `invoice -anthropic` '
+            "(exclude a word, on every ordering). Required words and phrases "
+            'are exact with `sort="date"`; the rank ordering also returns '
+            "semantic neighbours. "
             "Optional: omit it (or pass null) to "
             "search by filters alone, newest first — for example "
             "`has_attachment=true` for recent mail with attachments. "

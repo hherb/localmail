@@ -12,7 +12,7 @@ Supported operators (all optional, in any order, anywhere in the query):
 
 Anything not matched by an operator becomes free-text (joined with spaces,
 preserved in encounter order). The free text keeps web-search syntax for the
-lexical arms (#419): ``"quoted phrase"``, ``OR``, ``-excluded``.
+lexical arms (#419): ``"quoted phrase"``, ``OR`` (any case), ``-excluded``.
 """
 
 from __future__ import annotations
@@ -51,14 +51,55 @@ class ParsedQuery:
 
     @property
     def semantic_text(self) -> str:
-        """``free_text`` without its web-search syntax, for the embedding,
-        reranker and snippet: quotes dropped, ``OR`` and ``-excluded`` words
-        removed — embedding an excluded word would pull toward it (#419).
-        """
-        return " ".join(
-            text for text, raw in _tokenize(self.free_text)
-            if text and raw.lower() != "or" and not raw.startswith("-")
-        )
+        return semantic_text(self.free_text)
+
+    @property
+    def excluded_text(self) -> str:
+        return excluded_text(self.free_text)
+
+
+def _is_or(raw: str) -> bool:
+    # websearch_to_tsquery reads `or` in any case as the operator.
+    return raw.lower() == "or"
+
+
+def _is_exclusion(raw: str) -> bool:
+    # `--foo` is a double negation to websearch_to_tsquery, i.e. requires foo.
+    return raw.startswith("-") and not raw.startswith("--")
+
+
+def semantic_text(free_text: str) -> str:
+    """``free_text`` without its web-search syntax, for the embedding,
+    reranker, snippet and rankability: quotes dropped, ``OR`` (any case) and
+    ``-excluded`` words removed — embedding an excluded word would pull
+    toward it (#419). Empty means there is no positive term to rank against.
+    """
+    return " ".join(
+        text for text, raw in _tokenize(free_text)
+        if text and not _is_or(raw) and not _is_exclusion(raw)
+    )
+
+
+def excluded_text(free_text: str) -> str:
+    """The ``-word`` / ``-"phrase"`` tokens of ``free_text``, as websearch
+    syntax, for the message-level exclusion every retrieval path applies —
+    the vector arms match no words, so a lexical ``!word`` alone excludes
+    nothing from them (#419).
+
+    An exclusion next to an ``OR`` is left out: ``a -b OR c`` is
+    ``(a & !b) | c`` to Postgres, and excluding ``b`` outright would drop
+    the ``c`` matches that contain it. So is one with no word in it (``-"``,
+    ``-!``): its tsquery is empty, and ``@@`` an empty tsquery matches
+    nothing, which would exclude every message.
+    """
+    tokens = _tokenize(free_text)
+    raws = [raw for _, raw in tokens]
+    return " ".join(
+        raw for i, (text, raw) in enumerate(tokens)
+        if _is_exclusion(raw) and any(c.isalnum() for c in text)
+        and not (i > 0 and _is_or(raws[i - 1]))
+        and not (i + 1 < len(raws) and _is_or(raws[i + 1]))
+    )
 
 
 _OPERATORS = {
@@ -73,8 +114,9 @@ def _tokenize(s: str) -> list[tuple[str, str]]:
     Each token comes back twice: with its quote characters stripped (what an
     operator value is read from), and with its ``"`` delimiters kept (what
     free text is built from, so a phrase reaches ``websearch_to_tsquery``
-    as one, #419). Single quotes are stripped from both: an apostrophe opens
-    one, and turning ``it's late`` into a phrase would narrow a plain query.
+    as one, #419). Single quotes are stripped from both and never turned
+    into ``"``: Postgres ignores them, and converting would make ``it's
+    late`` a phrase.
 
     An unclosed quote runs to the end of the string: anything after an open
     quote is swallowed into its last token. A composer appending tokens after

@@ -732,11 +732,13 @@ class Searcher:
         which OR into the FTS match here exactly as they do in the hybrid arms.
         Structured filters
         (account_ids, folder_ids, from/to/subject substrings, date
-        ranges, has_attachment, lang) flow through ``_filter_sql`` either way.
+        ranges, has_attachment, lang) and the query's ``-word`` exclusions
+        flow through ``_message_where`` either way — the exclusions again
+        here so an OR-ed expansion term cannot bring an excluded word back.
         """
-        from localmail.search.arms import _filter_sql, build_lexical_tsquery
+        from localmail.search.arms import _message_where, build_lexical_tsquery
 
-        where_extra, where_params = _filter_sql(parsed.filters)
+        where_extra, where_params = _message_where(parsed)
         match_params: list[Any] = []
         # One call decides both which branch runs and what the cursor
         # records, so the two cannot disagree (#326).
@@ -825,15 +827,11 @@ class Searcher:
         )
         a1 = arm_bm25_messages(conn, parsed, self._cfg, limit=candidates_per_arm)
         a2 = arm_bm25_chunks(conn, parsed, self._cfg, limit=candidates_per_arm)
-        semantic = parsed.rewritten_text or parsed.semantic_text
-        a3: list[ArmHit] = []
-        a4: list[ArmHit] = []
-        # An all-exclusions query (`-acme`) has nothing to embed; the vector
-        # arms would rank by distance to the empty string (#419).
-        if semantic.strip():
-            qvec = self._embeddings.embed_query(semantic)
-            a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
-            a4 = arm_vector_attachment_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
+        # Never empty here: a query with no positive term (`-acme`) is not
+        # rankable, so it takes the date walk instead (#419).
+        qvec = self._embeddings.embed_query(parsed.rewritten_text or parsed.semantic_text)
+        a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
+        a4 = arm_vector_attachment_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
         fused = rrf_fuse([a1, a2, a3, a4], k=self._cfg.rrf_k)
         return self._cut_pool(conn, fused, rerank_pool_size)
 

@@ -1467,30 +1467,51 @@ for the Phase 2 plan.
   `setweight()` — no third-party extension required. Arms 1 and 2 (whole-message
   and chunk-level FTS) use `websearch_to_tsquery('simple', ...)` for
   language-neutral tokenisation (`plainto_tsquery` until #419; smart
-  expansion terms still use it).
-- **The free text carries web-search syntax (#419, `api_minor` 4)**: `OR`,
+  expansion terms still use it). The docstrings in `arms.py` still use
+  "BM25" as shorthand; the actual implementation is `tsvector`/`ts_rank_cd`
+  throughout.
+- **The free text carries web-search syntax (#419, `api_minor` 4)**: `OR`
+  (any case — Postgres reads `or` too, so `cats or dogs` now means either),
   `"phrase"`, `-excluded`. `plainto_tsquery` made every word required, so a
-  planner's `invoice OR bill` needed the word "or". Three parts:
+  planner's `invoice OR bill` needed the word "or". The rules all live in
+  `search/query.py`:
   - `query._tokenize` keeps `"` delimiters in a free-text token (filter
     values still lose them), because the parser dropping quotes is what made
-    a phrase two words. Single quotes stay stripped: an apostrophe opens
-    one, and `it's late` must not become a phrase.
+    a phrase two words. Single quotes are not turned into `"`: Postgres
+    ignores them, and converting would make `it's late` a phrase.
   - A bare `-` token is dropped: `websearch_to_tsquery` reads `Order
     confirmation - Qantas` as `!'qantas'`, so a pasted subject excluded its
     own last word.
-  - `ParsedQuery.semantic_text` (quotes gone, `OR` and `-word` removed) is
-    what the embedding, reranker and snippet terms read. An all-exclusions
-    query has none, so the vector arms are skipped rather than ranked by
-    distance to the empty string.
+  - `semantic_text` (quotes gone, `OR` and `-word` removed) is what the
+    embedding, reranker and snippet terms read, and what **rankability**
+    reads: `sort_axes.is_rankable` needs a positive term. Every row scores
+    0 against a pure negation, so on the rank path each arm's `ORDER BY
+    score LIMIT` kept an arbitrary tie-set of the archive. `-acme` is
+    therefore served by the date walk (still a *text* walk, so its FTS
+    predicate holds), and a stated `sort=rank` for it is the #324 400.
+  - `excluded_text` is applied to the **message** by `arms._message_where`,
+    on all four arms and the date walk. The lexical `!word` alone excluded
+    nothing on the rank path: the vector arms match no words, arm 2 negates
+    per chunk, and an OR-ed `--smart` synonym matches past it. Two shapes are
+    left out of it: an exclusion beside an `OR` (`a -b OR c` is `(a & !b) |
+    c`), and one with no word (`-"`, whose empty tsquery would exclude
+    everything). It reads `fts_v2`, so attachment text does not exclude.
+  - A phrase or plain word is **not** a hard filter on the rank path: the
+    vector arms still add semantic neighbours, as they always did for plain
+    words. `sort=date` is the exact-match ordering.
   - Measured warm on the 130k Mac archive: `invoice OR bill` ~100 ms on
     arm 1 (the old smart OR form costs the same), a phrase 26 ms. Pure
-    negation on the rank path is a seq scan, ~0.5 s per lexical arm. The
-    date walk serves it in 1 ms.
-  - Compound words (`e-ticket`, `ab_cd`) now parse as adjacency (`<->`)
-    where `plainto` ANDed the parts. A message containing the word still
-    matches (its tsvector has the same adjacent tokens); one holding the
-    parts only far apart no longer does. The docstrings in `arms.py` still use "BM25" as shorthand;
-  the actual implementation is `tsvector`/`ts_rank_cd` throughout.
+    negation on the date walk is 1 ms (it was ~0.5 s per lexical arm as a
+    seq scan on the rank path, which it no longer takes).
+  - Splits that keep no compound lexeme (`ab_cd`) now parse as adjacency
+    (`<->`) where `plainto` ANDed the parts, so a message holding the parts
+    only far apart no longer matches. `e-ticket` is unchanged: both forms
+    require the `e-ticket` lexeme itself.
+  - **The GUI re-joins a typed query** when absorbing operators
+    (`filter_parse.joinTokens`), and its tokenizer drops `"`, so it keeps a
+    leading `-` outside the re-added quotes: `"-a b"` would require the
+    phrase it was asked to exclude. A quoted *single* word (`"OR"`,
+    `"-acme"`) still loses its quotes there (#421).
 - Vector retrieval via pgvector HNSW + `halfvec(768)`. Default embedder:
   EmbeddingGemma-300M via fastembed (Gemma Terms — runtime download).
 - One embed_worker thread per process (account-agnostic; backend-bound).
@@ -1677,9 +1698,11 @@ on **`SearchPage.rewrite_skipped`** (the CLI prints a `note:`). Relative dates
 are resolved LLM-side via an injected `today` (deterministic prompt; testable).
 Expansion terms OR into the lexical arms through
 `arms.build_lexical_tsquery(free_text, expansion_terms)` →
-`plainto_tsquery('simple', %s) [ || … ]`; **with no expansion terms it returns
-the bare single-tsquery form byte-for-byte**, so the non-smart path is
-unchanged. The multi-term fragment is **parenthesised** because `@@` binds
+`websearch_to_tsquery('simple', free) [ || plainto_tsquery('simple', term) … ]`
+(free text via websearch since #419; the synonyms stay plain words); **with no
+expansion terms it returns the bare free-text tsquery alone**. The callers
+re-apply the free text's `-word` exclusions to the message
+(`arms._message_where`), so a synonym cannot bring an excluded word back. The multi-term fragment is **parenthesised** because `@@` binds
 tighter than `||` in Postgres. `rewriter_max_expansion_terms` (default 8) caps
 the OR fan-out. No new migration, **no new uv extra** (`httpx` is already a dep;
 Ollama is an external HTTP service). `continue_page`/`grow_pool` reuse the
@@ -3963,7 +3986,8 @@ for the full design.
         unpaginated `_list_recent_messages` — see **`sort_order`** below).
         It handles `sort=date` with any query and, regardless of `sort`,
         any blank query. With free text it matches the same FTS column as
-        retrieval Arm 1 (`fts_v2 @@ plainto_tsquery('simple', q)`), so
+        retrieval Arm 1 (`fts_v2 @@` the shared `build_lexical_tsquery`, i.e.
+        `websearch_to_tsquery` since #419), so
         recall is identical to the lexical case; with none it walks the
         whole (filtered) archive date-ordered. No pool cap; unbounded
         scroll. Route dispatches on the prefix, which also carries the

@@ -94,6 +94,22 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
     return " AND " + " AND ".join(parts), params
 
 
+def _message_where(parsed: ParsedQuery) -> tuple[str, list[Any]]:
+    """``_filter_sql`` plus the query's ``-word`` exclusions on the message.
+
+    Applied by every retrieval path, not left to the lexical tsquery: the
+    vector arms match no words, ``arm_bm25_chunks`` negates per chunk, and an
+    OR-ed ``--smart`` synonym bypasses the free text's ``!word`` (#419). The
+    exclusion reads ``fts_v2`` (subject, body, addresses), so a word that
+    only an attachment's text contains does not exclude its message.
+    """
+    sql, params = _filter_sql(parsed.filters)
+    if parsed.excluded_text:
+        sql += " AND m.fts_v2 @@ websearch_to_tsquery('simple', %s)"
+        params = [*params, parsed.excluded_text]
+    return sql, params
+
+
 def build_lexical_tsquery(
     free_text: str, expansion_terms: list[str]
 ) -> tuple[str, list[str]]:
@@ -106,9 +122,8 @@ def build_lexical_tsquery(
     synonyms are plain words, so a message matching only a synonym is still
     retrieved.
 
-    shortcut: an OR-ed synonym is not subject to the free text's exclusions,
-    so ``invoice -acme`` with --smart can return an Acme bill; AND the
-    exclusions onto each term if that ever matters.
+    An OR-ed synonym is not subject to the free text's ``!word`` here; the
+    callers re-apply the exclusions to the message via ``_message_where``.
 
     When expansion terms are present the fragment is wrapped in parentheses
     so the ``@@`` operator in callers binds to the full OR-chain rather than
@@ -149,7 +164,7 @@ def arm_bm25_messages(
     # every row.
     max_w = max(raw)
     weights = [1.0] * len(raw) if max_w <= 0 else [w / max_w for w in raw]
-    where_extra, where_params = _filter_sql(parsed.filters)
+    where_extra, where_params = _message_where(parsed)
     tsq_sql, tsq_params = build_lexical_tsquery(
         parsed.free_text, parsed.expansion_terms
     )
@@ -185,7 +200,7 @@ def arm_bm25_chunks(
     """tsvector FTS over message_chunks.fts with default ts_rank_cd weights."""
     if not parsed.free_text.strip():
         return []
-    where_extra, where_params = _filter_sql(parsed.filters)
+    where_extra, where_params = _message_where(parsed)
     tsq_sql, tsq_params = build_lexical_tsquery(
         parsed.free_text, parsed.expansion_terms
     )
@@ -221,7 +236,7 @@ def arm_vector_chunks(
     limit: int,
 ) -> list[ArmHit]:
     """Cosine-distance vector search over message_chunks.embedding_v1."""
-    where_extra, where_params = _filter_sql(parsed.filters)
+    where_extra, where_params = _message_where(parsed)
     sql = f"""
         WITH ranked AS (
             SELECT mc.message_id, mc.id AS chunk_id,
@@ -281,7 +296,7 @@ def arm_vector_attachment_chunks(
            to hundreds of recipients) from monopolising the candidate budget.
         4. Apply Phase 1 filter SQL (account:, folder:, after:, before:,
            from:, to:, subject:, label:, has:attachment / has:no-attachment)
-           via _filter_sql().
+           and the query's exclusions via _message_where().
            Filters operate on the messages alias 'm', matching every other arm.
         5. Convert cosine distance [0, 2] to arm_score via 1.0 - dist,
            yielding a similarity-like value in [-1, 1]. RRF fusion uses only
@@ -291,7 +306,7 @@ def arm_vector_attachment_chunks(
     Returns up to `limit` ArmHits, each with chunk_table='attachment_chunks'
     and rank in [1, limit].
     """
-    filter_sql, filter_params = _filter_sql(parsed.filters)
+    filter_sql, filter_params = _message_where(parsed)
     # Fetch 3x the requested limit of chunks before fan-out so that after
     # expanding each chunk to its carrying messages and applying the per-chunk
     # cap, there are still enough candidates to fill the output budget.

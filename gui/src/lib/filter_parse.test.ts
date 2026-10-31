@@ -286,6 +286,8 @@ describe("joinTokens", () => {
     [["don't"], '"don\'t"'],
     [["to:bob smith", "x"], '"to:bob smith" x'],
     [["a\tb", "it's", "q"], '"a\tb" "it\'s" q'],
+    // The dash stays outside: `"-a b"` would require the phrase (#419).
+    [["invoice", "-payment overdue"], 'invoice -"payment overdue"'],
   ])("joins %j as %s", (tokens, expected) => {
     expect(joinTokens(tokens)).toBe(expected);
   });
@@ -296,9 +298,15 @@ describe("joinTokens", () => {
     "it's from:o'brien has:attachment",
     'ab"c d"e \'x y\' "z\'s"',
     'to:"a\tb" \'',
+    'invoice -"payment overdue" from:bob',
   ])("gives back the tokens it was given: %s", (query) => {
     const tokens = tokenize(query);
     expect(tokenize(joinTokens(tokens))).toEqual(tokens);
+  });
+
+  it("keeps an excluded phrase excluded through extractDslFilters (#419)", () => {
+    expect(extractDslFilters('invoice -"payment overdue" from:bob').freeText)
+      .toBe('invoice -"payment overdue"');
   });
 
   it("a bare join loses a multi-word token (the negative control)", () => {

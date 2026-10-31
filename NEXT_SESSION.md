@@ -1,14 +1,13 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-10-31 (session 67).** `main` was **`cf002e8`** at
-> session start. #418 (closes #371) and #420 (#419, web-search syntax in the
-> query) had both merged since the last handoff. #420 left no handoff, and it
-> filed #421.
+> **Status as of 2026-10-31 (session 68).** `main` was **`f4ab719`** at
+> session start (#422, closing #415, had merged).
 >
-> This session opened **one PR** on `fix/415-internaldate-utc`. It has one
-> code commit (`f8c9d21`), closes **#415**, and also carries this handoff.
+> This session opened **one PR, #423**, on `fix/416-idle-renew-before-drop`.
+> It has one code commit (`39e1c75`), closes **#416**, and also carries this
+> handoff.
 >
-> **Open issues: 36** (35 once the PR merges).
+> **Open issues: 35** (34 once #423 merges).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -29,143 +28,116 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### PR on `fix/415-internaldate-utc` (based on `main` at `cf002e8`)
+### Operations: #415 deployed and repaired on both hosts (no commit)
+
+- Redeployed `f4ab719` to the Mac and the DGX. Both `/v1/version` report
+  `build_hash: f4ab719`.
+- Ran `backfill-internal-date --refetch` on both, after the redeploy.
+
+| host | updated / candidates | not on the server | unusable | time | exit |
+|---|---|---|---|---|---|
+| Mac | 94,544 / 132,296 | 2,720 | 0 | 36 min | 0 |
+| DGX | 38,595 / 39,070 | 474 | 0 | ~10 min | 0 |
+
+- **Mac skew histogram:** the peak moved from +2 h (87,422 rows) to 0
+  (123,205). No row has an `internal_date` in the future. The residual +2 h
+  bucket (2,143) is about the size of the "not on the server" count.
+- **DGX:** the peak is at 0 (35,475).
+- **The DGX acceptance message 39045 is still +11 h, and cannot be fixed by
+  refetch.** It was labelled only INBOX UID 65847. That UID is gone from
+  INBOX, and a `HEADER Message-ID` search of `[Gmail]/All Mail` finds
+  nothing. So it was deleted (or sits in Trash/Spam, which All Mail
+  excludes). It is one of the 474. See open decision 1.
+
+### PR #423 on `fix/416-idle-renew-before-drop` (based on `main` at `f4ab719`)
 
 | SHA | What |
 |---|---|
-| `f8c9d21` | INTERNALDATE stored as the server-reported instant; `backfill-internal-date --refetch` repairs old rows; the command now reads DB accounts |
-| handoff | this file + `docs/handoffs/2026-10-31T0744Z-internaldate-utc.md` |
+| `39e1c75` | TCP keepalive on every IMAP socket; IDLE renewal default 1740 → 600 s; `config.example.toml` pinned to the default |
+| handoff | this file + `docs/handoffs/2026-10-31T1225Z-idle-keepalive.md` |
 
-**The defect, measured on both hosts (not only the DGX, as the issue says):**
+**The issue's diagnosis was wrong, and that is the main finding.**
 
-- imapclient's default `normalise_times=True` returns INTERNALDATE as a
-  **naive host-local** datetime.
-- psycopg sends a naive value as `timestamp`, and Postgres reads it in the
-  **session** zone. The error is the host offset minus the session offset.
-- **DGX:** the host is in Sydney and the `localmail-pg` container runs UTC,
-  so the error is +10/+11 h.
-- **Mac:** the host is in Brisbane (+10) and Postgres.app's default zone is
-  Perth (+8).
-  - Of the live-account rows, 87,414 are +2 h, 32,070 are at 0 and 4,707
-    are +1.5 h.
-  - The host's zone has changed over time, so **no SQL offset can repair
-    it.**
-  - That is why the repair re-fetches from IMAP (operator ruling).
+- #416 blamed a Gmail 29-minute IDLE drop. Every crash was at `idle.py`'s
+  renewal `idle_done()`. That was true on Gmail **and** on `hherb-dmc`, from
+  **both** hosts. The server never closed the connection first.
+- The 29-minute cadence was our own `idle_renew_seconds = 1740`. Any
+  shorter silent timeout looks the same.
+- **The first fix (renew at 600 s) was tested live and failed.** The DGX
+  reset at its first 600 s renewal. The Mac reset at its second, for both
+  accounts.
+- **Measured instead**, with read-only parallel IDLE probes to Gmail
+  (SELECT readonly, IDLE, sleep, DONE). The probe was a scratch script and
+  is not kept.
+
+| silence | Mac | DGX |
+|---|---|---|
+| 60–300 s | OK | – |
+| 420 s | OK | reset |
+| 540 s | reset | reset |
+| 540 s + TCP keepalive | **OK** | **OK** |
+
+- So something on the network path drops a silent TCP flow without telling
+  either end.
 
 **The fix:**
 
-- `imap_client.open_connection` sets `client.normalise_times = False`.
-- The pure `src/localmail/imap_dates.py::aware_internal_date` is used by
-  sync and backfill. It passes an aware datetime through, and turns a naive
-  value or a non-datetime into `None`. Sync stores that as NULL (search
-  falls back to `date_sent`) and logs one WARNING per pass; backfill leaves
-  the row as it was and counts it as `unusable`.
-- `backfill_internal_date(..., refetch=False)` now returns a
-  `BackfillResult(scanned, updated, missing, unusable, skipped_mailboxes)`
-  dataclass (the last two from the review round, below).
-  - **`refetch=True`** asks about every row and overwrites it
-    `WHERE internal_date IS DISTINCT FROM`, so `updated` counts only real
-    changes.
-  - A message in several mailboxes gets the **earliest** INTERNALDATE.
-  - A message the server no longer has keeps its old value and is counted
-    as `missing`; one it returned without a usable date, as `unusable`.
-  - A mailbox it cannot read is reported and the CLI exits 1. Its messages
-    are in no count.
-- **The CLI** `backfill-internal-date [--account N] [--refetch]` now
-  resolves DB accounts through `cli._live_account_rows`, shared with
-  `sync`.
-  - It used to be TOML-only, and the Mac's `hherb-dmc` is not in
-    `config.toml`.
-  - Archive accounts are refused. `_account_or_die` was deleted (no callers
-    left).
-- **Why no test caught this:** `FakeIMAPClient` returns aware datetimes, so
-  it already behaved like the fixed client.
+- `imap_client.open_connection` calls the new `enable_tcp_keepalive`: 60 s
+  idle, 30 s interval. Linux spells the idle option `TCP_KEEPIDLE`, macOS
+  `TCP_KEEPALIVE`.
+- This covers IDLE, the poll plane, long FETCHes and the admin probe.
+- **The renewal default moves 1740 → 600**, because 1740 renewed *at* RFC
+  2177's 29-minute limit. `idle.RFC2177_IDLE_LIMIT_S` names that limit.
+  - Both hosts carried 1740 because they copied `config.example.toml`.
+    `tests/test_idle_renew_default.py` pins the example to the default.
+  - **Both hosts' `config.toml` were edited to 600 this session.**
+    Backups: the Mac's is in this session's scratchpad; the DGX's is
+    `~/.config/localmail/config.toml.bak-416`.
+- Test fakes that replace `IMAPClient`
+  (`test_internal_date_utc.py`, `test_sync_concurrent_writers.py`) gained a
+  `socket()`.
+- CLAUDE.md has a new note under **Sync model**.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | `ModuleNotFoundError: localmail.imap_dates` (collection) |
-| new file `tests/test_internal_date_utc.py` | 25 passed (15 before the review round) |
-| 5 mutations (normalise line, sync guard, earliest `<`→`>`, `IS DISTINCT FROM` dropped, `--refetch` ignored) | each caught by its own test |
-| review round: 10 more (per-mailbox commit, `updated` by rowcount, broad SELECT catch, UIDVALIDITY skip, naive warning per message, `missing` conflated, exit 0 on skip, paused notice, backfill bypassing the guard, default-mode earliest) | each caught |
-| full `pytest -q` | **4317 passed**, 6 warnings, 251 s (4307 before the review round) |
-| touched files under `-W error` | 75 passed, no warnings |
+| RED first | both new test files failed (import error; then 2 failed for keepalive) |
+| 4 mutations (keepalive call removed, idle 60 → 600, default back to 1740, example drifted) | each caught |
+| full `pytest -q` | **4321 passed**, 6 warnings, 207 s |
 | `mypy src/localmail` | Success, 162 files |
-| CI | see `gh pr checks` |
+| CI #423 | both pytest legs pass |
+| **live, Mac** (daemon runs from this checkout) | 0 IDLE crashes in ~30 min since 21:56:35. The unpatched 600 s build crashed both accounts within 20 min |
 
-- **Not checked:** what the 6 warnings are. The recorded baseline was 2
-  (the websockets pair, #25). The 4 extra are outside the touched files. I
-  did not compare against `main`, so it is unconfirmed whether they predate
-  #420.
-- **Not run against a real server:** the fix itself, i.e. `normalise_times`
-  on a live IMAPClient. The library half is pinned by
-  `parse_fetch_response(..., normalise_times=False)`.
-
-## Review round (same PR)
-
-Four reviewers (code, tests, error handling, docs). Fixed:
-
-- **Backfill committed nothing until every mailbox was fetched**, and its
-  first SELECT left a transaction (with read locks) open across all IMAP
-  traffic. It now ends the read transaction before any IMAP call and commits
-  each mailbox as it finishes. `updated` is computed against the value read,
-  not summed from `rowcount`, because a row can be written twice and end
-  where it began.
-- **Skipped mailboxes were in no count**, and the warning said "next regular
-  sync will refresh", which is false: `upsert_message` returns early for an
-  existing row. They are reported now, the CLI exits 1, and the warning names
-  the real remedy.
-- **`missing` conflated "not on the server" with "returned an unusable
-  date"**: split into `missing` and `unusable`.
-- **The SELECT catch was `except Exception`**, so a dead connection made every
-  later mailbox fail and the run "complete". Narrowed to `IMAPClientError`.
-- **The bare command skipped paused accounts silently** (the TOML-driven
-  version covered them). They are named now; not included, since a paused
-  account may have broken credentials and would abort the run.
-- **`sync_mailbox` stored NULL for a naive date silently**: one WARNING per
-  pass.
-- **Test gaps:** the UIDVALIDITY skip and backfill's own use of the guard had
-  no test, and the earliest-date test passed for "last mailbox wins". All
-  pinned. Nine mutations, each caught by its own test.
+- **Not live-tested on the DGX.** It still runs `main` (`f4ab719`) with
+  `idle_renew_seconds = 600`, and resets every 10 min until #423 is
+  deployed there. The DGX probe proves Linux keepalive works.
+- **The 6 warnings:** at least some are docling `DeprecationWarning`s from
+  `test_ocr_language_default.py`. The rest are unidentified (carried).
 
 ## What's next
 
-### 1. **Merge the PR, redeploy both hosts, then run the repair** (yours)
-- After the merge, check that `gh issue view 415` reports closed.
-- Redeploy (commands below). New mail is then stored correctly.
-- **Then repair each host once:**
-  `uv run localmail backfill-internal-date --refetch`.
-  - Do it **after** the redeploy. Before it, the daemon keeps writing
-    wrong values.
-  - This writes to the live archive.
-  - The Mac's label count is ~216k, so about 4,300 body-free FETCHes:
-    minutes.
-- **Acceptance:**
-  - On the DGX, message 39045's search-hit `date` equals its
-    `GET /v1/messages/{id}` `date` to within seconds (it is +11 h today).
-  - On the Mac, the skew histogram has its peak at 0, not +2 h:
-    `psql -p 5532 -d localmail -c "select round(extract(epoch from internal_date - date_sent)/1800)*0.5 h, count(*) from messages m join accounts a on a.id=m.account_id where internal_date is not null and date_sent is not null and a.auth_method<>'archive' group by 1 order by 2 desc limit 8"`
-  - The command's "not on the server" and "without a usable date" counts
-    are reported. Expect the first to be non-zero; those rows stay wrong.
-  - If it exits 1 naming skipped mailboxes, run `localmail sync` and then
-    the command again.
-  - Paused accounts are named and skipped. Repair one with `--account NAME`
-    if its dates matter.
-- **Open after the repair:** the `missing` rows keep wrong dates. If the
-  count is large, decide whether to NULL them, which makes search fall back
-  to `date_sent`.
+### 1. **Merge #423, redeploy both hosts** (yours)
+- After the merge, check that `gh issue view 416` reports closed.
+- Redeploy (commands below). The Mac already runs this code; the DGX needs
+  it.
+- **Acceptance:** no `inbox-idle session crashed` line in either daemon log
+  for an hour after the restart (one is expected right after the restart at
+  most). Before the fix it was one every ~10 min on the DGX.
+  - Mac: `grep "session crashed" ~/Library/Logs/localmail/daemon.err.log | tail`
+  - DGX: `journalctl --user -u localmail-daemon --since "-1h" | grep -c "session crashed"`
 
 ### 2. **Tell kastellan** (yours; carried)
-- Problem+json 400s on `/v1/search`, `filters.lang` as a list, web-search
-  syntax in `query` (#419).
-- After the repair, dates are no longer in the future.
+- Problem+json 400s on `/v1/search`, `filters.lang` as a list, and
+  web-search syntax in `query` (#419).
+- Dates are no longer in the future (#415 repaired on both hosts).
 
 ### 3. **Next small slice**
-- **#416:** Gmail's 29-minute IDLE drop logged as a crash.
-- **#414:** stalled workers on unbounded pool connections.
+- **#414:** stalled workers on unbounded pool connections. Note: #414's
+  incident followed one of these resets. Re-read it now that #416's cause
+  is known; part of it may be the same silent-drop mechanism.
 - **#421:** the GUI drops quotes on a single quoted word (`"OR"`, `"-acme"`).
-- **Acceptance (any of them):** RED test first, the fix, and the full suite
+- **Acceptance (either):** RED test first, the fix, and the full suite
   green.
 
 ### 4. **Carried**
@@ -180,19 +152,24 @@ Four reviewers (code, tests, error handling, docs). Fixed:
 
 ## Rulings made this session
 
-1. **#415 first.** It is the data-correctness bug, ahead of #416 and #414.
-2. **Repair by re-fetching from IMAP** (operator ruling). No SQL offset
-   correction, and no `date_sent` heuristic.
-3. **Earliest INTERNALDATE across a message's mailboxes** wins on refetch.
-4. **A naive INTERNALDATE is never stored as a guess**: sync writes NULL,
-   backfill leaves the row alone.
+1. **Deploy and repair both hosts this session** (operator).
+2. **#416 next** (operator).
+3. **Keepalive, not a shorter renewal**, is #416's fix: measured, after the
+   shorter renewal failed live.
 
 ## Open decisions & risks
 
-1. **The repair has not been run on either host.** Until it is, every
-   pre-fix row stays skewed.
-2. **Rows no longer on the server** cannot be repaired by refetch (see
-   next-step 1).
+1. **3,194 rows keep a skewed `internal_date`** (Mac 2,720, DGX 474): the
+   server no longer has them, so refetch cannot fix them. Options:
+   - Leave them.
+   - NULL them, so search falls back to `date_sent`.
+   - A per-host SQL shift. On the DGX the offset is deterministic (Sydney
+     local read as UTC); on the Mac it is not. This session's ruling was "no
+     SQL offset", and that ruling was made for the mixed Mac history.
+   - Not decided.
+2. **What drops the silent flows is unknown** (home router, ISP CGNAT,
+   WireGuard?). It differs per host: the DGX path drops under 420 s. If a
+   path ever drops under 60 s, keepalive at 60 s will not cover it.
 3. **Should a wire widening bump `api_minor`?** Still open.
 4. **#375 under load:** `build_hash` is null on the Mac until a quiet
    restart.
@@ -202,7 +179,9 @@ Four reviewers (code, tests, error handling, docs). Fixed:
 7. **Restore a mutation from a file copy, never with `git checkout`.**
 8. **Always sync with `--extra mcp --extra extraction`**, and use
    `~/.local/bin/uv` on the DGX. `uv sync --dry-run` is not read-only.
-9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
+9. **Run long DGX jobs detached** (`nohup setsid … > /tmp/x.log`). A quiet
+   ssh session can be dropped by the same silent-flow drop.
+10. **No ROADMAP.md.** That `/nextsession` step is a no-op.
 
 ## Exact commands to resume
 
@@ -211,8 +190,8 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git log --oneline main..origin/fix/415-internaldate-utc   # empty once merged
-gh issue view 415 --json state
+git log --oneline main..origin/fix/416-idle-renew-before-drop   # empty once merged
+gh issue view 416 --json state
 gh issue list --limit 200 --json number --jq length
 
 # Redeploy — Mac (the repo is the install)
@@ -220,19 +199,17 @@ unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
 launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version
-uv run localmail backfill-internal-date --refetch          # #415 repair (live DB)
 
 # Redeploy — DGX
 ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user restart localmail-daemon localmail-serve'
-ssh 10.0.0.3 'cd ~/src/localmail && ~/.local/bin/uv run localmail backfill-internal-date --refetch'
-ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version; systemctl --user show -p NRestarts localmail-daemon localmail-serve'
+ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version; journalctl --user -u localmail-daemon --since "-1h" | grep -c "session crashed"'
 
 # Load before trusting any timing; no other localmail pytest may be running.
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4307 at session 67
-uv run pytest -q tests/test_internal_date_utc.py tests/test_sync.py
+unset VIRTUAL_ENV && uv run pytest -q              # 4321 at session 68
+uv run pytest -q tests/test_imap_keepalive.py tests/test_idle_renew_default.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 162 files
 cd gui && npm test -- --run && npm run check
 cd gui/src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings

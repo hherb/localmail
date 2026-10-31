@@ -106,7 +106,8 @@ class SecretsConfig(BaseModel):
 
 
 class DaemonConfig(BaseModel):
-    idle_renew_seconds: int = 1740
+    # Well inside RFC 2177's 29-minute IDLE limit, not at it (see idle.py).
+    idle_renew_seconds: int = 600
     poll_seconds: int = 300
     # When None, the daemon picks `db.compute_daemon_pool_size(...)` based on
     # the number of configured accounts and which optional workers are on.

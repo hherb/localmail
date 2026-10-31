@@ -1133,6 +1133,30 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
   exponential backoff (1s → 60s cap) on failure. SIGTERM/SIGINT cleanly stop
   IDLE and join threads.
 
+  **Every IMAP socket carries TCP keepalive (60 s idle, 30 s interval), and
+  that is #416's fix.** Something on the network path drops a silent TCP
+  flow without telling either end (Mac: after 7–9 min; DGX: under 7), and a silent connection
+  is IDLE's normal state. The renewal's `DONE` was the first byte after the
+  silence and got a reset: ~48 tracebacks a day per account, on Gmail and on
+  `hherb-dmc`, from both hosts, all at `idle.py`'s renewal `idle_done()`.
+  - **Measured, not argued**, with read-only parallel IDLE probes to Gmail:
+    from the Mac 60–420 s of silence survived and 540 s was reset at
+    `DONE`; from the DGX 420 s was already reset; from both, 540 s with
+    keepalive survived. (Repeat it before changing the constants;
+    the probe was a scratch script, not kept.)
+  - **The 29-minute cadence was ours, and the issue's diagnosis was wrong.**
+    The crashes came every ~29 min only because `idle_renew_seconds` was
+    1740: any silent timeout below that looks identical. Lowering the
+    renewal to 600 s was tried first and **still reset on its first
+    renewal** on the DGX. Do not "fix" this class by shortening the renewal.
+  - **The renewal default is 600 anyway** (was 1740), because 1740 renewed
+    *at* RFC 2177's 29-minute server limit. Both hosts carried 1740 because
+    they copied `config.example.toml`, so
+    `tests/test_idle_renew_default.py` pins the example to the default.
+  - Keepalive is set in `imap_client.open_connection`, so the poll plane,
+    long FETCHes and the admin probe get it too. A test fake that replaces
+    `IMAPClient` must now offer `socket()`.
+
   Pool sizing: by default `compute_daemon_pool_size(...)` in `db.py` derives
   the cap from `(2 * n_accounts) + workers + headroom`, floored at
   `POOL_BASELINE_MIN`. Set `daemon.pool_max_size` in `config.toml` to

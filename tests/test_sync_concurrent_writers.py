@@ -11,6 +11,7 @@ three consequences that used to follow.
 
 from __future__ import annotations
 
+import socket
 import threading
 from pathlib import Path
 
@@ -296,12 +297,16 @@ def test_open_connection_bounds_every_blocking_imap_call(monkeypatch) -> None:
     class Recorder:
         def __init__(self, **kw):
             seen.update(kw)
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        def socket(self):
+            return self._sock
 
         def login(self, *a, **k):
             pass
 
         def logout(self):
-            pass
+            self._sock.close()
 
     monkeypatch.setattr(imap_mod, "IMAPClient", Recorder)
     monkeypatch.setattr(imap_mod.secrets, "get_password", lambda name: "pw")

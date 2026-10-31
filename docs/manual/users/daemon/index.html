@@ -151,7 +151,7 @@ tail -f /tmp/localmail.out.log /tmp/localmail.err.log</code></pre>
     <p>The defaults live under <code>[daemon]</code> in
     <code>config.toml</code>:</p>
     <pre><code>[daemon]
-idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling
+idle_renew_seconds = 600    # re-issue IDLE well inside the 29-minute RFC 2177 limit
 poll_seconds       = 300    # poll non-INBOX folders every 5 minutes</code></pre>
 
     <table>
@@ -162,9 +162,10 @@ poll_seconds       = 300    # poll non-INBOX folders every 5 minutes</code></pre
       </tr>
       <tr>
         <td><code>idle_renew_seconds</code></td>
-        <td>Fewer reconnects; risk hitting the 29-minute IDLE ceiling.</td>
-        <td>More reconnects; safer near server-side timeouts that are
-          tighter than 29 min.</td>
+        <td>Fewer IDLE re-issues; near 1740 (29 min) a renewal races the
+          server's own IDLE limit.</td>
+        <td>More IDLE re-issues (one cheap round trip each, on the same
+          connection); safer near timeouts tighter than 29 min.</td>
       </tr>
       <tr>
         <td><code>poll_seconds</code></td>

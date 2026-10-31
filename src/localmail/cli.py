@@ -19,7 +19,7 @@ import psycopg
 import logging
 
 from . import __version__, __version_diagnostic__, secrets
-from .config import AccountConfig, Config, default_config_path, load_config
+from .config import Config, default_config_path, load_config
 from .daemon import Daemon
 from .daemon_accounts import account_config_from_row
 from .daemon_cli import daemon_group
@@ -109,16 +109,6 @@ def _warm_reranker_in_background(reranker) -> None:
         log.info("reranker %r warm in %.1fs", model, time.monotonic() - t0)
 
     threading.Thread(target=_warm, name="reranker-warmup", daemon=True).start()
-
-
-def _account_or_die(cfg: Config, name: str) -> AccountConfig:
-    for a in cfg.accounts:
-        if a.name == name:
-            return a
-    raise click.ClickException(
-        f"account {name!r} is not declared in config.toml; "
-        f"add an [[accounts]] block with name = {name!r} first"
-    )
 
 
 def _resolve_account_row(conn: psycopg.Connection, cfg: Config, name: str) -> Account:
@@ -507,6 +497,25 @@ def oauth_login(ctx: click.Context, name: str) -> None:
     )
 
 
+def _live_account_rows(conn: psycopg.Connection, account_name: str | None) -> list:
+    """The DB accounts an IMAP command acts on: one by name (even if paused),
+    else every syncable one. Archive accounts have no server and are refused."""
+    if account_name:
+        row = get_account_by_name(conn, account_name)
+        if row is None:
+            raise click.ClickException(f"no such account: {account_name!r}")
+        if row.auth_method == "archive":
+            raise click.ClickException(
+                f"account {account_name!r} is an archive account; not synced"
+            )
+        rows = [row]
+    else:
+        rows = list_syncable_accounts(conn)
+    if not rows:
+        raise click.ClickException("no syncable accounts")
+    return rows
+
+
 @main.command("sync")
 @click.option("--account", "account_name", default=None,
               help="Sync only this account (default: all syncable DB accounts).")
@@ -522,21 +531,7 @@ def sync_cmd(ctx: click.Context, account_name: str | None,
     cfg = load_config(ctx.obj["config_path"])
     gmail_secrets = cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
     with psycopg.connect(cfg.database.dsn, autocommit=False) as conn:
-        if account_name:
-            row = get_account_by_name(conn, account_name)
-            if row is None:
-                raise click.ClickException(f"no such account: {account_name!r}")
-            if row.auth_method == "archive":
-                raise click.ClickException(
-                    f"account {account_name!r} is an archive account; not synced"
-                )
-            rows = [row]
-        else:
-            rows = list_syncable_accounts(conn)
-        if not rows:
-            raise click.ClickException("no syncable accounts")
-
-        for row in rows:
+        for row in _live_account_rows(conn, account_name):
             account = account_config_from_row(row)
             click.echo(f"--- syncing {account.name} ---")
             with open_connection(
@@ -830,55 +825,49 @@ def import_cmd(
 
 @main.command("backfill-internal-date")
 @click.option("--account", "account_name", default=None,
-              help="Restrict to one account (default: all).")
+              help="Restrict to one account (default: all syncable DB accounts).")
+@click.option("--refetch", is_flag=True, default=False,
+              help="Overwrite every row with the server's value, not only NULL "
+                   "rows. Repairs dates stored before #415.")
 @click.option("--no-ssl", is_flag=True, default=False,
               help="Disable TLS — for local-test IMAP servers only.")
 @click.pass_context
 def backfill_internal_date_cmd(
-    ctx: click.Context, account_name: str | None, no_ssl: bool,
+    ctx: click.Context, account_name: str | None, refetch: bool, no_ssl: bool,
 ) -> None:
-    """Populate `messages.internal_date` for rows where it is NULL by
-    re-fetching INTERNALDATE from the IMAP server.
+    """Set `messages.internal_date` by re-fetching INTERNALDATE from IMAP.
 
-    Pre-migration-0018 syncs didn't store INTERNALDATE; every row was
-    inserted with `internal_date` left implicitly NULL (or the legacy
-    `date_received` column held sync time, which migration 0018 already
-    decoupled). This pass walks every mailbox and runs a single
-    `FETCH UID INTERNALDATE` per UID — no body bytes are refetched, so
-    it's fast and bandwidth-cheap. Idempotent; safe to re-run.
+    By default only rows where it is NULL (pre-migration-0018 syncs). With
+    `--refetch`, every row: dates synced before #415 are host-local time read
+    in the Postgres session's zone, off by hours. Only `FETCH UID
+    INTERNALDATE` is issued, so it is fast. Idempotent; safe to re-run.
     """
     cfg = load_config(ctx.obj["config_path"])
-    accounts = (
-        [_account_or_die(cfg, account_name)] if account_name else cfg.accounts
-    )
-    if not accounts:
-        raise click.ClickException("no accounts configured")
     gmail_secrets = cfg.gmail_oauth.client_secrets_file if cfg.gmail_oauth else None
-    total_scanned = 0
-    total_updated = 0
+    total_scanned = total_updated = total_missing = 0
     with psycopg.connect(cfg.database.dsn, autocommit=False) as conn:
-        for account in accounts:
+        for row in _live_account_rows(conn, account_name):
+            account = account_config_from_row(row)
             click.echo(f"--- backfilling {account.name} ---")
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM accounts WHERE name = %s", (account.name,))
-                row = cur.fetchone()
-                if not row:
-                    click.echo(f"  {account.name}: not in DB; skipping")
-                    continue
-                account_id = int(row[0])
             with open_connection(
                 account, ssl=not no_ssl, gmail_client_secrets=gmail_secrets,
                 timeout=cfg.daemon.imap_timeout_s,
             ) as imap:
-                scanned, updated = backfill_internal_date(
-                    conn, imap,
-                    account_id=account_id,
+                result = backfill_internal_date(
+                    conn, imap, account_id=row.id, refetch=refetch,
                     progress=click.echo,
                 )
-            total_scanned += scanned
-            total_updated += updated
-            click.echo(f"  {account.name}: {updated}/{scanned} updated")
-    click.echo(f"done: {total_updated} rows updated across {total_scanned} candidates")
+            total_scanned += result.scanned
+            total_updated += result.updated
+            total_missing += result.missing
+            click.echo(
+                f"  {account.name}: {result.updated}/{result.scanned} updated, "
+                f"{result.missing} not on the server"
+            )
+    click.echo(
+        f"done: {total_updated} rows updated across {total_scanned} candidates; "
+        f"{total_missing} not on the server (left as they were)"
+    )
 
 
 @main.command("run")

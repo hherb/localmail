@@ -182,10 +182,10 @@ def test_backfill_internal_date_fills_nulls_from_imap(
     with db_conn.cursor() as cur:
         cur.execute("SELECT id FROM accounts WHERE name = 'acct'")
         account_id = cur.fetchone()[0]
-    scanned, updated = backfill_internal_date(
+    result = backfill_internal_date(
         db_conn, imap, account_id=account_id,
     )
-    assert (scanned, updated) == (2, 2)
+    assert (result.scanned, result.updated, result.missing) == (2, 2, 0)
     with db_conn.cursor() as cur:
         cur.execute(
             "SELECT ml.uid, m.internal_date FROM messages m "
@@ -216,10 +216,10 @@ def test_backfill_internal_date_is_idempotent_and_skips_populated_rows(
     with db_conn.cursor() as cur:
         cur.execute("SELECT id FROM accounts WHERE name = 'acct'")
         account_id = cur.fetchone()[0]
-    scanned, updated = backfill_internal_date(
+    result = backfill_internal_date(
         db_conn, imap, account_id=account_id,
     )
-    assert (scanned, updated) == (0, 0)
+    assert (result.scanned, result.updated) == (0, 0)
 
 
 def test_resync_inserts_zero_new_messages(db_conn, tmp_path: Path):

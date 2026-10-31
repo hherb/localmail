@@ -41,6 +41,7 @@ from .fetch_retry import (
     reclaim_below,
     record_attempt,
 )
+from .imap_dates import aware_internal_date
 from .parser import ParsedMessage, parse_message
 from .uids import (
     checkpoint_uidnext,
@@ -454,33 +455,51 @@ def retry_failed_messages(
     return succeeded, still_failing
 
 
+@dataclass(frozen=True)
+class BackfillResult:
+    """What one ``backfill_internal_date`` pass did, per account.
+
+    ``scanned`` counts distinct messages asked about, ``updated`` the rows
+    whose value changed, and ``missing`` the scanned messages no mailbox
+    returned a usable INTERNALDATE for (expunged or moved since sync); those
+    keep whatever value they had.
+    """
+
+    scanned: int
+    updated: int
+    missing: int
+
+
 def backfill_internal_date(
     conn: psycopg.Connection,
     imap: "ImapLike",
     *,
     account_id: int,
+    refetch: bool = False,
     progress: Callable[[str], None] | None = None,
-) -> tuple[int, int]:
-    """Populate ``messages.internal_date`` for existing rows by re-fetching
-    INTERNALDATE from IMAP. Returns ``(scanned, updated)``.
+) -> BackfillResult:
+    """Set ``messages.internal_date`` from INTERNALDATE re-fetched over IMAP.
 
-    Rationale: pre-migration-0018 syncs didn't store INTERNALDATE, and the
-    legacy ``date_received`` column held sync time instead. After the
-    migration, those rows have ``internal_date IS NULL``. This pass walks
-    every mailbox of the account, fetches INTERNALDATE for the UIDs we
-    know about (body bytes are not refetched — the FETCH is cheap), and
-    fills the column.
+    By default only NULL rows are touched: pre-migration-0018 syncs did not
+    store INTERNALDATE. With ``refetch`` every row of the account is asked
+    about and overwritten with the server's value; that repairs rows stored
+    before #415, which hold host-local time read in the Postgres session zone
+    and so are off by the difference between the two (it varied as the host's
+    zone did, so no SQL offset can undo it).
 
-    Idempotent: only NULL rows are updated. A row that gained
-    ``internal_date`` via incremental sync since the migration is left
-    alone. Mailboxes whose ``uidvalidity`` no longer matches what we have
-    on disk are skipped — those UIDs are stale and the next regular sync
-    will pick them up cleanly.
+    A message labelled in several mailboxes gets the **earliest** INTERNALDATE
+    any of them reports. Gmail reports one value for all labels; elsewhere a
+    copy into another folder gets a later one, and the earliest is when the
+    message arrived. Only body-free FETCHes are issued.
+
+    Mailboxes whose ``uidvalidity`` no longer matches ours are skipped — those
+    UIDs are stale and the next regular sync will pick them up cleanly.
     """
     def _emit(msg: str) -> None:
         if progress is not None:
             progress(msg)
 
+    only_null = "" if refetch else "AND m.internal_date IS NULL"
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, name, uidvalidity FROM mailboxes WHERE account_id = %s",
@@ -488,16 +507,15 @@ def backfill_internal_date(
         )
         mailboxes = cur.fetchall()
 
-    scanned = 0
-    updated = 0
+    scanned: set[int] = set()
+    earliest: dict[int, datetime] = {}
     for mb_id, mb_name, expected_uidvalidity in mailboxes:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT m.id, ml.uid
-                     FROM messages m
-                     JOIN message_labels ml ON ml.message_id = m.id
-                    WHERE ml.mailbox_id = %s
-                      AND m.internal_date IS NULL""",
+                f"""SELECT m.id, ml.uid
+                      FROM messages m
+                      JOIN message_labels ml ON ml.message_id = m.id
+                     WHERE ml.mailbox_id = %s {only_null}""",
                 (mb_id,),
             )
             msg_uid_pairs = cur.fetchall()
@@ -522,34 +540,36 @@ def backfill_internal_date(
             continue
 
         msg_ids_by_uid = {int(uid): int(mid) for mid, uid in msg_uid_pairs}
-        uids = sorted(msg_ids_by_uid.keys())
-        scanned += len(uids)
+        scanned.update(msg_ids_by_uid.values())
+        found = 0
+        for chunk in _batches(sorted(msg_ids_by_uid), BATCH_SIZE):
+            for uid_key, data in imap.fetch(chunk, [b"INTERNALDATE"]).items():
+                when = aware_internal_date(
+                    data.get(b"INTERNALDATE") or data.get("INTERNALDATE")
+                )
+                mid = msg_ids_by_uid.get(int(uid_key))
+                if when is None or mid is None:
+                    continue
+                found += 1
+                if mid not in earliest or when < earliest[mid]:
+                    earliest[mid] = when
+        _emit(f"  {mb_name}: {found}/{len(msg_ids_by_uid)} fetched")
 
-        mailbox_updated = 0
-        for chunk in _batches(uids, BATCH_SIZE):
-            fetched = imap.fetch(chunk, [b"INTERNALDATE"])
-            with conn.cursor() as cur:
-                for uid_key, data in fetched.items():
-                    int_date = (
-                        data.get(b"INTERNALDATE") or data.get("INTERNALDATE")
-                    )
-                    if not isinstance(int_date, datetime):
-                        continue
-                    mid = msg_ids_by_uid.get(int(uid_key))
-                    if mid is None:
-                        continue
-                    cur.execute(
-                        "UPDATE messages SET internal_date = %s "
-                        "WHERE id = %s AND internal_date IS NULL",
-                        (int_date, mid),
-                    )
-                    if cur.rowcount > 0:
-                        mailbox_updated += 1
-            conn.commit()
-        updated += mailbox_updated
-        _emit(f"  {mb_name}: {mailbox_updated}/{len(uids)} backfilled")
-
-    return scanned, updated
+    updated = 0
+    with conn.cursor() as cur:
+        for i, (mid, when) in enumerate(earliest.items(), start=1):
+            cur.execute(
+                "UPDATE messages SET internal_date = %s "
+                "WHERE id = %s AND internal_date IS DISTINCT FROM %s",
+                (when, mid, when),
+            )
+            updated += cur.rowcount
+            if i % BATCH_SIZE == 0:
+                conn.commit()
+    conn.commit()
+    return BackfillResult(
+        scanned=len(scanned), updated=updated, missing=len(scanned) - len(earliest),
+    )
 
 
 # --- folder filtering --------------------------------------------------------
@@ -789,7 +809,7 @@ def sync_mailbox(
 
             flags_list = _decode_flags(data.get(b"FLAGS") or data.get("FLAGS"))
             internal_date_raw = data.get(b"INTERNALDATE") or data.get("INTERNALDATE")
-            internal_date = internal_date_raw if isinstance(internal_date_raw, datetime) else None
+            internal_date = aware_internal_date(internal_date_raw)
             # Per-message SAVEPOINT — a single poison-pill row (e.g. an
             # unexpected encoding the parser/DB chokes on) only loses itself,
             # not the surrounding 49 messages' worth of work. On failure we

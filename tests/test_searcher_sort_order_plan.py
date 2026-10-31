@@ -78,6 +78,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 
 from localmail.search import date_keyset
+from localmail.search.arms import build_lexical_tsquery
 from localmail.search import searcher as searcher_mod
 from localmail.search.searcher import KeysetCursor, SortOrder
 
@@ -327,7 +328,8 @@ def test_the_ascending_fts_restricted_form_keeps_the_backward_scan(
     blank-query plan can show.
     """
     _seed(db_conn)
-    fts = "m.fts_v2 @@ plainto_tsquery('simple', %s) "
+    tsq_sql, _ = build_lexical_tsquery("needle", [])
+    fts = f"m.fts_v2 @@ {tsq_sql} "
     plan = _explain(
         db_conn, _PROJECTION + fts + _order_by("asc") + " LIMIT %s",
         ["needle", _PAGE_SIZE + 1],

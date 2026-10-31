@@ -825,9 +825,15 @@ class Searcher:
         )
         a1 = arm_bm25_messages(conn, parsed, self._cfg, limit=candidates_per_arm)
         a2 = arm_bm25_chunks(conn, parsed, self._cfg, limit=candidates_per_arm)
-        qvec = self._embeddings.embed_query(parsed.rewritten_text or parsed.free_text)
-        a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
-        a4 = arm_vector_attachment_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
+        semantic = parsed.rewritten_text or parsed.semantic_text
+        a3: list[ArmHit] = []
+        a4: list[ArmHit] = []
+        # An all-exclusions query (`-acme`) has nothing to embed; the vector
+        # arms would rank by distance to the empty string (#419).
+        if semantic.strip():
+            qvec = self._embeddings.embed_query(semantic)
+            a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
+            a4 = arm_vector_attachment_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
         fused = rrf_fuse([a1, a2, a3, a4], k=self._cfg.rrf_k)
         return self._cut_pool(conn, fused, rerank_pool_size)
 
@@ -1039,7 +1045,7 @@ class Searcher:
         **not** add ``sort_order`` handling to that branch "for symmetry":
         it would be tested against code that never runs.
         """
-        terms = parsed.free_text.split()
+        terms = parsed.semantic_text.split()
         if sort == "date":
             ordered = sorted(
                 zip(hydrated, rerank_scores, strict=True),
@@ -1251,7 +1257,7 @@ class Searcher:
             snippets = [item["snippet_source_text"][:cap] for item in hydrated]
             scores = _safe_rerank(
                 self._reranker,
-                parsed.rewritten_text or parsed.free_text,
+                parsed.rewritten_text or parsed.semantic_text,
                 snippets,
                 fallback=[item["fused"].rrf_score for item in hydrated],
             )
@@ -1726,7 +1732,7 @@ class Searcher:
             ]
             scores = _safe_rerank(
                 reranker,
-                parsed.rewritten_text or parsed.free_text,
+                parsed.rewritten_text or parsed.semantic_text,
                 snippets_for_rerank,
                 fallback=[item["fused"].rrf_score for item in hydrated],
             )

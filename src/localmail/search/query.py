@@ -11,7 +11,8 @@ Supported operators (all optional, in any order, anywhere in the query):
     has:attachment / has:no-attachment
 
 Anything not matched by an operator becomes free-text (joined with spaces,
-preserved in encounter order).
+preserved in encounter order). The free text keeps web-search syntax for the
+lexical arms (#419): ``"quoted phrase"``, ``OR``, ``-excluded``.
 """
 
 from __future__ import annotations
@@ -48,6 +49,17 @@ class ParsedQuery:
     expansion_terms: list[str] = field(default_factory=list)
     filters: SearchFilters = field(default_factory=SearchFilters)
 
+    @property
+    def semantic_text(self) -> str:
+        """``free_text`` without its web-search syntax, for the embedding,
+        reranker and snippet: quotes dropped, ``OR`` and ``-excluded`` words
+        removed — embedding an excluded word would pull toward it (#419).
+        """
+        return " ".join(
+            text for text, raw in _tokenize(self.free_text)
+            if text and raw.lower() != "or" and not raw.startswith("-")
+        )
+
 
 _OPERATORS = {
     "from", "to", "subject", "after", "before", "has", "label",
@@ -55,32 +67,45 @@ _OPERATORS = {
 }
 
 
-def _tokenize(s: str) -> list[str]:
+def _tokenize(s: str) -> list[tuple[str, str]]:
     """Whitespace-split, but keep quoted strings (single or double) intact.
+
+    Each token comes back twice: with its quote characters stripped (what an
+    operator value is read from), and with its ``"`` delimiters kept (what
+    free text is built from, so a phrase reaches ``websearch_to_tsquery``
+    as one, #419). Single quotes are stripped from both: an apostrophe opens
+    one, and turning ``it's late`` into a phrase would narrow a plain query.
 
     An unclosed quote runs to the end of the string: anything after an open
     quote is swallowed into its last token. A composer appending tokens after
     untrusted text must account for that (#367, and #374 for the CLI's).
     """
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     buf: list[str] = []
+    raw: list[str] = []
     quote: str | None = None
     for ch in s:
         if quote:
             if ch == quote:
                 quote = None
+                if ch == '"':
+                    raw.append(ch)
             else:
                 buf.append(ch)
+                raw.append(ch)
         elif ch in ('"', "'"):
             quote = ch
+            if ch == '"':
+                raw.append(ch)
         elif ch.isspace():
             if buf:
-                out.append("".join(buf))
-                buf = []
+                out.append(("".join(buf), "".join(raw)))
+            buf, raw = [], []
         else:
             buf.append(ch)
+            raw.append(ch)
     if buf:
-        out.append("".join(buf))
+        out.append(("".join(buf), "".join(raw)))
     return out
 
 
@@ -160,7 +185,7 @@ def parse_query(query: str) -> ParsedQuery:
     f_has_attachment: bool | None = None
     f_languages: list[str] = []
 
-    for tok in _tokenize(query):
+    for tok, raw in _tokenize(query):
         _reject_unstorable(tok)
         if ":" in tok:
             op, _, value = tok.partition(":")
@@ -188,13 +213,13 @@ def parse_query(query: str) -> ParsedQuery:
                     try:
                         f_account_ids.append(int(value))
                     except ValueError:
-                        free_parts.append(tok)
+                        free_parts.append(raw)
                     continue
                 elif op_l == "folder_id":
                     try:
                         f_folder_ids.append(int(value))
                     except ValueError:
-                        free_parts.append(tok)
+                        free_parts.append(raw)
                     continue
                 elif op_l == "after":
                     f_after = _parse_date(value, "after")
@@ -203,7 +228,10 @@ def parse_query(query: str) -> ParsedQuery:
                 elif op_l == "has":
                     f_has_attachment = _parse_has(value, f_has_attachment)
                 continue
-        free_parts.append(tok)
+        # A spaced dash is a separator ("Order confirmation - Qantas"), but
+        # websearch_to_tsquery reads it as negating the next word (#419).
+        if raw.strip("-"):
+            free_parts.append(raw)
 
     filters = SearchFilters(
         account_names=f_account_names,

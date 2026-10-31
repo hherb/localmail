@@ -99,20 +99,28 @@ def build_lexical_tsquery(
 ) -> tuple[str, list[str]]:
     """Build an OR-combined tsquery fragment + its params.
 
-    With no expansion terms this is byte-identical to the single
-    ``plainto_tsquery('simple', %s)`` form, so the non-smart path is
-    unchanged. Each expansion term adds one OR-ed ``plainto_tsquery`` so a
-    message matching only a synonym is still retrieved.
+    The free text goes through ``websearch_to_tsquery``, so ``OR``,
+    ``"quoted phrase"`` and ``-excluded`` work, and malformed syntax never
+    raises (#419). With no expansion terms that call is the whole fragment.
+    Each expansion term adds one OR-ed ``plainto_tsquery``: the rewriter's
+    synonyms are plain words, so a message matching only a synonym is still
+    retrieved.
+
+    shortcut: an OR-ed synonym is not subject to the free text's exclusions,
+    so ``invoice -acme`` with --smart can return an Acme bill; AND the
+    exclusions onto each term if that ever matters.
 
     When expansion terms are present the fragment is wrapped in parentheses
     so the ``@@`` operator in callers binds to the full OR-chain rather than
     only the first alternative (operator precedence: ``@@`` > ``||``).
     """
-    terms = [free_text, *expansion_terms]
-    if len(terms) == 1:
-        return "plainto_tsquery('simple', %s)", terms
-    inner = " || ".join(["plainto_tsquery('simple', %s)"] * len(terms))
-    return f"({inner})", terms
+    free_sql = "websearch_to_tsquery('simple', %s)"
+    if not expansion_terms:
+        return free_sql, [free_text]
+    inner = " || ".join(
+        [free_sql, *["plainto_tsquery('simple', %s)"] * len(expansion_terms)]
+    )
+    return f"({inner})", [free_text, *expansion_terms]
 
 
 def arm_bm25_messages(

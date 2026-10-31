@@ -28,7 +28,11 @@ API_MAJOR = 1
 # silently. Bumped anyway, so a client can feature-detect without provoking a
 # refusal. HTTP only: the MCP `search` tool takes neither and #368 drops an
 # unknown tool argument silently, so this counter over-promises there.
-API_MINOR = 3
+# 4: web-search syntax in the search `query` — `OR`, `"phrase"`, `-word`
+# (#419). An older server reads each as a required plain word and answers 200,
+# so this is the only way a client (kastellan's planner) can know it works.
+# Unlike 3, this reaches MCP too: the syntax rides in `query`.
+API_MINOR = 4
 
 logger = logging.getLogger("localmail.serve")
 

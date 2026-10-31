@@ -1465,8 +1465,31 @@ for the Phase 2 plan.
   **No magic numbers elsewhere in search code.**
 - Lexical retrieval via PostgreSQL built-in `tsvector` + `ts_rank_cd` with
   `setweight()` — no third-party extension required. Arms 1 and 2 (whole-message
-  and chunk-level FTS) use `plainto_tsquery('simple', ...)` for language-neutral
-  tokenisation. The docstrings in `arms.py` still use "BM25" as shorthand;
+  and chunk-level FTS) use `websearch_to_tsquery('simple', ...)` for
+  language-neutral tokenisation (`plainto_tsquery` until #419; smart
+  expansion terms still use it).
+- **The free text carries web-search syntax (#419, `api_minor` 4)**: `OR`,
+  `"phrase"`, `-excluded`. `plainto_tsquery` made every word required, so a
+  planner's `invoice OR bill` needed the word "or". Three parts:
+  - `query._tokenize` keeps `"` delimiters in a free-text token (filter
+    values still lose them), because the parser dropping quotes is what made
+    a phrase two words. Single quotes stay stripped: an apostrophe opens
+    one, and `it's late` must not become a phrase.
+  - A bare `-` token is dropped: `websearch_to_tsquery` reads `Order
+    confirmation - Qantas` as `!'qantas'`, so a pasted subject excluded its
+    own last word.
+  - `ParsedQuery.semantic_text` (quotes gone, `OR` and `-word` removed) is
+    what the embedding, reranker and snippet terms read. An all-exclusions
+    query has none, so the vector arms are skipped rather than ranked by
+    distance to the empty string.
+  - Measured warm on the 130k Mac archive: `invoice OR bill` ~100 ms on
+    arm 1 (the old smart OR form costs the same), a phrase 26 ms. Pure
+    negation on the rank path is a seq scan, ~0.5 s per lexical arm. The
+    date walk serves it in 1 ms.
+  - Compound words (`e-ticket`, `ab_cd`) now parse as adjacency (`<->`)
+    where `plainto` ANDed the parts. A message containing the word still
+    matches (its tsvector has the same adjacent tokens); one holding the
+    parts only far apart no longer does. The docstrings in `arms.py` still use "BM25" as shorthand;
   the actual implementation is `tsvector`/`ts_rank_cd` throughout.
 - Vector retrieval via pgvector HNSW + `halfvec(768)`. Default embedder:
   EmbeddingGemma-300M via fastembed (Gemma Terms — runtime download).

@@ -150,7 +150,10 @@ def build_mcp_server(
     def search(
         query: Annotated[str | None, Field(description=(
             "Free-text query matched against message subjects/bodies and "
-            "extracted attachment text. Optional: omit it (or pass null) to "
+            "extracted attachment text. Every word is required unless you "
+            'use web-search syntax: `invoice OR bill` (either), `"payment '
+            'overdue"` (exact phrase), `invoice -anthropic` (exclude a word). '
+            "Optional: omit it (or pass null) to "
             "search by filters alone, newest first — for example "
             "`has_attachment=true` for recent mail with attachments. "
             "Filter operators typed here (`from:`, `to:`, `subject:`, "

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import socket
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -23,6 +24,23 @@ from .oauth_gmail import fresh_access_token
 # knob; this constant only keeps the bound non-infinite by default.
 DEFAULT_IMAP_TIMEOUT_SECONDS = 60.0
 
+# TCP keepalive on every IMAP socket (#416). Something on the path drops a
+# silent TCP flow without telling either end. Measured with a silent IDLE to
+# Gmail: from the Mac 420 s survived and 540 s was reset; from the DGX 420 s
+# was already reset; from both, 540 s with keepalive survived. Silence is
+# IDLE's normal state, so without this every renewal DONE got a reset.
+TCP_KEEPALIVE_IDLE_S = 60
+TCP_KEEPALIVE_INTERVAL_S = 30
+
+
+def enable_tcp_keepalive(sock: socket.socket) -> None:
+    """Probe an idle connection every `TCP_KEEPALIVE_IDLE_S` so the path keeps it."""
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    # Linux spells the idle option TCP_KEEPIDLE, macOS TCP_KEEPALIVE.
+    idle_option = getattr(socket, "TCP_KEEPIDLE", None) or socket.TCP_KEEPALIVE
+    sock.setsockopt(socket.IPPROTO_TCP, idle_option, TCP_KEEPALIVE_IDLE_S)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, TCP_KEEPALIVE_INTERVAL_S)
+
 
 @contextmanager
 def open_connection(
@@ -39,6 +57,9 @@ def open_connection(
     # stored in the Postgres session's zone, not the host's (#415).
     client.normalise_times = False
     try:
+        # imapclient documents socket() as for polling only; that warns off
+        # reads and writes, and setsockopt touches neither.
+        enable_tcp_keepalive(client.socket())
         if account.auth_method == "password":
             password = secrets.get_password(account.name)
             if password is None:

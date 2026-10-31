@@ -5,8 +5,13 @@
 
 One connection per account is kept open and in IDLE state. New-mail
 notifications from the server cause an immediate incremental sync; otherwise
-IDLE is re-issued every `idle_renew_seconds` (RFC 2177 says a server MAY drop
-an IDLE connection after 29 minutes).
+IDLE is re-issued every `idle_renew_seconds`.
+
+RFC 2177 lets a server end an IDLE after 29 minutes (`RFC2177_IDLE_LIMIT_S`),
+so renew well inside it rather than at it; a renewal is one DONE/IDLE round
+trip on the same connection. The network path drops a silent TCP flow much
+sooner than that (#416); TCP keepalive in `imap_client` is what keeps
+the connection itself alive between renewals.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ log = logging.getLogger(__name__)
 INBOX = "INBOX"
 HEARTBEAT_SECONDS = 30
 RENEW_GUARD_SECONDS = 5
+RFC2177_IDLE_LIMIT_S = 29 * 60  # RFC 2177: a server may end an IDLE after this
 
 
 def run_inbox_idle_loop(ctx: WorkerContext) -> None:

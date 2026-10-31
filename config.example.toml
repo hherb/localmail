@@ -43,7 +43,7 @@ backend = "keyring"
 # file_path = "~/.config/localmail/secrets.json"
 
 [daemon]
-idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling
+idle_renew_seconds = 600    # re-issue IDLE well inside the 29-minute RFC 2177 limit
 poll_seconds       = 300    # poll non-INBOX folders every 5 minutes
 reload_seconds     = 30     # re-read accounts + reconcile threads this often (hot-reload)
 shutdown_grace_seconds = 30 # per-thread join timeout on teardown / shutdown

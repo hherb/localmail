@@ -211,7 +211,7 @@ def test_empty_accounts_list_passes_duplicate_check():
 
 def test_model_default_daemon_values():
     cfg = Config.model_validate({"database": {"dsn": "x"}})
-    assert cfg.daemon.idle_renew_seconds == 1740
+    assert cfg.daemon.idle_renew_seconds == 600
     assert cfg.daemon.poll_seconds == 300
 
 

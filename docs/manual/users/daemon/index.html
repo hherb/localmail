@@ -54,8 +54,8 @@
     <ul>
       <li>An <strong>IDLE</strong> thread that subscribes to INBOX and
         receives push notifications when new mail arrives. RFC 2177 caps an
-        IDLE session at 29 minutes; the daemon re-issues it before that
-        limit (default every 1740 s).</li>
+        IDLE session at 29 minutes; the daemon re-issues it well before that
+        limit (default every 600 s).</li>
       <li>A <strong>poll</strong> thread that scans every other folder on a
         timer (default 300 s) for new UIDs. IMAP servers don't push for
         non-INBOX folders, so polling is the only option.</li>
@@ -151,7 +151,7 @@ tail -f /tmp/localmail.out.log /tmp/localmail.err.log</code></pre>
     <p>The defaults live under <code>[daemon]</code> in
     <code>config.toml</code>:</p>
     <pre><code>[daemon]
-idle_renew_seconds = 1740   # re-issue IDLE before the 29-minute RFC 2177 ceiling
+idle_renew_seconds = 600    # re-issue IDLE well inside the 29-minute RFC 2177 limit
 poll_seconds       = 300    # poll non-INBOX folders every 5 minutes</code></pre>
 
     <table>
@@ -162,9 +162,10 @@ poll_seconds       = 300    # poll non-INBOX folders every 5 minutes</code></pre
       </tr>
       <tr>
         <td><code>idle_renew_seconds</code></td>
-        <td>Fewer reconnects; risk hitting the 29-minute IDLE ceiling.</td>
-        <td>More reconnects; safer near server-side timeouts that are
-          tighter than 29 min.</td>
+        <td>Fewer IDLE re-issues; near 1740 (29 min) a renewal races the
+          server's own IDLE limit.</td>
+        <td>More IDLE re-issues (one cheap round trip each, on the same
+          connection); safer near timeouts tighter than 29 min.</td>
       </tr>
       <tr>
         <td><code>poll_seconds</code></td>
@@ -181,7 +182,7 @@ poll_seconds       = 300    # poll non-INBOX folders every 5 minutes</code></pre
     <pre><code>INFO  [horst-gmail] idle: starting on INBOX
 INFO  [horst-gmail] idle: woke for 1 new message(s)
 INFO  [horst-gmail] poll: 0 new in [Gmail]/Sent Mail
-INFO  [work-fastmail] idle: re-issuing after 1740s</code></pre>
+INFO  [work-fastmail] idle: re-issuing after 600s</code></pre>
 
     <p>WARNINGs are surfaced for transient problems (connection blip,
     backend error). ERRORs indicate a stuck connection or persistent

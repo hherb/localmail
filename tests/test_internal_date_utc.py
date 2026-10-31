@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import imaplib
 import logging
+import socket
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -72,12 +73,16 @@ def test_imapclient_without_normalising_yields_the_reported_instant() -> None:
 class _RecordingClient:
     def __init__(self, **kw: object) -> None:
         self.normalise_times = True
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    def socket(self) -> socket.socket:
+        return self._sock
 
     def login(self, *a: object) -> None:
         pass
 
     def logout(self) -> None:
-        pass
+        self._sock.close()
 
 
 def test_open_connection_turns_off_time_normalising(monkeypatch, memory_keyring) -> None:

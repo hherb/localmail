@@ -57,6 +57,8 @@ def open_connection(
     # stored in the Postgres session's zone, not the host's (#415).
     client.normalise_times = False
     try:
+        # imapclient documents socket() as for polling only; that warns off
+        # reads and writes, and setsockopt touches neither.
         enable_tcp_keepalive(client.socket())
         if account.auth_method == "password":
             password = secrets.get_password(account.name)

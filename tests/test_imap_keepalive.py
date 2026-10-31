@@ -57,5 +57,8 @@ def test_open_connection_turns_on_tcp_keepalive(monkeypatch, memory_keyring) -> 
 
 
 def test_keepalive_speaks_well_inside_the_measured_drop() -> None:
-    first_probe = imap_client.TCP_KEEPALIVE_IDLE_S
-    assert first_probe + imap_client.TCP_KEEPALIVE_INTERVAL_S < _LONGEST_SURVIVING_SILENCE_S
+    # An answered probe re-arms the IDLE_S timer, so a healthy flow is never
+    # silent longer than IDLE_S; INTERVAL_S only spaces retries of a lost one.
+    # Bound the worse case: one probe lost, the retry INTERVAL_S later.
+    one_probe_lost = imap_client.TCP_KEEPALIVE_IDLE_S + imap_client.TCP_KEEPALIVE_INTERVAL_S
+    assert one_probe_lost < _LONGEST_SURVIVING_SILENCE_S

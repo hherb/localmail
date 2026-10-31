@@ -54,8 +54,8 @@
     <ul>
       <li>An <strong>IDLE</strong> thread that subscribes to INBOX and
         receives push notifications when new mail arrives. RFC 2177 caps an
-        IDLE session at 29 minutes; the daemon re-issues it before that
-        limit (default every 1740 s).</li>
+        IDLE session at 29 minutes; the daemon re-issues it well before that
+        limit (default every 600 s).</li>
       <li>A <strong>poll</strong> thread that scans every other folder on a
         timer (default 300 s) for new UIDs. IMAP servers don't push for
         non-INBOX folders, so polling is the only option.</li>
@@ -182,7 +182,7 @@ poll_seconds       = 300    # poll non-INBOX folders every 5 minutes</code></pre
     <pre><code>INFO  [horst-gmail] idle: starting on INBOX
 INFO  [horst-gmail] idle: woke for 1 new message(s)
 INFO  [horst-gmail] poll: 0 new in [Gmail]/Sent Mail
-INFO  [work-fastmail] idle: re-issuing after 1740s</code></pre>
+INFO  [work-fastmail] idle: re-issuing after 600s</code></pre>
 
     <p>WARNINGs are surfaced for transient problems (connection blip,
     backend error). ERRORs indicate a stuck connection or persistent

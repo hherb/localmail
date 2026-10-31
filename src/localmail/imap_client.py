@@ -35,6 +35,9 @@ def open_connection(
     client = IMAPClient(
         host=account.imap_host, port=account.imap_port, ssl=ssl, timeout=timeout
     )
+    # Aware datetimes, not naive host-local ones: a naive INTERNALDATE is
+    # stored in the Postgres session's zone, not the host's (#415).
+    client.normalise_times = False
     try:
         if account.auth_method == "password":
             password = secrets.get_password(account.name)

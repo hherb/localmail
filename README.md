@@ -1099,6 +1099,19 @@ the SQL sorts by — so the displayed ordering always matches the field.
 Legacy archives can backfill IMAP `INTERNALDATE` via
 `localmail backfill-internal-date` once after upgrade.
 
+Before [#415](https://github.com/hherb/localmail/issues/415), synced
+`INTERNALDATE`s were stored as the host's local time read in the Postgres
+session's time zone, so a hit could show a date hours in the future and
+`sort=date` misordered it against rows dated by `Date:`. New mail is stored
+correctly. Repair existing rows once with
+`localmail backfill-internal-date --refetch`, which re-reads every value from
+the server (body-free FETCHes only). Restart the sync daemon first. Rows it
+cannot repair keep their old value and are counted: messages no longer on the
+server, and messages returned without a usable date. A mailbox it cannot read
+(refused, or its UIDVALIDITY changed) is named and the command exits 1; run
+`localmail sync`, then the command again. Paused accounts are named and
+skipped; repair one with `--account NAME`.
+
 #### Compact hits: `fields` and `snippet_chars` (`api_minor` ≥ 3)
 
 `POST /v1/search` accepts two optional fields:

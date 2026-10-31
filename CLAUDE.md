@@ -146,7 +146,7 @@ uv run localmail list-failed [--account N] [--limit K]   # show messages sync sk
 uv run localmail retry-failed [--account N]    # re-attempt every failed message
 uv run localmail extract-backfill              # one-shot extraction backfill for all blobs
 uv run localmail lang-backfill [--retry-declined] [--relabel [--yes]]  # one-shot body_lang detection
-uv run localmail backfill-internal-date [--account N]  # IMAP INTERNALDATE for legacy rows
+uv run localmail backfill-internal-date [--account N] [--refetch]  # IMAP INTERNALDATE: NULL rows, or all (#415 repair)
 uv run localmail list-failed-extractions [--limit K]   # show blobs extraction skipped
 uv run localmail retry-failed-extractions      # re-attempt every failed extraction
 uv run localmail list-failed-fetches [--account N] [--limit K]   # UIDs whose BODY[] sync gave up on
@@ -787,6 +787,7 @@ src/localmail/
   secrets.py        # keyring wrapper
   oauth_gmail.py    # OAuth2 desktop flow + token refresh
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
+  imap_dates.py     # pure: aware_internal_date — the one INTERNALDATE rule (#415)
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
   pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
                     #   + replace_surrogates — the one lone-surrogate rule (#380)
@@ -943,8 +944,40 @@ subsystem before touching either column.
   usually accurate. Nullable.
 - `internal_date` — IMAP server INTERNALDATE (RFC 3501), "when this email
   arrived at the mailbox". Populated by `sync.py:upsert_message` on insert;
-  legacy rows (pre-migration-0018) are NULL until backfilled via
+  legacy rows (pre-migration-0018), and rows sync could not date, are NULL
+  until backfilled via
   `localmail backfill-internal-date`. Nullable.
+  - **It is the instant the server reported, and must arrive aware (#415).**
+    imapclient's default `normalise_times=True` returns a *naive* host-local
+    time; psycopg sends naive as `timestamp`, and Postgres reads that in the
+    **session** zone. So every synced row was off by host minus session
+    offset: +10/+11 h on the DGX (Sydney host, UTC container), +2 h on the
+    Mac (Brisbane host, Postgres.app's Perth default) — and the Mac's history
+    is mixed (0, +1.5, +2 h) because its host zone changed over time, which is
+    why no SQL offset can repair it. `open_connection` sets
+    `normalise_times = False`; the pure
+    [src/localmail/imap_dates.py](src/localmail/imap_dates.py)`::aware_internal_date`
+    refuses a naive value rather than letting the session pick a zone,
+    and is shared by sync and backfill: sync stores NULL (with one WARNING
+    per mailbox pass), backfill leaves the row as it was. `FakeIMAPClient` hands out aware
+    datetimes, i.e. behaves like the fixed client, which is why no sync test
+    saw it. **Repair is `backfill-internal-date --refetch`**: every row is
+    re-read from the server and overwritten (`IS DISTINCT FROM`, so `updated`
+    counts real changes); a message in several mailboxes gets the
+    **earliest** INTERNALDATE (Gmail reports one per message; elsewhere a
+    copy a client APPENDed gets a later one). What it cannot repair it
+    reports, in three separate counts: `missing` (the server no longer has
+    it), `unusable` (it answered without a usable date), and skipped
+    mailboxes (SELECT refused, or UIDVALIDITY changed — exit 1, remedy
+    `sync` then re-run, since sync never rewrites `internal_date` on an
+    existing row). A message labelled only in a skipped mailbox is in no
+    count. Paused accounts are named and left out unless given with
+    `--account`. Each mailbox commits as it finishes and no transaction is
+    held across IMAP traffic, so an interrupted run keeps its work; only a
+    SELECT refusal is caught, a connection error aborts. Restart the daemon
+    before repairing, or an unfixed one keeps writing shifted values.
+    Archive imports were not affected by this defect — their dates are built
+    aware in UTC.
 - `date_received` — local sync timestamp, `NOT NULL`. Not a meaningful
   "received" date; reflects "when localmail wrote this row". Used by
   `/v1/changes` as a safe-horizon filter (`< now() - changes_safe_horizon_s`)
@@ -3216,8 +3249,10 @@ for the full design.
   cascades when messages reference it. One-shot `sync` (bare) iterates
   `list_syncable_accounts` like the daemon; `--account NAME` resolves via
   `get_account_by_name` and syncs even a paused (`sync_enabled = FALSE`)
-  account, rejecting archive accounts. `backfill-internal-date` remains
-  TOML-driven (`_account_or_die`) — out of 2A.2d scope. No new migration.
+  account, rejecting archive accounts. `backfill-internal-date` was left
+  TOML-driven by 2A.2d and moved onto the same DB resolution (the shared
+  `cli._live_account_rows`) by #415, whose repair it is: both hosts carry
+  accounts in the DB that `config.toml` does not. No new migration.
 - **`sync_enabled` CLI setter (follow-up to 2A.2):** `enable-account NAME` /
   `disable-account NAME` toggle `accounts.sync_enabled` via the pure planner
   `cli_sync_toggle.plan_sync_toggle` (reject / noop / apply). Name resolution is

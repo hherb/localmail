@@ -7,13 +7,14 @@ Pure — no IO. `date_sent` is `TIMESTAMPTZ`, so storing an offset-bearing
 header keeps the instant and drops the sender's offset; `sender_local_time`
 renders the same instant on the sender's own clock. Both go through
 `parse_date_header`, so the two cannot disagree about which instant a header
-names.
+names; `date_sent_instant` only attaches UTC to the naive `-0000` reading
+(#431).
 """
 
 from __future__ import annotations
 
 import email.utils
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def parse_date_header(raw: str | None) -> datetime | None:
@@ -41,3 +42,18 @@ def sender_local_time(raw: str | None) -> str | None:
     if dt is None or dt.tzinfo is None:
         return None
     return dt.isoformat()
+
+
+def date_sent_instant(raw: str | None) -> datetime | None:
+    """`parse_date_header`, made aware for storage in `date_sent` (#431).
+
+    A naive result is the `-0000` form, which RFC 5322 defines as UTC (the
+    default policy rewrites an unknown zone to it too). Left naive, psycopg
+    sends it as `timestamp` and Postgres reads it in the session zone — the
+    #415 mechanism. `sender_local_time` keeps the naive reading, since there
+    the point is that the sender's own offset is unknown.
+    """
+    dt = parse_date_header(raw)
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt

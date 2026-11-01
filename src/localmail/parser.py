@@ -14,7 +14,7 @@ from email.message import EmailMessage, MIMEPart
 from email.utils import getaddresses
 from typing import Any
 
-from localmail.date_header import parse_date_header
+from localmail.date_header import date_sent_instant
 from localmail.header_block import entries_from_message, group_entries
 from localmail.pgtext import strip_nuls, strip_nuls_all
 
@@ -79,7 +79,7 @@ def _refs_list(msg: EmailMessage) -> list[str]:
 def _date_sent(msg: EmailMessage) -> datetime | None:
     # Through the guard: a year overflowing a C long raises OverflowError out
     # of msg.get itself, which DateHeader.parse does not catch (#430).
-    return parse_date_header(_header_text(msg, "Date"))
+    return date_sent_instant(_header_text(msg, "Date"))
 
 
 def _header_text(msg: EmailMessage, name: str) -> str | None:

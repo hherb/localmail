@@ -1163,14 +1163,45 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
   and every IDLE/poll heartbeat and sync goes through the pool. One rule now,
   `db.bounded_connect_kwargs`, passed to both. Pinned by asking a real pool
   connection (`SHOW statement_timeout`, `conn.info.get_parameters()`), not a spy.
-  - **A pool statement past `db_statement_timeout_s` now fails.** Inside sync's
-    per-message SAVEPOINT that is a `failed_messages` row (`retry-failed`
-    recovers it). The slowest pool statement measured on the 130k Mac archive
-    is the embed worker's chunk claim at 144 ms, so 30 s is ~200× headroom.
+  - **A pool statement past `db_statement_timeout_s` now fails, and the likely
+    one is a lock wait, not a slow query.** The IDLE and poll threads insert
+    the same Message-Id (and any thread the same global `attachment_blobs`
+    row), and the loser's `ON CONFLICT DO NOTHING` waits until the winner's
+    whole 50-message batch commits — which can include `_uid_still_on_server`,
+    an IMAP probe bounded by `imap_timeout_s` (60 s, more than the 30 s
+    statement bound). Sync's per-message `except` therefore **re-raises**
+    `db.DB_CONTENTION_ERRORS` (`QueryCanceled`, `DeadlockDetected`,
+    `LockNotAvailable`) after its `ROLLBACK TO`: recording them was #231's
+    `failed_messages` pollution again, and advanced `uidnext` past healthy
+    mail. The pass aborts into the worker's backoff and resumes from the
+    committed checkpoint, idempotently. The cost is that a message whose own
+    statement genuinely needs >30 s wedges its mailbox, loudly, until the bound
+    is raised — the loud-recoverable-wedge call. The extract worker treats the
+    same classes as transient (#153 budget, not `retry_count`). Pinned with a
+    real second session in `tests/test_db_contention.py`, plus a positive
+    control that a `DataError` is still a poison pill. The slowest *worker
+    claim* measured on the 130k Mac archive is the embed chunk claim at 144 ms;
+    no other pool statement was timed.
+  - **The operator's `options=` survives.** A libpq `options` kwarg *replaces*
+    the DSN's `options=` and `PGOPTIONS`, so before this fix an operator's
+    `-c search_path=…` was silently dropped — on every worker connection once
+    the pool was bounded. `bounded_connect_kwargs(dsn, …)` carries the DSN's
+    (else `PGOPTIONS`, libpq's precedence) in front of ours; ours come last, so
+    the configured `statement_timeout` wins.
+  - **The embed worker and language detection still misclassify a contention
+    error** (a `failed_chunkings`/`failed_embeddings` row, or a "declined"
+    stamp). Their claims lock their own rows, so it needs a slow index insert;
+    filed as #425 rather than fixed.
   - **The cause of #414's stall is still unknown**: the DGX journal for it had
     rotated away. `run_forever` registers `faulthandler` on
     `STACK_DUMP_SIGNAL` (SIGUSR1), so the next stall is `kill -USR1 <pid>`
-    and read off stderr. The stale-heartbeat watchdog #414 also suggests is
+    and read off stderr. Registered **before** `start_workers` (pinned: a dump
+    registered later misses the stall), only on the main thread (pinned, like
+    SIGTERM/SIGINT), and best-effort — `faulthandler` refuses a `None` or
+    fileno-less stderr, and a diagnostic aid must not stop the daemon starting.
+    Before registration SIGUSR1 still terminates the process, which includes
+    the startup backoff wait. Under `serve` the dump lands in the supervisor's
+    200-line ring and can be cut short. The stale-heartbeat watchdog #414 also suggests is
     deferred until a dump shows what hangs (operator decision).
 
   Pool sizing: by default `compute_daemon_pool_size(...)` in `db.py` derives

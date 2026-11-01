@@ -44,8 +44,10 @@ from .worker import WorkerContext
 log = logging.getLogger(__name__)
 
 # `kill -USR1 <pid>` writes every thread's stack to stderr (the journal under
-# systemd, daemon.err.log under launchd), so a stalled worker can be located
-# rather than guessed at (#414).
+# systemd, the plist's StandardErrorPath under launchd, the supervisor's log
+# ring under serve), so a stalled worker can be located rather than guessed at
+# (#414). Registered by run_forever; before that, SIGUSR1's default action
+# terminates the process.
 STACK_DUMP_SIGNAL = signal.SIGUSR1
 
 
@@ -125,8 +127,10 @@ class Daemon:
     def _connect(self) -> psycopg.Connection:
         """Open a fresh (non-pool) connection with every phase bounded.
 
-        The daemon opens fresh connects in three places — startup account read,
-        reconcile, and the heartbeat clear — none of which borrow from the pool.
+        The daemon opens fresh connects for the startup account read, the command
+        drain, reconcile, the command listener (which then lifts its own
+        ``statement_timeout``, since it waits on ``NOTIFY``) and the heartbeat
+        clear — none of which borrow from the pool.
         Routing them all through here applies three complementary bounds so no
         phase can hang indefinitely on a network fault (#140, #142):
 
@@ -147,6 +151,7 @@ class Daemon:
 
     def _connect_kwargs(self) -> dict[str, Any]:
         return bounded_connect_kwargs(
+            self._dsn,
             connect_timeout_s=self.cfg.daemon.db_connect_timeout_s,
             tcp_user_timeout_ms=self.cfg.daemon.db_tcp_user_timeout_ms,
             statement_timeout_s=self.cfg.daemon.db_statement_timeout_s,
@@ -516,11 +521,21 @@ class Daemon:
         for t in self._worker_threads:
             t.join(timeout=timeout)
 
+    @staticmethod
+    def _register_stack_dump() -> None:
+        # A diagnostic aid must not stop the daemon starting: faulthandler
+        # refuses a stderr that is None or has no usable fileno() (fd 2
+        # closed, an embedder's replacement stream).
+        try:
+            faulthandler.register(STACK_DUMP_SIGNAL, all_threads=True)
+        except (RuntimeError, ValueError, AttributeError, OSError):
+            log.warning("could not register the SIGUSR1 stack dump", exc_info=True)
+
     def run_forever(self) -> None:
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self._handle_signal)
             signal.signal(signal.SIGINT, self._handle_signal)
-            faulthandler.register(STACK_DUMP_SIGNAL, all_threads=True)
+            self._register_stack_dump()
         self.start_workers()  # initial account spawn + embed/extract workers
         listener: threading.Thread | None = None
         if self.cfg.daemon.command_listen_enabled:

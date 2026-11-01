@@ -59,15 +59,18 @@ shutdown_grace_seconds = 30 # per-thread join timeout on teardown / shutdown
 # the beat interval independent of poll_seconds above.
 heartbeat_stale_seconds = 120
 # Bound (integer seconds) for every daemon psycopg connection: its fresh
-# connects (startup account read, reconcile, heartbeat clear) and the shared
-# pool the workers sync and heartbeat through. Stops a network black-hole
-# from blocking startup / hot-reload for the OS TCP default (minutes).
+# connects (startup account read, command drain, reconcile, heartbeat clear)
+# and the shared pool the workers sync and heartbeat through. Stops a network
+# black-hole from blocking startup, hot-reload or a worker for the OS TCP
+# default (minutes).
 db_connect_timeout_s = 10
 # Server-side query bound (integer seconds) for those same connections,
 # applied as Postgres statement_timeout. Catches a slow / stuck query (lock
 # contention, a bad plan) — NOT a network black-hole (it's server-side: useless
 # when the server never sees the query or the reply is dropped). The slowest
-# pool statement measured is ~0.15 s, so the default is generous; 0 disables.
+# worker claim query measured is ~0.15 s, so the default is generous; 0
+# disables. A sync statement waiting this long on the other sync thread's lock
+# aborts the pass, which then retries; it is not recorded as a failed message.
 db_statement_timeout_s = 30
 # Post-connect network-black-hole bound (integer MILLISECONDS) for those same
 # connections, applied as libpq tcp_user_timeout: forces the socket closed

@@ -152,8 +152,8 @@ class DaemonConfig(BaseModel):
     # `db_tcp_user_timeout_ms` below, not here. Threaded through
     # `db.bounded_connect_kwargs` as libpq `options='-c statement_timeout=<N>s'`.
     # Integer seconds (passed with the GUC `s` unit suffix, so no s->ms magic
-    # conversion). The slowest pool statement measured on a 130k-message archive
-    # (the embed worker's chunk claim) took 144 ms, so the default leaves wide
+    # conversion). The slowest worker claim query measured on a 130k-message
+    # archive (the embed chunk claim) took 144 ms, so the default leaves wide
     # headroom yet is finite. `0` disables the bound (libpq/Postgres semantics).
     db_statement_timeout_s: int = 30
     # Bound for the *post-connect network black-hole* on those same connections

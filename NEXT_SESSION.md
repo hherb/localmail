@@ -49,7 +49,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `tcp_user_timeout` and `statement_timeout`. `open_pool` used the bare DSN,
   though every IDLE/poll heartbeat and sync goes through the pool. One rule
   now, `db.bounded_connect_kwargs`, passed to both. `open_pool` gained a
-  `connect_kwargs=` argument; its CLI callers are unchanged.
+  `connect_kwargs=` argument; its other callers (CLI, `create_searcher`) are unchanged.
 - **Stack dump.** `run_forever` (main-thread branch, beside the signal
   handlers) calls `faulthandler.register(STACK_DUMP_SIGNAL, all_threads=True)`.
   `STACK_DUMP_SIGNAL = signal.SIGUSR1` lives in `daemon.py`.
@@ -57,7 +57,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **Why the cause is still unknown:** the DGX journal for the 10-29 stall has
   rotated away (reboots on 10-31). Everything in the stall window
   (`open_connection`, then the first pool heartbeat) is bounded except pool
-  queries, which had no `statement_timeout`. That is not proof.
+  connections, which carried none of the three bounds — no `tcp_user_timeout`
+  for a post-connect black-hole, no `statement_timeout`. That is not proof.
 - Docs: README (`localmail run` row, plus the SIGUSR1 note),
   `config.example.toml`, the `config.py` comments, and a CLAUDE.md note under
   **Sync model**.
@@ -115,9 +116,12 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 ## Open decisions & risks
 
 1. **New failure mode:** a pool statement past `db_statement_timeout_s` (30 s)
-   now aborts. In sync that lands in `failed_messages` (`retry-failed`
-   recovers). Watch for `canceling statement due to statement timeout` in
-   either daemon log after the deploy.
+   now aborts. Review found the likely trigger is a lock wait behind the
+   sibling sync thread's batch, so sync now re-raises it (pass aborts, retries
+   from the checkpoint) instead of writing `failed_messages`; the extract
+   worker treats it as transient. Watch for `canceling statement due to
+   statement timeout` in either daemon log after the deploy: repeated for one
+   mailbox means a message genuinely needs a higher bound.
 2. **3,194 rows keep a skewed `internal_date`** (Mac 2,720, DGX 474); the
    server no longer has them. Leave / NULL / per-host SQL shift: not decided.
 3. **What drops the silent IMAP flows is unknown** (router, CGNAT,

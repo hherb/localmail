@@ -91,6 +91,7 @@ import psycopg
 from psycopg_pool import ConnectionPool
 
 from localmail.config import SearchConfig
+from localmail.db import DB_CONTENTION_ERRORS
 from localmail.heartbeat import safe_heartbeat
 from localmail.pgtext import strip_nuls
 from localmail.search import attachment_kind, extract_queue
@@ -143,12 +144,13 @@ def _is_transient(exc: BaseException) -> bool:
     Recognises ``TransientExtractorError`` (extractors opt in directly,
     including docling's third-party network classes — see
     ``extractor._TRANSIENT_THIRD_PARTY_MODULES``) and the narrow builtin
-    ``_TRANSIENT_EXC_TYPES``. The chain walk (``__cause__`` then
+    ``_TRANSIENT_EXC_TYPES``, plus ``db.DB_CONTENTION_ERRORS``: a lock wait
+    or deadlock on our own INSERT is not the blob's fault (#414). The chain walk (``__cause__`` then
     ``__context__`` unless suppressed) is shared with the extractor via
     ``iter_exc_chain``.
     """
     return any(
-        isinstance(e, (TransientExtractorError, *_TRANSIENT_EXC_TYPES))
+        isinstance(e, (TransientExtractorError, *_TRANSIENT_EXC_TYPES, *DB_CONTENTION_ERRORS))
         for e in iter_exc_chain(exc)
     )
 

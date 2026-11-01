@@ -949,17 +949,21 @@ subsystem before touching either column.
 - `date_sent` — email header `Date:`. Sender-supplied, may be wrong/future,
   usually accurate. Nullable.
   - **A `-0000` header is stored as UTC (#431).** `parsedate_to_datetime`
-    returns it naive (the default policy also rewrites an unknown zone like
-    `XYZ` to `-0000`), and a naive value reaches Postgres as `timestamp`,
+    returns it naive (so too an unknown zone like `XYZ`, which the default
+    policy renders as `-0000`, and a header with no zone at all), and a naive
+    value reaches Postgres as `timestamp`,
     read in the session zone — #415's mechanism. `parser._date_sent` goes
     through the pure `date_header.date_sent_instant`, which attaches UTC
     (RFC 5322 3.3 defines `-0000` as UTC); `sender_local_time` keeps the
     naive reading, so `date_local` is still `None` for it. **Rows synced
     before the fix were not repaired**: on the Mac (session zone
     `Australia/Perth`) 2,865 of 132,320 carry a `-0000` Date and are 8 h
-    off; none has a NULL `internal_date`, so the wire `date` is right and
-    only direct readers of `date_sent` see it — the `after:`/`before:`
-    filters and two `ORDER BY m.date_sent` sites in `search/arms.py`. The DGX session is UTC, so
+    off; none has a NULL `internal_date`, so the list/search/changes wire
+    `date` (the COALESCE) is right, but every raw reader of `date_sent` sees
+    it: the **message-detail** `date` (`api/messages.py`, so MCP
+    `get_message` too), the `after:`/`before:` filters, arm 4's fan-out cap
+    (`search/arms.py`'s one `ORDER BY m.date_sent`), `localmail search`'s
+    printed date, and the `Date:` line in embedded chunk text. The DGX session is UTC, so
     its rows were stored correctly. A repair would re-parse `raw_bytes`, not
     shift by an offset.
 - `internal_date` — IMAP server INTERNALDATE (RFC 3501), "when this email

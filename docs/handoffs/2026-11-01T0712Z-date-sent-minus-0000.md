@@ -45,7 +45,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   naive result; `parser._date_sent` calls it. `sender_local_time` is
   unchanged, so `date_local` stays `None` for `-0000`.
 - **Existing rows not repaired** (see open decision 1).
-- New test file `tests/test_date_sent_minus_zero.py` (12 tests: pure rule,
+- New test file `tests/test_date_sent_minus_zero.py` (16 tests: pure rule,
   parser, and `process_one_message` under `SET TimeZone = 'Australia/Perth'`).
   CLAUDE.md's `date_sent` bullet and the #426 bullet updated. README unchanged.
 
@@ -54,7 +54,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | check | result |
 |---|---|
 | RED first | the DB test failed storing `09:58:24+08:00` for `09:58:24 -0000`, the parser tests failed on a naive value |
-| `uv run pytest -q` | **4436 passed**, 6 warnings (4424 at session 73) |
+| `uv run pytest -q` | **4440 passed**, 6 warnings (4424 at session 73) |
 | mypy | Success, 165 files |
 | GUI | not run (no GUI change) |
 | CI | **check on the PR** (`gh pr checks`) |
@@ -121,11 +121,15 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows carry a
    `-0000` Date, stored 8 h off; **none** has a NULL `internal_date`, so the
-   wire `date` is right and only `after:`/`before:` (which read `date_sent`)
-   and two `ORDER BY m.date_sent` sites in `arms.py` see it. DGX: session is
-   UTC, so its rows are correct. A repair should re-parse `raw_bytes`
-   (`date_sent_instant` over the Date header), not shift by a fixed offset.
-   Measuring query (read-only):
+   list/search/changes wire `date` (COALESCE) is right. Raw `date_sent`
+   readers see the skew: the message-detail `date` (`api/messages.py`, also
+   MCP `get_message`), `after:`/`before:`, arm 4's fan-out cap
+   (`arms.py:360`), `localmail search`'s printed date, and the `Date:` line
+   in embedded chunk text. DGX: session is UTC, so its rows are correct. A
+   repair should re-parse `raw_bytes` (`date_sent_instant` over the Date
+   header), not shift by a fixed offset. Measuring query (read-only; it reads
+   only the exact `Date` key, so `DATE`/`date` spellings are missed and the
+   count may be slightly low):
    `select count(*) from messages where exists (select 1 from jsonb_array_elements_text(case when jsonb_typeof(headers->'Date')='array' then headers->'Date' else '[]' end) d where d ~ '-0000\s*(\(.*\))?\s*$')`
 2. **`attachment_name` is unindexed** (~0.2 s warm at 132k for a filter-only
    miss). A trigram index would be `0038`.
@@ -172,7 +176,7 @@ ssh 10.0.0.3 'kill -USR1 $(systemctl --user show -p MainPID --value localmail-da
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4436 at session 74
+unset VIRTUAL_ENV && uv run pytest -q              # 4440 at session 74
 uv run pytest -q tests/test_date_sent_minus_zero.py tests/test_date_header.py tests/test_date_header_overflow_sync.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
 cd gui && npm test -- --run && npm run check   # 530 at session 72

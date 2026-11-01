@@ -47,8 +47,9 @@ def sender_local_time(raw: str | None) -> str | None:
 def date_sent_instant(raw: str | None) -> datetime | None:
     """`parse_date_header`, made aware for storage in `date_sent` (#431).
 
-    A naive result is the `-0000` form, which RFC 5322 defines as UTC (the
-    default policy rewrites an unknown zone to it too). Left naive, psycopg
+    A naive result means no usable offset: `-0000`, which RFC 5322 defines
+    as UTC, and likewise an unknown zone (`XYZ`) or none at all, which
+    `parsedate_to_datetime` reads the same way. Left naive, psycopg
     sends it as `timestamp` and Postgres reads it in the session zone — the
     #415 mechanism. `sender_local_time` keeps the naive reading, since there
     the point is that the sender's own offset is unknown.

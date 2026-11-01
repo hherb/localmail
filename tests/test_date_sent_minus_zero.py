@@ -6,8 +6,9 @@
 RFC 5322 3.3: `-0000` means "the time is UTC, the sender's local zone is
 unknown". `parsedate_to_datetime` returns it naive, psycopg sends naive as
 `timestamp`, and Postgres reads that in the *session* zone — #415's shape,
-for `date_sent`. The default policy also rewrites an unknown zone (`XYZ`) to
-`-0000`, so that form arrives here too. `date_local` must stay None for both.
+for `date_sent`. An unknown zone (`XYZ`, which the default policy renders as
+`-0000`) and a header with no zone at all parse naive too, so they take the
+same path. `date_local` must stay None for all three.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ _NON_UTC_SESSION_ZONE = "Australia/Perth"
 _ZONELESS_HEADERS = [
     "Wed, 12 Jul 2023 09:58:24 -0000",
     "Wed, 12 Jul 2023 09:58:24 XYZ",
+    "Wed, 12 Jul 2023 09:58:24",
 ]
 
 
@@ -75,6 +77,8 @@ def test_the_parser_yields_an_aware_date_sent(date: str) -> None:
 def test_the_stored_instant_ignores_the_session_zone(
     db_conn: psycopg.Connection, tmp_path: Path, date: str,
 ) -> None:
+    # Load-bearing: on a UTC-default cluster (DGX, likely CI) the pre-fix
+    # code stores the right value and this test would pass without it.
     with db_conn.cursor() as cur:
         cur.execute(f"SET TimeZone = '{_NON_UTC_SESSION_ZONE}'")
     account_id = _ensure_account(db_conn, make_account())

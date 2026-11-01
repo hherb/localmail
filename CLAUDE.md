@@ -1212,10 +1212,15 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
     the pool was bounded. `bounded_connect_kwargs(dsn, …)` carries the DSN's
     (else `PGOPTIONS`, libpq's precedence) in front of ours; ours come last, so
     the configured `statement_timeout` wins.
-  - **The embed worker and language detection still misclassify a contention
-    error** (a `failed_chunkings`/`failed_embeddings` row, or a "declined"
-    stamp). Their claims lock their own rows, so it needs a slow index insert;
-    filed as #425 rather than fixed.
+  - **The embed worker and language detection re-raise them too (#425).**
+    They used to record a `failed_chunkings`/`failed_embeddings` row or a
+    "declined" stamp, which took the item out of its queue. Now message
+    chunking and lang detection fail the sweep (the loop logs it and retries),
+    and a chunk's embedding UPDATE falls to `_embed_table`'s batch-level
+    fallback. Unlikely in practice: their claims lock their own rows, so it
+    needs a slow index insert. `embed-backfill` and `lang-backfill` exit with
+    the traceback; re-run them. Pinned in `tests/test_worker_db_contention.py`
+    with a trigger raising each SQLSTATE, plus a `DataError` control per site.
   - **The cause of #414's stall is still unknown**: the DGX journal for it had
     rotated away. `run_forever` registers `faulthandler` on
     `STACK_DUMP_SIGNAL` (SIGUSR1), so the next stall is `kill -USR1 <pid>`

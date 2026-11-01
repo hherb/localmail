@@ -47,6 +47,7 @@ from typing import Any, Protocol, runtime_checkable
 import psycopg
 
 from localmail.config import SearchConfig
+from localmail.db import DB_CONTENTION_ERRORS
 from localmail.search.lang_text import normalize_for_detection
 
 
@@ -224,6 +225,11 @@ def run_lang_detect_pass(
     There is no dedicated failure table — persistent failures resurface on
     every sweep via the WARNING log line, matching the policy already in place
     for attachment chunking.
+
+    A `db.DB_CONTENTION_ERRORS` failure is the exception (#425): it is not the
+    body's fault, so the row is left unstamped and the error re-raised. A
+    stamped row would read as a detector decline, which only
+    `--retry-declined` reopens.
     """
     limit = batch if batch is not None else cfg.body_lang_detect_batch_size
     labelled = 0
@@ -259,6 +265,10 @@ def run_lang_detect_pass(
                     labelled += 1
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT lang")
+                if isinstance(exc, DB_CONTENTION_ERRORS):
+                    # A contended write is not a decline: leave the row
+                    # unstamped and claimable, and fail the pass (#425).
+                    raise
                 log.warning(
                     "lang detection failed for message %s: %s", mid, exc,
                 )

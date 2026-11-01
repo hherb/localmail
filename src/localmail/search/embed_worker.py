@@ -40,6 +40,7 @@ from collections.abc import Callable
 import psycopg
 
 from localmail.config import SearchConfig
+from localmail.db import DB_CONTENTION_ERRORS
 from localmail.heartbeat import safe_heartbeat
 from localmail.search.chunking import MessageRow, chunk_attachment_text, chunk_message
 from localmail.search.embeddings import EmbeddingBackend
@@ -137,6 +138,10 @@ def _chunk_messages_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch: i
     Per-message SAVEPOINT isolates poison messages so a single broken row
     only loses itself; the failure lands in failed_chunkings keyed on
     message_id, and the message is skipped on subsequent sweeps.
+
+    `db.DB_CONTENTION_ERRORS` are re-raised instead (#425): waiting on another
+    session is not the message's fault, so the sweep fails and the message is
+    re-claimed next time rather than counted towards its retry cap.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -177,6 +182,10 @@ def _chunk_messages_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch: i
                 cur.execute("RELEASE SAVEPOINT msg")
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT msg")
+                if isinstance(exc, DB_CONTENTION_ERRORS):
+                    # Another session's lock, not this message: fail the
+                    # sweep and re-claim it next time (#425).
+                    raise
                 log.warning("chunking failed for message %s: %s", mid, exc)
                 record_failed_chunking(conn, mid, exc)
     conn.commit()
@@ -335,7 +344,9 @@ def _embed_and_store(
     The backend.embed_documents() call covers the whole batch — if it raises,
     the caller rolls back (batch-level fallback), which is the correct behavior
     for transient backend errors. Individual UPDATE failures are caught per-chunk
-    and recorded in failed_embeddings so the chunk is skipped on subsequent sweeps.
+    and recorded in failed_embeddings so the chunk is skipped on subsequent sweeps,
+    except a `db.DB_CONTENTION_ERRORS` one, which is re-raised into the
+    batch-level fallback: the chunk is not at fault (#425).
 
     Args:
         conn: Active psycopg connection.
@@ -366,6 +377,10 @@ def _embed_and_store(
                 written += 1
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT chunk")
+                if isinstance(exc, DB_CONTENTION_ERRORS):
+                    # Not this chunk's fault: `_embed_table` rolls the batch
+                    # back and the chunk is re-claimed next sweep (#425).
+                    raise
                 log.warning("embedding write failed for chunk %s in %s: %s", cid, chunk_table, exc)
                 record_failed_embedding(conn, chunk_table, cid, exc)
     conn.commit()

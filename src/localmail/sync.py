@@ -397,6 +397,9 @@ def retry_failed_messages(
     ``UNIQUE (mailbox_id, uid)`` on every attempt, forever. A live account's UID
     is the server's truth and is always replayed verbatim -- a collision there
     is a genuine invariant violation worth surfacing rather than papering over.
+
+    A `db.DB_CONTENTION_ERRORS` failure is re-raised rather than recorded
+    (#437), so the command stops and can be re-run.
     """
     sql = """
         SELECT f.id, f.account_id, f.mailbox_id, f.uid, f.raw_bytes, a.auth_method
@@ -440,6 +443,10 @@ def retry_failed_messages(
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT retry")
                 cur.execute("RELEASE SAVEPOINT retry")
+            if isinstance(exc, DB_CONTENTION_ERRORS):
+                # Contention is not the message's fault: stop, leaving its
+                # retry_count alone; rows already retried are committed (#437).
+                raise
             # Re-record under the *stored* uid, not `attempt_uid`: the row is
             # keyed UNIQUE (account_id, mailbox_id, uid), so this upserts the
             # same row and bumps retry_count instead of accumulating a new row

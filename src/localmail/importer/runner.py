@@ -4,7 +4,8 @@
 """Importer core: stream an archive source through sync.process_one_message.
 
 Owns the import_jobs row lifecycle: marks running, per-message SAVEPOINT
-isolation (poison pills -> failed_messages, mirroring sync_mailbox), checkpoint
+isolation (poison pills -> failed_messages, mirroring sync_mailbox; a
+`db.DB_CONTENTION_ERRORS` failure fails the job instead, #437), checkpoint
 counter flushes + last_progress_at heartbeat, cooperative cancel, and a
 guaranteed terminal status (completed / cancelled / failed+error_msg). Takes a
 `conn_factory` (not a pool) so the long-lived worker holds its own connection.
@@ -19,6 +20,7 @@ from typing import Callable, Iterator
 
 import psycopg
 
+from localmail.db import DB_CONTENTION_ERRORS
 from localmail.importer.job_state import should_checkpoint
 from localmail.importer.sources import ImportedMessage, iter_maildir, iter_mbox
 from localmail.sync import process_one_message, record_failed_message, upsert_mailbox
@@ -169,12 +171,17 @@ def run_import(
                 c.inserted += 1 if did_insert else 0
                 c.skipped_dup += 0 if did_insert else 1
             except Exception as exc:  # poison pill -- isolate to this message
-                log.warning(
-                    "import job %s: skipping poison message uid=%s mailbox=%s: %s",
-                    job_id, uid, msg.mailbox_name, exc)
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")
                     cur.execute("RELEASE SAVEPOINT msg")
+                if isinstance(exc, DB_CONTENTION_ERRORS):
+                    # Waiting on the daemon's uncommitted batch is not the
+                    # message's fault: fail the job, which is safe to re-run
+                    # (#437, the sync idiom from #414).
+                    raise
+                log.warning(
+                    "import job %s: skipping poison message uid=%s mailbox=%s: %s",
+                    job_id, uid, msg.mailbox_name, exc)
                 record_failed_message(
                     conn, account_id=job.account_id, mailbox_id=mailbox_id, uid=uid,
                     raw=msg.raw, exc=exc)

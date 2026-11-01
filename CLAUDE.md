@@ -1239,6 +1239,17 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
       each SQLSTATE, plus a `DataException` control per site. **Not
       `psycopg.errors.DataError.sqlstate`**: that is the DB-API base class,
       its sqlstate is `None`, and the trigger then raised `UndefinedObject`.
+  - **The importer and `retry-failed` re-raise them too (#437).** Both wrote
+    a `failed_messages` row, so an import colliding with the daemon on the
+    same Message-Id or blob reported healthy mail as failed. Now
+    `run_import` lands in its outer handler, which marks the job `failed`
+    with `error_msg` (re-run it: imports are idempotent), and
+    `retry_failed_messages` raises, leaving that row's `retry_count` alone
+    (rows retried before it are committed). **The failed job's counters
+    overstate**: messages since the last checkpoint are counted but rolled
+    back when the connection closes — pre-existing for any mid-run error.
+    Pinned in `tests/test_import_retry_db_contention.py`, reusing #425's
+    trigger.
   - **The cause of #414's stall is still unknown**: the DGX journal for it had
     rotated away. `run_forever` registers `faulthandler` on
     `STACK_DUMP_SIGNAL` (SIGUSR1), so the next stall is `kill -USR1 <pid>`

@@ -77,6 +77,6 @@ def test_grow_pool_rejects_different_user(db_dsn, db_conn):
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
         p1 = s.search("test", allowed_account_ids=None, user_id=1)
         with pytest.raises(CacheMissError):
-            s.grow_pool(p1.search_token, candidates_per_arm=10, user_id=2)
+            s.grow_pool(p1.search_token, candidates_per_arm=10, page=1, user_id=2)
     finally:
         pool.close()

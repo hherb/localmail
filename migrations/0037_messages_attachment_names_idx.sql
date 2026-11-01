@@ -9,7 +9,11 @@
 -- character for character, or the planner cannot match it (pinned by
 -- tests/test_attachment_names.py). Nothing needs backfilling.
 --
+-- The name list is cut at 50000 characters (`NAMES_MAX_CHARS`): past the
+-- 1 MiB tsvector cap `to_tsvector` raises, and this expression runs on every
+-- INSERT into `messages`.
+--
 -- Lock cost: one CREATE INDEX over `messages`, reading only the small
--- `attachments` column. A few seconds of blocked writes on a 130k-row archive.
+-- `attachments` column. Blocks writes for its duration; not measured.
 CREATE INDEX IF NOT EXISTS messages_attachment_names_idx ON messages
-    USING gin ((setweight(to_tsvector('simple', jsonb_path_query_array(attachments, '$[*].filename')::text) || to_tsvector('simple', regexp_replace(jsonb_path_query_array(attachments, '$[*].filename')::text, '[^[:alnum:]]+', ' ', 'g')), 'A')));
+    USING gin ((setweight(to_tsvector('simple', left(jsonb_path_query_array(attachments, '$[*].filename')::text, 50000)) || to_tsvector('simple', regexp_replace(left(jsonb_path_query_array(attachments, '$[*].filename')::text, 50000), '[^[:alnum:]]+', ' ', 'g')), 'A')));

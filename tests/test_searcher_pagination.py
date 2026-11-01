@@ -83,7 +83,7 @@ def test_grow_pool_returns_page_1_with_larger_pool(db_dsn, db_conn):
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
         p1 = s.search("test", allowed_account_ids=None)
         assert p1.pool_size <= 3
-        p1_big = s.grow_pool(p1.search_token, candidates_per_arm=20)
+        p1_big = s.grow_pool(p1.search_token, candidates_per_arm=20, page=1)
     finally:
         pool.close()
     assert p1_big.candidates_per_arm == 20
@@ -102,24 +102,17 @@ def test_continue_page_with_invalid_token_raises(db_dsn, db_conn):
         pool.close()
 
 
-def test_paging_past_a_grow_serves_each_message_once(db_dsn, db_conn):
-    """#426: the page after a pool grow used to be the grown pool's page 1,
-    so page 3 of a search repeated page 1. Paged the way a client pages —
-    ``run_search`` with ``next_cursor`` until it is null — every seeded
-    message must arrive exactly once, under one token."""
+def _page_through(db_dsn, cfg, *, acl, replay_first_cursor=False):
+    """Page ``test`` the way a client does: ``run_search`` with
+    ``next_cursor`` until it is null. Returns ids served, per-page counts and
+    tokens; optionally replays the first (page-2) cursor after the walk."""
     from localmail.api.search import run_search
     from localmail.api.search_cursor import decode_search_cursor
 
-    _seed_many(db_conn, n=30)
-    cfg = SearchConfig(page_size_default=5, candidates_per_arm=4,
-                       rerank_pool_size=4, candidates_per_arm_max=64)
-    run_embed_worker_once(db_conn, cfg, _E())
-    with db_conn.cursor() as cur:
-        cur.execute("SELECT id FROM accounts")
-        acl = [row[0] for row in cur.fetchall()]
     pool = open_pool(db_dsn)
     seen: list[str] = []
-    tokens: set[str] = set()
+    counts: list[int] = []
+    cursors: list[str] = []
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
         cursor = None
@@ -127,13 +120,70 @@ def test_paging_past_a_grow_serves_each_message_once(db_dsn, db_conn):
             out = run_search(searcher=s, free_text="test", filters={}, limit=5,
                              allowed_account_ids=acl, user_id=1, cursor=cursor)
             seen += [r["message_id"] for r in out["results"]]
+            counts.append(len(out["results"]))
             cursor = out["next_cursor"]
             if cursor is None:
                 break
-            tokens.add(decode_search_cursor(cursor).token)
+            cursors.append(cursor)
+        assert cursor is None
+        if replay_first_cursor:
+            run_search(searcher=s, free_text="test", filters={}, limit=5,
+                       allowed_account_ids=acl, user_id=1, cursor=cursors[0])
     finally:
         pool.close()
-    assert cursor is None
+    return seen, counts, {decode_search_cursor(c).token for c in cursors}
+
+
+def _acl(db_conn) -> list[int]:
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts")
+        return [row[0] for row in cur.fetchall()]
+
+
+def test_paging_past_a_grow_serves_each_message_once(db_dsn, db_conn):
+    """#426: the page after a pool grow used to be the grown pool's page 1,
+    so page 3 of a search repeated page 1. Every seeded message must arrive
+    exactly once, under one token.
+
+    Under the default ``candidates_per_arm_max`` (800): the grows that find
+    nothing new double the arms to 400 and 800, where arm 4 used to ask
+    pgvector for an ``ef_search`` past its 1000 ceiling — a 500 — and where
+    an empty grow used to be served as an empty page with a cursor."""
+    _seed_many(db_conn, n=30)
+    cfg = SearchConfig(page_size_default=5, candidates_per_arm=4,
+                       rerank_pool_size=4)
+    assert cfg.candidates_per_arm_max * cfg.arm4_chunk_prefetch_multiplier > 1000
+    run_embed_worker_once(db_conn, cfg, _E())
+    seen, counts, tokens = _page_through(db_dsn, cfg, acl=_acl(db_conn))
     assert len(seen) == len(set(seen)), "a message was served twice"
     assert len(seen) == 30
     assert len(tokens) == 1
+    assert 0 not in counts[:-1], f"an empty page carried a cursor: {counts}"
+
+
+def test_a_cursor_from_before_the_grow_is_expired(db_dsn, db_conn):
+    """A page served before a grow is not in the grown pool, so its cursor
+    is a 409 — never a 200 slicing the grown pool from a negative start."""
+    from localmail.api.errors import SearchCursorExpired
+
+    _seed_many(db_conn, n=30)
+    cfg = SearchConfig(page_size_default=5, candidates_per_arm=4,
+                       rerank_pool_size=4, candidates_per_arm_max=64)
+    run_embed_worker_once(db_conn, cfg, _E())
+    with pytest.raises(SearchCursorExpired):
+        _page_through(db_dsn, cfg, acl=_acl(db_conn), replay_first_cursor=True)
+
+
+def test_a_grow_at_the_cap_serves_the_rest_of_the_pool(db_dsn, db_conn):
+    """The first grow reaches the cap with more than two pages of unseen
+    rows: its third page must still be reached. ``has_more_in_pool`` counts
+    pages from the grow, not from page 1 — counted from page 1, the walk
+    stops after the grown pool's second page (4 + 2 * 5 rows) (#426)."""
+    _seed_many(db_conn, n=30)
+    cfg = SearchConfig(page_size_default=5, candidates_per_arm=8,
+                       rerank_pool_size=4, candidates_per_arm_max=16)
+    run_embed_worker_once(db_conn, cfg, _E())
+    seen, counts, _ = _page_through(db_dsn, cfg, acl=_acl(db_conn))
+    assert len(seen) == len(set(seen))
+    assert counts[0] == 4
+    assert len(seen) > 4 + 2 * 5, counts

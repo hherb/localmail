@@ -946,7 +946,10 @@ Poll, process, ack. Semantics:
   `next_cursor` to `null`. The grown pool leaves out every hit already
   served and keeps the same token, so each message arrives once per paging
   session (#426; before `api_minor` 5, page 3 onwards repeated page 1).
-  Re-presenting a cursor from before a grow is a 409, like an expired one.
+  Re-presenting the cursor for a page served before a grow is a 409, like
+  an expired one; the cursor that triggered the grow, and every later one,
+  still works. A grow that finds nothing unseen is grown again, up to the
+  cap, so no page before the last comes back empty.
 - **Keyset cursor** (`"K|"` / `"KT|"` descending, `"KA|"` / `"KAT|"`
   ascending, each followed by base64) — used for `sort=date` and for any
   blank-query search, backed by a scan over
@@ -1127,10 +1130,13 @@ skipped; repair one with `--account NAME`.
   The envelope (`next_cursor`, `sort_applied`, `rankable`, `rewrite_*`, …) is
   never projected. Since `api_minor` 5 two more opt-in names exist (#426):
   `attachment_filename`, the file whose extracted text matched (`null`
-  unless the best match was an attachment's text), and `attachments`, every
+  unless the best match was an attachment's text; a file-*name* match leaves
+  it `null`), and `attachments`, every
   attachment the message carries as `{filename, sha256, content_type, size}`,
-  the `GET /v1/messages/{id}` entry shape. `attachments` costs one query per
-  page, only when named.
+  the `GET /v1/messages/{id}` entry shape, in stored order. A malformed
+  stored entry keeps its position with every field `null`, so entry *i* is
+  still `/v1/messages/{id}/attachments/{i}`. `attachments` costs one query
+  per page, only when named.
 - `snippet_chars`: the width of the snippet window, between 1 and
   `[search] snippet_max_chars` (default 1000). A cut window may gain a `…`
   at either end, so the text is at most `snippet_chars + 2` characters.
@@ -1438,8 +1444,8 @@ excludes a word. A dash standing alone (`Order confirmation - Qantas`) is a
 separator, not an exclusion. Single quotes do not make a phrase.
 
 An excluded word is excluded on every ordering, `--smart` synonyms included;
-it is matched against the message's subject, body and addresses, not its
-attachments. Required words and phrases are exact on `--sort date`; the
+it is matched against the message's subject, body, addresses and (since
+`api_minor` 5) attachment file names, not the attachments' extracted text. Required words and phrases are exact on `--sort date`; the
 default relevance ordering also returns semantic neighbours that lack them.
 A query of only exclusions (`-anthropic`) has nothing to rank, so it is
 answered date-ordered. The syntax is announced by `api_minor >= 4` on
@@ -1449,8 +1455,11 @@ answered date-ordered. The syntax is announced by `api_minor >= 4` on
 Words also match attachment **file names** (`api_minor >= 5`, #426), at the
 subject's weight: `"2312 Herb Fee Proposal 230712.pdf"` finds the message
 carrying that file, and so does a fragment of it (`230712`, `Fee Proposal`).
-All of a query's words must sit in the name, or all in the message: a query
-split between the two matches neither.
+Lexically, a query's required words must all sit in the name or all in
+the message: split between the two, the words match neither (the relevance
+ordering's semantic neighbours can still return it). A query that a message
+with no words at all would satisfy (`-acme OR -beta`) is matched against the
+message alone, never its file names.
 
 DSL operators: `from:`, `to:`, `subject:`, `label:`, `account:`, `folder:`,
 `account_id:N`, `folder_id:N`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`,

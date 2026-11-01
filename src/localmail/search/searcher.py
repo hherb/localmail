@@ -124,9 +124,16 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
 
 
 # `CASE` guards both functions that raise on malformed input: the column has
-# no CHECK (see `attachment_presence`), and `decode` raises on non-hex.
+# no CHECK (see `attachment_presence`), and `decode` raises on non-hex. A
+# non-object entry is kept (all NULL) so list positions stay the attachment
+# indexes, and a non-string name or hash reads as NULL, not as its JSON text.
 _MESSAGE_ATTACHMENTS_SQL = """
-SELECT m.id, e.att ->> 'filename', e.att ->> 'sha256', b.mime_type, b.size_bytes
+SELECT m.id,
+       CASE WHEN jsonb_typeof(e.att -> 'filename') = 'string'
+            THEN e.att ->> 'filename' END,
+       CASE WHEN jsonb_typeof(e.att -> 'sha256') = 'string'
+            THEN e.att ->> 'sha256' END,
+       b.mime_type, b.size_bytes
 FROM messages m
 CROSS JOIN LATERAL jsonb_array_elements(
     CASE WHEN jsonb_typeof(m.attachments) = 'array'
@@ -135,7 +142,7 @@ CROSS JOIN LATERAL jsonb_array_elements(
 LEFT JOIN attachment_blobs b ON b.sha256 = CASE
     WHEN e.att ->> 'sha256' ~ '^[0-9a-fA-F]{64}$'
     THEN decode(e.att ->> 'sha256', 'hex') END
-WHERE m.id = ANY(%s) AND jsonb_typeof(e.att) = 'object'
+WHERE m.id = ANY(%s)
 ORDER BY m.id, e.ord
 """
 
@@ -619,7 +626,7 @@ class Searcher:
     and the page cache. Methods:
       - search(query, ...) -> SearchPage  (the entry point)
       - continue_page(token, page) -> SearchPage  (Task 16)
-      - grow_pool(token, candidates_per_arm) -> SearchPage  (Task 16)
+      - grow_pool(token, candidates_per_arm, page=) -> SearchPage  (Task 16)
     """
 
     def __init__(
@@ -666,10 +673,11 @@ class Searcher:
         ``sha256``, ``content_type``, ``size``, the last two ``None`` when no
         blob row matches. A message with none maps to ``[]``. One query.
 
-        No ACL here: the ids are a page of hits, which the search that
-        produced them has already scoped. A malformed stored entry (the
-        column has no CHECK) is skipped or degrades to ``None`` metadata
-        rather than failing the page.
+        Applies no ACL: the caller must pass only ids it may read — in
+        practice a page of hits, which the search that produced them has
+        already scoped. A malformed stored entry (the column has no CHECK)
+        keeps its position as an all-``None`` entry, so entry *i* is still
+        ``/v1/messages/{id}/attachments/{i}``, rather than failing the page.
         """
         out: dict[int, list[dict[str, Any]]] = {mid: [] for mid in message_ids}
         if not message_ids:
@@ -793,8 +801,10 @@ class Searcher:
         pipeline a query like "e-ticket" returns at most
         ``rerank_pool_size`` candidates fused across the four arms, then
         date-sorted. Users with dozens of recent e-tickets only see a
-        handful — and grow_pool's "load more" re-ranks the same top-K with
-        overlap, so it appears to find nothing new. This walk bypasses both
+        handful — and before #426 grow_pool's "load more" re-ranked the same
+        top-K with overlap, so it appeared to find nothing new. (It now
+        leaves served rows out, but each grow still costs a full retrieval
+        and stops at ``candidates_per_arm_max``.) This walk bypasses both
         bounds: there is no pool cap and the cursor walks the (ts, id)
         keyspace, so the user can scroll back arbitrarily far.
 
@@ -810,7 +820,7 @@ class Searcher:
         here so an OR-ed expansion term cannot bring an excluded word back.
         """
         from localmail.search.arms import _message_where, build_lexical_tsquery
-        from localmail.search.attachment_names import NAMES_TSV_SQL
+        from localmail.search.attachment_names import names_match_sql
 
         where_extra, where_params = _message_where(parsed)
         match_params: list[Any] = []
@@ -823,8 +833,8 @@ class Searcher:
             )
             # File names match as in arm 1 (#426).
             match_clause = (f"(m.fts_v2 @@ {tsq_sql}"
-                            f" OR {NAMES_TSV_SQL} @@ {tsq_sql})")
-            match_params.extend([*tsq_params, *tsq_params])
+                            f" OR {names_match_sql(tsq_sql)})")
+            match_params.extend([*tsq_params, *tsq_params, *tsq_params])
         else:
             # No free text: the walk is over the whole (filtered) archive.
             # This is the branch that used to be _list_recent_messages, which
@@ -901,8 +911,8 @@ class Searcher:
         """Fuse the four arms and cut to ``rerank_pool_size``.
 
         ``exclude`` drops already-served messages *before* the cut, so a
-        grown pool holds ``rerank_pool_size`` unseen rows rather than that
-        many minus the ones it then throws away (#426).
+        grown pool holds up to ``rerank_pool_size`` unseen rows rather than
+        that many minus the ones it then throws away (#426).
         """
         # Lazy import to avoid circular dependency (arms imports ArmHit from this module)
         from localmail.search.arms import (
@@ -1216,7 +1226,7 @@ class Searcher:
         pool_size = len(hydrated)
         # A grown pool starts at the page that triggered the grow, with every
         # row served before it removed (#426). Ungrown pools start at 1.
-        first_page = entry.get("first_page", 1)
+        first_page = entry["first_page"]
         if 1 <= page < first_page:
             # Pages served before a grow are not in the grown pool; the
             # caller re-runs the search, as for any expired cursor.
@@ -1255,7 +1265,7 @@ class Searcher:
         )
 
     def grow_pool(
-        self, search_token: str, candidates_per_arm: int, *, page: int = 1,
+        self, search_token: str, candidates_per_arm: int, *, page: int,
         user_id: int | None = None, snippet_chars: int | None = None,
     ) -> SearchPage:
         """Re-run the pipeline with a larger candidate pool; return ``page``.
@@ -1266,8 +1276,10 @@ class Searcher:
         return the grown pool's page 1 under a new token, which re-ranked to
         mostly the same top hits: page 3 of a search repeated page 1.
 
-        ``page`` is the page the caller asked for. With the default ``1``
-        nothing was served yet, so the result is the grown pool's page 1.
+        ``page`` is the page the caller asked for, keyword-only with no
+        default: a forgotten one would serve page 1 again, which is #426. A
+        page below the pool's ``first_page`` (served before an earlier grow)
+        is a ``CacheMissError``, like any expired cursor.
 
         ``user_id`` enforces the same cache-scoping invariant as
         :meth:`continue_page`: a cursor minted by user A is treated as
@@ -1281,12 +1293,12 @@ class Searcher:
         entry = self._cache.get(search_token)
         if user_id is not None and entry.get("user_id") != user_id:
             raise CacheMissError(search_token)
-        first_page = entry.get("first_page", 1)
+        first_page = entry["first_page"]
         if page < first_page:
             raise CacheMissError(search_token)
         page_size = entry["page_size"]
         served = _ordered_pool(entry["hydrated"], entry["scores"], entry["sort"])
-        excluded: frozenset[int] = entry.get("excluded_ids", frozenset()) | {
+        excluded: frozenset[int] = entry["excluded_ids"] | {
             item["fused"].message_id
             for item, _ in served[:(page - first_page) * page_size]
         }
@@ -1792,6 +1804,9 @@ class Searcher:
                 "user_id": user_id,
                 "sort": effective_sort,
                 "sort_order": effective_order,
+                # Rewritten by grow_pool; read by subscript, so a put that
+                # forgets them fails loudly rather than reading as ungrown.
+                "first_page": 1, "excluded_ids": frozenset(),
             })
         pool_size = len(hydrated)
         return SearchPage(

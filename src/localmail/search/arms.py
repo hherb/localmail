@@ -18,10 +18,21 @@ from typing import Any
 import psycopg
 
 from localmail.config import SearchConfig
-from localmail.search.attachment_names import NAMES_TSV_SQL
+from localmail.search.attachment_names import NAMES_TSV_SQL, names_match_sql
 from localmail.search.attachment_presence import HAS_ATTACHMENT_SQL
 from localmail.search.query import ParsedQuery, SearchFilters
 from localmail.search.searcher import ArmHit
+
+#: pgvector's own ceiling on ``hnsw.ef_search``; a larger ``SET`` raises.
+#: Deep paging doubles the arms' limit up to ``candidates_per_arm_max``, and
+#: arm 4 multiplies it again, so the wish can pass this (#426 review).
+HNSW_EF_SEARCH_MAX = 1000
+
+
+def _ef_search(cfg: SearchConfig, wanted: int) -> int:
+    # shortcut: past the ceiling HNSW may return fewer than `wanted`
+    # candidates; the arm then fills less of its budget, which beats a 500.
+    return min(max(int(cfg.hnsw_ef_search), int(wanted)), HNSW_EF_SEARCH_MAX)
 
 
 def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
@@ -101,13 +112,15 @@ def _message_where(parsed: ParsedQuery) -> tuple[str, list[Any]]:
     Applied by every retrieval path, not left to the lexical tsquery: the
     vector arms match no words, ``arm_bm25_chunks`` negates per chunk, and an
     OR-ed ``--smart`` synonym bypasses the free text's ``!word`` (#419). The
-    exclusion reads ``fts_v2`` (subject, body, addresses), so a word that
-    only an attachment's text contains does not exclude its message.
+    exclusion reads ``fts_v2`` (subject, body, addresses) and the file
+    names, since both match a positive word (#426); a word that only an
+    attachment's extracted text contains does not exclude its message.
     """
     sql, params = _filter_sql(parsed.filters)
     if parsed.excluded_text:
-        sql += " AND m.fts_v2 @@ websearch_to_tsquery('simple', %s)"
-        params = [*params, parsed.excluded_text]
+        sql += (" AND m.fts_v2 @@ websearch_to_tsquery('simple', %s)"
+                f" AND {NAMES_TSV_SQL} @@ websearch_to_tsquery('simple', %s)")
+        params = [*params, parsed.excluded_text, parsed.excluded_text]
     return sql, params
 
 
@@ -151,7 +164,10 @@ def arm_bm25_messages(
       D = to_addrs, C = body, B = from, A = subject
 
     Attachment file names match too, ranked at the subject's weight; see
-    ``attachment_names`` for why they are a separate tsvector (#426).
+    ``attachment_names`` for why they are a separate tsvector (#426). The
+    two are ranked apart and summed, never concatenated: ``||`` re-checks
+    the 1 MiB tsvector cap, so two halves that each fit could raise on
+    every search matching that message.
     """
     if not parsed.free_text.strip():
         return []
@@ -175,17 +191,19 @@ def arm_bm25_messages(
     sql = f"""
         WITH ranked AS (
             SELECT m.id,
-                   ts_rank_cd(%s::float4[], m.fts_v2 || {NAMES_TSV_SQL},
-                              {tsq_sql}) AS score
+                   ts_rank_cd(%s::float4[], m.fts_v2, {tsq_sql})
+                   + ts_rank_cd(%s::float4[], {NAMES_TSV_SQL}, {tsq_sql})
+                       AS score
             FROM messages m
-            WHERE (m.fts_v2 @@ {tsq_sql} OR {NAMES_TSV_SQL} @@ {tsq_sql})
+            WHERE (m.fts_v2 @@ {tsq_sql} OR {names_match_sql(tsq_sql)})
             {where_extra}
             ORDER BY score DESC
             LIMIT %s
         )
         SELECT id, score, ROW_NUMBER() OVER (ORDER BY score DESC) FROM ranked
     """
-    params: list[Any] = [weights, *tsq_params, *tsq_params, *tsq_params,
+    params: list[Any] = [weights, *tsq_params, weights, *tsq_params,
+                         *tsq_params, *tsq_params, *tsq_params,
                          *where_params, limit]
     with conn.cursor() as cur:
         cur.execute(sql, params)
@@ -259,7 +277,7 @@ def arm_vector_chunks(
     params: list[Any] = [query_vector, *where_params, query_vector, limit]
     # ef_search must be >= the LIMIT we want returned, otherwise HNSW
     # truncates the candidate set before our SELECT sees it.
-    ef = max(int(cfg.hnsw_ef_search), int(limit))
+    ef = _ef_search(cfg, limit)
     with conn.cursor() as cur:
         # SET LOCAL requires an open transaction. psycopg_pool connections
         # are non-autocommit by default; if you ever wrap this call in an
@@ -360,7 +378,7 @@ def arm_vector_attachment_chunks(
     # ef_search must be >= chunk_limit; otherwise HNSW returns fewer
     # candidates than the prefetch ORDER BY ... LIMIT expects, capping the
     # fan-out budget below what the caller actually requested.
-    ef = max(int(cfg.hnsw_ef_search), int(chunk_limit))
+    ef = _ef_search(cfg, chunk_limit)
     with conn.cursor() as cur:
         cur.execute(f"SET LOCAL hnsw.ef_search = {ef}")
         cur.execute(sql, params)

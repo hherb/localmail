@@ -131,7 +131,7 @@ def test_growing_a_pool_reports_the_pool_s_own_sort(searcher):
     first = searcher.search("needle", allowed_account_ids=None, user_id=1,
                             page_size=2, candidates_per_arm=2)
     assert first.search_token is not None
-    grown = searcher.grow_pool(first.search_token, 8, user_id=1)
+    grown = searcher.grow_pool(first.search_token, 8, page=1, user_id=1)
     assert grown.sort_applied == "rank"
 
 
@@ -238,6 +238,7 @@ def test_continue_page_reads_the_pool_s_sort_rather_than_assuming_rank(searcher)
         "parsed": parse_query("needle"), "hydrated": [], "scores": {},
         "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
         "user_id": None, "sort": "date", "sort_order": "desc",
+        "first_page": 1, "excluded_ids": frozenset(),
     })
     assert searcher.continue_page("tok-date", 1).sort_applied == "date"
 
@@ -261,8 +262,9 @@ def test_grow_pool_reads_the_pool_s_sort_rather_than_assuming_rank(searcher):
         "parsed": parse_query("needle"), "hydrated": [], "scores": {},
         "page_size": 5, "candidates_per_arm": 2, "rerank_pool_size": 20,
         "user_id": 1, "sort": "date", "sort_order": "desc",
+        "first_page": 1, "excluded_ids": frozenset(),
     })
-    grown = searcher.grow_pool("tok-grow-date", 8, user_id=1)
+    grown = searcher.grow_pool("tok-grow-date", 8, page=1, user_id=1)
     assert grown.sort_applied == "date"
 
 
@@ -275,6 +277,7 @@ def test_a_pool_exhausted_at_the_cap_reports_the_pool_s_sort(searcher):
         "page_size": 5, "candidates_per_arm": cfg.candidates_per_arm_max,
         "rerank_pool_size": 20,
         "user_id": 1, "sort": "date", "sort_order": "desc",
+        "first_page": 1, "excluded_ids": frozenset(),
     })
     out = run_search(searcher=searcher, free_text="needle", filters={},
                      limit=5, allowed_account_ids=[1], user_id=1,

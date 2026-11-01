@@ -129,7 +129,7 @@ def test_continue_page_without_a_width_uses_the_default(searcher) -> None:
 
 def test_grow_pool_takes_its_own_width(searcher) -> None:
     p1 = searcher.search("zebra", allowed_account_ids=None)
-    grown = searcher.grow_pool(p1.search_token, candidates_per_arm=100,
+    grown = searcher.grow_pool(p1.search_token, candidates_per_arm=100, page=1,
                                snippet_chars=40)
     assert len(_snippet(grown)) <= 42
 
@@ -168,7 +168,8 @@ def test_continuations_refuse_a_non_positive_width_too(method) -> None:
     s = Searcher(pool=MagicMock(), cfg=SearchConfig(), embeddings=None,
                  reranker=None, rewriter=None)
     with pytest.raises(ValueError, match="snippet_chars"):
-        getattr(s, method)("tok", 2, snippet_chars=0)
+        extra = {"page": 2} if method == "grow_pool" else {}
+        getattr(s, method)("tok", 2, snippet_chars=0, **extra)
 
 
 @pytest.mark.parametrize("method", ["_build_results"])

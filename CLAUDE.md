@@ -857,6 +857,8 @@ src/localmail/
     snippet_width.py # pure: snippet_width_error — the one snippet-width
                     #   type/floor rule, read by the api gate (capped) and
                     #   by Searcher._snippet_width (uncapped) (#390)
+    attachment_names.py # pure: NAMES_TSV_SQL / names_match_sql — file names
+                    #   in the lexical match; must equal 0037's index (#426)
 migrations/         # 0001_init.sql … 0037_messages_attachment_names_idx.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
@@ -1599,14 +1601,18 @@ for the Phase 2 plan.
     per chunk, and an OR-ed `--smart` synonym matches past it. Two shapes are
     left out of it: an exclusion beside an `OR` (`a -b OR c` is `(a & !b) |
     c`), and one with no word (`-"`, whose empty tsquery would exclude
-    everything). It reads `fts_v2`, so attachment text does not exclude.
+    everything). It reads `fts_v2` and, since #426, the attachment file
+    names (which match a positive word too), so only attachment *text* does
+    not exclude.
   - A phrase or plain word is **not** a hard filter on the rank path: the
     vector arms still add semantic neighbours, as they always did for plain
     words. `sort=date` is the exact-match ordering.
   - Measured warm on the 130k Mac archive: `invoice OR bill` ~100 ms on
     arm 1 (the old smart OR form costs the same), a phrase 26 ms. Pure
     negation on the date walk is 1 ms (it was ~0.5 s per lexical arm as a
-    seq scan on the rank path, which it no longer takes).
+    seq scan on the rank path, which it no longer takes). Measured before
+    #426 added the file-name expression to the walk's filter and to the
+    exclusion; not re-measured.
   - Splits that keep no compound lexeme (`ab_cd`) now parse as adjacency
     (`<->`) where `plainto` ANDed the parts, so a message holding the parts
     only far apart no longer matches. `e-ticket` is unchanged: both forms
@@ -3900,7 +3906,8 @@ for the full design.
   `snippet_chars` (window width, `1..search.snippet_max_chars`, default cap
   1000). `api_minor` is **3**. The rules are the pure
   [src/localmail/api/search_projection.py](src/localmail/api/search_projection.py).
-  - **`HIT_FIELDS` is pinned equal to `_to_api_result`'s keys plus `snippet`.**
+  - **`HIT_FIELDS` is pinned equal to `_to_api_result`'s keys plus `snippet`**
+    (plus `OPT_IN_FIELDS` since #426, of which `snippet` is one).
     A hit key added later cannot go missing from the projection, and no name
     can be permitted that the hit never carries.
   - **`snippet` is selectable only.** The default response stays
@@ -4033,7 +4040,8 @@ for the full design.
       amplified, fails slow rather than wrong, and capping the wire field is
       a contract change — **#394**, deliberately not folded into #390–#392.
     - **#394 capped it in `fields_error`, not on the wire field.**
-      `MAX_FIELDS = 48` (4 × the 12 hit fields, written as a literal so
+      `MAX_FIELDS = 48` (4 × the 12 hit fields there were then — 14 since
+      #426, and the cap deliberately did not move — written as a literal so
       adding a hit field does not silently move a documented limit), judged
       **before** any element is read so the gate's own cost is bounded, and
       membership is a `frozenset`. Not `Field(max_length=…)`: pydantic
@@ -4093,7 +4101,8 @@ for the full design.
         It handles `sort=date` with any query and, regardless of `sort`,
         any blank query. With free text it matches the same FTS column as
         retrieval Arm 1 (`fts_v2 @@` the shared `build_lexical_tsquery`, i.e.
-        `websearch_to_tsquery` since #419), so
+        `websearch_to_tsquery` since #419; since #426 both also match the
+        attachment file names, `OR`-ed), so
         recall is identical to the lexical case; with none it walks the
         whole (filtered) archive date-ordered. No pool cap; unbounded
         scroll. Route dispatches on the prefix, which also carries the
@@ -4272,7 +4281,8 @@ for the full design.
     per-user ACL filter on `messages_recent_idx`). `grow_pool` on the
     `sort=rank` path can still surface duplicates when the cache is
     exhausted past pool 100 — covered by `sort=date` for the "show me
-    everything" intent.
+    everything" intent. (**Resolved by #426**: a grown pool leaves out every
+    row already served — see the #426 entry.)
   - **Searcher public boundaries (#71)**: the api/ layer (and any
     future MCP layer) uses `searcher.get_pool_metadata(token, *,
     user_id)` and `searcher.config` — never reach into
@@ -5971,33 +5981,80 @@ for the full design.
     token, which re-ranked to mostly the same top hits: page 3 of a search
     repeated page 1 (measured on the DGX, 119 distinct of 300). It now takes
     `page=`, leaves every row the earlier pages served out of the grown pool
-    *before* the cut (`_retrieve_pool(exclude=)`, so the pool holds
+    *before* the cut (`_retrieve_pool(exclude=)`, so the pool holds up to
     `rerank_pool_size` unseen rows), and re-puts the entry under the same
     token with `first_page`/`excluded_ids`. `continue_page` pages relative to
     `first_page`; a page below it is a `CacheMissError` (409), since those
     rows are no longer in the pool. Served order is `_ordered_pool`, shared
-    with `_build_results`, so "what was served" cannot drift from what was.
-    The two keys are read with `.get` defaults: an ungrown pool truthfully
-    starts at page 1 with nothing excluded. Pinned end to end through
+    with `_build_results`, so the rows `grow_pool` treats as served are
+    exactly the rows `_build_results` served. Pinned end to end through
     `run_search` (`test_paging_past_a_grow_serves_each_message_once`: 88
     hits for 30 messages on the old code).
+    - **Both keys are subscripted, never `.get`-defaulted** (review): the
+      first `search()` put writes `first_page: 1` and an empty
+      `excluded_ids`, so a put path that forgets them is a `KeyError` rather
+      than a pool silently read as ungrown — #426 again, with tests green.
+      The `entry["sort"]` rule. `grow_pool`'s `page` is keyword-only with
+      **no default** for the same reason (#234's shape).
+    - **A grow that finds nothing unseen is grown again** in
+      `_continue_or_grow`, up to the cap, inside the same request: served
+      as is it was an empty page still carrying a `next_cursor`, each one a
+      full retrieval. A `CacheMissError` from the grow itself (evicted after
+      the metadata probe) maps to the 409 like any other.
+    - **Deep paging reaches `hnsw.ef_search`'s ceiling.** Arm 4 asks for
+      `limit × arm4_chunk_prefetch_multiplier`, so the default config's grow
+      to 400 asked pgvector for 1200 against its hard limit of 1000 — a 500
+      on page ~10 of any big result set. Pre-existing, but this fix is what
+      makes paging that deep worth doing. Both vector arms clamp at
+      `arms.HNSW_EF_SEARCH_MAX`; the end-to-end test runs at the default
+      `candidates_per_arm_max` to pin it.
   - **File names match the lexical query, through their own index.** The
     rule is [src/localmail/search/attachment_names.py](src/localmail/search/attachment_names.py),
     an expression index in migration `0037` rather than a change to the
     generated `fts_v2` (a rewrite of every row, raw bytes included) or an
     index over `fts_v2 || names` (a second 688 MB GIN). Each name is indexed
     as written and split on punctuation, because `simple` reads
-    `230712.pdf` as one file token. Arm 1 and the date walk match
-    `fts_v2 @@ q OR names @@ q`, so a query split between a name and the
-    body matches neither half — the price of keeping both indexes. Arm 1
-    ranks over `fts_v2 || names` (weight A), computed per matched row:
-    ~1.5 µs a row, measured unindexed over the live archive. The migration
-    text is pinned to the expression, since the planner matches only an
-    identical tree.
+    `230712.pdf` as one token (type `host`). Arm 1 and the date walk match
+    `fts_v2 @@ q OR names @@ q`, so lexically a query's required words split
+    between a name and the body match neither half — the price of keeping
+    both indexes. Arm 1 ranks the two apart and sums them (names at weight
+    A), computed per matched row: ~1.5 µs a row, measured unindexed over the
+    live archive. The migration text is pinned to the expression, since the
+    planner matches only an identical tree.
+    - **Never `fts_v2 || names`** (review; it shipped that way). `||`
+      re-checks the 1 MiB tsvector cap, which counts lexemes *and*
+      positions, so two halves that each fit raise `string is too long for
+      tsvector` together — on every rank search matching that message, after
+      it synced fine. One crafted ~1.3 MB mail disabled search for any word
+      in it. Pinned by a fixture that overflows `||` (the precondition is
+      asserted as the raise; note `SELECT 1 FROM (SELECT expr) x` plans the
+      expression away and proves nothing).
+    - **The name text is cut at `NAMES_MAX_CHARS` (50000)**, in the helper
+      and in 0037 alike, because the index expression runs on every INSERT:
+      uncut, ~1.2 MB of names raised there, failing the message on every
+      sync and retry and stopping 0037 on an archive holding one. **0037 was
+      edited before it was applied anywhere** but test databases (the Mac
+      archive stopped at 0036); a test DB carrying the uncut index needs
+      `DROP INDEX messages_attachment_names_idx` and its
+      `schema_migrations` row deleted, or the plan test fails.
+    - **The names half is off for a query the empty document satisfies**
+      (`names_match_sql`'s `AND NOT ''::tsvector @@ q`). `-acme OR -beta`
+      leaves no message-level exclusion (an exclusion beside an `OR` is
+      deliberately not one, #419), and an attachment-less message's empty
+      names vector satisfies it, so the walk admitted messages whose body
+      the query rejects. The guard is a constant per query; the price is
+      that `invoice OR -beta` finds `invoice.pdf` only through the body.
+    - **File names exclude too**: `_message_where` applies `-word` to the
+      names as well as `fts_v2`, since a name now matches a positive word.
+      Only an attachment's extracted text still does not exclude.
   - **`fields` gains `attachment_filename` and `attachments`**, opt-in like
     `snippet` (`OPT_IN_FIELDS`), so the default hit is unchanged.
     `attachments` is `Searcher.message_attachments`, one query per page run
-    only when named, in the message-detail entry shape. HTTP only (#368).
+    only when named, in the message-detail entry shape, in stored order. It
+    applies no ACL (the ids are a page of already-scoped hits — a caller
+    precondition). A malformed entry keeps its slot as all-`None`, and a
+    non-string name or hash reads as `None`, so entry *i* stays attachment
+    index *i* (review: it used to drop them). HTTP only (#368).
 - **Search filters are honoured or refused, never dropped (#364).** Design:
   [docs/superpowers/specs/2026-09-14-search-request-honesty-design.md](docs/superpowers/specs/2026-09-14-search-request-honesty-design.md);
   plan: [docs/superpowers/plans/2026-09-14-search-request-honesty.md](docs/superpowers/plans/2026-09-14-search-request-honesty.md).

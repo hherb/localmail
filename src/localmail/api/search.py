@@ -281,7 +281,9 @@ def run_search(
     still be grown, the route transparently calls
     ``searcher.grow_pool(token, candidates_per_arm * 2, page=…)``, which
     serves the requested page from the grown pool with every row already
-    served left out, under the same token (#426). If the cache has been evicted (``CacheMissError``) — TTL, LRU,
+    served left out, under the same token (#426); a grow that finds nothing
+    unseen is grown again, up to the cap, rather than served empty. If the
+    cache has been evicted (``CacheMissError``) — TTL, LRU,
     or cross-user replay — the route raises ``SearchCursorExpired`` (HTTP
     409) so the GUI can run its transparent re-search recovery.
 
@@ -676,6 +678,10 @@ def _continue_or_grow(
     except CacheMissError as exc:
         raise SearchCursorExpired(f"cursor {parsed.token!r} not found") from exc
     except PageOutOfPoolError:
+        pass
+    # A grow that finds nothing unseen grows again: served as is, it would be
+    # an empty page still carrying a cursor (#426).
+    while True:
         meta = searcher.get_pool_metadata(parsed.token, user_id=user_id)
         if meta is None:
             raise SearchCursorExpired(f"cursor {parsed.token!r} not found")
@@ -684,8 +690,18 @@ def _continue_or_grow(
                                      sort_applied=meta.sort,
                                      rankable=meta.rankable)
         new_cpa = min(meta.candidates_per_arm * 2, cfg.candidates_per_arm_max)
-        return searcher.grow_pool(parsed.token, new_cpa, page=parsed.page,
-                                  user_id=user_id, snippet_chars=snippet_chars)
+        try:
+            grown = searcher.grow_pool(parsed.token, new_cpa, page=parsed.page,
+                                       user_id=user_id,
+                                       snippet_chars=snippet_chars)
+        except CacheMissError as exc:
+            # Evicted between the metadata probe and the grow.
+            raise SearchCursorExpired(
+                f"cursor {parsed.token!r} not found") from exc
+        # `<=`: `candidates_per_arm` has no floor, and 0 doubles to 0.
+        if (grown.results or new_cpa >= cfg.candidates_per_arm_max
+                or new_cpa <= meta.candidates_per_arm):
+            return grown
 
 
 def _empty_grown_page(

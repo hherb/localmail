@@ -42,10 +42,11 @@ _KNOWN = frozenset(HIT_FIELDS)
 
 #: The longest ``fields`` list accepted (#394). Duplicates are accepted, so
 #: without a cap the caller chooses ``len(fields)``, and ``project_hit``'s
-#: per-hit re-check costs that times every hit on the page. Four times the
-#: number of hit fields admits any honest call, repeats included, by a wide
-#: margin; a literal rather than ``4 * len(HIT_FIELDS)`` so adding a hit
-#: field does not silently move a documented wire limit.
+#: per-hit re-check costs that times every hit on the page. Set at four
+#: times the 12 hit fields there were then (14 since #426, and the cap
+#: deliberately did not move); it admits any honest call, repeats included,
+#: by a wide margin. A literal rather than ``4 * len(HIT_FIELDS)`` so adding
+#: a hit field does not silently move a documented wire limit.
 MAX_FIELDS = 48
 
 

@@ -6079,8 +6079,10 @@ for the full design.
     past the ceiling). `date_header.parse_date_header` is shared with
     `parser._date_sent`, so `date_local` and `date_sent` name one instant.
     `None` for no parseable header and for `-0000`; an overflowing year is
-    unparseable too (the stdlib raises `OverflowError`; sync still
-    poison-pills it, #430). ~3 ms warm per 50 hits, which partly answers
+    unparseable too (the stdlib raises `OverflowError`, out of
+    `msg.get("Date")` itself; since #430 sync reads `Date` through
+    `parser._header_text`, so such mail is stored with `date_sent` NULL
+    instead of poison-pilled). ~3 ms warm per 50 hits, which partly answers
     #384: 50 bounded `raw_bytes` prefix reads are cheap warm. A malformed
     `attachments` column can still match `attachment_name` (lax jsonpath,
     like `NAMES_TSV_SQL`; #429). A `-0000` `date_sent` is stored in the

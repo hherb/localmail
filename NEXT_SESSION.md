@@ -1,18 +1,20 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-01 (session 74).** `main` was **`fa1184b`** after
-> #433 merged at the start of this session (#430 is closed).
+> **Status as of 2026-11-01 (session 75).** `main` is **`a2815e2`**: #434
+> (#431) merged before this session started, review fixes included
+> (`git diff origin/main a7146ba` is empty). #431 is closed.
 >
-> This session opened **one PR** on `fix/431-date-sent-minus-0000`:
-> `3b9d7f8` (the code) and this handoff. Its body says **`Closes #431`**.
+> This session opened **one PR** on `fix/429-strict-attachment-names`:
+> `db08ec0` (the code) and this handoff. Its body says **`Closes #429`**.
 >
-> **Open issues: 36** (35 once #431 closes).
+> **Open issues: 35** (34 once #429 closes).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
 >
-> **Neither host has #424, #427, #428, #432 or #433 deployed.** The DGX is
-> at `b07b78e`, the Mac DB at migration `0036`.
+> **Correction to session 74's handoff:** the DGX **does** have migration
+> `0037` applied (`schema_migrations` reads `0037_…`). The Mac live DB is at
+> `0036`. Which code the DGX *runs* was not re-checked.
 
 ## Project context (1-minute version)
 
@@ -28,47 +30,56 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-- **#433 merged** (operator) as `fa1184b`; #430 closed.
-
-### PR on `fix/431-date-sent-minus-0000` (based on `main` at `fa1184b`)
+### PR on `fix/429-strict-attachment-names` (based on `main` at `a2815e2`)
 
 | SHA | What |
 |---|---|
-| `3b9d7f8` | #431: a `-0000` `Date:` is stored as UTC, not in the Postgres session zone |
-| handoff | this file + `docs/handoffs/2026-11-01T0712Z-date-sent-minus-0000.md` |
+| `db08ec0` | #429: both attachment-name rules read names with a strict jsonpath; migration `0038` |
+| handoff | this file + `docs/handoffs/2026-11-01T0829Z-strict-attachment-names.md` |
 
-- **The defect.** `parsedate_to_datetime` returns `-0000` naive (the default
-  policy rewrites an unknown zone like `XYZ` to `-0000` too). psycopg sends
-  naive as `timestamp`, which Postgres reads in the session zone: #415's
-  mechanism. On the Mac (session `Australia/Perth`) such rows are 8 h off.
-- **The fix.** New pure `date_header.date_sent_instant` attaches UTC to a
-  naive result; `parser._date_sent` calls it. `sender_local_time` is
-  unchanged, so `date_local` stays `None` for `-0000`.
-- **Existing rows not repaired** (see open decision 1).
-- New test file `tests/test_date_sent_minus_zero.py` (16 tests: pure rule,
-  parser, and `process_one_message` under `SET TimeZone = 'Australia/Perth'`).
-  CLAUDE.md's `date_sent` bullet and the #426 bullet updated. README unchanged.
+- **The defect.** `NAMES_TSV_SQL` (lexical match, index expression) and
+  `NAME_CONTAINS_SQL` (`attachment_name:` filter) used lax
+  `$[*].filename`. Lax mode wraps a top-level object and unwraps a nested
+  array, and an array-valued name still reached both rules, so those
+  malformed `attachments` columns matched. The object case contradicted `HAS_ATTACHMENT_SQL`:
+  `has:no-attachment attachment_name:fee` returned a row flagged
+  `has_attachments: false`. Latent (no writer produces these shapes).
+- **The fix.** `attachment_names.NAMES_JSONPATH` =
+  `strict $[*] ? (@.type() == "object" && @.filename.type() == "string").filename`,
+  called with `silent => true` (positional `'{}', true`) so a non-array
+  yields nothing. Shared by both rules through `names_query_sql`. Both
+  functions are immutable, so it is a valid index expression.
+- **Migration `0038_messages_attachment_names_strict_idx.sql`**: drops
+  `messages_attachment_names_idx`, creates
+  `messages_attachment_names_strict_idx` (new name: `IF NOT EXISTS` matches
+  on name only). Computing the expression over the Mac's 132k messages took
+  0.2 s, so the rebuild is cheap. On the Mac, `init-db` will build 0037 and
+  then replace it with 0038 in one run.
+- New `tests/test_attachment_names_malformed.py` (7 tests). CLAUDE.md: new
+  strict-jsonpath bullet under #426, layout and migration-slot lines.
+  README unchanged (well-formed behaviour is the same).
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | the DB test failed storing `09:58:24+08:00` for `09:58:24 -0000`, the parser tests failed on a naive value |
-| `uv run pytest -q` | **4440 passed**, 6 warnings (4424 at session 73) |
+| RED first | all 7 new tests failed on the lax rules (filter, lexical rank+date, has:no-attachment, 3 names-vector shapes) |
+| `uv run pytest -q` | **4447 passed**, 6 warnings (4440 at session 74) |
 | mypy | Success, 165 files |
+| test DB | `messages_attachment_names_strict_idx` present, old index gone, latest `0038` |
 | GUI | not run (no GUI change) |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
 ### 1. **Merge this PR** (yours)
-- **Acceptance:** `gh issue view 431 --json state` is `CLOSED`.
+- **Acceptance:** `gh issue view 429 --json state` is `CLOSED`.
 
 ### 2. **Deploy both hosts** (yours; carried)
 - Undeployed: #424 (pool bounds, SIGUSR1), #427 (paging, migration `0037`),
-  #428 (`api_minor` 6), #432 (GUI), #433, and this PR once merged.
+  #428 (`api_minor` 6), #432 (GUI), #433, #434, and this PR (migration `0038`) once merged.
 - Mac: `uv sync --frozen --extra mcp --extra extraction`, then
-  `localmail init-db` (builds the `0037` index), then restart daemon and serve.
+  `localmail init-db` (builds `0037`, then `0038` replaces it), then restart daemon and serve.
 - DGX: the same through ssh (commands below).
 - **Acceptance:**
   - `/v1/version` reports `api_minor` 6 on both hosts.
@@ -87,35 +98,33 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   #415 dates; `api_minor` 5 (no repeats, `attachment_filename` /
   `attachments`); `api_minor` 6 (`filters.attachment_name`, `date_local`).
 
-### 4. **Next small slice: #429** (a malformed `attachments` column can match `attachment_name`)
-- Read the issue first; the rule lives in `search/attachment_names.py`
-  (`NAME_CONTAINS_SQL`, lax jsonpath, like `NAMES_TSV_SQL`).
-- **Acceptance:** a RED test seeding a non-array / malformed `attachments`
-  row shows the filter admitting it; the fix makes the name rules agree with
-  `HAS_ATTACHMENT_SQL` (which reads a malformed row as "no attachments") on
-  what a malformed row is. `NAMES_TSV_SQL` is 0037's index expression, so
-  changing it needs `0038` — decide that with the operator.
-  Full `uv run pytest -q` green.
+### 4. **Next small slice: pick with the operator**
+- Candidates: #425 (embed worker / lang detection misclassify a DB
+  contention error), #383 (`messages.headers` + its GIN index are
+  write-only), #365 (images embedded in HTML counted as attachments — an
+  edit to `HAS_ATTACHMENT_SQL`), #384 (comment or close: partly answered).
+- **Acceptance (any):** a RED test first, then full `uv run pytest -q`
+  green and mypy clean.
 
 ### 5. **Carried**
-- **Migrations:** `0037` is taken. #319/#318/#320 need `0038`.
+- **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
 - **#414 watchdog:** waits for a stack dump.
 - **Dependabot #71 / #185:** left open on purpose.
 - **docling > 2.144:** probe the next release when it lands.
 - **emSign G3:** re-check the trust stores after OS updates.
 - **kastellan slice C:** ask whether it is still wanted.
 - **#384** is partly answered (2.7 ms warm for 50 prefixes). Comment or close.
-- **Issues:** #429, #425, #383, #378, #369, #373, #372, #368, #365; #375;
+- **Issues:** #425, #383, #378, #369, #373, #372, #368, #365; #375;
   #374 + #305; #358/#357; #330/#327/#328; #340, #363, #285; robustness #218,
   #226, #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **#431: attach UTC in a new `date_sent_instant`, not in
-   `parse_date_header`** (my call). `sender_local_time` needs the naive
-   reading to say "offset unknown"; changing the shared parser would have
-   broken `date_local`.
-2. **#431: no backfill built** (my call, reversible). Left as open decision 1.
+1. **#429: fix both rules plus a migration, not a query-side guard** (my
+   call; session 74 had said "decide with the operator"). The issue itself
+   prescribes it, 0037 is applied on the DGX so it cannot be edited, and
+   the rebuild costs ~0.2 s of expression work. A query-time
+   `jsonb_typeof` guard would have fixed only the object shape.
 
 ## Open decisions & risks
 
@@ -132,7 +141,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    count may be slightly low):
    `select count(*) from messages where exists (select 1 from jsonb_array_elements_text(case when jsonb_typeof(headers->'Date')='array' then headers->'Date' else '[]' end) d where d ~ '-0000\s*(\(.*\))?\s*$')`
 2. **`attachment_name` is unindexed** (~0.2 s warm at 132k for a filter-only
-   miss). A trigram index would be `0038`.
+   miss). A trigram index would be `0039`.
 3. **`date_local` vs `date`:** different instants for most mail (send vs
    arrival). Documented in README.
 4. **Should a wire widening bump `api_minor`?** Still open.
@@ -155,32 +164,32 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/431-date-sent-minus-0000 --stat   # empty once merged (squash)
+git diff main origin/fix/429-strict-attachment-names --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh issue view 431 --json state --jq .state
+gh issue view 429 --json state --jq .state
 gh issue list --limit 200 --json number --jq length
 
 # Deploy — Mac (the repo is the install)
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
-uv run localmail init-db                # builds the 0037 index; messages writes pause meanwhile
+uv run localmail init-db                # builds 0037 then 0038; messages writes pause meanwhile
 launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version     # api_minor 6
 
 # Deploy — DGX
 ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user stop localmail-daemon && .venv/bin/localmail init-db && systemctl --user start localmail-daemon && systemctl --user restart localmail-serve'
-ssh 10.0.0.3 'docker exec localmail-pg psql -U localmail -d localmail -Atc "select revision from schema_migrations order by 1 desc limit 1"'   # 0037_…
+ssh 10.0.0.3 'docker exec localmail-pg psql -U localmail -d localmail -Atc "select revision from schema_migrations order by 1 desc limit 1"'   # 0038_…
 ssh 10.0.0.3 'kill -USR1 $(systemctl --user show -p MainPID --value localmail-daemon); sleep 2; journalctl --user -u localmail-daemon --since "-1min" | grep -c "Thread 0x"'
 
 # Load before trusting any timing; no other localmail pytest may be running.
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4440 at session 74
-uv run pytest -q tests/test_date_sent_minus_zero.py tests/test_date_header.py tests/test_date_header_overflow_sync.py
+unset VIRTUAL_ENV && uv run pytest -q              # 4447 at session 75
+uv run pytest -q tests/test_attachment_names_malformed.py tests/test_attachment_names.py tests/test_search_attachment_name_filter.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
 cd gui && npm test -- --run && npm run check   # 530 at session 72
 ```
 
-The latest migration is **`0037_messages_attachment_names_idx.sql`**; the next
-free slot is `0038_*.sql`.
+The latest migration is **`0038_messages_attachment_names_strict_idx.sql`**;
+the next free slot is `0039_*.sql`.

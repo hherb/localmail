@@ -860,10 +860,10 @@ src/localmail/
                     #   type/floor rule, read by the api gate (capped) and
                     #   by Searcher._snippet_width (uncapped) (#390)
     attachment_names.py # pure: NAMES_TSV_SQL / names_match_sql — file names
-                    #   in the lexical match; must equal 0037's index (#426)
+                    #   in the lexical match; must equal 0038's index (#426, #429)
                     #   + NAME_CONTAINS_SQL, the attachment_name: filter
     hit_dates.py    # date_local: each hit's Date: on the sender's clock (#426)
-migrations/         # 0001_init.sql … 0037_messages_attachment_names_idx.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0038_messages_attachment_names_strict_idx.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -6039,8 +6039,8 @@ for the full design.
       `candidates_per_arm_max` to pin it.
   - **File names match the lexical query, through their own index.** The
     rule is [src/localmail/search/attachment_names.py](src/localmail/search/attachment_names.py),
-    an expression index in migration `0037` rather than a change to the
-    generated `fts_v2` (a rewrite of every row, raw bytes included) or an
+    an expression index (migration `0037`, replaced by `0038` in #429)
+    rather than a change to the generated `fts_v2` (a rewrite of every row, raw bytes included) or an
     index over `fts_v2 || names` (a second 688 MB GIN). Each name is indexed
     as written and split on punctuation, because `simple` reads
     `230712.pdf` as one token (type `host`). Arm 1 and the date walk match
@@ -6063,9 +6063,23 @@ for the full design.
       uncut, ~1.2 MB of names raised there, failing the message on every
       sync and retry and stopping 0037 on an archive holding one. **0037 was
       edited before it was applied anywhere** but test databases (the Mac
-      archive stopped at 0036); a test DB carrying the uncut index needs
-      `DROP INDEX messages_attachment_names_idx` and its
-      `schema_migrations` row deleted, or the plan test fails.
+      archive stopped at 0036). 0038 now drops that index, which supersedes
+      the old manual fix for a test DB carrying the uncut one; **do not**
+      delete 0037's `schema_migrations` row, or `init-db` re-runs 0037 and
+      rebuilds a lax index that nothing drops again.
+    - **The names are read with a strict jsonpath (#429, migration
+      `0038`).** `attachment_names.NAMES_JSONPATH` is shared by
+      `NAMES_TSV_SQL` and `NAME_CONTAINS_SQL`: each object entry's string
+      `filename`, `silent` so a non-array yields nothing. Lax mode wrapped a
+      top-level object and unwrapped a nested array, and an array-valued name
+      still reached both rules, so those malformed columns matched a name
+      search, and the object one contradicted `HAS_ATTACHMENT_SQL` (`has:no-attachment
+      attachment_name:fee` returned a row flagged `has_attachments: false`).
+      Now both rules read the names `message_attachments` reports. 0038
+      drops 0037's index and builds `messages_attachment_names_strict_idx`
+      under a **new name** (0035's lesson); 0037 was already applied on the
+      DGX, so it could not be edited. Pinned by
+      `tests/test_attachment_names_malformed.py`.
     - **The names half is off for a query the empty document satisfies**
       (`names_match_sql`'s `AND NOT ''::tsvector @@ q`). `-acme OR -beta`
       leaves no message-level exclusion (an exclusion beside an `OR` is
@@ -6102,8 +6116,8 @@ for the full design.
     `parser._header_text`, so such mail is stored with `date_sent` NULL
     instead of poison-pilled). ~3 ms warm per 50 hits, which partly answers
     #384: 50 bounded `raw_bytes` prefix reads are cheap warm. A malformed
-    `attachments` column can still match `attachment_name` (lax jsonpath,
-    like `NAMES_TSV_SQL`; #429). A `-0000` `date_sent` is stored as UTC
+    `attachments` column no longer matches `attachment_name` (#429, see the
+    strict-jsonpath bullet above). A `-0000` `date_sent` is stored as UTC
     since #431 (see the `date_sent` bullet under Schema essentials).
 - **Search filters are honoured or refused, never dropped (#364).** Design:
   [docs/superpowers/specs/2026-09-14-search-request-honesty-design.md](docs/superpowers/specs/2026-09-14-search-request-honesty-design.md);
@@ -6932,7 +6946,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0037_messages_attachment_names_idx.sql`; next free slot `0038_*.sql`.
+  Latest is `0038_messages_attachment_names_strict_idx.sql`; next free slot `0039_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

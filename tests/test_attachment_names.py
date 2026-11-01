@@ -25,7 +25,7 @@ from localmail.search.query import parse_query
 from localmail.search.searcher import Searcher
 
 _MIGRATION = (Path(__file__).parent.parent / "migrations"
-              / "0037_messages_attachment_names_idx.sql")
+              / "0038_messages_attachment_names_strict_idx.sql")
 _WANTED = "2312 Herb Fee Proposal 230712.pdf"
 _SHA = "ab" * 32
 
@@ -245,4 +245,4 @@ def test_the_name_match_can_use_the_index(db_conn) -> None:
         cur.execute(sql)
         plan = "\n".join(r[0] for r in cur.fetchall())
     db_conn.rollback()
-    assert "messages_attachment_names_idx" in plan
+    assert "messages_attachment_names_strict_idx" in plan

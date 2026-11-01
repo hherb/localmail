@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -127,6 +127,10 @@ def run_import(
     cancellable (issue #163). `clock` is injectable for deterministic tests.
     """
     c = _Counters()
+    # The counters as of the worker connection's last commit: what a failed
+    # job reports, since closing the connection rolls back everything after
+    # it, including the failed_messages rows of poison pills (#439).
+    committed = _Counters()
     try:
         conn = conn_factory()
     except Exception as e:  # connection failure before any work
@@ -149,6 +153,7 @@ def run_import(
                     conn, account_id=job.account_id, name=msg.mailbox_name,
                     delimiter=None, flags=[])
                 conn.commit()
+                committed = replace(c)
                 mailbox_ids[msg.mailbox_name] = mb.id
                 # Continue past whatever a previous import left in this mailbox
                 # (#215). Mailboxes resolve on (account_id, name), so two
@@ -204,6 +209,7 @@ def run_import(
                 checkpoint_seconds=checkpoint_seconds,
             ):
                 _flush(conn, job_id, c)
+                committed = replace(c)
                 processed_at_last_checkpoint = c.processed
                 last_checkpoint_at = now
                 if _cancel_requested(conn, job_id):
@@ -219,4 +225,6 @@ def run_import(
             conn.close()
         except Exception:
             pass
-        _mark_terminal(conn_factory, job_id, "failed", c, error_msg=f"{type(e).__name__}: {e}")
+        _mark_terminal(
+            conn_factory, job_id, "failed", committed,
+            error_msg=f"{type(e).__name__}: {e}")

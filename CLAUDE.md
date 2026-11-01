@@ -1255,10 +1255,16 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
       then raises, leaving that row's `retry_count` alone. Rows retried
       before it stay committed (each is committed in turn, pinned by a
       three-row test). The CLI turns it into a one-line `ClickException`.
-    - **A failed job's counters overstate, and genuine poison pills since
-      the last commit lose their `failed_messages` rows** until a re-run:
-      both are rolled back when the connection closes. Pre-existing for any
-      mid-run error, filed as #439.
+    - **A failed job reports the counters as of the worker connection's
+      last commit (#439)**, not its in-memory totals. Closing the connection
+      rolls back everything after that commit, poison pills'
+      `failed_messages` rows included, so the in-memory counts described
+      work that no longer existed. `run_import` keeps a `committed` snapshot,
+      taken after `_flush` **and** after a new mailbox's `upsert_mailbox`
+      commit (which commits the messages before it too). Each of the two
+      snapshot points and the handler's use of it is pinned by its own test
+      in `tests/test_importer_runner.py`. The rolled-back poison pills are
+      re-recorded by the re-run, which re-processes them.
     - Pinned in `tests/test_import_retry_db_contention.py`, reusing #425's
       trigger.
   - **The cause of #414's stall is still unknown**: the DGX journal for it had

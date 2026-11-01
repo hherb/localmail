@@ -1,19 +1,19 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-01 (session 71).** `main` was **`3bd0c72`** at
-> session start (#427, #426 items 1–3, had merged).
+> **Status as of 2026-11-01 (session 72).** `main` was **`62bdec6`** at
+> session start (#428 had merged; #426 is closed).
 >
-> This session opened **one PR** on `fix/426-attachment-name-filter-date-local`:
-> `ba64877` (the code) and this handoff. Its body says **`Closes #426`**:
-> all five items are now shipped.
+> This session opened **one PR** on `fix/421-gui-requote-quoted-tokens`:
+> `f6072bd` (the code) and this handoff. Its body says **`Closes #421`**.
 >
-> **Open issues: 35** (34 once #426 closes).
+> **Open issues: 38** (37 once #421 closes).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
 >
-> **Neither host has #424 or #427 deployed.** The DGX is at `b07b78e`, the
-> Mac DB at migration `0036`.
+> **Neither host has #424, #427 or #428 deployed.** The DGX is at
+> `b07b78e`, the Mac DB at migration `0036`. This PR is GUI-only and needs
+> no server deploy.
 
 ## Project context (1-minute version)
 
@@ -24,70 +24,48 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **Hybrid search**, the HTTPS `/v1` server, a remote **MCP server**, and the
   opt-in `--smart` rewriter.
 - **Tauri 2 + Svelte 5 GUI** under `gui/`.
-- **kastellan** consumes `/v1` over REST with an API key. #426 is its list of
-  search asks, finished by this PR.
+- **kastellan** consumes `/v1` over REST with an API key. #426 was its list of
+  search asks, finished by #428.
 
 ## What we shipped this session
 
-### Operations check (no commit)
-
-- The handoff for #427 said to check the DGX's `schema_migrations` before
-  merging, because `0037` was edited in place. #427 had already merged.
-  Checked afterwards: the DGX DB stops at `0036_api_keys` and its checkout is
-  at `b07b78e`, so no host ever applied the old `0037` text. **No reset is
-  needed.**
-
-### PR on `fix/426-attachment-name-filter-date-local` (based on `main` at `3bd0c72`), `api_minor` 6
+### PR on `fix/421-gui-requote-quoted-tokens` (based on `main` at `62bdec6`)
 
 | SHA | What |
 |---|---|
-| `ba64877` | #426 item 4 (`filters.attachment_name`), item 5 (`date_local`), `api_minor` 6, websearch grouping pin |
-| handoff | this file + `docs/handoffs/2026-11-01T0403Z-attachment-name-date-local.md` |
+| `f6072bd` | #421: a token typed with quotes keeps them when the GUI rebuilds the query |
+| handoff | this file + `docs/handoffs/2026-11-01T0517Z-gui-requote-quoted-tokens.md` |
 
-- **Item 4: `filters.attachment_name`, DSL `attachment_name:`.** It keeps
-  messages where some attachment's file name contains the value,
-  case-insensitively. The SQL is `strpos(lower(…), lower(%s))`, so `_` and
-  `%` are literal. The rule is `attachment_names.NAME_CONTAINS_SQL`, composed
-  by `_filter_sql`, so every arm and the date walk apply it. It is on HTTP
-  and on the MCP `search` tool.
-- **Item 5: `date_local`, an opt-in `fields` name.** It gives the `Date:`
-  header's instant on the sender's clock (`2023-07-12T09:58:24+10:00`). It is
-  `null` with no parseable header, or for `-0000`.
-  - It is read from the raw header block (new module `search/hit_dates.py`),
-    the same way `?headers=list` reads it. A block past the 64 KiB ceiling is
-    re-read in full with a WARNING.
-  - The new pure `date_header.py` is shared with `parser._date_sent`, so
-    `date_local` and `date_sent` name the same instant.
-  - HTTP only, like the other `fields` names (#368).
-- **Pinned kastellan's reliance**: `a b OR c d` → `'a' & 'b' | 'c' & 'd'`
-  (`test_search_websearch_syntax.py`).
-- Docs: README (filters and `fields` sections), `docs/mcp-usage.md`, the
-  CLAUDE.md #426 entry, and the `version.py` comment.
-- **Review round (same PR).** `parse_date_header` catches `OverflowError`
-  (a huge year was a 500 on `date_local`); the bare `assert` in `hit_dates`
-  is a skip; "`date` is UTC" was false (it is the session zone) and is
-  corrected; the `NAME_CONTAINS_SQL` comment no longer claims malformed rows
-  never match. Tests added: big body served from the prefix, `fields=None`
-  skips both reads, lower-case `date:`, `date_sent` through `parse_message`,
-  and `attachment_name` in the neutrality/NUL tables — 5 surviving mutations
-  now caught. Filed, not fixed: **#429** (strict jsonpath for both name
-  rules), **#430** (`Date:` overflow poison-pills sync), **#431** (`-0000`
-  `date_sent` stored in the session zone).
+- **The defect.** `filter_parse.tokenize` dropped every `"`, so
+  `joinTokens` could not tell `"OR"` from `OR` or `"-acme"` from `-acme`.
+  On a popover Apply, or when a typed operator is absorbed into a chip, the
+  quoted word came back as the operator / an exclusion (#419 syntax).
+- **The fix.** New `tokenizeRaw(s): Token[]` with `{text, raw}`; `raw`
+  keeps the `"` delimiters, as the server's `_tokenize` does. `joinTokens`
+  takes `Token[]` and re-emits a quoted token as typed. A raw spelling with
+  an apostrophe *outside* its quotes falls back to the old whole-token
+  wrapping, because the server reads that `'` as a quote opener.
+  `tokenize` keeps returning `string[]` (it is `tokenizeRaw(...).map(text)`).
+- **Visible change:** a kept `to:"bob smith"` is now rebuilt as typed,
+  `to:"bob smith"`, rather than `"to:bob smith"`. Two test expectations
+  moved accordingly.
+- CLAUDE.md: the #419 GUI bullet and the #376 `joinTokens` bullet.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | 9 of 11 new tests failed. One of the two passes was for the wrong reason (an "unknown key" refusal) and was tightened |
-| 9 mutations | all caught, each by its own test. One (dropping the `type() == "string"` guard) survived at first and got a fixture that catches it |
-| full `pytest -q` | **4392 passed**, 6 warnings (the same set as before), 250 s |
-| `mypy src/localmail` | Success, 165 files |
-| cost, live Mac archive (132,315 msgs, warm) | filter-only `attachment_name` that matches nothing: **~195 ms** (walks the whole archive); a common one (`.pdf`): 1.6 ms. `date_local` for 50 hits: **2.7 ms** warm, 14 ms cold |
+| RED first | 7 new tests, all 7 failed before the fix |
+| 4 mutations | all caught: no raw return (9 fail), no closing `"` in raw (14), no apostrophe guard (1, its own case), no `raw` reset on an unclosed quote (1, its own round-trip case) |
+| `npm test -- --run` | **528 passed**, 49 files |
+| `npm run check` | 0 errors, 0 warnings |
+| server agreement | `parse_query` keeps `a "OR" b` and `"-acme" invoice` as free text with no exclusion; `to:"bob smith"` is the `to` filter |
+| Python suite | not run (no Python changed) |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Merge this PR, deploy both hosts** (yours)
+### 1. **Deploy both hosts** (yours; #428 is merged, #426 closed)
 - Both hosts are behind: #424 (pool bounds, SIGUSR1) and #427 (paging, and
   migration `0037`) are undeployed as well.
 - Mac:
@@ -105,8 +83,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   - `fields: ["message_id", "date_local"]` gives an offset-bearing time.
   - `kill -USR1 <daemon pid>` on the DGX prints thread stacks, and the
     daemon keeps running (the #424 acceptance, still outstanding).
-- Then check that #426 is closed (`gh issue view 426`) and comment there
-  with the probe results.
+- Then comment on #426 with the probe results.
 
 ### 2. **Tell kastellan** (yours; carried)
 - Problem+json 400s on `/v1/search`, `filters.lang` as a list, web-search
@@ -115,17 +92,23 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `attachment_filename` / `attachments`.
 - `api_minor` 6: `filters.attachment_name`; `fields` `date_local`.
 
-### 3. **Next small slice: #421**
-- The GUI tokenizer drops quotes on a single quoted word (`"OR"`,
-  `"-acme"`). `filter_parse.tokenize` must record which tokens were quoted,
-  so `joinTokens` re-quotes them.
-- **Acceptance:**
-  - A RED vitest test: `a "OR" b` and `"-acme"` survive a popover Apply and
-    `absorbConflictingOperators`.
-  - The fix.
-  - `npm test -- --run` and `npm run check` both green.
+### 3. **Merge this PR** (yours)
+- GUI-only; `gui-ci` and `python-ci` should both be green.
+- **Acceptance:** `gh issue view 421 --json state` is `CLOSED`.
 
-### 4. **Carried**
+### 4. **Next small slice: #430** (a `Date:` header with an overflowing year poison-pills sync)
+- `parse_date_header` already catches `OverflowError` for `date_local`
+  (#428); sync still reads `msg.get("Date")`, which raises out of the
+  stdlib header parser.
+- **Acceptance:**
+  - A RED test: a message whose `Date:` has a year past 9999 goes through
+    `process_one_message` and is stored (with `date_sent` NULL), not
+    recorded in `failed_messages`.
+  - The fix, at the header read (the #314 `_header_text` seam is the
+    likely place).
+  - Full `uv run pytest -q` green.
+
+### 5. **Carried**
 - **Migrations:** `0037` is taken. #319/#318/#320 need `0038`.
 - **#414 watchdog:** waits for a stack dump.
 - **Dependabot #71 / #185:** left open on purpose.
@@ -134,19 +117,17 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **#384** (the cost of the `raw_bytes` prefix read) is now partly answered:
   2.7 ms warm for 50 prefixes. Comment on it, or close it.
-- **Issues:** #383, #378, #369, #373, #372, #368, #365; #375; #374 + #305;
+- **Issues:** #431, #429, #425, #383, #378, #369, #373, #372, #368, #365; #375; #374 + #305;
   #358/#357; #330/#327/#328; #340, #363, #285; robustness #218, #226,
   #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **#426 items 4 and 5: build both** (operator).
-2. **`date_local` re-reads the full message when the header block passes
-   the ceiling**, rather than returning `null`. That matches
-   `?headers=list`, and 0 live messages need it (my call).
-3. **`api_minor` bumped to 6** for the two wire additions, following the
-   house convention of one bump per wire feature (my call; the general
-   question, open decision 3, is still open).
+1. **#421: reuse the typed spelling rather than invent a quoted flag** (my
+   call). Mirroring the server's `raw` keeps every quote where it was typed
+   (`"-acme"` vs `-"acme"`, `to:"bob smith"`), which a boolean could not.
+2. **`tokenize` keeps its `string[]` shape** (my call); only `joinTokens`
+   changed signature, and its two callers are in the same module.
 
 ## Open decisions & risks
 
@@ -182,9 +163,9 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git log --oneline main..origin/fix/426-attachment-name-filter-date-local   # empty once merged
+git log --oneline main..origin/fix/421-gui-requote-quoted-tokens   # empty once merged
 gh pr list --state all --limit 3
-gh issue view 426 --json state --jq .state
+gh issue view 421 --json state --jq .state
 gh issue list --limit 200 --json number --jq length
 
 # Deploy — Mac (the repo is the install)
@@ -203,10 +184,10 @@ ssh 10.0.0.3 'kill -USR1 $(systemctl --user show -p MainPID --value localmail-da
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4392 at session 71
+unset VIRTUAL_ENV && uv run pytest -q              # 4392 at session 71 (not re-run in 72)
 uv run pytest -q tests/test_search_attachment_name_filter.py tests/test_search_date_local.py tests/test_date_header.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
-cd gui && npm test -- --run && npm run check
+cd gui && npm test -- --run && npm run check   # 528 at session 72
 ```
 
 The latest migration is **`0037_messages_attachment_names_idx.sql`**; the next

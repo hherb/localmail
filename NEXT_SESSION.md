@@ -1,19 +1,18 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-01 (session 72).** `main` was **`62bdec6`** at
-> session start (#428 had merged; #426 is closed).
+> **Status as of 2026-11-01 (session 73).** `main` was **`f906aa6`** at
+> session start (#432 merged; #421 is closed).
 >
-> This session opened **one PR** on `fix/421-gui-requote-quoted-tokens`:
-> `f6072bd` (the code) and this handoff. Its body says **`Closes #421`**.
+> This session opened **one PR** on `fix/430-date-header-overflow`:
+> `5fc1322` (the code) and this handoff. Its body says **`Closes #430`**.
 >
-> **Open issues: 38** (37 once #421 closes).
+> **Open issues: 37** (36 once #430 closes).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
 >
-> **Neither host has #424, #427 or #428 deployed.** The DGX is at
-> `b07b78e`, the Mac DB at migration `0036`. This PR is GUI-only and needs
-> no server deploy.
+> **Neither host has #424, #427, #428 or #432 deployed.** The DGX is at
+> `b07b78e`, the Mac DB at migration `0036`.
 
 ## Project context (1-minute version)
 
@@ -29,85 +28,74 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### PR on `fix/421-gui-requote-quoted-tokens` (based on `main` at `62bdec6`)
+### PR on `fix/430-date-header-overflow` (based on `main` at `f906aa6`)
 
 | SHA | What |
 |---|---|
-| `f6072bd` | #421: a token typed with quotes keeps them when the GUI rebuilds the query |
-| handoff | this file + `docs/handoffs/2026-11-01T0517Z-gui-requote-quoted-tokens.md` |
+| `5fc1322` | #430: an overflowing `Date:` year is stored with `date_sent` NULL, not poison-pilled |
+| handoff | this file + `docs/handoffs/2026-11-01T0600Z-date-header-overflow.md` |
 
-- **The defect.** `filter_parse.tokenize` dropped every `"`, so
-  `joinTokens` could not tell `"OR"` from `OR` or `"-acme"` from `-acme`.
-  On a popover Apply, or when a typed operator is absorbed into a chip, the
-  quoted word came back as the operator / an exclusion (#419 syntax).
-- **The fix.** New `tokenizeRaw(s): Token[]` with `{text, raw}`; `raw`
-  keeps closed `"…"` delimiters, as the server's `_tokenize` does (an
-  unclosed `"` is dropped, where the server keeps it). `joinTokens`
-  takes `Token[]` and re-emits a quoted token as typed. A raw spelling with
-  an apostrophe *outside* its quotes falls back to the old whole-token
-  wrapping, because the server reads that `'` as a quote opener.
-  `tokenize` keeps returning `string[]` (it is `tokenizeRaw(...).map(text)`).
-- **Visible change:** a kept `to:"bob smith"` is now rebuilt as typed,
-  `to:"bob smith"`, rather than `"to:bob smith"`. Two test expectations
-  moved accordingly.
-- CLAUDE.md: the #419 GUI bullet and the #376 `joinTokens` bullet.
+- **The defect.** `parser._date_sent` called `msg.get("Date")` unguarded.
+  A year too large for a C long raises `OverflowError` out of the stdlib's
+  `DateHeader.parse` (it catches only `ValueError`), so the message went to
+  `failed_messages` permanently.
+- **The fix.** One line: `_date_sent` reads through the existing
+  `_header_text` guard (#314), so an unreadable `Date:` is absent and
+  `date_sent` is NULL. `date_local` was already safe (#428).
+- **Not done:** existing `failed_messages` rows of this cause were not
+  looked for; `localmail retry-failed` on each host will now store them.
+- New test file `tests/test_date_header_overflow_sync.py` (real header,
+  through `parse_message` and `process_one_message`). CLAUDE.md's #426
+  `date_local` bullet updated.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | 7 new tests, all 7 failed before the fix |
-| 4 mutations | all caught: no raw return (9 fail), no closing `"` in raw (14), no apostrophe guard (1, its own case), no `raw` reset on an unclosed quote (1, its own round-trip case) |
-| `npm test -- --run` | **530 passed**, 49 files (528 + 2 added in review) |
-| review | 2 more mutations survived (no `rawBeforeQuote` save, non-global quote strip); each now has its own test and fails it. Server-token differential re-run on the new join: 3 seeds × 30,000, 0 mismatches (51 with the apostrophe guard removed) |
-| `npm run check` | 0 errors, 0 warnings |
-| server agreement | `parse_query` keeps `a "OR" b` and `"-acme" invoice` as free text with no exclusion; `to:"bob smith"` is the `to` filter |
-| Python suite | not run (no Python changed) |
+| RED first | both new tests failed with `OverflowError` before the fix |
+| `uv run pytest -q` | **4424 passed**, 6 warnings (4392 at session 71) |
+| mypy | Success, 165 files |
+| GUI | not run (no GUI change) |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Deploy both hosts** (yours; #428 is merged, #426 closed)
-- Both hosts are behind: #424 (pool bounds, SIGUSR1) and #427 (paging, and
-  migration `0037`) are undeployed as well.
-- Mac:
-  `uv sync --frozen --extra mcp --extra extraction`, then
-  `localmail init-db` (builds the `0037` index; stop the daemon first or
-  accept the pause on `messages` writes), then restart the daemon and serve.
+### 1. **Deploy both hosts** (yours; carried from session 72)
+- Undeployed: #424 (pool bounds, SIGUSR1), #427 (paging, migration
+  `0037`), #428 (`api_minor` 6), #432 (GUI), and this PR once merged.
+- Mac: `uv sync --frozen --extra mcp --extra extraction`, then
+  `localmail init-db` (builds the `0037` index), then restart daemon and serve.
 - DGX: the same through ssh (commands below).
 - **Acceptance:**
   - `/v1/version` reports `api_minor` 6 on both hosts.
-  - kastellan's #426 probe on the DGX passes:
-    - `Fee Proposal`, `2312 Herb Fee Proposal` and `Qantas booking`, paged
-      6 pages each, show 0 repeats and keep one token.
-    - `230712` finds message 18106.
-  - `filters: {"attachment_name": "230712"}` returns 18106.
-  - `fields: ["message_id", "date_local"]` gives an offset-bearing time.
-  - `kill -USR1 <daemon pid>` on the DGX prints thread stacks, and the
-    daemon keeps running (the #424 acceptance, still outstanding).
+  - kastellan's #426 probe on the DGX passes (`Fee Proposal`,
+    `2312 Herb Fee Proposal`, `Qantas booking`: 6 pages each, 0 repeats;
+    `230712` finds 18106; `filters.attachment_name` `230712` → 18106;
+    `fields: ["message_id","date_local"]` gives an offset-bearing time).
+  - `kill -USR1 <daemon pid>` on the DGX prints stacks and the daemon keeps
+    running (#424).
+  - After this PR deploys: `localmail retry-failed` on each host; any
+    `OverflowError` rows in `failed_messages` succeed.
 - Then comment on #426 with the probe results.
 
 ### 2. **Tell kastellan** (yours; carried)
-- Problem+json 400s on `/v1/search`, `filters.lang` as a list, web-search
-  syntax (#419), #415 dates.
-- `api_minor` 5: no repeats after a pool grow; `fields`
-  `attachment_filename` / `attachments`.
-- `api_minor` 6: `filters.attachment_name`; `fields` `date_local`.
+- Problem+json 400s on `/v1/search`, `filters.lang` as a list, #419 syntax,
+  #415 dates; `api_minor` 5 (no repeats, `attachment_filename` /
+  `attachments`); `api_minor` 6 (`filters.attachment_name`, `date_local`).
 
 ### 3. **Merge this PR** (yours)
-- GUI-only; `gui-ci` and `python-ci` should both be green.
-- **Acceptance:** `gh issue view 421 --json state` is `CLOSED`.
+- **Acceptance:** `gh issue view 430 --json state` is `CLOSED`.
 
-### 4. **Next small slice: #430** (a `Date:` header with an overflowing year poison-pills sync)
-- `parse_date_header` already catches `OverflowError` for `date_local`
-  (#428); sync still reads `msg.get("Date")`, which raises out of the
-  stdlib header parser.
+### 4. **Next small slice: #431** (a `-0000` `date_sent` is stored in the session zone)
+- `parse_date_header` returns a *naive* datetime for `-0000`; psycopg sends
+  naive as `timestamp`, which Postgres reads in the session zone — #415's
+  shape for `date_sent`.
 - **Acceptance:**
-  - A RED test: a message whose `Date:` has a year past 9999 goes through
-    `process_one_message` and is stored (with `date_sent` NULL), not
-    recorded in `failed_messages`.
-  - The fix, at the header read (the #314 `_header_text` seam is the
-    likely place).
+  - A RED test: a `Date: … -0000` message stored through
+    `process_one_message` has `date_sent` equal to the header's UTC instant
+    regardless of the session `TimeZone` (set it to a non-UTC zone in the test).
+  - Fix where `date_sent` is produced (treat `-0000` as UTC for storage only;
+    `date_local` must still be `None` for it).
   - Full `uv run pytest -q` green.
 
 ### 5. **Carried**
@@ -125,11 +113,9 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## Rulings made this session
 
-1. **#421: reuse the typed spelling rather than invent a quoted flag** (my
-   call). Mirroring the server's `raw` keeps every quote where it was typed
-   (`"-acme"` vs `-"acme"`, `to:"bob smith"`), which a boolean could not.
-2. **`tokenize` keeps its `string[]` shape** (my call); only `joinTokens`
-   changed signature, and its two callers are in the same module.
+1. **#430: reuse `_header_text` rather than a Date-specific catch** (my
+   call). Same failure class as #314, same guard; one rule for reading a
+   structured header.
 
 ## Open decisions & risks
 
@@ -165,9 +151,9 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git log --oneline main..origin/fix/421-gui-requote-quoted-tokens   # empty once merged
+git log --oneline main..origin/fix/430-date-header-overflow   # empty once merged
 gh pr list --state all --limit 3
-gh issue view 421 --json state --jq .state
+gh issue view 430 --json state --jq .state
 gh issue list --limit 200 --json number --jq length
 
 # Deploy — Mac (the repo is the install)
@@ -186,7 +172,7 @@ ssh 10.0.0.3 'kill -USR1 $(systemctl --user show -p MainPID --value localmail-da
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4392 at session 71 (not re-run in 72)
+unset VIRTUAL_ENV && uv run pytest -q              # 4424 at session 73
 uv run pytest -q tests/test_search_attachment_name_filter.py tests/test_search_date_local.py tests/test_date_header.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
 cd gui && npm test -- --run && npm run check   # 530 at session 72

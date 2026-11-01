@@ -77,8 +77,9 @@ def _refs_list(msg: EmailMessage) -> list[str]:
 
 
 def _date_sent(msg: EmailMessage) -> datetime | None:
-    raw = msg.get("Date")
-    return parse_date_header(str(raw)) if raw else None
+    # Through the guard: a year overflowing a C long raises OverflowError out
+    # of msg.get itself, which DateHeader.parse does not catch (#430).
+    return parse_date_header(_header_text(msg, "Date"))
 
 
 def _header_text(msg: EmailMessage, name: str) -> str | None:

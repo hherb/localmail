@@ -55,6 +55,7 @@ PARSER_CASES = [
     ("FROM:a{c}b", "from"),
     ("to:a{c}b", "to"),
     ("subject:a{c}b", "subject"),
+    ("attachment_name:a{c}b", "attachment_name"),
     ("lang:e{c}n", "lang"),
     ("label:a{c}b", "label"),
     ("account:a{c}b", "account"),
@@ -119,6 +120,7 @@ WIRE_CASES = [
     ("", {"from": "{c}"}, "from"),
     ("x", {"to": "a{c}b"}, "to"),
     ("x", {"subject": "a{c}b"}, "subject"),
+    ("x", {"attachment_name": "a{c}b"}, "attachment_name"),
     ("x", {"lang": "e{c}n"}, "lang"),
 ]
 
@@ -173,6 +175,7 @@ MCP_CASES = [
     ({"from_addr": "a{c}b"}, "from"),
     ({"to": "a{c}b"}, "to"),
     ({"subject": "a{c}b"}, "subject"),
+    ({"attachment_name": "a{c}b"}, "attachment_name"),
     ({"lang": "e{c}n"}, "lang"),
 ]
 

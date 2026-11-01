@@ -26,8 +26,8 @@ from typing import Any
 #: attachment's), and ``attachments`` lists every attachment the message
 #: carries, in the ``GET /v1/messages/{id}`` entry shape (#426).
 #: ``date_local`` is the ``Date:`` header's instant on the sender's own
-#: clock (``None`` without one, or for ``-0000``); ``date`` is UTC and may be
-#: the arrival time instead (#426).
+#: clock (``None`` without a parseable one, or for ``-0000``); ``date`` is in
+#: the server's session zone and may be the arrival time instead (#426).
 OPT_IN_FIELDS: tuple[str, ...] = (
     "snippet", "attachment_filename", "attachments", "date_local")
 

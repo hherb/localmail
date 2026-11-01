@@ -40,7 +40,8 @@ API_MAJOR = 1
 # `fields`, as with 3.
 # 6: `filters.attachment_name` (a substring of any attachment's file name)
 # and the `date_local` hit field (#426 items 4 and 5). An older server
-# refuses both with a 400. The filter reaches MCP too, as `attachment_name`;
+# refuses both with a 400, but reads an `attachment_name:` in `query` as free
+# text. The filter reaches MCP too, as `attachment_name`;
 # `date_local` is HTTP only, as with 3.
 API_MINOR = 6
 

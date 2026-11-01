@@ -65,7 +65,7 @@ _EVERY_FILTER = {
     "account_ids": ["1", "2"], "folder_ids": ["5"],
     "from": "o'brien@example.com", "to": 'bob "the builder',
     "subject": "don't forget", "date_from": "2024-01-01", "date_to": "2024-12-31",
-    "lang": "en",
+    "lang": "en", "attachment_name": 'fee "it\'s',
 }
 
 
@@ -96,6 +96,7 @@ def test_every_filter_parses_to_its_own_value_with_no_free_text() -> None:
         "o'brien@example.com", "bob the builder", "don't forget")
     assert (f.after, f.before) == (date(2024, 1, 1), date(2024, 12, 31))
     assert f.languages == ["en"]
+    assert f.attachment_name_substr == "fee it's"
 
 
 def test_the_reproduction_from_367_keeps_every_filter() -> None:

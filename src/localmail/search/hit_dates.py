@@ -7,8 +7,8 @@
 from the row; it survives only in ``raw_bytes``. The header block is read the
 way ``GET /v1/messages/{id}?headers=list`` reads it: a bounded prefix, parsed
 under the policy sync uses, re-read in full with a WARNING when the block runs
-past the ceiling (0 of 129,590 live messages do). The first ``Date:`` counts,
-as it does for ``date_sent``.
+past the ceiling (0 of 129,590 live messages did at #379). The first
+``Date:`` counts, as it does for ``date_sent``.
 """
 
 from __future__ import annotations
@@ -51,7 +51,8 @@ def fetch_local_dates(
                     "message %s; re-reading in full", PREFIX_READ_BYTES, mid)
                 cur.execute(_WHOLE_SQL, (mid,))
                 whole = cur.fetchone()
-                assert whole is not None
+                if whole is None:  # deleted since the prefix read
+                    continue
                 block = header_block_of_whole(bytes(whole[0]))
             date = next((e.value for e in parse_header_block(block)
                          if e.name.lower() == "date"), None)

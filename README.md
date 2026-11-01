@@ -1144,10 +1144,11 @@ skipped; repair one with `--account NAME`.
   still `/v1/messages/{id}/attachments/{i}`. `attachments` costs one query
   per page, only when named. Since `api_minor` 6, `date_local` is the
   `Date:` header's instant on the **sender's own clock**
-  (`"2023-07-12T09:58:24+10:00"`), where `date` is UTC and may be the
-  arrival time instead. It is `null` when the message has no parseable
+  (`"2023-07-12T09:58:24+10:00"`), where `date` is in the server's
+  Postgres session zone and may be the arrival time instead. It is `null` when the message has no parseable
   `Date:` or the header says `-0000` (local zone unknown). One query per
-  page, only when named (~3 ms warm for 50 hits on a 132k archive).
+  page, only when named (~3 ms warm for 50 hits on a 132k archive), plus a
+  full read of any message whose header block passes 64 KiB.
 - `snippet_chars`: the width of the snippet window, between 1 and
   `[search] snippet_max_chars` (default 1000). A cut window may gain a `…`
   at either end, so the text is at most `snippet_chars + 2` characters.

@@ -29,6 +29,11 @@ _RAW = {
     # Only the first occurrence counts, as for `date_sent`.
     "twice": (b"Date: Mon, 1 Jan 2024 08:00:00 -0500\r\n"
               b"Date: Tue, 2 Jan 2024 08:00:00 +0000\r\n\r\nbody"),
+    "lower": b"date: Mon, 1 Jan 2024 08:00:00 -0500\r\n\r\nbody",
+    # Small headers, big body (every message with attachments): the prefix
+    # holds the separator, so it must be served from the prefix.
+    "bigbody": b"Date: Wed, 12 Jul 2023 09:58:24 +1000\r\n\r\n"
+               + b"x" * (HEADER_BLOCK_READ_BYTES + 10_000),
     # A block past the read ceiling: no separator in the prefix.
     "huge": b"X-Pad: " + b"a" * HEADER_BLOCK_READ_BYTES
             + b"\r\nDate: Wed, 12 Jul 2023 09:58:24 +1000\r\n\r\nbody",
@@ -79,13 +84,17 @@ def test_date_local_is_the_header_s_own_clock(archive, caplog) -> None:
                                      "date_local": "2023-07-12T09:58:24+10:00"}
     assert hits[ids["nodate"]]["date_local"] is None
     assert hits[ids["twice"]]["date_local"] == "2024-01-01T08:00:00-05:00"
+    assert hits[ids["lower"]]["date_local"] == "2024-01-01T08:00:00-05:00"
+    assert hits[ids["bigbody"]]["date_local"] == "2023-07-12T09:58:24+10:00"
+    assert f"message {ids['bigbody']}" not in caplog.text
     # Past the ceiling: re-read in full, with a WARNING, as `?headers=` does.
     assert hits[ids["huge"]]["date_local"] == "2023-07-12T09:58:24+10:00"
     assert f"message {ids['huge']}" in caplog.text
 
 
-def test_the_read_is_skipped_unless_named(archive, monkeypatch) -> None:
+@pytest.mark.parametrize("fields", [None, ["message_id"]])
+def test_the_read_is_skipped_unless_named(archive, monkeypatch, fields) -> None:
     searcher, _, _ = archive
     monkeypatch.setattr(searcher, "message_local_dates",
                         lambda ids: pytest.fail("read without being named"))
-    _hits(archive, fields=["message_id"])
+    _hits(archive, fields=fields)

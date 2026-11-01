@@ -63,6 +63,16 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   (`test_search_websearch_syntax.py`).
 - Docs: README (filters and `fields` sections), `docs/mcp-usage.md`, the
   CLAUDE.md #426 entry, and the `version.py` comment.
+- **Review round (same PR).** `parse_date_header` catches `OverflowError`
+  (a huge year was a 500 on `date_local`); the bare `assert` in `hit_dates`
+  is a skip; "`date` is UTC" was false (it is the session zone) and is
+  corrected; the `NAME_CONTAINS_SQL` comment no longer claims malformed rows
+  never match. Tests added: big body served from the prefix, `fields=None`
+  skips both reads, lower-case `date:`, `date_sent` through `parse_message`,
+  and `attachment_name` in the neutrality/NUL tables — 5 surviving mutations
+  now caught. Filed, not fixed: **#429** (strict jsonpath for both name
+  rules), **#430** (`Date:` overflow poison-pills sync), **#431** (`-0000`
+  `date_sent` stored in the session zone).
 
 ## Verification
 
@@ -148,7 +158,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    date_sent)`, so for most mail `date_local` names a *different* instant:
    send time, where `date` is arrival time. That is intended (it is "the
    sender's clock"), but a consumer could read it as `date` in another zone.
-   The README says so.
+   The README says so (and that `date` is in the server's session zone,
+   not UTC as #428 first claimed).
 3. **Should a wire widening bump `api_minor`?** The general question is still
    open; this session followed precedent.
 4. **3,194 rows keep a skewed `internal_date`** (Mac 2,720, DGX 474). Not

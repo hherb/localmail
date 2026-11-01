@@ -1218,9 +1218,27 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
     chunking and lang detection fail the sweep (the loop logs it and retries),
     and a chunk's embedding UPDATE falls to `_embed_table`'s batch-level
     fallback. Unlikely in practice: their claims lock their own rows, so it
-    needs a slow index insert. `embed-backfill` and `lang-backfill` exit with
-    the traceback; re-run them. Pinned in `tests/test_worker_db_contention.py`
-    with a trigger raising each SQLSTATE, plus a `DataError` control per site.
+    needs a slow index insert.
+    - **The cost is sync's loud wedge, over a wider scope.** A raise discards
+      its step's whole uncommitted batch, and the next sweep re-claims the
+      same `ORDER BY id` batch. So a row whose statement times out on every
+      attempt wedges its step until `daemon.db_statement_timeout_s` is
+      raised; re-running does not help. Lang detection was therefore moved
+      to the **last** step of `run_embed_worker_once`, so a wedged lang row
+      stalls only lang detection. Embedding still slows down: the raising
+      sweep is paced as an empty one, so embedding drains one batch per
+      backoff ceiling. Message chunking is still the first step,
+      and a wedged one stops embedding too. Pinned by
+      `test_a_contended_language_pass_does_not_cost_the_sweep_its_embeddings`.
+    - **The CLI sees it differently per site.** `embed-backfill` and
+      `lang-backfill` exit with the traceback from chunking and lang
+      detection. At the embedding UPDATE, `embed-backfill` logs the batch
+      WARNING, stops early and still prints `done`. The CLI's pools carry no
+      `statement_timeout`, so there it takes a deadlock or `lock_timeout`.
+    - Pinned in `tests/test_worker_db_contention.py` with a trigger raising
+      each SQLSTATE, plus a `DataException` control per site. **Not
+      `psycopg.errors.DataError.sqlstate`**: that is the DB-API base class,
+      its sqlstate is `None`, and the trigger then raised `UndefinedObject`.
   - **The cause of #414's stall is still unknown**: the DGX journal for it had
     rotated away. `run_forever` registers `faulthandler` on
     `STACK_DUMP_SIGNAL` (SIGUSR1), so the next stall is `kill -USR1 <pid>`

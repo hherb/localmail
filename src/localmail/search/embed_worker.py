@@ -486,10 +486,16 @@ def run_embed_worker_once(
       2. _chunk_attachments_lazily — fills attachment_chunks for unchunked
          attachment_text rows (Phase 2). Sentinel rows (extracted_text='')
          produce zero chunks and are silently skipped.
-      3. run_lang_detect_pass — populates messages.body_lang for messages
+      3. Embed pending message_chunks rows.
+      4. Embed pending attachment_chunks rows.
+      5. run_lang_detect_pass — populates messages.body_lang for messages
          that don't yet have it (only when `lang_detector` is provided).
-      4. Embed pending message_chunks rows.
-      5. Embed pending attachment_chunks rows.
+
+    Steps 1 and 5 re-raise `db.DB_CONTENTION_ERRORS` (#425), discarding that
+    step's uncommitted batch; earlier steps have already committed. A row
+    whose statement times out on every attempt therefore wedges its step
+    until `daemon.db_statement_timeout_s` is raised, and a wedged step 1
+    stops the steps after it too.
 
     Returns a `SweepOutcome` carrying the chunks embedded across both tables
     *and* the language rows visited. Used both by the background daemon thread
@@ -525,15 +531,17 @@ def run_embed_worker_once(
     chunk_batch = max(cfg.embed_worker_batch_size, cfg.embed_worker_chunk_batch_size)
     _chunk_messages_lazily(conn, cfg, batch=chunk_batch)
     _chunk_attachments_lazily(conn, cfg, batch=chunk_batch)
-    lang_visited = 0
-    if lang_detector is not None and cfg.body_lang_enabled:
-        lang_visited = run_lang_detect_pass(conn, cfg, lang_detector).visited
     embedded_msg = _embed_table(
         conn, cfg, backend, "message_chunks", failure_log=log_state, now=now
     )
     embedded_att = _embed_table(
         conn, cfg, backend, "attachment_chunks", failure_log=log_state, now=now
     )
+    # Last, because it can raise (#425): a row whose write keeps timing out
+    # then stalls language detection only, not the embedding committed above.
+    lang_visited = 0
+    if lang_detector is not None and cfg.body_lang_enabled:
+        lang_visited = run_lang_detect_pass(conn, cfg, lang_detector).visited
     return SweepOutcome(
         embedded=embedded_msg + embedded_att, lang_visited=lang_visited,
     )

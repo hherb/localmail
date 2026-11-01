@@ -14,7 +14,7 @@ The error is raised by the server, through a trigger, rather than by a patched
 Python function: the embedding UPDATE has no Python seam inside its savepoint,
 and a server-side failure is also what aborts the transaction for real, so the
 `ROLLBACK TO SAVEPOINT` that precedes the re-raise is exercised too. A
-`DataError` through the same trigger is the positive control at every site: a
+`DataException` through the same trigger is the positive control at every site: a
 re-raise of everything would pass the contention cases alone.
 """
 
@@ -34,12 +34,15 @@ from localmail.search.lang_detect import FixedDetector, run_lang_detect_pass
 from .test_embed_worker import _seed_message, _StaticEmbedder
 
 _TRIGGER_FN = "localmail_test_raise_425"
-_POISON_SQLSTATE = psycopg.errors.DataError.sqlstate
+# Not `DataError.sqlstate`: that is the DB-API base class, whose sqlstate is
+# None, so the trigger raised `UndefinedObject` for the code 'None' instead.
+_POISON_SQLSTATE = psycopg.errors.DataException.sqlstate
+assert _POISON_SQLSTATE and all(exc.sqlstate for exc in DB_CONTENTION_ERRORS)
 
 #: (sqlstate, expected exception or None when the item is recorded instead).
 _CASES = [
     pytest.param(exc.sqlstate, exc, id=exc.__name__) for exc in DB_CONTENTION_ERRORS
-] + [pytest.param(_POISON_SQLSTATE, None, id="DataError-is-still-recorded")]
+] + [pytest.param(_POISON_SQLSTATE, None, id="DataException-is-still-recorded")]
 
 
 @contextlib.contextmanager
@@ -50,10 +53,12 @@ def _raising_trigger(
     """A trigger raising `sqlstate` on `event` of `table`, dropped on exit.
 
     The workers commit, so the trigger must be committed to be seen by them,
-    and must therefore be removed explicitly rather than by a rollback.
+    and must therefore be removed explicitly rather than by a rollback. The
+    setup replaces whatever a killed run left behind, since `TRUNCATE` does not.
     """
+    conn.execute(f"DROP TRIGGER IF EXISTS raise_425 ON {table}")
     conn.execute(
-        f"CREATE FUNCTION {_TRIGGER_FN}() RETURNS trigger LANGUAGE plpgsql AS"
+        f"CREATE OR REPLACE FUNCTION {_TRIGGER_FN}() RETURNS trigger LANGUAGE plpgsql AS"
         f" $$BEGIN RAISE EXCEPTION 'simulated' USING ERRCODE = '{sqlstate}'; END$$"
     )
     conn.execute(
@@ -141,3 +146,24 @@ def test_language_detection_does_not_decline_a_contended_row(
         assert row[1] is not None  # poison: stamped, leaves the queue
     else:
         assert row[1] is None  # contention: still claimable next sweep
+
+
+def test_a_contended_language_pass_does_not_cost_the_sweep_its_embeddings(
+    db_conn: psycopg.Connection,
+) -> None:
+    """Language detection runs after both embedding steps, so a lang write
+    that keeps timing out stalls only itself: the chunks embedded earlier in
+    the same sweep were committed before it raised."""
+    _seed_message(db_conn, body="ein deutscher Text")
+    detector = FixedDetector({"ein deutscher Text": "de"})
+    with _raising_trigger(
+        db_conn, table="messages", event="UPDATE",
+        sqlstate=psycopg.errors.QueryCanceled.sqlstate,
+        when="NEW.body_lang IS NOT NULL",
+    ), pytest.raises(psycopg.errors.QueryCanceled):
+        run_embed_worker_once(
+            db_conn, SearchConfig(), _StaticEmbedder(), lang_detector=detector,
+        )
+    assert _count(
+        db_conn, "SELECT count(*) FROM message_chunks WHERE embedding_v1 IS NOT NULL",
+    ) >= 1

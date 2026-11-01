@@ -41,7 +41,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   On a popover Apply, or when a typed operator is absorbed into a chip, the
   quoted word came back as the operator / an exclusion (#419 syntax).
 - **The fix.** New `tokenizeRaw(s): Token[]` with `{text, raw}`; `raw`
-  keeps the `"` delimiters, as the server's `_tokenize` does. `joinTokens`
+  keeps closed `"…"` delimiters, as the server's `_tokenize` does (an
+  unclosed `"` is dropped, where the server keeps it). `joinTokens`
   takes `Token[]` and re-emits a quoted token as typed. A raw spelling with
   an apostrophe *outside* its quotes falls back to the old whole-token
   wrapping, because the server reads that `'` as a quote opener.
@@ -57,7 +58,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 |---|---|
 | RED first | 7 new tests, all 7 failed before the fix |
 | 4 mutations | all caught: no raw return (9 fail), no closing `"` in raw (14), no apostrophe guard (1, its own case), no `raw` reset on an unclosed quote (1, its own round-trip case) |
-| `npm test -- --run` | **528 passed**, 49 files |
+| `npm test -- --run` | **530 passed**, 49 files (528 + 2 added in review) |
+| review | 2 more mutations survived (no `rawBeforeQuote` save, non-global quote strip); each now has its own test and fails it. Server-token differential re-run on the new join: 3 seeds × 30,000, 0 mismatches (51 with the apostrophe guard removed) |
 | `npm run check` | 0 errors, 0 warnings |
 | server agreement | `parse_query` keeps `a "OR" b` and `"-acme" invoice` as free text with no exclusion; `to:"bob smith"` is the `to` filter |
 | Python suite | not run (no Python changed) |
@@ -187,7 +189,7 @@ uptime; pgrep -fl pytest
 unset VIRTUAL_ENV && uv run pytest -q              # 4392 at session 71 (not re-run in 72)
 uv run pytest -q tests/test_search_attachment_name_filter.py tests/test_search_date_local.py tests/test_date_header.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
-cd gui && npm test -- --run && npm run check   # 528 at session 72
+cd gui && npm test -- --run && npm run check   # 530 at session 72
 ```
 
 The latest migration is **`0037_messages_attachment_names_idx.sql`**; the next

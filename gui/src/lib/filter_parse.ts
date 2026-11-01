@@ -20,8 +20,10 @@ const POPOVER_OPERATORS = new Set([
 ]);
 
 /**
- * A token as read (`text`, quote characters dropped) and as typed (`raw`,
- * with its `"` delimiters kept — the server's `_tokenize` keeps them too).
+ * A token as read (`text`, `"` dropped) and as typed (`raw`, with its closed
+ * `"…"` delimiters kept, as the server's `_tokenize` keeps them). An
+ * unclosed `"` is dropped from `raw` too, where the server keeps it and runs
+ * it to the end of the string; and `'` is literal here, a quote there.
  * `raw` is what lets a rebuild keep `"OR"` a word and `"-acme"` a required
  * term rather than an operator and an exclusion (#421).
  */

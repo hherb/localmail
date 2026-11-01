@@ -1624,7 +1624,8 @@ for the Phase 2 plan.
   - **The GUI re-joins a typed query** when absorbing operators and on a
     popover Apply (`filter_parse.joinTokens`). Since #421 its tokenizer
     keeps each token's typed spelling beside the text (`tokenizeRaw`'s
-    `raw`, with `"` kept, like the server's `_tokenize`), and a token typed
+    `raw`, with closed `"…"` pairs kept, like the server's `_tokenize`; an
+    unclosed `"` is dropped, where the server keeps it), and a token typed
     with quotes is re-emitted as typed: `"OR"` stays a word and `"-acme"` a
     required term. The one exception is a raw spelling with an apostrophe
     *outside* its quotes, which the server would read as a quote opener; it
@@ -6219,7 +6220,12 @@ for the full design.
           (#421 later made a token *typed* with quotes come back verbatim,
           so `to:"bob smith"` stays `to:"bob smith"` rather than becoming
           `"to:bob smith"`; the wrapping above now applies to unquoted
-          tokens and to the apostrophe-outside-quotes fallback.)
+          tokens and to the apostrophe-outside-quotes fallback. The 20,000
+          figure measured the old join; the new one was re-measured in
+          #421's review, 3 seeds × 30,000 queries over `a b O R x - " '`
+          and space, rebuilt by the real `joinTokens` and read by the real
+          `_tokenize`: 0 queries where the server's tokens differ from the
+          client's, against 51 with the apostrophe guard removed.)
         - **Two imprecisions, both from reading with the client tokenizer.**
           An operator only the server extracts (`'from:bob'`, single-quoted)
           is not seen, so its chip can still be out-voted. And an operator an

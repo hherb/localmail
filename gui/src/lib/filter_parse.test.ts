@@ -302,6 +302,20 @@ describe("quoted single words survive a rebuild (#421)", () => {
     expect(out.filters.from).toBe("bob");
     expect(out.query).toBe(expected);
   });
+
+  // An unclosed quote mid-token rolls `raw` back to the text before it, so
+  // the prefix typed ahead of the quote must survive the rollback.
+  it("keeps the prefix of a token with an unclosed quote", () => {
+    expect(tokenizeRaw('ab"cd')).toEqual([{ text: "abcd", raw: "abcd" }]);
+    expect(extractDslFilters('ab"cd from:x').freeText).toBe("abcd");
+    expect(extractDslFilters('"x" ab"cd').freeText).toBe('"x" abcd');
+  });
+
+  // Every closed pair is stripped before looking for an apostrophe outside
+  // them; a non-global strip would see the `'` in the second pair.
+  it("looks past every quoted run for an outside apostrophe", () => {
+    expect(extractDslFilters('"-a""b\'s" x').freeText).toBe('"-a""b\'s" x');
+  });
 });
 
 describe("joinTokens", () => {

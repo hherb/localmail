@@ -100,3 +100,40 @@ def test_continue_page_with_invalid_token_raises(db_dsn, db_conn):
             s.continue_page("nonexistent", page=2)
     finally:
         pool.close()
+
+
+def test_paging_past_a_grow_serves_each_message_once(db_dsn, db_conn):
+    """#426: the page after a pool grow used to be the grown pool's page 1,
+    so page 3 of a search repeated page 1. Paged the way a client pages —
+    ``run_search`` with ``next_cursor`` until it is null — every seeded
+    message must arrive exactly once, under one token."""
+    from localmail.api.search import run_search
+    from localmail.api.search_cursor import decode_search_cursor
+
+    _seed_many(db_conn, n=30)
+    cfg = SearchConfig(page_size_default=5, candidates_per_arm=4,
+                       rerank_pool_size=4, candidates_per_arm_max=64)
+    run_embed_worker_once(db_conn, cfg, _E())
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id FROM accounts")
+        acl = [row[0] for row in cur.fetchall()]
+    pool = open_pool(db_dsn)
+    seen: list[str] = []
+    tokens: set[str] = set()
+    try:
+        s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
+        cursor = None
+        for _ in range(50):
+            out = run_search(searcher=s, free_text="test", filters={}, limit=5,
+                             allowed_account_ids=acl, user_id=1, cursor=cursor)
+            seen += [r["message_id"] for r in out["results"]]
+            cursor = out["next_cursor"]
+            if cursor is None:
+                break
+            tokens.add(decode_search_cursor(cursor).token)
+    finally:
+        pool.close()
+    assert cursor is None
+    assert len(seen) == len(set(seen)), "a message was served twice"
+    assert len(seen) == 30
+    assert len(tokens) == 1

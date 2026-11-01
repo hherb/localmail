@@ -123,6 +123,54 @@ def _date_sort_key(item: dict) -> tuple[int, datetime]:
     return date_key(_msg_date(item))
 
 
+# `CASE` guards both functions that raise on malformed input: the column has
+# no CHECK (see `attachment_presence`), and `decode` raises on non-hex.
+_MESSAGE_ATTACHMENTS_SQL = """
+SELECT m.id, e.att ->> 'filename', e.att ->> 'sha256', b.mime_type, b.size_bytes
+FROM messages m
+CROSS JOIN LATERAL jsonb_array_elements(
+    CASE WHEN jsonb_typeof(m.attachments) = 'array'
+         THEN m.attachments ELSE '[]'::jsonb END
+) WITH ORDINALITY AS e(att, ord)
+LEFT JOIN attachment_blobs b ON b.sha256 = CASE
+    WHEN e.att ->> 'sha256' ~ '^[0-9a-fA-F]{64}$'
+    THEN decode(e.att ->> 'sha256', 'hex') END
+WHERE m.id = ANY(%s) AND jsonb_typeof(e.att) = 'object'
+ORDER BY m.id, e.ord
+"""
+
+
+def _ordered_pool(
+    hydrated: list[dict], scores: list[float], sort: SortMode,
+) -> list[tuple[dict, float]]:
+    """The cached pool in served order: what ``_build_results`` pages over.
+
+    Shared with ``Searcher.grow_pool``, which must know which rows earlier
+    pages already served so the grown pool does not serve them again (#426).
+    """
+    if sort == "date":
+        return sorted(
+            zip(hydrated, scores, strict=True),
+            key=lambda x: _date_sort_key(x[0]), reverse=True,
+        )
+    # Equal relevance orders newest first. The score still leads — the date
+    # is a tiebreak, not the sort — and `message_id` closes the date's own
+    # ties so the page is reproducible. The same key function as the pool
+    # cut in `_cut_pool`, reading its date through the same `_msg_date`, or
+    # the rule would hold for the page and not for what reached it. The
+    # `score` axis differs by design: the cut can only know the RRF score,
+    # since the rerank necessarily runs after it.
+    return sorted(
+        zip(hydrated, scores, strict=True),
+        key=lambda x: relevance_key(
+            score=x[1],
+            when=_msg_date(x[0]),
+            message_id=x[0]["fused"].message_id,
+        ),
+        reverse=True,
+    )
+
+
 # The date-ordered walk's SQL rules moved to ``search/date_keyset.py``
 # when #323 made the walk a two-query operation — see that module. These
 # two names stay bound here because they are what this file (``_keyset_clause``)
@@ -609,6 +657,30 @@ class Searcher:
         ``searcher._rewriter`` (see #71)."""
         return self._rewriter is not None
 
+    def message_attachments(
+        self, message_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Every attachment each message carries, in stored order (#426).
+
+        Entries have the ``GET /v1/messages/{id}`` shape: ``filename``,
+        ``sha256``, ``content_type``, ``size``, the last two ``None`` when no
+        blob row matches. A message with none maps to ``[]``. One query.
+
+        No ACL here: the ids are a page of hits, which the search that
+        produced them has already scoped. A malformed stored entry (the
+        column has no CHECK) is skipped or degrades to ``None`` metadata
+        rather than failing the page.
+        """
+        out: dict[int, list[dict[str, Any]]] = {mid: [] for mid in message_ids}
+        if not message_ids:
+            return out
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(_MESSAGE_ATTACHMENTS_SQL, (message_ids,))
+            for mid, filename, sha, mime, size in cur.fetchall():
+                out[mid].append({"filename": filename, "sha256": sha,
+                                 "content_type": mime, "size": size})
+        return out
+
     def get_pool_metadata(
         self, search_token: str, *, user_id: int | None = None,
     ) -> PoolMetadata | None:
@@ -726,7 +798,8 @@ class Searcher:
         bounds: there is no pool cap and the cursor walks the (ts, id)
         keyspace, so the user can scroll back arbitrarily far.
 
-        Uses the same ``messages.fts_v2`` column and the shared
+        Uses the same ``messages.fts_v2`` column (plus attachment file
+        names, #426) and the shared
         ``build_lexical_tsquery`` matcher as ``arm_bm25_messages`` so recall is
         identical for the lexical case — including ``--smart`` expansion terms,
         which OR into the FTS match here exactly as they do in the hybrid arms.
@@ -737,6 +810,7 @@ class Searcher:
         here so an OR-ed expansion term cannot bring an excluded word back.
         """
         from localmail.search.arms import _message_where, build_lexical_tsquery
+        from localmail.search.attachment_names import NAMES_TSV_SQL
 
         where_extra, where_params = _message_where(parsed)
         match_params: list[Any] = []
@@ -747,8 +821,10 @@ class Searcher:
             tsq_sql, tsq_params = build_lexical_tsquery(
                 parsed.free_text, parsed.expansion_terms
             )
-            match_clause = f"m.fts_v2 @@ {tsq_sql}"
-            match_params.extend(tsq_params)
+            # File names match as in arm 1 (#426).
+            match_clause = (f"(m.fts_v2 @@ {tsq_sql}"
+                            f" OR {NAMES_TSV_SQL} @@ {tsq_sql})")
+            match_params.extend([*tsq_params, *tsq_params])
         else:
             # No free text: the walk is over the whole (filtered) archive.
             # This is the branch that used to be _list_recent_messages, which
@@ -819,7 +895,15 @@ class Searcher:
         parsed: ParsedQuery,
         candidates_per_arm: int,
         rerank_pool_size: int,
+        *,
+        exclude: frozenset[int] = frozenset(),
     ) -> list[FusedHit]:
+        """Fuse the four arms and cut to ``rerank_pool_size``.
+
+        ``exclude`` drops already-served messages *before* the cut, so a
+        grown pool holds ``rerank_pool_size`` unseen rows rather than that
+        many minus the ones it then throws away (#426).
+        """
         # Lazy import to avoid circular dependency (arms imports ArmHit from this module)
         from localmail.search.arms import (
             arm_bm25_chunks, arm_bm25_messages, arm_vector_chunks,
@@ -833,6 +917,8 @@ class Searcher:
         a3 = arm_vector_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
         a4 = arm_vector_attachment_chunks(conn, parsed, self._cfg, qvec, limit=candidates_per_arm)
         fused = rrf_fuse([a1, a2, a3, a4], k=self._cfg.rrf_k)
+        if exclude:
+            fused = [h for h in fused if h.message_id not in exclude]
         return self._cut_pool(conn, fused, rerank_pool_size)
 
     def _cut_pool(
@@ -1044,29 +1130,7 @@ class Searcher:
         it would be tested against code that never runs.
         """
         terms = parsed.semantic_text.split()
-        if sort == "date":
-            ordered = sorted(
-                zip(hydrated, rerank_scores, strict=True),
-                key=lambda x: _date_sort_key(x[0]), reverse=True,
-            )
-        else:
-            # Equal relevance orders newest first. The score still leads —
-            # the date is a tiebreak, not the sort — and `message_id` closes
-            # the date's own ties so the page is reproducible. The same key
-            # function as the pool cut in `_cut_pool`, reading its date
-            # through the same `_msg_date`, or the rule would hold for the
-            # page and not for what reached it. The `score` axis differs by
-            # design: the cut can only know the RRF score, since the rerank
-            # necessarily runs after it.
-            ordered = sorted(
-                zip(hydrated, rerank_scores, strict=True),
-                key=lambda x: relevance_key(
-                    score=x[1],
-                    when=_msg_date(x[0]),
-                    message_id=x[0]["fused"].message_id,
-                ),
-                reverse=True,
-            )
+        ordered = _ordered_pool(hydrated, rerank_scores, sort)
         start = (page - 1) * page_size
         end = start + page_size
         out: list[SearchResult] = []
@@ -1150,8 +1214,16 @@ class Searcher:
         page_size = entry["page_size"]
         hydrated = entry["hydrated"]
         pool_size = len(hydrated)
+        # A grown pool starts at the page that triggered the grow, with every
+        # row served before it removed (#426). Ungrown pools start at 1.
+        first_page = entry.get("first_page", 1)
+        if 1 <= page < first_page:
+            # Pages served before a grow are not in the grown pool; the
+            # caller re-runs the search, as for any expired cursor.
+            raise CacheMissError(search_token)
+        local_page = page - first_page + 1
         max_page = max(1, math.ceil(pool_size / page_size))
-        if page < 1 or page > max_page:
+        if page < 1 or local_page > max_page:
             raise PageOutOfPoolError(
                 f"page {page} out of pool (pool_size={pool_size}, page_size={page_size}); "
                 "call grow_pool to widen the candidate pool"
@@ -1163,18 +1235,18 @@ class Searcher:
         if needs_filename:
             with self._pool.connection() as conn:
                 results = self._build_results(
-                    hydrated, entry["parsed"], entry["scores"], page, page_size,
-                    conn=conn, sort=sort, snippet_width=width,
+                    hydrated, entry["parsed"], entry["scores"], local_page,
+                    page_size, conn=conn, sort=sort, snippet_width=width,
                 )
         else:
             results = self._build_results(
-                hydrated, entry["parsed"], entry["scores"], page, page_size,
-                conn=None, sort=sort, snippet_width=width,
+                hydrated, entry["parsed"], entry["scores"], local_page,
+                page_size, conn=None, sort=sort, snippet_width=width,
             )
         return SearchPage(
             results=results, page=page, page_size=page_size, pool_size=pool_size,
             candidates_per_arm=entry["candidates_per_arm"],
-            has_more_in_pool=pool_size > page * page_size,
+            has_more_in_pool=pool_size > local_page * page_size,
             can_grow_pool=True,
             search_token=search_token, query=entry["parsed"],
             timing_ms={"cache_hit": 0.0},
@@ -1183,10 +1255,19 @@ class Searcher:
         )
 
     def grow_pool(
-        self, search_token: str, candidates_per_arm: int, *, user_id: int | None = None,
-        snippet_chars: int | None = None,
+        self, search_token: str, candidates_per_arm: int, *, page: int = 1,
+        user_id: int | None = None, snippet_chars: int | None = None,
     ) -> SearchPage:
-        """Re-run the pipeline with a larger candidate pool. Returns page 1.
+        """Re-run the pipeline with a larger candidate pool; return ``page``.
+
+        Every row the pages before ``page`` already served is left out of the
+        grown pool, and the pool stays under ``search_token``, so a caller
+        paging on past a grow sees each message once (#426). It used to
+        return the grown pool's page 1 under a new token, which re-ranked to
+        mostly the same top hits: page 3 of a search repeated page 1.
+
+        ``page`` is the page the caller asked for. With the default ``1``
+        nothing was served yet, so the result is the grown pool's page 1.
 
         ``user_id`` enforces the same cache-scoping invariant as
         :meth:`continue_page`: a cursor minted by user A is treated as
@@ -1200,56 +1281,24 @@ class Searcher:
         entry = self._cache.get(search_token)
         if user_id is not None and entry.get("user_id") != user_id:
             raise CacheMissError(search_token)
+        first_page = entry.get("first_page", 1)
+        if page < first_page:
+            raise CacheMissError(search_token)
+        page_size = entry["page_size"]
+        served = _ordered_pool(entry["hydrated"], entry["scores"], entry["sort"])
+        excluded: frozenset[int] = entry.get("excluded_ids", frozenset()) | {
+            item["fused"].message_id
+            for item, _ in served[:(page - first_page) * page_size]
+        }
         parsed = entry["parsed"]
-        sort: SortMode = entry["sort"]
-        self._cache.invalidate(search_token)
         # rerank pool grows proportionally so the larger arm output isn't wasted
         rps = max(candidates_per_arm, entry["rerank_pool_size"])
-        page = self._search_with_parsed(parsed, page_size=entry["page_size"],
-                                        candidates_per_arm=candidates_per_arm,
-                                        rerank_pool_size=rps, use_cache=True,
-                                        user_id=user_id, sort=sort,
-                                        sort_order=entry["sort_order"],
-                                        snippet_width=width)
-        return page
-
-    def _search_with_parsed(self, parsed, *, page_size, candidates_per_arm,
-                            rerank_pool_size, use_cache, user_id: int | None = None,
-                            sort: SortMode,
-                            sort_order: SortOrder,
-                            snippet_width: int):
-        """Variant of search() that takes an already-parsed query.
-
-        Connection scope: retrieval + hydrate inside one 'with' block. The
-        connection is released before the reranker runs (the ML pass can be
-        slow). A second short-lived connection opens only when the page needs
-        attachment filename resolution.
-
-        ``sort`` and ``sort_order`` are **keyword-only with no default**,
-        the ``allowed_account_ids`` shape (#234). This method *writes* the
-        cached pool's own record of both axes, and ``PoolMetadata`` reads
-        that record back to decide whether a paging request contradicts the
-        pool — so a caller who omitted either would record the pool as
-        rank/desc regardless of what it actually built, which is #312 one
-        function over and silent. The single caller (``grow_pool``) forwards
-        the values it read off the entry, so nothing is lost by making them
-        unspellable-by-omission.
-
-        ``snippet_width`` is likewise required and keyword-only, the
-        ``_build_results`` shape: a default would let a caller forget it and
-        silently serve the configured width to a caller who asked for
-        another.
-        """
-        t0 = time.monotonic()
-        timing: dict[str, float] = {"parse": 0.0}
         with self._pool.connection() as conn:
             parsed = self._resolve_account_names(conn, parsed)
-            t = time.monotonic()
-            fused = self._retrieve_pool(conn, parsed, candidates_per_arm, rerank_pool_size)
-            timing["retrieve"] = (time.monotonic() - t) * 1000
+            fused = self._retrieve_pool(conn, parsed, candidates_per_arm, rps,
+                                        exclude=excluded)
             hydrated = self._hydrate(conn, fused)
         # Connection released. Reranker runs without holding a pool connection.
-        t = time.monotonic()
         if self._reranker and hydrated:
             cap = self._cfg.rerank_max_chars
             snippets = [item["snippet_source_text"][:cap] for item in hydrated]
@@ -1261,38 +1310,17 @@ class Searcher:
             )
         else:
             scores = [item["fused"].rrf_score for item in hydrated]
-        timing["rerank"] = (time.monotonic() - t) * 1000
-        needs_filename = any(
-            item["fused"].best_chunk_table == "attachment_chunks" for item in hydrated
-        )
-        if needs_filename:
-            with self._pool.connection() as conn:
-                results = self._build_results(hydrated, parsed, scores, page=1,
-                                              page_size=page_size, conn=conn,
-                                              sort=sort, snippet_width=snippet_width)
-        else:
-            results = self._build_results(hydrated, parsed, scores, page=1,
-                                          page_size=page_size, conn=None,
-                                          sort=sort, snippet_width=snippet_width)
-        timing["total"] = (time.monotonic() - t0) * 1000
-        token = uuid.uuid4().hex[:16] if use_cache else None
-        if token:
-            self._cache.put(token, {
-                "parsed": parsed, "hydrated": hydrated, "scores": scores,
-                "candidates_per_arm": candidates_per_arm,
-                "rerank_pool_size": rerank_pool_size, "page_size": page_size,
-                "user_id": user_id,
-                "sort": sort,
-                "sort_order": sort_order,
-            })
-        return SearchPage(
-            results=results, page=1, page_size=page_size, pool_size=len(hydrated),
-            candidates_per_arm=candidates_per_arm,
-            has_more_in_pool=len(hydrated) > page_size, can_grow_pool=True,
-            search_token=token, query=parsed, timing_ms=timing,
-            sort_applied=sort,
-            rankable=is_rankable(free_text=parsed.free_text),
-        )
+        # `sort` and `sort_order` are copied from the entry, never defaulted:
+        # `PoolMetadata` reads them back to decide whether a paging request
+        # contradicts the pool (#312).
+        self._cache.put(search_token, {
+            **entry,
+            "parsed": parsed, "hydrated": hydrated, "scores": scores,
+            "candidates_per_arm": candidates_per_arm, "rerank_pool_size": rps,
+            "first_page": page, "excluded_ids": excluded,
+        })
+        return self.continue_page(search_token, page, user_id=user_id,
+                                  snippet_chars=width)
 
     def search(
         self,

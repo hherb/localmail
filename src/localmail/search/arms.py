@@ -18,6 +18,7 @@ from typing import Any
 import psycopg
 
 from localmail.config import SearchConfig
+from localmail.search.attachment_names import NAMES_TSV_SQL
 from localmail.search.attachment_presence import HAS_ATTACHMENT_SQL
 from localmail.search.query import ParsedQuery, SearchFilters
 from localmail.search.searcher import ArmHit
@@ -148,6 +149,9 @@ def arm_bm25_messages(
 
     Field weight order for ts_rank_cd float4[] is [D, C, B, A]:
       D = to_addrs, C = body, B = from, A = subject
+
+    Attachment file names match too, ranked at the subject's weight; see
+    ``attachment_names`` for why they are a separate tsvector (#426).
     """
     if not parsed.free_text.strip():
         return []
@@ -171,16 +175,18 @@ def arm_bm25_messages(
     sql = f"""
         WITH ranked AS (
             SELECT m.id,
-                   ts_rank_cd(%s::float4[], m.fts_v2, {tsq_sql}) AS score
+                   ts_rank_cd(%s::float4[], m.fts_v2 || {NAMES_TSV_SQL},
+                              {tsq_sql}) AS score
             FROM messages m
-            WHERE m.fts_v2 @@ {tsq_sql}
+            WHERE (m.fts_v2 @@ {tsq_sql} OR {NAMES_TSV_SQL} @@ {tsq_sql})
             {where_extra}
             ORDER BY score DESC
             LIMIT %s
         )
         SELECT id, score, ROW_NUMBER() OVER (ORDER BY score DESC) FROM ranked
     """
-    params: list[Any] = [weights, *tsq_params, *tsq_params, *where_params, limit]
+    params: list[Any] = [weights, *tsq_params, *tsq_params, *tsq_params,
+                         *where_params, limit]
     with conn.cursor() as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()

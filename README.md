@@ -943,7 +943,10 @@ Poll, process, ack. Semantics:
   hybrid retrieval pool. When the page advances past the cached pool
   and `can_grow_pool=true`, the route doubles `candidates_per_arm` up
   to `candidates_per_arm_max` (default 800), then flips
-  `next_cursor` to `null`.
+  `next_cursor` to `null`. The grown pool leaves out every hit already
+  served and keeps the same token, so each message arrives once per paging
+  session (#426; before `api_minor` 5, page 3 onwards repeated page 1).
+  Re-presenting a cursor from before a grow is a 409, like an expired one.
 - **Keyset cursor** (`"K|"` / `"KT|"` descending, `"KA|"` / `"KAT|"`
   ascending, each followed by base64) — used for `sort=date` and for any
   blank-query search, backed by a scan over
@@ -1122,7 +1125,12 @@ skipped; repair one with `--account NAME`.
   under its historical name: the server has never emitted markup into it, so
   it is raw message text and a consumer rendering it as HTML must escape it.)
   The envelope (`next_cursor`, `sort_applied`, `rankable`, `rewrite_*`, …) is
-  never projected.
+  never projected. Since `api_minor` 5 two more opt-in names exist (#426):
+  `attachment_filename`, the file whose extracted text matched (`null`
+  unless the best match was an attachment's text), and `attachments`, every
+  attachment the message carries as `{filename, sha256, content_type, size}`,
+  the `GET /v1/messages/{id}` entry shape. `attachments` costs one query per
+  page, only when named.
 - `snippet_chars`: the width of the snippet window, between 1 and
   `[search] snippet_max_chars` (default 1000). A cut window may gain a `…`
   at either end, so the text is at most `snippet_chars + 2` characters.
@@ -1130,7 +1138,7 @@ skipped; repair one with `--account NAME`.
   request.
 
 An unknown or empty `fields`, a `fields` list of more than 48 entries
-(duplicates count; there are 12 hit fields), or an out-of-range or
+(duplicates count; there are 14 hit fields), or an out-of-range or
 non-integer `snippet_chars`, is a 400 problem+json. That holds for a caller granted no
 accounts too. Omit both for today's response, unchanged.
 
@@ -1438,6 +1446,12 @@ answered date-ordered. The syntax is announced by `api_minor >= 4` on
 `GET /v1/version`; an older server reads `OR` and quotes as plain words and
 `-word` as a *required* word.
 
+Words also match attachment **file names** (`api_minor >= 5`, #426), at the
+subject's weight: `"2312 Herb Fee Proposal 230712.pdf"` finds the message
+carrying that file, and so does a fragment of it (`230712`, `Fee Proposal`).
+All of a query's words must sit in the name, or all in the message: a query
+split between the two matches neither.
+
 DSL operators: `from:`, `to:`, `subject:`, `label:`, `account:`, `folder:`,
 `account_id:N`, `folder_id:N`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`,
 `lang:XX` (ISO 639-1 code; matches the `messages.body_lang` column populated
@@ -1567,7 +1581,8 @@ for r in page.results:
 page2 = searcher.continue_page(page.search_token, page=2)
 
 # Needle-in-haystack — widen the candidate pool:
-deeper = searcher.grow_pool(page.search_token, candidates_per_arm=200)
+# (the next page after a grow; already-served hits are left out)
+deeper = searcher.grow_pool(page.search_token, candidates_per_arm=200, page=3)
 ```
 
 ### Embedding model

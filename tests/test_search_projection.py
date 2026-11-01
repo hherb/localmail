@@ -16,6 +16,7 @@ from localmail.api.search import _to_api_result
 from localmail.api.search_projection import (
     HIT_FIELDS,
     MAX_FIELDS,
+    OPT_IN_FIELDS,
     fields_error,
     project_hit,
 )
@@ -36,20 +37,24 @@ def _result() -> SearchResult:
 def test_hit_fields_are_exactly_the_hit_keys_plus_snippet() -> None:
     # One authority: a key added to the hit later cannot go missing from the
     # projection, and no name is permitted that the hit never carries.
-    assert set(HIT_FIELDS) == set(_to_api_result(_result())) | {"snippet"}
+    assert set(HIT_FIELDS) == set(_to_api_result(_result())) | set(OPT_IN_FIELDS)
     assert len(HIT_FIELDS) == len(set(HIT_FIELDS))
-    # Positional, because the module docstring's claim is positional ("the
-    # first eleven"). The set comparison above admits a reorder of
+    # Positional, because the module docstring's claim is positional (the
+    # hit's keys, then the opt-ins). The set comparison above admits a reorder of
     # `_to_api_result`, after which a projected hit's key order diverges from
     # a default hit's and the claim is false with both assertions green.
-    assert tuple(HIT_FIELDS[:-1]) == tuple(_to_api_result(_result()))
-    assert HIT_FIELDS[-1] == "snippet"
+    n = len(OPT_IN_FIELDS)
+    assert tuple(HIT_FIELDS[:-n]) == tuple(_to_api_result(_result()))
+    assert HIT_FIELDS[-n:] == OPT_IN_FIELDS
+    # Opt-in means absent by default: the default hit stays byte-identical.
+    assert not set(OPT_IN_FIELDS) & set(_to_api_result(_result()))
 
 
 def test_hit_fields_order_is_the_documented_one() -> None:
     assert HIT_FIELDS == (
         "message_id", "account", "folder", "subject", "from", "to", "date",
         "snippet_html", "has_attachments", "score", "matched_arms", "snippet",
+        "attachment_filename", "attachments",
     )
 
 

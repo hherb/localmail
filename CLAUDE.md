@@ -857,7 +857,7 @@ src/localmail/
     snippet_width.py # pure: snippet_width_error — the one snippet-width
                     #   type/floor rule, read by the api gate (capped) and
                     #   by Searcher._snippet_width (uncapped) (#390)
-migrations/         # 0001_init.sql … 0036_api_keys.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0037_messages_attachment_names_idx.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -5963,6 +5963,41 @@ for the full design.
         finite rows: substituting some *other* constant keeps `C, D, B`
         intact and moves only the NaN row, so the filtered assertion alone
         passes for it (mutation-proven with `99.0`).
+- **Kastellan's search asks (#426): paging, attachment names.** Items 1–3
+  shipped; 4 (`filters.attachment_name`) and 5 (the sender's local time on a
+  hit) are open. `api_minor` is **5**.
+  - **A grown pool serves the requested page, not page 1.** `grow_pool`
+    used to re-run retrieval and return the grown pool's page 1 under a new
+    token, which re-ranked to mostly the same top hits: page 3 of a search
+    repeated page 1 (measured on the DGX, 119 distinct of 300). It now takes
+    `page=`, leaves every row the earlier pages served out of the grown pool
+    *before* the cut (`_retrieve_pool(exclude=)`, so the pool holds
+    `rerank_pool_size` unseen rows), and re-puts the entry under the same
+    token with `first_page`/`excluded_ids`. `continue_page` pages relative to
+    `first_page`; a page below it is a `CacheMissError` (409), since those
+    rows are no longer in the pool. Served order is `_ordered_pool`, shared
+    with `_build_results`, so "what was served" cannot drift from what was.
+    The two keys are read with `.get` defaults: an ungrown pool truthfully
+    starts at page 1 with nothing excluded. Pinned end to end through
+    `run_search` (`test_paging_past_a_grow_serves_each_message_once`: 88
+    hits for 30 messages on the old code).
+  - **File names match the lexical query, through their own index.** The
+    rule is [src/localmail/search/attachment_names.py](src/localmail/search/attachment_names.py),
+    an expression index in migration `0037` rather than a change to the
+    generated `fts_v2` (a rewrite of every row, raw bytes included) or an
+    index over `fts_v2 || names` (a second 688 MB GIN). Each name is indexed
+    as written and split on punctuation, because `simple` reads
+    `230712.pdf` as one file token. Arm 1 and the date walk match
+    `fts_v2 @@ q OR names @@ q`, so a query split between a name and the
+    body matches neither half — the price of keeping both indexes. Arm 1
+    ranks over `fts_v2 || names` (weight A), computed per matched row:
+    ~1.5 µs a row, measured unindexed over the live archive. The migration
+    text is pinned to the expression, since the planner matches only an
+    identical tree.
+  - **`fields` gains `attachment_filename` and `attachments`**, opt-in like
+    `snippet` (`OPT_IN_FIELDS`), so the default hit is unchanged.
+    `attachments` is `Searcher.message_attachments`, one query per page run
+    only when named, in the message-detail entry shape. HTTP only (#368).
 - **Search filters are honoured or refused, never dropped (#364).** Design:
   [docs/superpowers/specs/2026-09-14-search-request-honesty-design.md](docs/superpowers/specs/2026-09-14-search-request-honesty-design.md);
   plan: [docs/superpowers/plans/2026-09-14-search-request-honesty.md](docs/superpowers/plans/2026-09-14-search-request-honesty.md).
@@ -6781,7 +6816,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0036_api_keys.sql`; next free slot `0037_*.sql`.
+  Latest is `0037_messages_attachment_names_idx.sql`; next free slot `0038_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

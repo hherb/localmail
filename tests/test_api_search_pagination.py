@@ -158,6 +158,8 @@ def test_pool_exhausted_with_grow_pool_available_triggers_grow_pool() -> None:
     assert args[0] == "tok-1"
     new_cpa = args[1] if len(args) > 1 else kwargs.get("candidates_per_arm")
     assert new_cpa > 50
+    # The grown pool serves the page the cursor asked for, not page 1 (#426).
+    assert kwargs.get("page") == 5
     # Accessor is called with the user_id so the pool's ownership is enforced.
     s.get_pool_metadata.assert_called_once_with("tok-1", user_id=99)
     assert out["next_cursor"] == "tok-2:2"

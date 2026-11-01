@@ -249,7 +249,7 @@ def test_grow_pool_reads_the_pool_s_sort_rather_than_assuming_rank(searcher):
     ``test_growing_a_pool_reports_the_pool_s_own_sort`` above grows a
     *rank*-built pool, so it is satisfied by a hardcoded ``"rank"`` — the
     exact vacuity its two siblings here were written to avoid. Measured:
-    replacing ``_search_with_parsed``'s stamp with ``"rank"`` left the whole
+    replacing ``grow_pool``'s stamp with ``"rank"`` left the whole
     suite green, while the same mutation on ``continue_page`` failed
     immediately.
 

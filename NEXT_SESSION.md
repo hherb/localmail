@@ -1,14 +1,15 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-01 (session 77).** `main` is **`d5f1277`**: #436
-> (#425) merged before this session, and #425 is closed.
+> **Status as of 2026-11-02 (session 77, continued).** `main` is
+> **`d5f1277`**: #436 (#425) merged before this session, and #425 is closed.
 >
-> This session opened **one PR** on `fix/437-import-retry-contention`:
-> `4083794` (the code) and this handoff. Its body says **`Closes #437`**.
+> This session has **one open PR, #438**, on `fix/437-import-retry-contention`.
+> Its body says **`Closes #437`** and **`Closes #439`**. It carries the #437
+> code, a four-reviewer review round, the #439 fix, and this handoff.
 >
-> **Both hosts are deployed at `d5f1277`** (see below).
+> **Both hosts are deployed at `d5f1277`**; nothing from #438 is deployed.
 >
-> **Open issues: 35** (34 once #437 closes; #439 filed in review).
+> **Open issues: 35** (33 once #438 merges: #437 and #439 close).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -35,13 +36,15 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `nvidia-cusparselt-cu13==0.8.1`, lock unchanged), restarted both units.
   `api_minor` 6, `build_hash` `d5f1277`, `NRestarts` 0, daemon `active`.
 
-### PR on `fix/437-import-retry-contention` (based on `main` at `d5f1277`)
+### PR #438 on `fix/437-import-retry-contention` (based on `main` at `d5f1277`)
 
 | SHA | What |
 |---|---|
 | `4083794` | #437: importer and `retry-failed` re-raise `db.DB_CONTENTION_ERRORS` |
-| handoff | this file + `docs/handoffs/2026-11-01T1243Z-import-retry-contention.md` |
-| review | review fixes: contention WARNINGs, `import` exits 1 on a failed job, `retry-failed` `ClickException`, three-row + CLI tests, corrected trigger wording |
+| `fec3a55` | first handoff (`docs/handoffs/2026-11-01T1243Z-import-retry-contention.md`, frozen) |
+| `0c2860e` | review fixes: contention WARNINGs, `import` exits 1 on a failed job, `retry-failed` `ClickException`, three-row + CLI tests, corrected trigger wording |
+| `c7fd77b` | #439: a failed import job reports the counters as of the last commit |
+| handoff | this file + `docs/handoffs/2026-11-02T0800Z-import-retry-contention-and-counters.md` |
 
 - **The defect.** Two per-message SAVEPOINT handlers recorded
   `QueryCanceled` / `DeadlockDetected` / `LockNotAvailable` in
@@ -51,8 +54,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `if isinstance(exc, DB_CONTENTION_ERRORS): raise`.
   - `run_import` lands in its outer handler, which writes `status='failed'`
     with `error_msg` (`"QueryCanceled: …"`) on a fresh connection. The
-    importer's "skipping poison message" WARNING now runs after the check,
-    so it no longer lies about a contended message.
+    check picks the WARNING (contention or "skipping poison message"), so
+    a contended message is no longer reported as poison.
   - `retry_failed_messages` raises out of the command; rows retried earlier
     were committed one by one, so they keep their outcome.
 - **Review round** (four reviewers): the first cut's trigger story was
@@ -64,7 +67,16 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `retry-failed` turns contention into a `ClickException`, and a three-row
   test pins "rows recovered before it stay committed" (moving the commit
   to the end of the loop survived every test before it). Each new pin was
-  mutation-checked. The counters defect is now #439.
+  mutation-checked. The counters defect was filed as #439.
+- **#439 (the operator picked it next; same PR, not a stacked branch).** A
+  failed job wrote its in-memory counters, but closing the worker
+  connection rolls back everything since its last commit, poison pills'
+  `failed_messages` rows included. `run_import` now keeps a `committed`
+  snapshot, taken after `_flush` and after a new mailbox's
+  `upsert_mailbox` commit (which also commits the messages before it), and
+  the outer handler writes that. Two tests in
+  `tests/test_importer_runner.py`; RED first (`('failed', 2, 1, 0, 1)` vs
+  `('failed', 1, 1, 0, 0)`).
 - New `tests/test_import_retry_db_contention.py` (11 tests), reusing
   `_raising_trigger` / `_CASES` from `tests/test_worker_db_contention.py`.
 - CLAUDE.md gained a #437 bullet beside #425's; README's failed-messages
@@ -75,19 +87,20 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | check | result |
 |---|---|
-| RED first | 6 contention cases failed, 2 `DataException` controls passed |
-| mutation | disabling each re-raise (`python -B`) fails exactly its own 3 cases |
-| `uv run pytest -q` | **4479 passed**, 6 warnings (load ~10–15) |
+| RED first | #437: 6 contention cases failed, 2 controls passed. #439: the counters test failed as above |
+| mutation | each re-raise; the per-row retry commit; the CLI catch; `ctx.exit(1)`; each #439 snapshot point and the handler's use of it: every one fails exactly its own test |
+| `uv run pytest -q` | **4484 passed**, 6 warnings (load ~15) |
 | mypy | Success, 165 files |
 | GUI | not run (no GUI change) |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Merge this PR** (yours)
-- **Acceptance:** `gh issue view 437 --json state` is `CLOSED`.
+### 1. **Merge PR #438** (yours), once CI is green
+- **Acceptance:** `gh pr checks 438` all pass; after the merge, `gh issue
+  view 437` and `gh issue view 439` are both `CLOSED`.
 
-### 2. **Deploy #437 once merged** (low urgency)
+### 2. **Deploy #438 once merged** (low urgency)
 - Pure Python, no migration. It only changes `localmail import`,
   admin-panel imports (in-serve) and `retry-failed`, so **restart serve**;
   the daemon runs none of it and needs no restart.
@@ -128,15 +141,19 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 1. **The operator picked #437** and asked for both hosts to be deployed at
    `d5f1277`.
-2. **The failed job's counters were left as they are** (my call). On any
-   mid-run failure, the counters include messages since the last commit
-   (a checkpoint or a new mailbox) that the closing connection rolls back,
-   and genuine poison pills since then lose their `failed_messages` rows.
-   Pre-existing, now reachable by contention too; a re-run is idempotent.
-   Filed as #439.
+2. **The counters defect was first filed (#439), then fixed here** at the
+   operator's pick. It went into #438 rather than a second PR because both
+   touch `runner.py`, and the convention is one PR per session.
+3. **`localmail import` exits 1 on a failed job** (my call, review round).
+   A script that ignored a failed import now sees it. A failed job was
+   exit 0 before.
+4. **`retry-failed` catches only `DB_CONTENTION_ERRORS`**, not every
+   exception; the wider `cli.py` error handling stays with #305.
 
 ## Open decisions & risks
 
+0. **The `import` exit-code change is a behaviour change** for any cron or
+   script running `localmail import`; none is known on either host.
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows carry a
    `-0000` Date and are stored 8 h off. None has a NULL `internal_date`, so
    the list/search/changes wire `date` is right; raw `date_sent` readers
@@ -170,7 +187,7 @@ git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 git diff main origin/fix/437-import-retry-contention --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh issue view 437 --json state --jq .state
+gh issue view 437 --json state --jq .state; gh issue view 439 --json state --jq .state
 gh issue list --limit 200 --json number --jq length
 
 # Deploy — Mac (the repo is the install; no migration for #437)
@@ -187,7 +204,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4479 at session 77
+unset VIRTUAL_ENV && uv run pytest -q              # 4484 at session 77
 uv run pytest -q tests/test_import_retry_db_contention.py tests/test_worker_db_contention.py tests/test_importer_runner.py tests/test_import_uid_collision.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
 cd gui && npm test -- --run && npm run check   # 530 at session 72

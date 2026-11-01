@@ -14,6 +14,7 @@ from email.message import EmailMessage, MIMEPart
 from email.utils import getaddresses
 from typing import Any
 
+from localmail.date_header import parse_date_header
 from localmail.header_block import entries_from_message, group_entries
 from localmail.pgtext import strip_nuls, strip_nuls_all
 
@@ -77,13 +78,7 @@ def _refs_list(msg: EmailMessage) -> list[str]:
 
 def _date_sent(msg: EmailMessage) -> datetime | None:
     raw = msg.get("Date")
-    if not raw:
-        return None
-    try:
-        dt = email.utils.parsedate_to_datetime(str(raw))
-    except (TypeError, ValueError):
-        return None
-    return dt
+    return parse_date_header(str(raw)) if raw else None
 
 
 def _header_text(msg: EmailMessage, name: str) -> str | None:

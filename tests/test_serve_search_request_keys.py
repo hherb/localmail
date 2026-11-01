@@ -196,8 +196,8 @@ def test_an_unknown_filter_key_is_a_400_naming_it(
     assert r.headers["content-type"].startswith("application/problem+json")
     assert r.json()["detail"] == (
         "filters: unknown key 'has_attachments' (did you mean 'has_attachment'?); "
-        "supported: account_ids, after, before, date_from, date_to, folder_ids, "
-        "from, has_attachment, lang, subject, to"
+        "supported: account_ids, after, attachment_name, before, date_from, "
+        "date_to, folder_ids, from, has_attachment, lang, subject, to"
     )
     searcher.search.assert_not_called()
 

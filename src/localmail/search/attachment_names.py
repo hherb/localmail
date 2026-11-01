@@ -66,3 +66,18 @@ def names_match_sql(tsq_sql: str) -> str:
     ``tsq_sql`` appears twice, so its parameters must be passed twice.
     """
     return f"({NAMES_TSV_SQL} @@ {tsq_sql} AND NOT ''::tsvector @@ {tsq_sql})"
+
+
+#: The ``attachment_name:`` filter: some attachment's file name contains the
+#: one parameter, case-insensitively. ``strpos`` rather than ``ILIKE`` so a
+#: ``_`` or ``%`` in the value is literal, as it is in a file name. Nothing
+#: in a malformed column raises: an entry with no ``filename`` or a non-string
+#: one is skipped. But lax jsonpath also unwraps a top-level object, a nested
+#: array and an array-valued name, so those still match, as they do for
+#: ``NAMES_TSV_SQL`` (#429). Unindexed: it runs per row the rest of the query
+#: admits.
+NAME_CONTAINS_SQL = (
+    "EXISTS (SELECT 1 FROM jsonb_path_query(m.attachments,"
+    " '$[*].filename ? (@.type() == \"string\")') AS n(name)"
+    " WHERE strpos(lower(n.name #>> '{}'), lower(%s)) > 0)"
+)

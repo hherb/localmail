@@ -788,6 +788,8 @@ src/localmail/
   oauth_gmail.py    # OAuth2 desktop flow + token refresh
   imap_client.py    # open_connection() context manager (password / XOAUTH2)
   imap_dates.py     # pure: aware_internal_date — the one INTERNALDATE rule (#415)
+  date_header.py    # pure: parse_date_header — one Date: read for date_sent
+                    #   and date_local (#426)
   parser.py         # bytes -> ParsedMessage (pure; no IO; NUL-strip + empty->None)
   pgtext.py         # pure: strip_nuls / strip_nuls_all — the one NUL rule
                     #   + replace_surrogates — the one lone-surrogate rule (#380)
@@ -859,6 +861,8 @@ src/localmail/
                     #   by Searcher._snippet_width (uncapped) (#390)
     attachment_names.py # pure: NAMES_TSV_SQL / names_match_sql — file names
                     #   in the lexical match; must equal 0037's index (#426)
+                    #   + NAME_CONTAINS_SQL, the attachment_name: filter
+    hit_dates.py    # date_local: each hit's Date: on the sender's clock (#426)
 migrations/         # 0001_init.sql … 0037_messages_attachment_names_idx.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
@@ -3809,7 +3813,8 @@ for the full design.
     **write-only** (#383); the per-occurrence broad catch moved onto the
     serving path still discards its exception, and now runs per request rather
     than once at sync (#382); and the `substring()` prefix read may not be cheap
-    if `raw_bytes` is LZ4-compressed in TOAST, which is unmeasured (#384).
+    if `raw_bytes` is LZ4-compressed in TOAST, which is partly answered
+    by #426's `date_local` timing (#384; see that entry).
   - **A lone surrogate in a header value is replaced, at the same seam as the
     NUL strip (#380).** The #314 fallback keeps a header's raw text, which for
     8-bit bytes is surrogate-escaped, and Starlette's `JSONResponse` raises
@@ -4040,7 +4045,7 @@ for the full design.
       amplified, fails slow rather than wrong, and capping the wire field is
       a contract change — **#394**, deliberately not folded into #390–#392.
     - **#394 capped it in `fields_error`, not on the wire field.**
-      `MAX_FIELDS = 48` (4 × the 12 hit fields there were then — 14 since
+      `MAX_FIELDS = 48` (4 × the 12 hit fields there were then — 15 since
       #426, and the cap deliberately did not move — written as a literal so
       adding a hit field does not silently move a documented limit), judged
       **before** any element is read so the gate's own cost is bounded, and
@@ -5973,9 +5978,8 @@ for the full design.
         finite rows: substituting some *other* constant keeps `C, D, B`
         intact and moves only the NaN row, so the filtered assertion alone
         passes for it (mutation-proven with `99.0`).
-- **Kastellan's search asks (#426): paging, attachment names.** Items 1–3
-  shipped; 4 (`filters.attachment_name`) and 5 (the sender's local time on a
-  hit) are open. `api_minor` is **5**.
+- **Kastellan's search asks (#426): paging, attachment names, sender time.**
+  All five shipped (items 1–3 at `api_minor` 5, items 4–5 at **6**).
   - **A grown pool serves the requested page, not page 1.** `grow_pool`
     used to re-run retrieval and return the grown pool's page 1 under a new
     token, which re-ranked to mostly the same top hits: page 3 of a search
@@ -6055,6 +6059,25 @@ for the full design.
     precondition). A malformed entry keeps its slot as all-`None`, and a
     non-string name or hash reads as `None`, so entry *i* stays attachment
     index *i* (review: it used to drop them). HTTP only (#368).
+  - **`filters.attachment_name` / DSL `attachment_name:`** (item 4) keeps
+    messages where some file name contains the value: `strpos(lower(…),
+    lower(%s))`, so `_`/`%` are literal (unlike the `ILIKE` substring
+    filters beside it). The rule is `attachment_names.NAME_CONTAINS_SQL`,
+    composed by `_filter_sql`, so every arm and the date walk apply it.
+    Unindexed — measured on the 132k Mac archive, a name matching nothing
+    walks the whole archive in ~0.2 s warm. MCP has the parameter too.
+  - **`date_local`** (item 5, opt-in `fields`) is the `Date:` header's
+    instant on the sender's clock, read from the raw header block
+    (`search/hit_dates.py`, the `?headers=list` read, re-reading in full
+    past the ceiling). `date_header.parse_date_header` is shared with
+    `parser._date_sent`, so `date_local` and `date_sent` name one instant.
+    `None` for no parseable header and for `-0000`; an overflowing year is
+    unparseable too (the stdlib raises `OverflowError`; sync still
+    poison-pills it, #430). ~3 ms warm per 50 hits, which partly answers
+    #384: 50 bounded `raw_bytes` prefix reads are cheap warm. A malformed
+    `attachments` column can still match `attachment_name` (lax jsonpath,
+    like `NAMES_TSV_SQL`; #429). A `-0000` `date_sent` is stored in the
+    session zone (#431).
 - **Search filters are honoured or refused, never dropped (#364).** Design:
   [docs/superpowers/specs/2026-09-14-search-request-honesty-design.md](docs/superpowers/specs/2026-09-14-search-request-honesty-design.md);
   plan: [docs/superpowers/plans/2026-09-14-search-request-honesty.md](docs/superpowers/plans/2026-09-14-search-request-honesty.md).

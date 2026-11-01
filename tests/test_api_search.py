@@ -71,6 +71,7 @@ def test_a_non_boolean_has_attachment_is_refused(value) -> None:
     {"from": "o'brien@example.com"},
     {"subject": 'say "hi'},
     {"subject": "don't forget", "to": "it's"},
+    {"attachment_name": 'it\'s "a.pdf'},
 ])
 def test_build_query_string_is_free_text_neutral(
     free_text: str, filters: dict,

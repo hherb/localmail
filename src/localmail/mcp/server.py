@@ -62,6 +62,7 @@ def _build_filters(
     from_addr: str | None,
     to: str | None,
     subject: str | None,
+    attachment_name: str | None,
     has_attachment: bool | None,
     lang: str | list[str] | None,
 ) -> dict[str, Any]:
@@ -78,6 +79,7 @@ def _build_filters(
         "from": from_addr,
         "to": to,
         "subject": subject,
+        "attachment_name": attachment_name,
         "has_attachment": has_attachment,
         "lang": lang,
     }
@@ -227,6 +229,11 @@ def build_mcp_server(
             "Case-insensitive substring the subject must contain. A "
             "`subject:` in `query` overrides it."))]
             = None,
+        attachment_name: Annotated[str | None, Field(description=(
+            "Case-insensitive substring some attachment's file name must "
+            "contain (`_` and `%` are literal). An `attachment_name:` in "
+            "`query` overrides it."))]
+            = None,
         has_attachment: Annotated[bool | None, Field(description=(
             "True for only messages with attachments, False for only those "
             "without; omit to match either."))] = None,
@@ -297,6 +304,7 @@ def build_mcp_server(
             from_addr=from_addr,
             to=to,
             subject=subject,
+            attachment_name=attachment_name,
             has_attachment=has_attachment,
             lang=lang,
         )

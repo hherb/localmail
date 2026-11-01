@@ -132,3 +132,11 @@ def test_api_minor_announces_web_search_query_syntax(db_dsn: str) -> None:
     and answers 200, so the version is the only signal (#419)."""
     body = _client(db_dsn).get("/v1/version").json()
     assert body["api_minor"] >= 4
+
+
+def test_api_minor_announces_the_attachment_name_filter_and_date_local(
+    db_dsn: str,
+) -> None:
+    """An older server refuses both with a 400 (#426 items 4 and 5)."""
+    body = _client(db_dsn).get("/v1/version").json()
+    assert body["api_minor"] >= 6

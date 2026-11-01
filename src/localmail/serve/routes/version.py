@@ -38,7 +38,12 @@ API_MAJOR = 1
 # `attachment_filename` and `attachments` (an older one refuses them with a
 # 400). Paging past a pool grow no longer repeats page 1. HTTP only for
 # `fields`, as with 3.
-API_MINOR = 5
+# 6: `filters.attachment_name` (a substring of any attachment's file name)
+# and the `date_local` hit field (#426 items 4 and 5). An older server
+# refuses both with a 400, but reads an `attachment_name:` in `query` as free
+# text. The filter reaches MCP too, as `attachment_name`;
+# `date_local` is HTTP only, as with 3.
+API_MINOR = 6
 
 logger = logging.getLogger("localmail.serve")
 

@@ -36,6 +36,7 @@ from localmail.search.argument_errors import (
     SortOrderNotApplicable,
 )
 from localmail.search.embeddings import EmbeddingBackend
+from localmail.search.hit_dates import fetch_local_dates
 from localmail.search.page_cache import (
     CacheMissError, PageCache, PageOutOfPoolError,
 )
@@ -688,6 +689,14 @@ class Searcher:
                 out[mid].append({"filename": filename, "sha256": sha,
                                  "content_type": mime, "size": size})
         return out
+
+    def message_local_dates(
+        self, message_ids: list[int],
+    ) -> dict[int, str | None]:
+        """Each message's ``Date:`` on the sender's clock (#426); see
+        ``search.hit_dates``. Applies no ACL, like ``message_attachments``."""
+        with self._pool.connection() as conn:
+            return fetch_local_dates(conn, message_ids)
 
     def get_pool_metadata(
         self, search_token: str, *, user_id: int | None = None,

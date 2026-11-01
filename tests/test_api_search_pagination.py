@@ -86,6 +86,11 @@ def test_a_projected_attachment_filename_is_the_result_s_own() -> None:
                      fields=["attachment_filename"])
     assert out["results"] == [{"attachment_filename": "scan.pdf"}]
     s.message_attachments.assert_not_called()
+    s.message_local_dates.assert_not_called()
+    run_search(searcher=s, free_text="hello", filters={}, limit=2,
+               allowed_account_ids=[1], user_id=99)
+    s.message_attachments.assert_not_called()
+    s.message_local_dates.assert_not_called()
 
 
 def test_initial_search_emits_null_cursor_when_pool_exhausted() -> None:

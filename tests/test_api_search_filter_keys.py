@@ -17,7 +17,7 @@ import pytest
 from localmail.api.errors import ValidationFailed
 from localmail.api.search import _SUPPORTED_FILTER_KEYS, filter_key_error, run_search
 
-_SUPPORTED = ("account_ids, after, before, date_from, date_to, folder_ids, from, "
+_SUPPORTED = ("account_ids, after, attachment_name, before, date_from, date_to, folder_ids, from, "
               "has_attachment, lang, subject, to")
 
 

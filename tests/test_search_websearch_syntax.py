@@ -292,3 +292,13 @@ def test_a_synonym_is_excluded_at_the_message_arm_too(db_conn):
                          expansion_terms=["Anthropic"])
     hits = arm_bm25_messages(db_conn, parsed, SearchConfig(), limit=50)
     assert ids["anthropic"] not in {h.message_id for h in hits}
+
+
+def test_or_binds_looser_than_the_implied_and(db_conn):
+    """kastellan sends ``a b OR c d`` meaning ``(a AND b) OR (c AND d)`` (#426).
+    That grouping is Postgres', not ours, so pin it on the fragment we emit."""
+    from localmail.search.arms import build_lexical_tsquery
+    fragment, params = build_lexical_tsquery("fee proposal OR qantas booking", [])
+    with db_conn.cursor() as cur:
+        cur.execute(f"SELECT ({fragment})::text", params)
+        assert cur.fetchone()[0] == "'fee' & 'proposal' | 'qantas' & 'booking'"

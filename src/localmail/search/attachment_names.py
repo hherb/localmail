@@ -7,8 +7,9 @@
 ``messages.attachments``, so a search for ``2312 Herb Fee Proposal
 230712.pdf`` could only find that message through its body words. The names
 get their own small tsvector, served by the expression index of migration
-0037, rather than joining ``fts_v2``: that column is generated, so changing
-it rewrites every row of ``messages`` (raw bytes included), and a second
+0038 (0037's, made strict by #429), rather than joining ``fts_v2``: that
+column is generated, so changing it rewrites every row of ``messages`` (raw
+bytes included), and a second
 index over ``fts_v2 || names`` would duplicate its 688 MB GIN index.
 
 Each name is indexed twice. As written, so a quoted full name matches as a
@@ -28,19 +29,40 @@ vector, so ``names_match_sql`` turns the names half off for such a query;
 from __future__ import annotations
 
 
+#: The file names in an ``attachments`` column: each object entry's string
+#: ``filename``, in stored order. Shared by both name rules so they agree on
+#: what a name is, and with ``HAS_ATTACHMENT_SQL`` on what a malformed column
+#: is (#429). ``strict`` because lax mode wraps a top-level object and unwraps
+#: a nested array or an array-valued name, so all three used to match while
+#: ``HAS_ATTACHMENT_SQL`` read the object as "no attachments". The filter
+#: predicate skips a non-object entry, a missing ``filename`` and a non-string
+#: one (an error inside a filter is "unknown", not raised).
+NAMES_JSONPATH = (
+    'strict $[*] ? (@.type() == "object" && @.filename.type() == "string")'
+    ".filename"
+)
+
+
+def names_query_sql(function: str, column: str) -> str:
+    """``function`` (``jsonb_path_query`` or ``jsonb_path_query_array``)
+    over ``column`` with ``NAMES_JSONPATH``. ``silent`` because strict
+    ``$[*]`` raises on a non-array, which then yields no names."""
+    return f"{function}({column}, '{NAMES_JSONPATH}', '{{}}', true)"
+
+
 def names_tsvector_sql(column: str) -> str:
     """The names tsvector over ``column`` (``m.attachments`` in a query).
 
-    Must stay identical, up to the column reference, to migration 0037's
+    Must stay identical, up to the column reference, to migration 0038's
     index expression, or the planner cannot use the index (pinned by a
     test). Every function in it is immutable, and none raises on a
-    malformed array: lax jsonpath skips what has no ``filename``. The text
+    malformed column (see ``NAMES_JSONPATH``). The text
     is cut at ``NAMES_MAX_CHARS`` because ``to_tsvector`` raises past the
     1 MiB tsvector cap, and this expression runs on every INSERT into
     ``messages``: an uncut name list that large would fail its message on
-    every sync and retry, and stop migration 0037 on an archive holding one.
+    every sync and retry, and stop the migration on an archive holding one.
     """
-    names = (f"left(jsonb_path_query_array({column}, '$[*].filename')::text,"
+    names = (f"left({names_query_sql('jsonb_path_query_array', column)}::text,"
              f" {NAMES_MAX_CHARS})")
     return (
         f"setweight(to_tsvector('simple', {names})"
@@ -70,14 +92,10 @@ def names_match_sql(tsq_sql: str) -> str:
 
 #: The ``attachment_name:`` filter: some attachment's file name contains the
 #: one parameter, case-insensitively. ``strpos`` rather than ``ILIKE`` so a
-#: ``_`` or ``%`` in the value is literal, as it is in a file name. Nothing
-#: in a malformed column raises: an entry with no ``filename`` or a non-string
-#: one is skipped. But lax jsonpath also unwraps a top-level object, a nested
-#: array and an array-valued name, so those still match, as they do for
-#: ``NAMES_TSV_SQL`` (#429). Unindexed: it runs per row the rest of the query
-#: admits.
+#: ``_`` or ``%`` in the value is literal, as it is in a file name. Reads the
+#: names ``NAMES_JSONPATH`` reads, so it matches exactly what the lexical
+#: match can. Unindexed: it runs per row the rest of the query admits.
 NAME_CONTAINS_SQL = (
-    "EXISTS (SELECT 1 FROM jsonb_path_query(m.attachments,"
-    " '$[*].filename ? (@.type() == \"string\")') AS n(name)"
-    " WHERE strpos(lower(n.name #>> '{}'), lower(%s)) > 0)"
+    f"EXISTS (SELECT 1 FROM {names_query_sql('jsonb_path_query', 'm.attachments')}"
+    " AS n(name) WHERE strpos(lower(n.name #>> '{}'), lower(%s)) > 0)"
 )

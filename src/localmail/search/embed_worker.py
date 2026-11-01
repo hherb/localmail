@@ -40,6 +40,7 @@ from collections.abc import Callable
 import psycopg
 
 from localmail.config import SearchConfig
+from localmail.db import DB_CONTENTION_ERRORS
 from localmail.heartbeat import safe_heartbeat
 from localmail.search.chunking import MessageRow, chunk_attachment_text, chunk_message
 from localmail.search.embeddings import EmbeddingBackend
@@ -137,6 +138,10 @@ def _chunk_messages_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch: i
     Per-message SAVEPOINT isolates poison messages so a single broken row
     only loses itself; the failure lands in failed_chunkings keyed on
     message_id, and the message is skipped on subsequent sweeps.
+
+    `db.DB_CONTENTION_ERRORS` are re-raised instead (#425): waiting on another
+    session is not the message's fault, so the sweep fails and the message is
+    re-claimed next time rather than counted towards its retry cap.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -177,6 +182,10 @@ def _chunk_messages_lazily(conn: psycopg.Connection, cfg: SearchConfig, batch: i
                 cur.execute("RELEASE SAVEPOINT msg")
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT msg")
+                if isinstance(exc, DB_CONTENTION_ERRORS):
+                    # Another session's lock, not this message: fail the
+                    # sweep and re-claim it next time (#425).
+                    raise
                 log.warning("chunking failed for message %s: %s", mid, exc)
                 record_failed_chunking(conn, mid, exc)
     conn.commit()
@@ -335,7 +344,9 @@ def _embed_and_store(
     The backend.embed_documents() call covers the whole batch — if it raises,
     the caller rolls back (batch-level fallback), which is the correct behavior
     for transient backend errors. Individual UPDATE failures are caught per-chunk
-    and recorded in failed_embeddings so the chunk is skipped on subsequent sweeps.
+    and recorded in failed_embeddings so the chunk is skipped on subsequent sweeps,
+    except a `db.DB_CONTENTION_ERRORS` one, which is re-raised into the
+    batch-level fallback: the chunk is not at fault (#425).
 
     Args:
         conn: Active psycopg connection.
@@ -366,6 +377,10 @@ def _embed_and_store(
                 written += 1
             except Exception as exc:  # noqa: BLE001 — poison-pill isolation
                 cur.execute("ROLLBACK TO SAVEPOINT chunk")
+                if isinstance(exc, DB_CONTENTION_ERRORS):
+                    # Not this chunk's fault: `_embed_table` rolls the batch
+                    # back and the chunk is re-claimed next sweep (#425).
+                    raise
                 log.warning("embedding write failed for chunk %s in %s: %s", cid, chunk_table, exc)
                 record_failed_embedding(conn, chunk_table, cid, exc)
     conn.commit()
@@ -471,10 +486,16 @@ def run_embed_worker_once(
       2. _chunk_attachments_lazily — fills attachment_chunks for unchunked
          attachment_text rows (Phase 2). Sentinel rows (extracted_text='')
          produce zero chunks and are silently skipped.
-      3. run_lang_detect_pass — populates messages.body_lang for messages
+      3. Embed pending message_chunks rows.
+      4. Embed pending attachment_chunks rows.
+      5. run_lang_detect_pass — populates messages.body_lang for messages
          that don't yet have it (only when `lang_detector` is provided).
-      4. Embed pending message_chunks rows.
-      5. Embed pending attachment_chunks rows.
+
+    Steps 1 and 5 re-raise `db.DB_CONTENTION_ERRORS` (#425), discarding that
+    step's uncommitted batch; earlier steps have already committed. A row
+    whose statement times out on every attempt therefore wedges its step
+    until `daemon.db_statement_timeout_s` is raised, and a wedged step 1
+    stops the steps after it too.
 
     Returns a `SweepOutcome` carrying the chunks embedded across both tables
     *and* the language rows visited. Used both by the background daemon thread
@@ -510,15 +531,17 @@ def run_embed_worker_once(
     chunk_batch = max(cfg.embed_worker_batch_size, cfg.embed_worker_chunk_batch_size)
     _chunk_messages_lazily(conn, cfg, batch=chunk_batch)
     _chunk_attachments_lazily(conn, cfg, batch=chunk_batch)
-    lang_visited = 0
-    if lang_detector is not None and cfg.body_lang_enabled:
-        lang_visited = run_lang_detect_pass(conn, cfg, lang_detector).visited
     embedded_msg = _embed_table(
         conn, cfg, backend, "message_chunks", failure_log=log_state, now=now
     )
     embedded_att = _embed_table(
         conn, cfg, backend, "attachment_chunks", failure_log=log_state, now=now
     )
+    # Last, because it can raise (#425): a row whose write keeps timing out
+    # then stalls language detection only, not the embedding committed above.
+    lang_visited = 0
+    if lang_detector is not None and cfg.body_lang_enabled:
+        lang_visited = run_lang_detect_pass(conn, cfg, lang_detector).visited
     return SweepOutcome(
         embedded=embedded_msg + embedded_att, lang_visited=lang_visited,
     )

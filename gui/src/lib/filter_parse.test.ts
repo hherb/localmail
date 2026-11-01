@@ -5,6 +5,7 @@ import {
   formatDslTokens,
   joinTokens,
   tokenize,
+  tokenizeRaw,
 } from "./filter_parse";
 import { emptyFilters } from "./api/search";
 
@@ -206,7 +207,7 @@ describe("absorbConflictingOperators", () => {
     const chips = { ...emptyFilters(), from: "alice" };
     const out = absorbConflictingOperators(
       'to:"bob smith" from:bob "exact phrase" don\'t', chips);
-    expect(out.query).toBe('"to:bob smith" "exact phrase" "don\'t"');
+    expect(out.query).toBe('to:"bob smith" "exact phrase" "don\'t"');
     // Re-quoted, the kept operator still reads as one filter.
     expect(extractDslFilters(out.query).filters.to).toBe("bob smith");
   });
@@ -218,7 +219,10 @@ describe("absorbConflictingOperators", () => {
     ['"don\'t" has:attachment from:bob', '"don\'t" has:attachment'],
     ['from:bob "O\'Brien" lang:de', '"O\'Brien" lang:de'],
     ['from:bob "it\'s" to:carol', '"it\'s" to:carol'],
-    ['subject:"it\'s" from:bob has:attachment', '"subject:it\'s" has:attachment'],
+    ['subject:"it\'s" from:bob has:attachment', 'subject:"it\'s" has:attachment'],
+    // An apostrophe outside the quotes is a quote opener to the server, so
+    // that raw spelling is not reused; the whole token is wrapped instead.
+    ['o\'b"c d" from:bob has:attachment', '"o\'bc d" has:attachment'],
   ])("quotes a kept apostrophe token so no later filter is swallowed: %s", (query, expected) => {
     const out = absorbConflictingOperators(query, { ...emptyFilters(), from: "alice" });
     expect(out.query).toBe(expected);
@@ -276,6 +280,30 @@ describe("absorbConflictingOperators", () => {
   });
 });
 
+describe("quoted single words survive a rebuild (#421)", () => {
+  // The server reads web-search syntax (#419): `"OR"` is the word, `OR` the
+  // operator; `"-acme"` requires acme, `-acme` excludes it. Each rebuild of
+  // the query must keep the quotes where they were typed.
+  it.each([
+    ['a "OR" b', 'a "OR" b'],
+    ['"-acme" invoice', '"-acme" invoice'],
+    ['-"acme" invoice', '-"acme" invoice'],
+    ['"or"', '"or"'],
+  ])("popover Apply keeps %s as %s", (query, expected) => {
+    expect(extractDslFilters(query).freeText).toBe(expected);
+  });
+
+  it.each([
+    ['a "OR" b from:bob', 'a "OR" b'],
+    ['"-acme" from:bob', '"-acme"'],
+    ['from:bob to:"bob smith"', 'to:"bob smith"'],
+  ])("absorbing keeps the kept tokens as typed: %s", (query, expected) => {
+    const out = absorbConflictingOperators(query, { ...emptyFilters(), from: "alice" });
+    expect(out.filters.from).toBe("bob");
+    expect(out.query).toBe(expected);
+  });
+});
+
 describe("joinTokens", () => {
   // The query the client sends after absorbing must tokenize to the same
   // tokens on the server, whose tokenizer also opens a quote at `'`. Inside
@@ -289,7 +317,8 @@ describe("joinTokens", () => {
     // The dash stays outside: `"-a b"` would require the phrase (#419).
     [["invoice", "-payment overdue"], 'invoice -"payment overdue"'],
   ])("joins %j as %s", (tokens, expected) => {
-    expect(joinTokens(tokens)).toBe(expected);
+    // Unquoted tokens: raw is the text itself.
+    expect(joinTokens(tokens.map((t) => ({ text: t, raw: t })))).toBe(expected);
   });
 
   it.each([
@@ -299,9 +328,11 @@ describe("joinTokens", () => {
     'ab"c d"e \'x y\' "z\'s"',
     'to:"a\tb" \'',
     'invoice -"payment overdue" from:bob',
+    'a "OR" b "-acme" -"x"',
+    'o\'b"c d" x',
   ])("gives back the tokens it was given: %s", (query) => {
-    const tokens = tokenize(query);
-    expect(tokenize(joinTokens(tokens))).toEqual(tokens);
+    const tokens = tokenizeRaw(query);
+    expect(tokenize(joinTokens(tokens))).toEqual(tokens.map((t) => t.text));
   });
 
   it("keeps an excluded phrase excluded through extractDslFilters (#419)", () => {

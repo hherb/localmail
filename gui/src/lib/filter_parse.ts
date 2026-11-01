@@ -19,7 +19,22 @@ const POPOVER_OPERATORS = new Set([
   "from", "to", "subject", "after", "before", "has", "lang",
 ]);
 
+/**
+ * A token as read (`text`, quote characters dropped) and as typed (`raw`,
+ * with its `"` delimiters kept — the server's `_tokenize` keeps them too).
+ * `raw` is what lets a rebuild keep `"OR"` a word and `"-acme"` a required
+ * term rather than an operator and an exclusion (#421).
+ */
+export interface Token {
+  text: string;
+  raw: string;
+}
+
 export function tokenize(s: string): string[] {
+  return tokenizeRaw(s).map((tok) => tok.text);
+}
+
+export function tokenizeRaw(s: string): Token[] {
   // Whitespace-split, respecting double-quoted runs. Apostrophes are treated
   // as literal text (so `from:o'brien` round-trips); single-quoted multi-word
   // values are not supported because the cost of breaking `o'brien` is worse
@@ -28,10 +43,17 @@ export function tokenize(s: string): string[] {
   // If a quote is never closed, the unterminated run is re-processed as
   // whitespace-split tokens. The prior greedy-absorb behavior would swallow
   // every later DSL token into the unterminated run, silently dropping them.
-  const out: string[] = [];
+  const out: Token[] = [];
   let buf = "";
+  let raw = "";
   let inQuote = false;
   let bufBeforeQuote = "";
+  let rawBeforeQuote = "";
+  const flush = () => {
+    if (buf) out.push({ text: buf, raw });
+    buf = "";
+    raw = "";
+  };
   for (const ch of s) {
     if (inQuote) {
       if (ch === '"') {
@@ -39,27 +61,33 @@ export function tokenize(s: string): string[] {
       } else {
         buf += ch;
       }
+      raw += ch;
     } else if (ch === '"') {
       inQuote = true;
       bufBeforeQuote = buf;
+      rawBeforeQuote = raw;
+      raw += ch;
     } else if (/\s/.test(ch)) {
-      if (buf) { out.push(buf); buf = ""; }
+      flush();
     } else {
       buf += ch;
+      raw += ch;
     }
   }
   if (inQuote) {
     const tail = buf.slice(bufBeforeQuote.length);
     buf = bufBeforeQuote;
+    raw = rawBeforeQuote;
     for (const ch of tail) {
       if (/\s/.test(ch)) {
-        if (buf) { out.push(buf); buf = ""; }
+        flush();
       } else {
         buf += ch;
+        raw += ch;
       }
     }
   }
-  if (buf) out.push(buf);
+  flush();
   return out;
 }
 
@@ -80,9 +108,10 @@ function popoverOperator(tok: string): { op: string; val: string } | null {
 
 export function extractDslFilters(query: string): ExtractedFilters {
   const filters = emptyFilters();
-  const freeParts: string[] = [];
+  const freeParts: Token[] = [];
 
-  for (const tok of tokenize(query)) {
+  for (const token of tokenizeRaw(query)) {
+    const tok = token.text;
     const operator = popoverOperator(tok);
     if (operator) {
       const { op, val } = operator;
@@ -108,7 +137,7 @@ export function extractDslFilters(query: string): ExtractedFilters {
         continue;
       }
     }
-    freeParts.push(tok);
+    freeParts.push(token);
   }
 
   return { freeText: joinTokens(freeParts), filters };
@@ -127,10 +156,17 @@ export function extractDslFilters(query: string): ExtractedFilters {
  *
  * A leading `-` stays outside the quotes: the server reads `-"a b"` as
  * excluding the phrase, and `"-a b"` as requiring it (#419).
+ *
+ * A token that was typed with quotes is given back as typed (`raw`), since
+ * where the quotes sit is meaning to the server: `"OR"` is a word, `"-acme"`
+ * requires acme (#421). The exception is a raw spelling with an apostrophe
+ * outside its quotes, which the server would read as a quote opener; that
+ * falls back to the wrapping above.
  */
-export function joinTokens(tokens: string[]): string {
+export function joinTokens(tokens: Token[]): string {
   return tokens
-    .map((tok) => {
+    .map(({ text: tok, raw }) => {
+      if (raw !== tok && !raw.replace(/"[^"]*"/g, "").includes("'")) return raw;
       if (!/[\s']/.test(tok)) return tok;
       return tok.startsWith("-") ? `-"${tok.slice(1)}"` : `"${tok}"`;
     })
@@ -216,8 +252,8 @@ export function absorbConflictingOperators(
   }
 
   if (absorbed.size === 0) return { query, filters };
-  const kept = tokenize(query).filter((tok) => {
-    const operator = popoverOperator(tok);
+  const kept = tokenizeRaw(query).filter((tok) => {
+    const operator = popoverOperator(tok.text);
     return !(operator && absorbed.has(operator.op));
   });
   return { query: joinTokens(kept), filters: next };

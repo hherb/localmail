@@ -171,17 +171,25 @@ def run_import(
                 c.inserted += 1 if did_insert else 0
                 c.skipped_dup += 0 if did_insert else 1
             except Exception as exc:  # poison pill -- isolate to this message
+                # A deadlock or lock/statement timeout against another session
+                # (the daemon shares only the global attachment_blobs rows) is
+                # not the message's fault: fail the job, which is safe to
+                # re-run (#437, the sync idiom from #414).
+                contended = isinstance(exc, DB_CONTENTION_ERRORS)
+                if contended:
+                    log.warning(
+                        "import job %s: DB contention at uid=%s mailbox=%s; failing "
+                        "the job, re-run it (imports are idempotent): %s",
+                        job_id, uid, msg.mailbox_name, exc)
+                else:
+                    log.warning(
+                        "import job %s: skipping poison message uid=%s mailbox=%s: %s",
+                        job_id, uid, msg.mailbox_name, exc)
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")
                     cur.execute("RELEASE SAVEPOINT msg")
-                if isinstance(exc, DB_CONTENTION_ERRORS):
-                    # Waiting on the daemon's uncommitted batch is not the
-                    # message's fault: fail the job, which is safe to re-run
-                    # (#437, the sync idiom from #414).
+                if contended:
                     raise
-                log.warning(
-                    "import job %s: skipping poison message uid=%s mailbox=%s: %s",
-                    job_id, uid, msg.mailbox_name, exc)
                 record_failed_message(
                     conn, account_id=job.account_id, mailbox_id=mailbox_id, uid=uid,
                     raw=msg.raw, exc=exc)

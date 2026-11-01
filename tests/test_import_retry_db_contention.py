@@ -5,9 +5,12 @@
 
 Sync (#414) and the embed worker / lang detection (#425) re-raise
 `db.DB_CONTENTION_ERRORS`; these two per-message SAVEPOINT handlers used to
-record them in `failed_messages` as if the message were malformed. The likely
-trigger is an `ON CONFLICT DO NOTHING` waiting behind the daemon's uncommitted
-batch for the same Message-Id or `attachment_blobs` row.
+record them in `failed_messages` as if the message were malformed. Their
+connections carry no timeout, so a lock wait just blocks: what raises is a
+deadlock, or a lock/statement timeout an operator configured. Against the
+daemon an import shares only the global `attachment_blobs` rows (dedup is per
+account, and the daemon never syncs archive accounts); `retry-failed` on a live
+account's row can also meet it on the same Message-Id.
 
 The error is raised server-side by `_raising_trigger` (shared with #425's
 tests), so the `ROLLBACK TO SAVEPOINT` ahead of the re-raise runs for real. A
@@ -20,9 +23,12 @@ from __future__ import annotations
 import mailbox as _mailbox
 from pathlib import Path
 
+from click.testing import CliRunner
+
 import psycopg
 import pytest
 
+from localmail.cli import main
 from localmail.importer import runner
 from localmail.sync import record_failed_message, retry_failed_messages, upsert_mailbox
 from tests.conftest import TEST_DSN
@@ -66,6 +72,7 @@ def _mbox(tmp_path: Path) -> str:
 @pytest.mark.parametrize(("sqlstate", "raised"), _CASES)
 def test_import_records_only_a_genuine_failure(
     db_conn: psycopg.Connection, tmp_path: Path, sqlstate: str, raised,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A contended message fails the job (re-run it) instead of being counted
     `failed` and written to `failed_messages`."""
@@ -97,11 +104,13 @@ def test_import_records_only_a_genuine_failure(
     else:
         assert (status, failed, recorded) == ("failed", 0, 0)
         assert error_msg.startswith(f"{raised.__name__}: ")
+        assert "DB contention at uid=1 mailbox=Inbox" in caplog.text
 
 
 @pytest.mark.parametrize(("sqlstate", "raised"), _CASES)
 def test_retry_failed_records_only_a_genuine_failure(
     db_conn: psycopg.Connection, tmp_path: Path, sqlstate: str, raised,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A contended retry raises and leaves the row's `retry_count` alone."""
     aid = _archive_account(db_conn)
@@ -120,7 +129,71 @@ def test_retry_failed_records_only_a_genuine_failure(
         else:
             with pytest.raises(raised):
                 retry_failed_messages(db_conn, attachments_root=tmp_path / "blobs")
+            assert "DB contention on failed_messages" in caplog.text
+            assert f"uid=1 mailbox_id={mb.id} after 0 recovered" in caplog.text
 
     db_conn.rollback()
     after = _count(db_conn, "SELECT retry_count FROM failed_messages")
     assert after == (before + 1 if raised is None else before)
+
+
+def _raw(n: int) -> bytes:
+    return (
+        f"From: a@example.com\r\nSubject: s{n}\r\n"
+        f"Message-Id: <m{n}-437@example.com>\r\n\r\nbody {n}\r\n"
+    ).encode()
+
+
+def _seed_failed(conn: psycopg.Connection, raws: list[bytes]) -> None:
+    aid = _archive_account(conn)
+    mb = upsert_mailbox(conn, account_id=aid, name="Inbox", delimiter=None, flags=[])
+    for uid, raw in enumerate(raws, start=1):
+        record_failed_message(
+            conn, account_id=aid, mailbox_id=mb.id, uid=uid, raw=raw,
+            exc=ValueError("original failure"),
+        )
+    conn.commit()
+
+
+def test_retry_keeps_rows_recovered_before_the_contended_one(
+    db_conn: psycopg.Connection, tmp_path: Path,
+) -> None:
+    """Each recovered row is committed before the next is tried, so a stop on
+    row 2 keeps row 1 recovered and never attempts row 3."""
+    _seed_failed(db_conn, [_raw(1), _raw(2), _raw(3)])
+    with _raising_trigger(
+        db_conn, table="messages", event="INSERT", sqlstate="57014",
+        when="NEW.subject = 's2'",
+    ):
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            retry_failed_messages(db_conn, attachments_root=tmp_path / "blobs")
+    db_conn.rollback()
+    subjects = [r[0] for r in db_conn.execute("SELECT subject FROM messages ORDER BY id")]
+    assert subjects == ["s1"]
+    counts = [r[0] for r in db_conn.execute(
+        "SELECT retry_count FROM failed_messages ORDER BY uid")]
+    assert counts == [0, 0]
+
+
+def test_cli_retry_failed_reports_contention_without_a_traceback(
+    db_conn: psycopg.Connection, tmp_path: Path, cli_config: Path,
+) -> None:
+    _seed_failed(db_conn, [_RAW])
+    with _raising_trigger(db_conn, table="messages", event="INSERT", sqlstate="57014"):
+        result = CliRunner().invoke(main, ["retry-failed"])
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    assert "stopped on database contention (QueryCanceled" in result.stderr
+    assert "re-run retry-failed" in result.stderr
+
+
+def test_cli_import_exits_nonzero_when_the_job_fails(
+    db_conn: psycopg.Connection, tmp_path: Path, cli_config: Path,
+) -> None:
+    _archive_account(db_conn)
+    with _raising_trigger(db_conn, table="messages", event="INSERT", sqlstate="57014"):
+        result = CliRunner().invoke(
+            main, ["import", _mbox(tmp_path), "--account", "arch", "--kind", "mbox"])
+    assert result.exit_code == 1, result.output
+    assert "status=failed" in result.stdout
+    assert "error: QueryCanceled: " in result.stderr

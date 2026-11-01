@@ -8,7 +8,7 @@
 >
 > **Both hosts are deployed at `d5f1277`** (see below).
 >
-> **Open issues: 34** (33 once #437 closes).
+> **Open issues: 35** (34 once #437 closes; #439 filed in review).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -41,6 +41,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 |---|---|
 | `4083794` | #437: importer and `retry-failed` re-raise `db.DB_CONTENTION_ERRORS` |
 | handoff | this file + `docs/handoffs/2026-11-01T1243Z-import-retry-contention.md` |
+| review | review fixes: contention WARNINGs, `import` exits 1 on a failed job, `retry-failed` `ClickException`, three-row + CLI tests, corrected trigger wording |
 
 - **The defect.** Two per-message SAVEPOINT handlers recorded
   `QueryCanceled` / `DeadlockDetected` / `LockNotAvailable` in
@@ -54,7 +55,17 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
     so it no longer lies about a contended message.
   - `retry_failed_messages` raises out of the command; rows retried earlier
     were committed one by one, so they keep their outcome.
-- New `tests/test_import_retry_db_contention.py` (8 tests), reusing
+- **Review round** (four reviewers): the first cut's trigger story was
+  wrong. These connections carry no timeout, so a wait on the daemon just
+  blocks, and an import cannot meet the daemon on a Message-Id (per-account
+  dedup; the daemon never syncs archive accounts). Fixed in the comments,
+  test docstring, CLAUDE.md and README. Also: a contention WARNING naming
+  the message at both sites, `localmail import` exits 1 on a failed job,
+  `retry-failed` turns contention into a `ClickException`, and a three-row
+  test pins "rows recovered before it stay committed" (moving the commit
+  to the end of the loop survived every test before it). Each new pin was
+  mutation-checked. The counters defect is now #439.
+- New `tests/test_import_retry_db_contention.py` (11 tests), reusing
   `_raising_trigger` / `_CASES` from `tests/test_worker_db_contention.py`.
 - CLAUDE.md gained a #437 bullet beside #425's; README's failed-messages
   section says a lock timeout/deadlock is not counted against the message.
@@ -78,8 +89,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ### 2. **Deploy #437 once merged** (low urgency)
 - Pure Python, no migration. It only changes `localmail import`,
-  admin-panel imports (in-serve) and `retry-failed`, so **restart serve**
-  as well as the daemon.
+  admin-panel imports (in-serve) and `retry-failed`, so **restart serve**;
+  the daemon runs none of it and needs no restart.
 - **Acceptance:** `build_hash` on `/v1/version` equals the merge SHA on both hosts.
 
 ### 3. **Tell kastellan** (yours; carried)
@@ -118,10 +129,11 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 1. **The operator picked #437** and asked for both hosts to be deployed at
    `d5f1277`.
 2. **The failed job's counters were left as they are** (my call). On any
-   mid-run failure, `inserted`/`processed` include messages since the last
-   checkpoint that the closing connection rolls back. Pre-existing, now
-   reachable by contention too; a re-run is idempotent. Documented in
-   CLAUDE.md, not fixed.
+   mid-run failure, the counters include messages since the last commit
+   (a checkpoint or a new mailbox) that the closing connection rolls back,
+   and genuine poison pills since then lose their `failed_messages` rows.
+   Pre-existing, now reachable by contention too; a re-run is idempotent.
+   Filed as #439.
 
 ## Open decisions & risks
 

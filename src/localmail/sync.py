@@ -446,6 +446,10 @@ def retry_failed_messages(
             if isinstance(exc, DB_CONTENTION_ERRORS):
                 # Contention is not the message's fault: stop, leaving its
                 # retry_count alone; rows already retried are committed (#437).
+                log.warning(
+                    "retry-failed: DB contention on failed_messages id=%s uid=%s "
+                    "mailbox_id=%s after %d recovered; stopping, re-run it: %s",
+                    row_id, uid, mailbox_id, succeeded, exc)
                 raise
             # Re-record under the *stored* uid, not `attempt_uid`: the row is
             # keyed UNIQUE (account_id, mailbox_id, uid), so this upserts the

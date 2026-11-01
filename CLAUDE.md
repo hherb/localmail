@@ -1240,16 +1240,27 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
       `psycopg.errors.DataError.sqlstate`**: that is the DB-API base class,
       its sqlstate is `None`, and the trigger then raised `UndefinedObject`.
   - **The importer and `retry-failed` re-raise them too (#437).** Both wrote
-    a `failed_messages` row, so an import colliding with the daemon on the
-    same Message-Id or blob reported healthy mail as failed. Now
-    `run_import` lands in its outer handler, which marks the job `failed`
-    with `error_msg` (re-run it: imports are idempotent), and
-    `retry_failed_messages` raises, leaving that row's `retry_count` alone
-    (rows retried before it are committed). **The failed job's counters
-    overstate**: messages since the last checkpoint are counted but rolled
-    back when the connection closes — pre-existing for any mid-run error.
-    Pinned in `tests/test_import_retry_db_contention.py`, reusing #425's
-    trigger.
+    a `failed_messages` row, so a contended message was reported as
+    malformed. Their connections are bare `psycopg.connect` with no
+    timeout, so a lock wait just blocks: what raises is a deadlock, or a
+    lock/statement timeout an operator configured. Against the daemon an
+    import shares only the global `attachment_blobs` rows (dedup is per
+    account, and the daemon never syncs archive accounts); `retry-failed`
+    on a live account's row can also meet it on a Message-Id.
+    - `run_import` logs a WARNING naming the uid and mailbox, then lands in
+      its outer handler, which marks the job `failed` with `error_msg`
+      (re-run it: imports are idempotent). `localmail import` now exits 1
+      on a failed job, where it used to exit 0.
+    - `retry_failed_messages` logs the row and how many were recovered,
+      then raises, leaving that row's `retry_count` alone. Rows retried
+      before it stay committed (each is committed in turn, pinned by a
+      three-row test). The CLI turns it into a one-line `ClickException`.
+    - **A failed job's counters overstate, and genuine poison pills since
+      the last commit lose their `failed_messages` rows** until a re-run:
+      both are rolled back when the connection closes. Pre-existing for any
+      mid-run error, filed as #439.
+    - Pinned in `tests/test_import_retry_db_contention.py`, reusing #425's
+      trigger.
   - **The cause of #414's stall is still unknown**: the DGX journal for it had
     rotated away. `run_forever` registers `faulthandler` on
     `STACK_DUMP_SIGNAL` (SIGUSR1), so the next stall is `kill -USR1 <pid>`

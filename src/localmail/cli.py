@@ -40,7 +40,7 @@ from .api.admin.accounts import (
 from .cli_account_resolve import Found, NotFound, plan_account_resolution
 from .cli_help_request import is_help_request
 from .cli_sync_toggle import plan_sync_toggle
-from .db import apply_migrations
+from .db import DB_CONTENTION_ERRORS, apply_migrations
 from .fetch_retry import (
     arm_for_retry,
     list_gave_up,
@@ -615,11 +615,16 @@ def retry_failed(ctx: click.Context, account_name: str | None) -> None:
                 if not row:
                     raise click.ClickException(f"no such account: {account_name!r}")
                 acct_id = row[0]
-        ok, still = retry_failed_messages(
-            conn,
-            attachments_root=cfg.attachments.root,
-            account_id=acct_id,
-        )
+        try:
+            ok, still = retry_failed_messages(
+                conn,
+                attachments_root=cfg.attachments.root,
+                account_id=acct_id,
+            )
+        except DB_CONTENTION_ERRORS as e:
+            raise click.ClickException(
+                f"stopped on database contention ({type(e).__name__}: {e}); rows "
+                "recovered before it stay recovered; re-run retry-failed") from e
     click.echo(f"recovered: {ok}    still failing: {still}")
 
 
@@ -821,6 +826,8 @@ def import_cmd(
         f"skipped_dup={job.skipped_dup} failed={job.failed}")
     if job.error_msg:
         click.echo(f"error: {job.error_msg}", err=True)
+    if job.status == "failed":
+        ctx.exit(1)
 
 
 @main.command("backfill-internal-date")

@@ -71,7 +71,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | full `pytest -q` | **4325 passed**, 6 warnings (same as before), 215 s |
 | `mypy src/localmail` | Success, 162 files |
 | statement_timeout headroom | slowest pool claim on the 130k Mac archive: 144 ms (embed chunk claim) |
-| CI #424 | **not checked at handoff time** |
+| CI #424 | both pytest legs pass (3.12, 3.13) |
 
 ## What's next
 

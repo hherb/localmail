@@ -1,13 +1,13 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-10-31 (session 68).** `main` was **`f4ab719`** at
-> session start (#422, closing #415, had merged).
+> **Status as of 2026-11-01 (session 69).** `main` was **`b07b78e`** at
+> session start (#423, closing #416, had merged).
 >
-> This session opened **one PR, #423**, on `fix/416-idle-renew-before-drop`.
-> It has one code commit (`39e1c75`), closes **#416**, and also carries this
-> handoff.
+> This session opened **one PR, #424**, on `fix/414-bound-pool-connections`.
+> It has one code commit (`c4fc08f`) and this handoff. It is **part of #414**:
+> the issue stays open for the watchdog.
 >
-> **Open issues: 35** (34 once #423 merges).
+> **Open issues: 34.**
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -28,119 +28,77 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### Operations: #415 deployed and repaired on both hosts (no commit)
+### Operations: #416 verified on both hosts (no commit)
 
-- Redeployed `f4ab719` to the Mac and the DGX. Both `/v1/version` report
-  `build_hash: f4ab719`.
-- Ran `backfill-internal-date --refetch` on both, after the redeploy.
+- #423 merged as `b07b78e`. Its tree is identical to the branch head
+  `2f8c62a`, so the review fixes landed.
+- **DGX:** running `b07b78e` since 2026-11-01 01:04 AEDT. One IDLE crash
+  since then (04:15, a `BrokenPipeError` on `DONE`, which the loop
+  reconnected from). Before the fix there was one every ~10 min.
+- **Mac:** no IDLE crash since 2026-10-31 21:52. I restarted `serve`, and
+  `/v1/version` now reports `b07b78e`.
 
-| host | updated / candidates | not on the server | unusable | time | exit |
-|---|---|---|---|---|---|
-| Mac | 94,544 / 132,296 | 2,720 | 0 | 36 min | 0 |
-| DGX | 38,595 / 39,070 | 474 | 0 | ~10 min | 0 |
-
-- **Mac skew histogram:** the peak moved from +2 h (87,422 rows) to 0
-  (123,205). No row has an `internal_date` in the future. The residual +2 h
-  bucket (2,143) is about the size of the "not on the server" count.
-- **DGX:** the peak is at 0 (35,475).
-- **The DGX acceptance message 39045 is still +11 h, and cannot be fixed by
-  refetch.** It was labelled only INBOX UID 65847. That UID is gone from
-  INBOX, and a `HEADER Message-ID` search of `[Gmail]/All Mail` finds
-  nothing. So it was deleted (or sits in Trash/Spam, which All Mail
-  excludes). It is one of the 474. See open decision 1.
-
-### PR #423 on `fix/416-idle-renew-before-drop` (based on `main` at `f4ab719`)
+### PR #424 on `fix/414-bound-pool-connections` (based on `main` at `b07b78e`)
 
 | SHA | What |
 |---|---|
-| `39e1c75` | TCP keepalive on every IMAP socket; IDLE renewal default 1740 → 600 s; `config.example.toml` pinned to the default |
-| handoff | this file + `docs/handoffs/2026-10-31T1225Z-idle-keepalive.md` |
+| `c4fc08f` | Pool connections get the #140/#142 bounds; `faulthandler` on SIGUSR1 |
+| handoff | this file + `docs/handoffs/2026-11-01T0101Z-pool-bounds.md` |
 
-**The issue's diagnosis was wrong, and that is the main finding.**
-
-- #416 blamed a Gmail 29-minute IDLE drop. Every crash was at `idle.py`'s
-  renewal `idle_done()`. That was true on Gmail **and** on `hherb-dmc`, from
-  **both** hosts. The server never closed the connection first.
-- The 29-minute cadence was our own `idle_renew_seconds = 1740`. Any
-  shorter silent timeout looks the same.
-- **The first fix (renew at 600 s) was tested live and failed.** The DGX
-  reset at its first 600 s renewal. The Mac reset at its second, for both
-  accounts.
-- **Measured instead**, with read-only parallel IDLE probes to Gmail
-  (SELECT readonly, IDLE, sleep, DONE). The probe was a scratch script and
-  is not kept.
-
-| silence | Mac | DGX |
-|---|---|---|
-| 60–300 s | OK | – |
-| 420 s | OK | reset |
-| 540 s | reset | reset |
-| 540 s + TCP keepalive | **OK** | **OK** |
-
-- So something on the network path drops a silent TCP flow without telling
-  either end.
-
-**The fix:**
-
-- `imap_client.open_connection` calls the new `enable_tcp_keepalive`: 60 s
-  idle, 30 s interval. Linux spells the idle option `TCP_KEEPIDLE`, macOS
-  `TCP_KEEPALIVE`.
-- This covers IDLE, the poll plane, long FETCHes and the admin probe.
-- **The renewal default moves 1740 → 600**, because 1740 renewed *at* RFC
-  2177's 29-minute limit. `idle.RFC2177_IDLE_LIMIT_S` names that limit.
-  - Both hosts carried 1740 because they copied `config.example.toml`.
-    `tests/test_idle_renew_default.py` pins the example to the default.
-  - **Both hosts' `config.toml` were edited to 600 this session.**
-    Backups: the Mac's is in this session's scratchpad; the DGX's is
-    `~/.config/localmail/config.toml.bak-416`.
-- Test fakes that replace `IMAPClient`
-  (`test_internal_date_utc.py`, `test_sync_concurrent_writers.py`) gained a
-  `socket()`.
-- CLAUDE.md has a new note under **Sync model**.
+- **Pool bounds.** `Daemon._connect` applied `connect_timeout`,
+  `tcp_user_timeout` and `statement_timeout`. `open_pool` used the bare DSN,
+  though every IDLE/poll heartbeat and sync goes through the pool. One rule
+  now, `db.bounded_connect_kwargs`, passed to both. `open_pool` gained a
+  `connect_kwargs=` argument; its other callers (CLI, `create_searcher`) are unchanged.
+- **Stack dump.** `run_forever` (main-thread branch, beside the signal
+  handlers) calls `faulthandler.register(STACK_DUMP_SIGNAL, all_threads=True)`.
+  `STACK_DUMP_SIGNAL = signal.SIGUSR1` lives in `daemon.py`.
+- **Not done, by operator decision:** #414's stale-heartbeat watchdog.
+- **Why the cause is still unknown:** the DGX journal for the 10-29 stall has
+  rotated away (reboots on 10-31). Everything in the stall window
+  (`open_connection`, then the first pool heartbeat) is bounded except pool
+  connections, which carried none of the three bounds — no `tcp_user_timeout`
+  for a post-connect black-hole, no `statement_timeout`. That is not proof.
+- Docs: README (`localmail run` row, plus the SIGUSR1 note),
+  `config.example.toml`, the `config.py` comments, and a CLAUDE.md note under
+  **Sync model**.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | both new test files failed (import error; then 2 failed for keepalive) |
-| 4 mutations (keepalive call removed, idle 60 → 600, default back to 1740, example drifted) | each caught |
-| full `pytest -q` | **4321 passed**, 6 warnings, 207 s |
+| RED first | pool test failed (`connect_timeout` absent from the pool connection's parameters); stack-dump test file failed to import |
+| 2 mutations (pool kwargs → `None`; `register` → `pass`) | each caught by exactly its own test |
+| full `pytest -q` | **4325 passed**, 6 warnings (same as before), 215 s |
 | `mypy src/localmail` | Success, 162 files |
-| CI #423 | both pytest legs pass |
-| **live, Mac** (daemon runs from this checkout) | 0 IDLE crashes in ~30 min since 21:56:35. The unpatched 600 s build crashed both accounts within 20 min |
-
-- **Not live-tested on the DGX.** It still runs `main` (`f4ab719`) with
-  `idle_renew_seconds = 600`, and resets every 10 min until #423 is
-  deployed there. The DGX probe proves Linux keepalive works.
-- **The 6 warnings:** at least some are docling `DeprecationWarning`s from
-  `test_ocr_language_default.py`. The rest are unidentified (carried).
+| statement_timeout headroom | slowest pool claim on the 130k Mac archive: 144 ms (embed chunk claim) |
+| CI #424 | both pytest legs pass (3.12, 3.13) |
 
 ## What's next
 
-### 1. **Merge #423, redeploy both hosts** (yours)
-- After the merge, check that `gh issue view 416` reports closed.
-- Redeploy (commands below). The Mac already runs this code; the DGX needs
-  it.
-- **Acceptance:** no `inbox-idle session crashed` line in either daemon log
-  for an hour after the restart (one is expected right after the restart at
-  most). Before the fix it was one every ~10 min on the DGX.
-  - Mac: `grep "session crashed" ~/Library/Logs/localmail/daemon.err.log | tail`
-  - DGX: `journalctl --user -u localmail-daemon --since "-1h" | grep -c "session crashed"`
+### 1. **Merge #424, redeploy both hosts** (yours)
+- After the merge, leave #414 open (the watchdog part remains). Comment on it
+  that bounds + SIGUSR1 shipped.
+- **Acceptance:** after the restart, `kill -USR1 <daemon pid>` on the DGX
+  prints thread stacks in `journalctl --user -u localmail-daemon`, and the
+  daemon keeps running (heartbeats fresh in `localmail daemon status`).
+- **If a stall recurs:** run `kill -USR1` *before* restarting, and save the
+  dump into #414.
 
 ### 2. **Tell kastellan** (yours; carried)
-- Problem+json 400s on `/v1/search`, `filters.lang` as a list, and
-  web-search syntax in `query` (#419).
-- Dates are no longer in the future (#415 repaired on both hosts).
+- Problem+json 400s on `/v1/search`, `filters.lang` as a list, web-search
+  syntax in `query` (#419), dates no longer in the future (#415).
 
 ### 3. **Next small slice**
-- **#414:** stalled workers on unbounded pool connections. Note: #414's
-  incident followed one of these resets. Re-read it now that #416's cause
-  is known; part of it may be the same silent-drop mechanism.
-- **#421:** the GUI drops quotes on a single quoted word (`"OR"`, `"-acme"`).
-- **Acceptance (either):** RED test first, the fix, and the full suite
-  green.
+- **#421:** the GUI tokenizer drops quotes on a single quoted word (`"OR"`,
+  `"-acme"`). `filter_parse.tokenize` must record which tokens were quoted,
+  so `joinTokens` re-quotes them.
+- **Acceptance:** a vitest RED test for `a "OR" b` and `"-acme"` surviving
+  a popover Apply and `absorbConflictingOperators`; fix; `npm test -- --run`
+  and `npm run check` green.
 
 ### 4. **Carried**
+- **#414 watchdog:** waits for a stack dump.
 - **Dependabot #71 / #185:** left open on purpose.
 - **docling > 2.144:** watch for a release and probe it.
 - **emSign G3:** re-check the trust stores after OS updates.
@@ -152,36 +110,34 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## Rulings made this session
 
-1. **Deploy and repair both hosts this session** (operator).
-2. **#416 next** (operator).
-3. **Keepalive, not a shorter renewal**, is #416's fix: measured, after the
-   shorter renewal failed live.
+1. **#414 scope: pool bounds + SIGUSR1 now; watchdog deferred** until a dump
+   shows what hangs (operator).
 
 ## Open decisions & risks
 
-1. **3,194 rows keep a skewed `internal_date`** (Mac 2,720, DGX 474): the
-   server no longer has them, so refetch cannot fix them. Options:
-   - Leave them.
-   - NULL them, so search falls back to `date_sent`.
-   - A per-host SQL shift. On the DGX the offset is deterministic (Sydney
-     local read as UTC); on the Mac it is not. This session's ruling was "no
-     SQL offset", and that ruling was made for the mixed Mac history.
-   - Not decided.
-2. **What drops the silent flows is unknown** (home router, ISP CGNAT,
-   WireGuard?). It differs per host: the DGX path drops under 420 s. If a
-   path ever drops under 60 s, keepalive at 60 s will not cover it.
-3. **Should a wire widening bump `api_minor`?** Still open.
-4. **#375 under load:** `build_hash` is null on the Mac until a quiet
+1. **New failure mode:** a pool statement past `db_statement_timeout_s` (30 s)
+   now aborts. Review found the likely trigger is a lock wait behind the
+   sibling sync thread's batch, so sync now re-raises it (pass aborts, retries
+   from the checkpoint) instead of writing `failed_messages`; the extract
+   worker treats it as transient. Watch for `canceling statement due to
+   statement timeout` in either daemon log after the deploy: repeated for one
+   mailbox means a message genuinely needs a higher bound.
+2. **3,194 rows keep a skewed `internal_date`** (Mac 2,720, DGX 474); the
+   server no longer has them. Leave / NULL / per-host SQL shift: not decided.
+3. **What drops the silent IMAP flows is unknown** (router, CGNAT,
+   WireGuard?). If a path ever drops under 60 s, keepalive at 60 s won't
+   cover it.
+4. **Should a wire widening bump `api_minor`?** Still open.
+5. **#375 under load:** `build_hash` is null on the Mac until a quiet
    restart.
-5. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
-6. **Never run two localmail pytest sessions against one test DB.** The
-   test DB is on port 5532, the same cluster as the live archive.
-7. **Restore a mutation from a file copy, never with `git checkout`.**
-8. **Always sync with `--extra mcp --extra extraction`**, and use
-   `~/.local/bin/uv` on the DGX. `uv sync --dry-run` is not read-only.
-9. **Run long DGX jobs detached** (`nohup setsid … > /tmp/x.log`). A quiet
-   ssh session can be dropped by the same silent-flow drop.
-10. **No ROADMAP.md.** That `/nextsession` step is a no-op.
+6. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.**
+7. **Never run two localmail pytest sessions against one test DB** (port
+   5532, same cluster as the live archive).
+8. **Restore a mutation from a file copy, never with `git checkout`.**
+9. **Always sync with `--extra mcp --extra extraction`**; `~/.local/bin/uv`
+   on the DGX. `uv sync --dry-run` is not read-only.
+10. **Run long DGX jobs detached** (`nohup setsid … > /tmp/x.log`).
+11. **No ROADMAP.md.** That `/nextsession` step is a no-op.
 
 ## Exact commands to resume
 
@@ -190,8 +146,8 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git log --oneline main..origin/fix/416-idle-renew-before-drop   # empty once merged
-gh issue view 416 --json state
+git log --oneline main..origin/fix/414-bound-pool-connections   # empty once merged
+gh pr checks 424
 gh issue list --limit 200 --json number --jq length
 
 # Redeploy — Mac (the repo is the install)
@@ -200,19 +156,19 @@ launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version
 
-# Redeploy — DGX
+# Redeploy — DGX, then prove the stack dump
 ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user restart localmail-daemon localmail-serve'
-ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version; journalctl --user -u localmail-daemon --since "-1h" | grep -c "session crashed"'
+ssh 10.0.0.3 'kill -USR1 $(systemctl --user show -p MainPID --value localmail-daemon); sleep 2; journalctl --user -u localmail-daemon --since "-1min" | grep -c "Thread 0x"'
+ssh 10.0.0.3 'cd ~/src/localmail && .venv/bin/localmail daemon status | head -8'
 
 # Load before trusting any timing; no other localmail pytest may be running.
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4321 at session 68
-uv run pytest -q tests/test_imap_keepalive.py tests/test_idle_renew_default.py
+unset VIRTUAL_ENV && uv run pytest -q              # 4325 at session 69
+uv run pytest -q tests/test_daemon_connect_timeout.py tests/test_daemon_stack_dump.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 162 files
 cd gui && npm test -- --run && npm run check
-cd gui/src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
 ```
 
 The latest migration is still **`0036_api_keys.sql`**; the next free slot is

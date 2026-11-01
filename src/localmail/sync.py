@@ -31,6 +31,7 @@ from psycopg.types.json import Jsonb
 
 from .attachments import write_attachments
 from .config import AccountConfig
+from .db import DB_CONTENTION_ERRORS
 from .fetch_retry import (
     DEFAULT_MAX_BODY_FETCH_HOLD_S,
     clear_attempts,
@@ -874,6 +875,11 @@ def sync_mailbox(
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")
                     cur.execute("RELEASE SAVEPOINT msg")
+                if isinstance(exc, DB_CONTENTION_ERRORS):
+                    # Waiting on the sibling thread's uncommitted batch is not
+                    # the message's fault: abort the pass, which resumes from
+                    # the last committed checkpoint (#414).
+                    raise
                 log.exception(
                     "skipping poison-pill UID %s in %s/%s",
                     uid, account_id, mailbox.name,

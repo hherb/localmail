@@ -134,27 +134,29 @@ class DaemonConfig(BaseModel):
     # exceeds the beat interval and a healthy worker is never flagged stale by
     # jitter — independent of [daemon] poll_seconds.
     heartbeat_stale_seconds: int = 120
-    # Bound for the daemon's *fresh* (non-pool) psycopg connects —
-    # `_load_syncable_accounts`, `reconcile`, `_clear_heartbeats` (#140). Without
+    # Bound for the daemon's psycopg connections: its fresh connects —
+    # `_load_syncable_accounts`, `reconcile`, `_clear_heartbeats` (#140) — and,
+    # since #414, every connection its shared pool opens. Without
     # it a network black-hole (host up, packets dropped) blocks the connect for
     # the OS TCP default (minutes), stalling startup and hot-reload. Integer
     # seconds because libpq's `connect_timeout` is integer-valued (a float would
     # serialise to "10.0" in the conninfo string).
     db_connect_timeout_s: int = 10
-    # Companion bound for the *query* phase of those same fresh connects (#142).
+    # Companion bound for the *query* phase of those same connections (#142).
     # This is `statement_timeout`, a *server-side* GUC: Postgres aborts a query
     # that runs longer than this *on the server*. It bounds a slow / stuck query
     # (lock contention, a pathological plan) — NOT a network black-hole. If
     # request packets are dropped in transit the server never starts the query
     # (so the timer never arms), and if the reply is dropped the client blocks on
     # recv regardless; that post-connect black-hole case is bounded by
-    # `db_tcp_user_timeout_ms` below, not here. Threaded into `Daemon._connect()`
-    # as libpq `options='-c statement_timeout=<N>s'`. Integer seconds (passed with
-    # the GUC `s` unit suffix, so no s->ms magic conversion); these queries are
-    # sub-ms so the default is generous headroom over real load yet finite. `0`
-    # disables the bound (libpq/Postgres semantics).
+    # `db_tcp_user_timeout_ms` below, not here. Threaded through
+    # `db.bounded_connect_kwargs` as libpq `options='-c statement_timeout=<N>s'`.
+    # Integer seconds (passed with the GUC `s` unit suffix, so no s->ms magic
+    # conversion). The slowest worker claim query measured on a 130k-message
+    # archive (the embed chunk claim) took 144 ms, so the default leaves wide
+    # headroom yet is finite. `0` disables the bound (libpq/Postgres semantics).
     db_statement_timeout_s: int = 30
-    # Bound for the *post-connect network black-hole* on those same fresh connects
+    # Bound for the *post-connect network black-hole* on those same connections
     # (#142): host up, packets silently dropped *after* the TCP connect succeeds.
     # `db_connect_timeout_s` only covers the connect handshake and
     # `db_statement_timeout_s` is server-side (useless when the server never sees

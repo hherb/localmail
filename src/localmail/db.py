@@ -5,15 +5,68 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import sqlparse
+from psycopg.conninfo import conninfo_to_dict
 from psycopg_pool import ConnectionPool
 
+# A statement that failed because of *other* sessions, not because of its own
+# data: a lock wait past statement_timeout, a deadlock, a lock_timeout. Bounding
+# the pool (#414) made the first reachable on sync's hot path. Callers that
+# isolate a bad row in a SAVEPOINT re-raise these rather than recording the row
+# as broken, since a retry once the other session commits succeeds.
+DB_CONTENTION_ERRORS: tuple[type[psycopg.Error], ...] = (
+    psycopg.errors.QueryCanceled,
+    psycopg.errors.DeadlockDetected,
+    psycopg.errors.LockNotAvailable,
+)
 
-def open_pool(dsn: str, *, min_size: int = 1, max_size: int = 4) -> ConnectionPool:
-    return ConnectionPool(conninfo=dsn, min_size=min_size, max_size=max_size, open=True)
+
+def bounded_connect_kwargs(
+    dsn: str,
+    *,
+    connect_timeout_s: int,
+    tcp_user_timeout_ms: int,
+    statement_timeout_s: int,
+) -> dict[str, Any]:
+    """libpq parameters that bound every phase of a daemon connection.
+
+    ``connect_timeout`` bounds the handshake (#140), ``statement_timeout`` a
+    stuck query and ``tcp_user_timeout`` a recv after packets are dropped
+    (#142). Shared by the daemon's fresh connects and its pool (#414), so the
+    two cannot drift apart.
+
+    An ``options`` kwarg *replaces* the DSN's ``options=`` (and ``PGOPTIONS``),
+    so the operator's own are carried in front of ours, in libpq's precedence:
+    the DSN's if it has any, else ``PGOPTIONS``. Ours come last, so the
+    configured ``statement_timeout`` wins over one set there.
+    """
+    operator_options = conninfo_to_dict(dsn).get("options") or os.environ.get(
+        "PGOPTIONS", ""
+    )
+    return {
+        "connect_timeout": connect_timeout_s,
+        "tcp_user_timeout": tcp_user_timeout_ms,
+        "options": f"{operator_options} -c statement_timeout={statement_timeout_s}s".lstrip(),
+    }
+
+
+def open_pool(
+    dsn: str,
+    *,
+    min_size: int = 1,
+    max_size: int = 4,
+    connect_kwargs: dict[str, Any] | None = None,
+) -> ConnectionPool:
+    """Open a pool; ``connect_kwargs`` is passed to every connection it makes."""
+    return ConnectionPool(
+        conninfo=dsn, min_size=min_size, max_size=max_size,
+        kwargs=connect_kwargs, open=True,
+    )
 
 
 POOL_BASELINE_MIN = 4

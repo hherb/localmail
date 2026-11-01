@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import signal
 import threading
@@ -27,7 +28,7 @@ from .blob_temps import sweep_blob_temps
 from .config import Config
 from .daemon_accounts import account_config_from_row
 from .daemon_reconcile import plan_reconcile
-from .db import compute_daemon_pool_size, open_pool
+from .db import bounded_connect_kwargs, compute_daemon_pool_size, open_pool
 from .heartbeat import (
     clear_account_heartbeats,
     clear_all_heartbeats,
@@ -41,6 +42,13 @@ from .version_report import log_version_diagnostic
 from .worker import WorkerContext
 
 log = logging.getLogger(__name__)
+
+# `kill -USR1 <pid>` writes every thread's stack to stderr (the journal under
+# systemd, the plist's StandardErrorPath under launchd, the supervisor's log
+# ring under serve), so a stalled worker can be located rather than guessed at
+# (#414). Registered by run_forever; before that, SIGUSR1's default action
+# terminates the process.
+STACK_DUMP_SIGNAL = signal.SIGUSR1
 
 
 @dataclass
@@ -104,8 +112,11 @@ class Daemon:
         # the time it returns, Postgres has answered, and any brief blip in the
         # window before a worker first acquires a connection is absorbed by the
         # IDLE/poll loops' own 1s→60s backoff.
+        # Every worker heartbeats and syncs through the pool, so its
+        # connections need the same bounds as `_connect` (#414).
         self.pool = open_pool(
-            self._dsn, min_size=resolved_min_size, max_size=resolved_max_size
+            self._dsn, min_size=resolved_min_size, max_size=resolved_max_size,
+            connect_kwargs=self._connect_kwargs(),
         )
         self._account_threads: dict[int, AccountThreads] = {}
         self._worker_threads: list[threading.Thread] = []
@@ -116,8 +127,10 @@ class Daemon:
     def _connect(self) -> psycopg.Connection:
         """Open a fresh (non-pool) connection with every phase bounded.
 
-        The daemon opens fresh connects in three places — startup account read,
-        reconcile, and the heartbeat clear — none of which borrow from the pool.
+        The daemon opens fresh connects for the startup account read, the command
+        drain, reconcile, the command listener (which then lifts its own
+        ``statement_timeout``, since it waits on ``NOTIFY``) and the heartbeat
+        clear — none of which borrow from the pool.
         Routing them all through here applies three complementary bounds so no
         phase can hang indefinitely on a network fault (#140, #142):
 
@@ -131,14 +144,17 @@ class Daemon:
           (Linux-effective; libpq ignores it where ``TCP_USER_TIMEOUT`` is
           absent, e.g. macOS).
 
-        ``self._dsn`` must not itself carry an ``options=`` conninfo entry — the
-        kwarg below replaces rather than merges it; the daemon's DSN never does.
+        The pool's connections carry the same three (#414); the rule is
+        ``db.bounded_connect_kwargs``.
         """
-        return psycopg.connect(
+        return psycopg.connect(self._dsn, **self._connect_kwargs())
+
+    def _connect_kwargs(self) -> dict[str, Any]:
+        return bounded_connect_kwargs(
             self._dsn,
-            connect_timeout=self.cfg.daemon.db_connect_timeout_s,
-            tcp_user_timeout=self.cfg.daemon.db_tcp_user_timeout_ms,
-            options=f"-c statement_timeout={self.cfg.daemon.db_statement_timeout_s}s",
+            connect_timeout_s=self.cfg.daemon.db_connect_timeout_s,
+            tcp_user_timeout_ms=self.cfg.daemon.db_tcp_user_timeout_ms,
+            statement_timeout_s=self.cfg.daemon.db_statement_timeout_s,
         )
 
     def _load_syncable_accounts(self) -> list[Account]:
@@ -505,10 +521,21 @@ class Daemon:
         for t in self._worker_threads:
             t.join(timeout=timeout)
 
+    @staticmethod
+    def _register_stack_dump() -> None:
+        # A diagnostic aid must not stop the daemon starting: faulthandler
+        # refuses a stderr that is None or has no usable fileno() (fd 2
+        # closed, an embedder's replacement stream).
+        try:
+            faulthandler.register(STACK_DUMP_SIGNAL, all_threads=True)
+        except (RuntimeError, ValueError, AttributeError, OSError):
+            log.warning("could not register the SIGUSR1 stack dump", exc_info=True)
+
     def run_forever(self) -> None:
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self._handle_signal)
             signal.signal(signal.SIGINT, self._handle_signal)
+            self._register_stack_dump()
         self.start_workers()  # initial account spawn + embed/extract workers
         listener: threading.Thread | None = None
         if self.cfg.daemon.command_listen_enabled:

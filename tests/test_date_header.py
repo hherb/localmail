@@ -52,8 +52,9 @@ def test_minus_zero_zero_states_no_local_offset() -> None:
     b"Date: not a date",
 ])
 def test_the_stored_date_sent_is_the_shared_reading(header: bytes) -> None:
-    """``parser._date_sent`` must go through ``parse_date_header``: the same
-    instant ``date_local`` renders, and None where it is unparseable."""
+    """``parser._date_sent`` must read the instant ``date_local`` renders,
+    and None where it is unparseable. (``-0000`` is excluded: it is stored as
+    UTC while ``date_local`` is None — see test_date_sent_minus_zero.py.)"""
     stored = parse_message(header + b"\r\nSubject: s\r\n\r\nbody").date_sent
     local = sender_local_time(header.split(b":", 1)[1].strip().decode())
     if local is None:

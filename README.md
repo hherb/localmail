@@ -1032,7 +1032,13 @@ it used to be FastAPI's 422 with an array `detail`
 ([#370](https://github.com/hherb/localmail/issues/370)). That holds for
 `/v1/search` only; other routes still answer 422. Pydantic still coerces where
 it can (`"yes"` for `has_attachment` reads as `true`). An empty string for
-`from`, `to`, `subject` or a date is an absent filter. Every hit's
+`from`, `to`, `subject`, `attachment_name` or a date is an absent filter.
+`attachment_name` (`api_minor` ≥ 6; DSL `attachment_name:`) keeps only
+messages where some attachment's file name contains the value,
+case-insensitively, with `_` and `%` literal. It is unindexed: on the
+132k-message Mac archive a filter-only search for a name that matches
+nothing walks the archive in ~0.2 s (warm), while a common one returns in
+2 ms. Every hit's
 `has_attachments` describes the message; it used to report whether the
 *matched text* came from an attachment. An attachment is any part
 `EmailMessage.iter_attachments()` yields: it walks only the top-level part's
@@ -1136,7 +1142,12 @@ skipped; repair one with `--account NAME`.
   the `GET /v1/messages/{id}` entry shape, in stored order. A malformed
   stored entry keeps its position with every field `null`, so entry *i* is
   still `/v1/messages/{id}/attachments/{i}`. `attachments` costs one query
-  per page, only when named.
+  per page, only when named. Since `api_minor` 6, `date_local` is the
+  `Date:` header's instant on the **sender's own clock**
+  (`"2023-07-12T09:58:24+10:00"`), where `date` is UTC and may be the
+  arrival time instead. It is `null` when the message has no parseable
+  `Date:` or the header says `-0000` (local zone unknown). One query per
+  page, only when named (~3 ms warm for 50 hits on a 132k archive).
 - `snippet_chars`: the width of the snippet window, between 1 and
   `[search] snippet_max_chars` (default 1000). A cut window may gain a `…`
   at either end, so the text is at most `snippet_chars + 2` characters.

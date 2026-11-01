@@ -18,7 +18,9 @@ from typing import Any
 import psycopg
 
 from localmail.config import SearchConfig
-from localmail.search.attachment_names import NAMES_TSV_SQL, names_match_sql
+from localmail.search.attachment_names import (
+    NAME_CONTAINS_SQL, NAMES_TSV_SQL, names_match_sql,
+)
 from localmail.search.attachment_presence import HAS_ATTACHMENT_SQL
 from localmail.search.query import ParsedQuery, SearchFilters
 from localmail.search.searcher import ArmHit
@@ -64,6 +66,9 @@ def _filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
     if filters.subject_substr:
         parts.append("m.subject ILIKE %s")
         params.append(f"%{filters.subject_substr}%")
+    if filters.attachment_name_substr:
+        parts.append(NAME_CONTAINS_SQL)
+        params.append(filters.attachment_name_substr)
     if filters.after:
         parts.append("m.date_sent >= %s")
         params.append(filters.after)

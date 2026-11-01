@@ -5973,9 +5973,8 @@ for the full design.
         finite rows: substituting some *other* constant keeps `C, D, B`
         intact and moves only the NaN row, so the filtered assertion alone
         passes for it (mutation-proven with `99.0`).
-- **Kastellan's search asks (#426): paging, attachment names.** Items 1–3
-  shipped; 4 (`filters.attachment_name`) and 5 (the sender's local time on a
-  hit) are open. `api_minor` is **5**.
+- **Kastellan's search asks (#426): paging, attachment names, sender time.**
+  All five shipped (items 1–3 at `api_minor` 5, items 4–5 at **6**).
   - **A grown pool serves the requested page, not page 1.** `grow_pool`
     used to re-run retrieval and return the grown pool's page 1 under a new
     token, which re-ranked to mostly the same top hits: page 3 of a search
@@ -6055,6 +6054,20 @@ for the full design.
     precondition). A malformed entry keeps its slot as all-`None`, and a
     non-string name or hash reads as `None`, so entry *i* stays attachment
     index *i* (review: it used to drop them). HTTP only (#368).
+  - **`filters.attachment_name` / DSL `attachment_name:`** (item 4) keeps
+    messages where some file name contains the value: `strpos(lower(…),
+    lower(%s))`, so `_`/`%` are literal (unlike the `ILIKE` substring
+    filters beside it). The rule is `attachment_names.NAME_CONTAINS_SQL`,
+    composed by `_filter_sql`, so every arm and the date walk apply it.
+    Unindexed — measured on the 132k Mac archive, a name matching nothing
+    walks the whole archive in ~0.2 s warm. MCP has the parameter too.
+  - **`date_local`** (item 5, opt-in `fields`) is the `Date:` header's
+    instant on the sender's clock, read from the raw header block
+    (`search/hit_dates.py`, the `?headers=list` read, re-reading in full
+    past the ceiling). `date_header.parse_date_header` is shared with
+    `parser._date_sent`, so `date_local` and `date_sent` name one instant.
+    `None` for no header and for `-0000`. ~3 ms warm per 50 hits — which
+    also says the bounded `raw_bytes` prefix read is cheap (#384's worry).
 - **Search filters are honoured or refused, never dropped (#364).** Design:
   [docs/superpowers/specs/2026-09-14-search-request-honesty-design.md](docs/superpowers/specs/2026-09-14-search-request-honesty-design.md);
   plan: [docs/superpowers/plans/2026-09-14-search-request-honesty.md](docs/superpowers/plans/2026-09-14-search-request-honesty.md).

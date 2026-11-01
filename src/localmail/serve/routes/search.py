@@ -30,6 +30,7 @@ class SearchFiltersModel(BaseModel):
     from_: str | None = Field(default=None, alias="from")
     to: str | None = None
     subject: str | None = None
+    attachment_name: str | None = None
     after: str | None = None
     before: str | None = None
 

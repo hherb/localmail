@@ -57,6 +57,7 @@ from localmail.search.searcher import (
 
 _SUPPORTED_FILTER_KEYS = frozenset({
     "from", "to", "subject", "after", "before", "has_attachment",
+    "attachment_name",
     "account_ids", "folder_ids",
     "date_from", "date_to", "lang",
 })
@@ -139,6 +140,8 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
         out.append(f'to:{_quote_value(v, "to")}')
     if (v := filters.get("subject")):
         out.append(f'subject:{_quote_value(v, "subject")}')
+    if (v := filters.get("attachment_name")):
+        out.append(f'attachment_name:{_quote_value(v, "attachment_name")}')
     if (v := filters.get("after")):
         _validate_date(v, "after")
         out.append(f"after:{v}")
@@ -616,6 +619,10 @@ def run_search(
     if fields is not None and "attachments" in fields:
         attachments = searcher.message_attachments(
             [r.message_id for r in page.results])
+    local_dates: dict[int, str | None] = {}
+    if fields is not None and "date_local" in fields:
+        local_dates = searcher.message_local_dates(
+            [r.message_id for r in page.results])
     return {
         "results": [
             _to_api_result(r) if fields is None
@@ -623,6 +630,7 @@ def run_search(
                 **_to_api_result(r),
                 "attachment_filename": r.attachment_filename,
                 "attachments": attachments.get(r.message_id, []),
+                "date_local": local_dates.get(r.message_id),
             }, fields)
             for r in page.results
         ],

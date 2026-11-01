@@ -25,7 +25,11 @@ from typing import Any
 #: file whose text matched (``None`` unless the best chunk was an
 #: attachment's), and ``attachments`` lists every attachment the message
 #: carries, in the ``GET /v1/messages/{id}`` entry shape (#426).
-OPT_IN_FIELDS: tuple[str, ...] = ("snippet", "attachment_filename", "attachments")
+#: ``date_local`` is the ``Date:`` header's instant on the sender's own
+#: clock (``None`` without one, or for ``-0000``); ``date`` is UTC and may be
+#: the arrival time instead (#426).
+OPT_IN_FIELDS: tuple[str, ...] = (
+    "snippet", "attachment_filename", "attachments", "date_local")
 
 #: Every name a `fields` projection may ask for, in the order the projected
 #: hit's keys come back: exactly the keys ``api.search._to_api_result``
@@ -43,7 +47,7 @@ _KNOWN = frozenset(HIT_FIELDS)
 #: The longest ``fields`` list accepted (#394). Duplicates are accepted, so
 #: without a cap the caller chooses ``len(fields)``, and ``project_hit``'s
 #: per-hit re-check costs that times every hit on the page. Set at four
-#: times the 12 hit fields there were then (14 since #426, and the cap
+#: times the 12 hit fields there were then (15 since #426, and the cap
 #: deliberately did not move); it admits any honest call, repeats included,
 #: by a wide margin. A literal rather than ``4 * len(HIT_FIELDS)`` so adding
 #: a hit field does not silently move a documented wire limit.

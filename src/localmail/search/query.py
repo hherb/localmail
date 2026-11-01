@@ -6,6 +6,7 @@
 Supported operators (all optional, in any order, anywhere in the query):
     from:STR / from:"STR"     to:STR / to:"STR"
     subject:STR               label:STR
+    attachment_name:STR       (a substring of any attachment's file name)
     account:NAME              folder:STR / folder:"STR"
     after:YYYY-MM-DD          before:YYYY-MM-DD
     has:attachment / has:no-attachment
@@ -40,6 +41,7 @@ class SearchFilters:
     has_attachment: bool | None = None
     label: str | None = None
     languages: list[str] | None = None
+    attachment_name_substr: str | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,7 @@ def excluded_text(free_text: str) -> str:
 _OPERATORS = {
     "from", "to", "subject", "after", "before", "has", "label",
     "account", "folder", "account_id", "folder_id", "lang",
+    "attachment_name",
 }
 
 
@@ -222,7 +225,7 @@ def parse_query(query: str) -> ParsedQuery:
     f_folders: list[str] = []
     f_account_ids: list[int] = []
     f_folder_ids: list[int] = []
-    f_from = f_to = f_subject = f_label = None
+    f_from = f_to = f_subject = f_label = f_attachment_name = None
     f_after = f_before = None
     f_has_attachment: bool | None = None
     f_languages: list[str] = []
@@ -247,6 +250,8 @@ def parse_query(query: str) -> ParsedQuery:
                     f_subject = value
                 elif op_l == "label":
                     f_label = value
+                elif op_l == "attachment_name":
+                    f_attachment_name = value
                 elif op_l == "account":
                     f_account_names.append(value)
                 elif op_l == "folder":
@@ -288,5 +293,6 @@ def parse_query(query: str) -> ParsedQuery:
         has_attachment=f_has_attachment,
         label=f_label,
         languages=f_languages or None,
+        attachment_name_substr=f_attachment_name,
     )
     return ParsedQuery(free_text=" ".join(free_parts), filters=filters)

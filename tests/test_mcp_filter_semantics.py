@@ -115,6 +115,16 @@ FILTER_SEMANTICS: tuple[FilterSemantic, ...] = (
         required_params=("%invoice%",),
         prose_keywords=("case-insensitive", "substring"),
     ),
+    # strpos, not ILIKE: no `%` wrapping, and a `_` in a file name is literal.
+    FilterSemantic(
+        mcp_param="attachment_name",
+        filters_kwarg="attachment_name_substr",
+        sample="fee_proposal",
+        required_sql=("strpos(lower(", "lower(%s)) > 0"),
+        forbidden_sql=("ILIKE",),
+        required_params=("fee_proposal",),
+        prose_keywords=("case-insensitive", "substring", "literal"),
+    ),
 )
 
 

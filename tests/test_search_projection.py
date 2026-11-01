@@ -54,7 +54,7 @@ def test_hit_fields_order_is_the_documented_one() -> None:
     assert HIT_FIELDS == (
         "message_id", "account", "folder", "subject", "from", "to", "date",
         "snippet_html", "has_attachments", "score", "matched_arms", "snippet",
-        "attachment_filename", "attachments",
+        "attachment_filename", "attachments", "date_local",
     )
 
 

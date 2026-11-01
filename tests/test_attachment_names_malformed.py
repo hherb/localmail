@@ -6,9 +6,9 @@
 
 The column is ``JSONB NOT NULL DEFAULT '[]'`` with no CHECK, and no writer
 produces these shapes (a restore or a hand ``UPDATE`` can). A lax jsonpath
-wraps a top-level object and unwraps a nested array or an array-valued name,
-so all three used to match the name rules, and the first one contradicted
-``HAS_ATTACHMENT_SQL``: ``has:no-attachment attachment_name:fee`` returned a
+wraps a top-level object and unwraps a nested array, and an array-valued name
+still reached both rules, so all three used to match the name rules, and the
+first one contradicted ``HAS_ATTACHMENT_SQL``: ``has:no-attachment attachment_name:fee`` returned a
 row whose own ``has_attachments`` flag said false.
 """
 
@@ -21,7 +21,7 @@ import pytest
 from localmail.api.search import run_search
 from localmail.config import SearchConfig
 from localmail.db import open_pool
-from localmail.search.attachment_names import NAMES_TSV_SQL
+from localmail.search.attachment_names import NAME_CONTAINS_SQL, NAMES_TSV_SQL
 from localmail.search.searcher import Searcher
 
 _MALFORMED = {
@@ -29,6 +29,8 @@ _MALFORMED = {
     "nested": [[{"filename": "fee.pdf"}]],
     "array_name": [{"filename": ["fee.pdf"]}],
 }
+#: A non-array top-level value names nothing, and must not raise either.
+_SCALARS = {"string": "fee.pdf", "number": 5, "null": None}
 #: A well-formed entry among malformed ones still counts: one bad entry must
 #: not hide its siblings.
 _MIXED = [1, None, {"filename": 3}, {"x": "fee"}, {"filename": "fee.pdf"}]
@@ -92,9 +94,30 @@ def test_a_non_array_is_not_named_by_a_message_without_attachments(archive) -> N
                                 "has_attachment": False}) == set()
 
 
-@pytest.mark.parametrize("shape", sorted(_MALFORMED))
+_UNNAMED = {**_MALFORMED, **_SCALARS}
+
+
+@pytest.mark.parametrize("shape", sorted(_UNNAMED))
 def test_a_malformed_column_has_an_empty_names_vector(db_conn, shape) -> None:
     with db_conn.cursor() as cur:
         cur.execute(f"SELECT ({NAMES_TSV_SQL})::text FROM (SELECT %s::jsonb AS"
-                    f" attachments) m", (json.dumps(_MALFORMED[shape]),))
+                    f" attachments) m", (json.dumps(_UNNAMED[shape]),))
         assert cur.fetchone()[0] == ""
+
+
+@pytest.mark.parametrize("shape", sorted({**_UNNAMED, "mixed": _MIXED}))
+def test_the_filter_names_only_a_well_formed_entry(db_conn, shape) -> None:
+    atts = _MIXED if shape == "mixed" else _UNNAMED[shape]
+    with db_conn.cursor() as cur:
+        cur.execute(f"SELECT {NAME_CONTAINS_SQL} FROM (SELECT %s::jsonb AS"
+                    f" attachments) m", ("fee", json.dumps(atts)))
+        assert cur.fetchone()[0] is (shape == "mixed")
+
+
+def test_0038_replaced_the_lax_index(db_conn) -> None:
+    """Without 0038's DROP both indexes exist, and every INSERT maintains
+    one the planner never uses."""
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'messages'"
+                    " AND indexname LIKE 'messages_attachment_names%'")
+        assert {r[0] for r in cur.fetchall()} == {"messages_attachment_names_strict_idx"}

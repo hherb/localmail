@@ -6039,8 +6039,8 @@ for the full design.
       `candidates_per_arm_max` to pin it.
   - **File names match the lexical query, through their own index.** The
     rule is [src/localmail/search/attachment_names.py](src/localmail/search/attachment_names.py),
-    an expression index in migration `0037` rather than a change to the
-    generated `fts_v2` (a rewrite of every row, raw bytes included) or an
+    an expression index (migration `0037`, replaced by `0038` in #429)
+    rather than a change to the generated `fts_v2` (a rewrite of every row, raw bytes included) or an
     index over `fts_v2 || names` (a second 688 MB GIN). Each name is indexed
     as written and split on punctuation, because `simple` reads
     `230712.pdf` as one token (type `host`). Arm 1 and the date walk match
@@ -6063,16 +6063,17 @@ for the full design.
       uncut, ~1.2 MB of names raised there, failing the message on every
       sync and retry and stopping 0037 on an archive holding one. **0037 was
       edited before it was applied anywhere** but test databases (the Mac
-      archive stopped at 0036); a test DB carrying the uncut index needs
-      `DROP INDEX messages_attachment_names_idx` and its
-      `schema_migrations` row deleted, or the plan test fails.
+      archive stopped at 0036). 0038 now drops that index, which supersedes
+      the old manual fix for a test DB carrying the uncut one; **do not**
+      delete 0037's `schema_migrations` row, or `init-db` re-runs 0037 and
+      rebuilds a lax index that nothing drops again.
     - **The names are read with a strict jsonpath (#429, migration
       `0038`).** `attachment_names.NAMES_JSONPATH` is shared by
       `NAMES_TSV_SQL` and `NAME_CONTAINS_SQL`: each object entry's string
       `filename`, `silent` so a non-array yields nothing. Lax mode wrapped a
-      top-level object and unwrapped a nested array or an array-valued name,
-      so those malformed columns matched a name search, and the object one
-      contradicted `HAS_ATTACHMENT_SQL` (`has:no-attachment
+      top-level object and unwrapped a nested array, and an array-valued name
+      still reached both rules, so those malformed columns matched a name
+      search, and the object one contradicted `HAS_ATTACHMENT_SQL` (`has:no-attachment
       attachment_name:fee` returned a row flagged `has_attachments: false`).
       Now both rules read the names `message_attachments` reports. 0038
       drops 0037's index and builds `messages_attachment_names_strict_idx`

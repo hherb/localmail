@@ -40,8 +40,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **The defect.** `NAMES_TSV_SQL` (lexical match, index expression) and
   `NAME_CONTAINS_SQL` (`attachment_name:` filter) used lax
   `$[*].filename`. Lax mode wraps a top-level object and unwraps a nested
-  array or an array-valued name, so those malformed `attachments` columns
-  matched. The object case contradicted `HAS_ATTACHMENT_SQL`:
+  array, and an array-valued name still reached both rules, so those
+  malformed `attachments` columns matched. The object case contradicted `HAS_ATTACHMENT_SQL`:
   `has:no-attachment attachment_name:fee` returned a row flagged
   `has_attachments: false`. Latent (no writer produces these shapes).
 - **The fix.** `attachment_names.NAMES_JSONPATH` =

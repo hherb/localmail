@@ -9,8 +9,8 @@
 get their own small tsvector, served by the expression index of migration
 0038 (0037's, made strict by #429), rather than joining ``fts_v2``: that
 column is generated, so changing it rewrites every row of ``messages`` (raw
-bytes included), and a second
-index over ``fts_v2 || names`` would duplicate its 688 MB GIN index.
+bytes included), and a second index over ``fts_v2 || names`` would
+duplicate its 688 MB GIN index.
 
 Each name is indexed twice. As written, so a quoted full name matches as a
 phrase; and split on punctuation, because the ``simple`` parser reads
@@ -33,10 +33,12 @@ from __future__ import annotations
 #: ``filename``, in stored order. Shared by both name rules so they agree on
 #: what a name is, and with ``HAS_ATTACHMENT_SQL`` on what a malformed column
 #: is (#429). ``strict`` because lax mode wraps a top-level object and unwraps
-#: a nested array or an array-valued name, so all three used to match while
-#: ``HAS_ATTACHMENT_SQL`` read the object as "no attachments". The filter
-#: predicate skips a non-object entry, a missing ``filename`` and a non-string
-#: one (an error inside a filter is "unknown", not raised).
+#: a nested array, and an array-valued name still reached both rules, so all
+#: three used to match while ``HAS_ATTACHMENT_SQL`` read the object as "no
+#: attachments". The filter predicate skips a missing ``filename`` and a
+#: non-string one (an error inside a filter is "unknown", not raised). The
+#: ``type() == "object"`` test changes no answer, since ``.filename`` on a
+#: non-object is already such an error; it states the rule, nothing more.
 NAMES_JSONPATH = (
     'strict $[*] ? (@.type() == "object" && @.filename.type() == "string")'
     ".filename"
@@ -92,9 +94,11 @@ def names_match_sql(tsq_sql: str) -> str:
 
 #: The ``attachment_name:`` filter: some attachment's file name contains the
 #: one parameter, case-insensitively. ``strpos`` rather than ``ILIKE`` so a
-#: ``_`` or ``%`` in the value is literal, as it is in a file name. Reads the
-#: names ``NAMES_JSONPATH`` reads, so it matches exactly what the lexical
-#: match can. Unindexed: it runs per row the rest of the query admits.
+#: ``_`` or ``%`` in the value is literal, as it is in a file name. Reads
+#: exactly the names ``NAMES_JSONPATH`` reads, so it agrees with the lexical
+#: match on what counts as a name (though it matches substrings of the whole
+#: list, where that matches tokens of its first ``NAMES_MAX_CHARS``).
+#: Unindexed: it runs per row the rest of the query admits.
 NAME_CONTAINS_SQL = (
     f"EXISTS (SELECT 1 FROM {names_query_sql('jsonb_path_query', 'm.attachments')}"
     " AS n(name) WHERE strpos(lower(n.name #>> '{}'), lower(%s)) > 0)"

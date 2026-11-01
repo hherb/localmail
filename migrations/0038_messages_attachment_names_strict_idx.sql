@@ -1,7 +1,7 @@
 -- #429: 0037's index read attachment names with a lax jsonpath, which wraps a
--- top-level object and unwraps a nested array or an array-valued name, so
--- those malformed `attachments` shapes matched a name search while
--- HAS_ATTACHMENT_SQL read the object as "no attachments". The path is strict
+-- top-level object and unwraps a nested array, and an array-valued name still
+-- reached both rules, so those malformed `attachments` shapes matched a name
+-- search while HAS_ATTACHMENT_SQL read the object as "no attachments". The path is strict
 -- now (`localmail.search.attachment_names.NAMES_JSONPATH`), for the lexical
 -- match and the `attachment_name:` filter alike.
 --

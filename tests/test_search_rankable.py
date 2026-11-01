@@ -136,7 +136,7 @@ def test_growing_a_pool_reports_the_pool_s_own_query(searcher):
     first = searcher.search("needle", allowed_account_ids=None, user_id=1,
                             page_size=2, candidates_per_arm=2)
     assert first.search_token is not None
-    grown = searcher.grow_pool(first.search_token, 8, user_id=1)
+    grown = searcher.grow_pool(first.search_token, 8, page=1, user_id=1)
     assert grown.rankable is True
 
 
@@ -207,6 +207,7 @@ def _textless_pool(searcher, token, **overrides):
         "parsed": parse_query(""), "hydrated": [], "scores": {},
         "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
         "user_id": None, "sort": "date", "sort_order": "desc",
+        "first_page": 1, "excluded_ids": frozenset(),
     }
     entry.update(overrides)
     searcher._cache.put(token, entry)
@@ -219,7 +220,7 @@ def test_continue_page_derives_rankability_from_the_pool_s_query(searcher):
 
 def test_grow_pool_derives_rankability_from_the_pool_s_query(searcher):
     _textless_pool(searcher, "tok-blank-grow")
-    assert searcher.grow_pool("tok-blank-grow", 8).rankable is False
+    assert searcher.grow_pool("tok-blank-grow", 8, page=1).rankable is False
 
 
 def test_pool_metadata_derives_rankability_from_the_pool_s_query(searcher):
@@ -388,6 +389,7 @@ def test_a_pool_exhausted_at_the_cap_reports_the_pool_as_rankable(searcher):
         "page_size": 5, "candidates_per_arm": cfg.candidates_per_arm_max,
         "rerank_pool_size": 20,
         "user_id": 1, "sort": "rank", "sort_order": "desc",
+        "first_page": 1, "excluded_ids": frozenset(),
     })
     out = run_search(searcher=searcher, free_text="needle", filters={},
                      limit=5, allowed_account_ids=[1], user_id=1,

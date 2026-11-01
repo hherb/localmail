@@ -19,16 +19,22 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+#: Names emitted only when a caller names them, so the default response
+#: stays byte-identical. ``snippet`` is the honest, plain-text name for
+#: ``snippet_html``, which has never held HTML. ``attachment_filename`` is the
+#: file whose text matched (``None`` unless the best chunk was an
+#: attachment's), and ``attachments`` lists every attachment the message
+#: carries, in the ``GET /v1/messages/{id}`` entry shape (#426).
+OPT_IN_FIELDS: tuple[str, ...] = ("snippet", "attachment_filename", "attachments")
+
 #: Every name a `fields` projection may ask for, in the order the projected
-#: hit's keys come back. The first eleven are exactly the keys
-#: ``api.search._to_api_result`` emits (pinned by a test, so a hit key added
-#: later cannot go missing here); ``snippet`` is the honest, plain-text name
-#: for ``snippet_html``, which has never held HTML. It is emitted only when
-#: named, so the default response stays byte-identical.
+#: hit's keys come back: exactly the keys ``api.search._to_api_result``
+#: emits (pinned by a test, so a hit key added later cannot go missing
+#: here), then ``OPT_IN_FIELDS``.
 HIT_FIELDS: tuple[str, ...] = (
     "message_id", "account", "folder", "subject", "from", "to", "date",
-    "snippet_html", "has_attachments", "score", "matched_arms", "snippet",
-)
+    "snippet_html", "has_attachments", "score", "matched_arms",
+) + OPT_IN_FIELDS
 
 _SNIPPET_ALIAS_OF = "snippet_html"
 
@@ -36,10 +42,11 @@ _KNOWN = frozenset(HIT_FIELDS)
 
 #: The longest ``fields`` list accepted (#394). Duplicates are accepted, so
 #: without a cap the caller chooses ``len(fields)``, and ``project_hit``'s
-#: per-hit re-check costs that times every hit on the page. Four times the
-#: number of hit fields admits any honest call, repeats included, by a wide
-#: margin; a literal rather than ``4 * len(HIT_FIELDS)`` so adding a hit
-#: field does not silently move a documented wire limit.
+#: per-hit re-check costs that times every hit on the page. Set at four
+#: times the 12 hit fields there were then (14 since #426, and the cap
+#: deliberately did not move); it admits any honest call, repeats included,
+#: by a wide margin. A literal rather than ``4 * len(HIT_FIELDS)`` so adding
+#: a hit field does not silently move a documented wire limit.
 MAX_FIELDS = 48
 
 
@@ -75,6 +82,10 @@ def fields_error(fields: object) -> str | None:
 
 def project_hit(hit: dict[str, Any], fields: Sequence[str]) -> dict[str, Any]:
     """Return a new hit carrying exactly ``fields``, in ``HIT_FIELDS`` order.
+
+    ``hit`` must carry every named opt-in field except ``snippet`` (derived
+    here from ``snippet_html``); the caller resolves them, since
+    ``attachments`` costs a query only worth running when it is named.
 
     ``fields`` must already have passed ``fields_error``, and that
     precondition is re-checked here rather than restated: an unvalidated

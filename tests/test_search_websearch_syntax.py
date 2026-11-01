@@ -261,7 +261,7 @@ def test_the_reranker_sees_the_query_without_its_operators(embedded):
     s, _, reranker = embedded
     query = 'invoice OR "electricity bill" -anthropic'
     first = s.search(query, allowed_account_ids=None, page_size=2, user_id=1)
-    s.grow_pool(first.search_token, 8, user_id=1)
+    s.grow_pool(first.search_token, 8, page=1, user_id=1)
     assert reranker.queries == ["invoice electricity bill"] * 2
 
 

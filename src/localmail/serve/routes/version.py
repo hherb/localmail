@@ -33,7 +33,12 @@ API_MAJOR = 1
 # *requires* the word — and answers 200, so this is the only way a client
 # (kastellan's planner) can know it works. Unlike 3, the feature reaches MCP
 # too (the syntax rides in `query`), though only HTTP can read this counter.
-API_MINOR = 4
+# 5: attachment file names on search (#426) — they match the query (an older
+# server ranks a named file by its body words alone), and `fields` accepts
+# `attachment_filename` and `attachments` (an older one refuses them with a
+# 400). Paging past a pool grow no longer repeats page 1. HTTP only for
+# `fields`, as with 3.
+API_MINOR = 5
 
 logger = logging.getLogger("localmail.serve")
 

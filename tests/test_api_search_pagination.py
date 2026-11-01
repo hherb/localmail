@@ -73,6 +73,21 @@ def test_initial_search_emits_next_cursor_when_more_in_pool() -> None:
     s.search.assert_called_once()
 
 
+def test_a_projected_attachment_filename_is_the_result_s_own() -> None:
+    """``fields=["attachment_filename"]`` reads the hit's matched file; the
+    end-to-end tests only ever see it ``None`` (a name match sets nothing)."""
+    s = MagicMock()
+    r = _result()
+    r.attachment_filename = "scan.pdf"
+    s.search.return_value = _page(results=[r], token="tok-1", pool_size=1,
+                                  page_size=2, has_more=False, can_grow=False)
+    out = run_search(searcher=s, free_text="hello", filters={}, limit=2,
+                     allowed_account_ids=[1], user_id=99,
+                     fields=["attachment_filename"])
+    assert out["results"] == [{"attachment_filename": "scan.pdf"}]
+    s.message_attachments.assert_not_called()
+
+
 def test_initial_search_emits_null_cursor_when_pool_exhausted() -> None:
     s = MagicMock()
     s.search.return_value = _page(
@@ -142,10 +157,10 @@ def test_pool_exhausted_with_grow_pool_available_triggers_grow_pool() -> None:
     )
     s.config.candidates_per_arm = 50
     s.config.candidates_per_arm_max = 800
-    # grow_pool returns a freshly enlarged pool's page 1.
+    # grow_pool serves the requested page under the same token (#426).
     grown_page = _page(
-        results=[_result(3)], token="tok-2", pool_size=20,
-        page_size=2, has_more=True, can_grow=True,
+        results=[_result(3)], token="tok-1", pool_size=20,
+        page_size=2, has_more=True, can_grow=True, page=5,
     )
     s.grow_pool.return_value = grown_page
     cursor = encode_search_cursor(SearchCursor(token="tok-1", page=5))
@@ -158,9 +173,71 @@ def test_pool_exhausted_with_grow_pool_available_triggers_grow_pool() -> None:
     assert args[0] == "tok-1"
     new_cpa = args[1] if len(args) > 1 else kwargs.get("candidates_per_arm")
     assert new_cpa > 50
+    # The grown pool serves the page the cursor asked for, not page 1 (#426).
+    assert kwargs.get("page") == 5
     # Accessor is called with the user_id so the pool's ownership is enforced.
     s.get_pool_metadata.assert_called_once_with("tok-1", user_id=99)
-    assert out["next_cursor"] == "tok-2:2"
+    assert out["next_cursor"] == "tok-1:6"
+
+
+def _growable(s: MagicMock) -> None:
+    from localmail.search.page_cache import PageOutOfPoolError
+    from localmail.search.searcher import PoolMetadata
+    s.continue_page.side_effect = PageOutOfPoolError("past pool")
+    s.get_pool_metadata.return_value = PoolMetadata(
+        candidates_per_arm=50, page_size=2, rerank_pool_size=20, pool_size=20,
+        sort="rank", sort_order="desc", rankable=True,
+    )
+    s.config.candidates_per_arm = 50
+    s.config.candidates_per_arm_max = 800
+
+
+def test_a_grow_that_finds_nothing_new_grows_again() -> None:
+    """An empty grow is not served as an empty page carrying a cursor: the
+    route grows again within the same request (#426 review)."""
+    s = MagicMock()
+    _growable(s)
+    empty = _page(results=[], token="tok-1", pool_size=0, page_size=2,
+                  has_more=False, can_grow=True, page=5)
+    full = _page(results=[_result(3)], token="tok-1", pool_size=2,
+                 page_size=2, has_more=False, can_grow=True, page=5)
+    s.grow_pool.side_effect = [empty, full]
+    cursor = encode_search_cursor(SearchCursor(token="tok-1", page=5))
+    out = run_search(searcher=s, free_text="hello", filters={}, limit=2,
+                     allowed_account_ids=[1], user_id=99, cursor=cursor)
+    assert s.grow_pool.call_count == 2
+    assert [r["message_id"] for r in out["results"]] == ["3"]
+
+
+def test_a_pool_that_cannot_grow_does_not_regrow_forever() -> None:
+    """``candidates_per_arm = 0`` doubles to 0: the re-grow loop must stop."""
+    from localmail.search.searcher import PoolMetadata
+    s = MagicMock()
+    _growable(s)
+    s.get_pool_metadata.return_value = PoolMetadata(
+        candidates_per_arm=0, page_size=2, rerank_pool_size=20, pool_size=0,
+        sort="rank", sort_order="desc", rankable=True,
+    )
+    s.grow_pool.return_value = _page(results=[], token="tok-1", pool_size=0,
+                                     page_size=2, has_more=False,
+                                     can_grow=True, page=5)
+    cursor = encode_search_cursor(SearchCursor(token="tok-1", page=5))
+    run_search(searcher=s, free_text="hello", filters={}, limit=2,
+               allowed_account_ids=[1], user_id=99, cursor=cursor)
+    assert s.grow_pool.call_count == 1
+
+
+def test_an_eviction_during_the_grow_is_an_expired_cursor() -> None:
+    """``grow_pool`` raising ``CacheMissError`` (evicted after the metadata
+    probe) is a 409, not a 500."""
+    from localmail.search.page_cache import CacheMissError
+    s = MagicMock()
+    _growable(s)
+    s.grow_pool.side_effect = CacheMissError("tok-1")
+    cursor = encode_search_cursor(SearchCursor(token="tok-1", page=5))
+    with pytest.raises(SearchCursorExpired):
+        run_search(searcher=s, free_text="hello", filters={}, limit=2,
+                   allowed_account_ids=[1], user_id=99, cursor=cursor)
 
 
 def test_grow_pool_forwards_snippet_chars() -> None:

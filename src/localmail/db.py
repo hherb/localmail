@@ -6,14 +6,43 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import sqlparse
 from psycopg_pool import ConnectionPool
 
 
-def open_pool(dsn: str, *, min_size: int = 1, max_size: int = 4) -> ConnectionPool:
-    return ConnectionPool(conninfo=dsn, min_size=min_size, max_size=max_size, open=True)
+def bounded_connect_kwargs(
+    *, connect_timeout_s: int, tcp_user_timeout_ms: int, statement_timeout_s: int
+) -> dict[str, Any]:
+    """libpq parameters that bound every phase of a daemon connection.
+
+    ``connect_timeout`` bounds the handshake (#140), ``statement_timeout`` a
+    stuck query and ``tcp_user_timeout`` a recv after packets are dropped
+    (#142). Shared by the daemon's fresh connects and its pool (#414), so the
+    two cannot drift apart. ``options`` replaces, not merges, any ``options=``
+    in the DSN; the daemon's never carries one.
+    """
+    return {
+        "connect_timeout": connect_timeout_s,
+        "tcp_user_timeout": tcp_user_timeout_ms,
+        "options": f"-c statement_timeout={statement_timeout_s}s",
+    }
+
+
+def open_pool(
+    dsn: str,
+    *,
+    min_size: int = 1,
+    max_size: int = 4,
+    connect_kwargs: dict[str, Any] | None = None,
+) -> ConnectionPool:
+    """Open a pool; ``connect_kwargs`` is passed to every connection it makes."""
+    return ConnectionPool(
+        conninfo=dsn, min_size=min_size, max_size=max_size,
+        kwargs=connect_kwargs, open=True,
+    )
 
 
 POOL_BASELINE_MIN = 4

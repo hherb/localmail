@@ -1157,6 +1157,22 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
     long FETCHes and the admin probe get it too. A test fake that replaces
     `IMAPClient` must now offer `socket()`.
 
+  **The pool's connections carry the fresh-connect bounds too (#414).**
+  `Daemon._connect` applied `connect_timeout`, `tcp_user_timeout` and
+  `statement_timeout` (#140/#142), but `open_pool` was built from the bare DSN,
+  and every IDLE/poll heartbeat and sync goes through the pool. One rule now,
+  `db.bounded_connect_kwargs`, passed to both. Pinned by asking a real pool
+  connection (`SHOW statement_timeout`, `conn.info.get_parameters()`), not a spy.
+  - **A pool statement past `db_statement_timeout_s` now fails.** Inside sync's
+    per-message SAVEPOINT that is a `failed_messages` row (`retry-failed`
+    recovers it). The slowest pool statement measured on the 130k Mac archive
+    is the embed worker's chunk claim at 144 ms, so 30 s is ~200× headroom.
+  - **The cause of #414's stall is still unknown**: the DGX journal for it had
+    rotated away. `run_forever` registers `faulthandler` on
+    `STACK_DUMP_SIGNAL` (SIGUSR1), so the next stall is `kill -USR1 <pid>`
+    and read off stderr. The stale-heartbeat watchdog #414 also suggests is
+    deferred until a dump shows what hangs (operator decision).
+
   Pool sizing: by default `compute_daemon_pool_size(...)` in `db.py` derives
   the cap from `(2 * n_accounts) + workers + headroom`, floored at
   `POOL_BASELINE_MIN`. Set `daemon.pool_max_size` in `config.toml` to

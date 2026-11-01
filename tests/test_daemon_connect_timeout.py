@@ -198,3 +198,25 @@ def test_construction_connect_passes_tcp_user_timeout(db_dsn: str, monkeypatch) 
         assert all(t == 4000 for t in captured), captured
     finally:
         d.stop()
+
+
+def test_pool_connections_carry_the_same_bounds(db_dsn: str) -> None:
+    """The IDLE/poll/embed/extract threads do every heartbeat and every sync
+    through the pool, so a pool connection without these bounds can block a
+    worker forever while the daemon stays `active` (#414). Asked of the server
+    and of libpq, not of a spy, so a pool built some other way is caught too."""
+    _truncate(db_dsn)
+    d = Daemon(
+        _cfg(db_dsn, connect_timeout=7, statement_timeout=11, tcp_user_timeout=9000),
+        ssl=False, stop_event=threading.Event(),
+    )
+    try:
+        with d.pool.connection() as conn:
+            params = conn.info.get_parameters()
+            row = conn.execute("SHOW statement_timeout").fetchone()
+        assert params.get("connect_timeout") == "7", params
+        assert params.get("tcp_user_timeout") == "9000", params
+        assert row is not None and row[0] == "11s"
+    finally:
+        d.stop()
+        d.pool.close()

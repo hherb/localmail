@@ -1,14 +1,15 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-02 (session 78).** `main` is **`a92a83b`** (#438:
-> #437 + #439, both closed).
+> **Status as of 2026-11-02 (session 79).** `main` is **`b8dd9db`** (#443:
+> #441, closed).
 >
-> This session has **one open PR, #443**, on `fix/441-record-failed-contention`.
-> Its body says **`Closes #441`**. It carries the #441 code and this handoff.
+> This session has **one open PR** on `fix/442-import-terminal-status`. Its
+> body says **`Closes #442`**. It carries the #442 code and this handoff.
 >
-> **Both hosts are deployed at `a92a83b`**; nothing from #443 is deployed.
+> **Both hosts are deployed at `b8dd9db`**; nothing from the #442 PR is
+> deployed.
 >
-> **Open issues: 36** (35 once #443 merges).
+> **Open issues: 35** (34 once the #442 PR merges).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -26,63 +27,65 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### Deploy of `a92a83b` (#438) to both hosts (no commit)
+### Deploy of `b8dd9db` (#443, #441) to both hosts (no commit)
 
 - **Mac:** `uv sync --frozen --extra mcp --extra extraction` (no change),
-  kickstarted `com.localmail.serve` only (the daemon runs none of #438).
-- **DGX:** pulled → `a92a83b`, synced (reinstalled `nvidia-cusparselt-cu13`
-  again, lock unchanged), restarted `localmail-serve`. Both units `active`.
-- Both `/v1/version`: `api_minor` 6, `build_hash` `a92a83b`.
+  kickstarted `com.localmail.daemon` **and** `com.localmail.serve`.
+- **DGX:** pulled → `b8dd9db`, synced (reinstalled `nvidia-cusparselt-cu13`
+  again, lock unchanged), restarted `localmail-daemon localmail-serve`. Both
+  `active`, `NRestarts=0`.
+- Both `/v1/version`: `api_minor` 6, `build_hash` `b8dd9db`.
 
-### PR #443 on `fix/441-record-failed-contention` (based on `main` at `a92a83b`)
+### PR on `fix/442-import-terminal-status` (based on `main` at `b8dd9db`)
 
 | SHA | What |
 |---|---|
-| `2da4d17` | #441: `record_failed_message` re-raises `DB_CONTENTION_ERRORS` |
-| handoff | this file + `docs/handoffs/2026-11-02T1330Z-record-failed-contention.md` |
+| `1093821` | #442: retry the terminal import status write, then report it |
+| handoff | this file + `docs/handoffs/2026-11-02T2350Z-import-terminal-status.md` |
 
-- **The defect.** `sync.record_failed_message` wraps its `failed_messages`
-  upsert in `SAVEPOINT fail_log` + `except Exception`, logs and carries on.
-  Contention on that upsert was swallowed too: the daemon then advanced
-  `uidnext` past a message recorded nowhere (lost until a manual rewind),
-  an import counted it `failed` with no row, and `retry-failed` counted it
-  `still_failing` with the row untouched.
-- **The fix.** After `ROLLBACK TO` / `RELEASE fail_log`, a contention class
-  logs a WARNING (`could not record failed message UID … DB contention …;
-  re-raising`) and re-raises. Each caller's existing handling then applies:
-  sync aborts the pass (uidnext not checkpointed), `run_import`'s outer
-  handler fails the job with the contention remedy in `error_msg`, and
-  `retry-failed` stops (the CLI's `ClickException`). Any other failure to
-  log is still swallowed. No caller changed.
-- New `tests/test_record_failed_contention.py` (16 tests): the function plus
-  all three callers, each parametrised over `_CASES` (3 contention classes
-  + a `DataException` control). The poison pill is `upsert_message` patched
-  to raise; the contention is `_raising_trigger` on the `failed_messages`
-  INSERT. CLAUDE.md gained a #441 bullet after #437's; README's
-  failed-messages paragraph mentions it. No migration.
+- **The defect.** `runner._mark_terminal` tried once. A failure (e.g. the
+  fresh `conn_factory()` cannot connect) escaped `run_import`; in serve the
+  thread's unhandled-exception dump was the only record and the row stayed
+  `running`, holding `import_jobs_single_active_uniq` until a serve restart.
+- **The fix.** `_mark_terminal` retries `_write_terminal`
+  `[imports] terminal_write_attempts` (5) times,
+  `terminal_write_backoff_s` (10 s) apart, then logs **one ERROR** naming the
+  job and the remedy (restart serve, or the `UPDATE` to run by hand) and
+  raises `TerminalStatusUnwritten`. `start_job`'s thread target
+  (`_run_import_in_thread`) swallows it; the CLI turns it into a
+  `ClickException` (exit 1). The `completed`/`cancelled` write moved to the
+  `try`'s `else`, so its exhaustion is **not** relabelled `failed` (ruling 2).
+- Both tunables are new `ImportsConfig` fields (floored `ge=1` / `ge=0`),
+  required keywords on `run_import`/`start_job`, threaded from `cfg.imports`
+  at the CLI and both routers. Existing tests pass `_TW` (1 try, no wait).
+- New `tests/test_import_terminal_status.py` (6 tests). #439's
+  "failure after the final commit" test now drives the worker connection's
+  `close()` raising (the one such failure that still reaches the handler).
+- README (imports paragraph), CLAUDE.md (after #162's bullet) and
+  `config.example.toml` updated. No migration.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | 12 contention cases failed, 4 controls passed |
-| mutation | guard → `if True:` (re-raise everything) fails exactly the 4 controls; no re-raise is the RED run |
-| `uv run pytest -q` | **4501 passed**, 6 warnings (load ~15) |
+| RED first | all 6 new tests failed |
+| mutation | final-commit snapshot removed; completed write back inside the `try`; no `sleep`; thread catch narrowed — each fails exactly its own test |
+| `uv run pytest -q` | **4507 passed**, 6 warnings (load ~15) |
 | mypy | Success, 165 files |
 | GUI | not run (no GUI change) |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Merge #443** (yours), once CI is green
-- **Acceptance:** `gh pr checks 443` all pass; after the merge
-  `gh issue view 441` is `CLOSED`.
+### 1. **Merge the #442 PR** (yours), once CI is green
+- **Acceptance:** `gh pr checks <n>` all pass; after the merge
+  `gh issue view 442` is `CLOSED`.
 
-### 2. **Deploy #441 once merged**
-- Pure Python, no migration. It changes the **sync daemon** path, so restart
-  **both** daemon and serve on both hosts (unlike #438).
+### 2. **Deploy #442 once merged**
+- Pure Python, no migration. Imports run in **serve** (and the CLI), so
+  restarting serve is enough; the daemon runs none of it.
 - **Acceptance:** `build_hash` on `/v1/version` equals the merge SHA on both
-  hosts; daemon units `active`, `NRestarts` 0 on the DGX.
+  hosts; units `active`.
 
 ### 3. **Tell kastellan** (yours; carried)
 - Problem+json 400s on `/v1/search`, `filters.lang` as a list, #419 syntax,
@@ -91,9 +94,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   Both hosts serve `api_minor` 6.
 
 ### 4. **Next small slice: pick with the operator**
-- Remaining #438 review follow-ups: #440 (re-running an import duplicates
-  poison pills' `failed_messages` rows), #442 (in-serve import stuck
-  `running` if the terminal status write fails).
+- Remaining #438 review follow-up: **#440** (re-running an import duplicates
+  poison pills' `failed_messages` rows under fresh uids).
 - Others: #383 (drop write-only `messages.headers` + GIN, `0039`, one-way
   door), #365 (inline images counted as attachments; product call), #384
   (comment or close), #369, #373.
@@ -115,16 +117,18 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## Rulings made this session
 
-1. **The operator asked for #438 on both hosts and picked #441** (over
-   #440/#442).
-2. **`record_failed_message` re-raises contention only**; every other
-   failure to write the row stays swallowed (unchanged).
+1. **The operator asked for `b8dd9db` on both hosts and picked #442** (over
+   #440/#373/#383).
+2. **An exhausted `completed`/`cancelled` write is not relabelled `failed`**:
+   one retry window, one ERROR, the row stays `running` until serve restarts.
 
 ## Open decisions & risks
 
 0. **Since #438, `localmail import` exits 1 on a failed job** (behaviour
    change for scripts; none known on either host). Since #441, a contended
-   poison-pill record also fails the job / aborts the sync pass.
+   poison-pill record also fails the job / aborts the sync pass. Since #442,
+   an import whose final status write fails on all 5 attempts (~40 s) also
+   exits 1, and the row stays `running` until serve restarts.
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows carry a
    `-0000` Date and are stored 8 h off. None has a NULL `internal_date`, so
    the list/search/changes wire `date` is right; raw `date_sent` readers
@@ -156,27 +160,26 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/441-record-failed-contention --stat   # empty once merged (squash)
+git diff main origin/fix/442-import-terminal-status --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh issue view 441 --json state --jq .state
+gh issue view 442 --json state --jq .state
 gh issue list --limit 200 --json number --jq length
 
-# Deploy — Mac (the repo is the install; no migration for #441; restart BOTH)
+# Deploy — Mac (the repo is the install; no migration for #442; serve only)
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
-launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version     # api_minor 6, build_hash = merge SHA
 
 # Deploy — DGX
-ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user restart localmail-daemon localmail-serve && systemctl --user is-active localmail-daemon localmail-serve'
+ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user restart localmail-serve && systemctl --user is-active localmail-daemon localmail-serve'
 ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 
 # Load before trusting any timing; no other localmail pytest may be running.
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4501 at session 78
-uv run pytest -q tests/test_record_failed_contention.py tests/test_import_retry_db_contention.py tests/test_worker_db_contention.py tests/test_importer_runner.py tests/test_import_uid_collision.py
+unset VIRTUAL_ENV && uv run pytest -q              # 4507 at session 79
+uv run pytest -q tests/test_import_terminal_status.py tests/test_record_failed_contention.py tests/test_import_retry_db_contention.py tests/test_worker_db_contention.py tests/test_importer_runner.py tests/test_import_uid_collision.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
 cd gui && npm test -- --run && npm run check   # 530 at session 72
 ```

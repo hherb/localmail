@@ -3,12 +3,12 @@
 > **Status as of 2026-11-02 (session 78).** `main` is **`a92a83b`** (#438:
 > #437 + #439, both closed).
 >
-> This session has **one open PR**, on `fix/441-record-failed-contention`.
+> This session has **one open PR, #443**, on `fix/441-record-failed-contention`.
 > Its body says **`Closes #441`**. It carries the #441 code and this handoff.
 >
-> **Both hosts are deployed at `a92a83b`**; nothing from the #441 PR is deployed.
+> **Both hosts are deployed at `a92a83b`**; nothing from #443 is deployed.
 >
-> **Open issues: 36** (35 once the #441 PR merges).
+> **Open issues: 36** (35 once #443 merges).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -34,7 +34,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   again, lock unchanged), restarted `localmail-serve`. Both units `active`.
 - Both `/v1/version`: `api_minor` 6, `build_hash` `a92a83b`.
 
-### PR on `fix/441-record-failed-contention` (based on `main` at `a92a83b`)
+### PR #443 on `fix/441-record-failed-contention` (based on `main` at `a92a83b`)
 
 | SHA | What |
 |---|---|
@@ -74,8 +74,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What's next
 
-### 1. **Merge the #441 PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <n>` all pass; after the merge
+### 1. **Merge #443** (yours), once CI is green
+- **Acceptance:** `gh pr checks 443` all pass; after the merge
   `gh issue view 441` is `CLOSED`.
 
 ### 2. **Deploy #441 once merged**

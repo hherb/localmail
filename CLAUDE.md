@@ -1288,8 +1288,8 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
     upsert (its nested savepoint exists so a logging failure cannot kill the
     caller), and it swallowed contention with it. In the daemon that was the
     worst case: `uidnext` advanced past a message recorded nowhere, lost
-    until a manual rewind. It now rolls back to `fail_log`, logs a WARNING
-    and re-raises a `DB_CONTENTION_ERRORS` class, so the message lands in
+    until a manual rewind. It now logs a WARNING (before the rollback, the
+    `retry_failed_messages` rule), rolls back to `fail_log` and re-raises a `DB_CONTENTION_ERRORS` class, so the message lands in
     each caller's existing contention handling: sync aborts the pass,
     an import fails the job, `retry-failed` stops. Any other failure to log
     is still swallowed. Pinned at the function and at all three callers in

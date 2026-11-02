@@ -376,15 +376,19 @@ def record_failed_message(
             )
             cur.execute("RELEASE SAVEPOINT fail_log")
         except Exception as log_exc:
-            cur.execute("ROLLBACK TO SAVEPOINT fail_log")
-            cur.execute("RELEASE SAVEPOINT fail_log")
-            if isinstance(log_exc, DB_CONTENTION_ERRORS):
-                # Swallowed, sync would advance uidnext past a message recorded
-                # nowhere: let each caller's contention handling apply (#441).
+            contended = isinstance(log_exc, DB_CONTENTION_ERRORS)
+            if contended:
+                # If swallowed, sync would advance uidnext past a message
+                # recorded nowhere: let each caller's contention handling
+                # apply (#441). Logged before the rollback so a failing
+                # rollback cannot lose it.
                 log.warning(
                     "could not record failed message UID %s in mailbox %s: DB "
-                    "contention (%s); re-raising", uid, mailbox_id,
-                    type(log_exc).__name__)
+                    "contention; re-raising: %s: %s", uid, mailbox_id,
+                    type(log_exc).__name__, log_exc)
+            cur.execute("ROLLBACK TO SAVEPOINT fail_log")
+            cur.execute("RELEASE SAVEPOINT fail_log")
+            if contended:
                 raise
             log.exception(
                 "could not record failed message UID %s in mailbox %s; "
@@ -907,7 +911,7 @@ def sync_mailbox(
                     # the last committed checkpoint (#414).
                     raise
                 log.exception(
-                    "skipping poison-pill UID %s in %s/%s",
+                    "poison-pill UID %s in %s/%s; recording it in failed_messages",
                     uid, account_id, mailbox.name,
                 )
                 record_failed_message(

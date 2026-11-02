@@ -413,7 +413,8 @@ Successful retries delete the `failed_messages` row and insert the message
 into `messages` via the same code path live sync uses. Persistent failures
 bump `retry_count` and `last_retry_at`. A database deadlock (or a lock or
 statement timeout you configured), for example against the running daemon,
-is not counted against the message: `retry-failed` stops with an error
+is not counted against the message, including one hit while recording the
+failure itself: sync leaves the message to be fetched again, `retry-failed` stops with an error
 (rows recovered before it stay recovered) and an import job is marked
 `failed`, with `localmail import` exiting 1. Re-run either.
 

@@ -343,6 +343,10 @@ def record_failed_message(
 
     Idempotent on `(account_id, mailbox_id, uid)`: a re-raised failure
     overwrites the prior record and bumps `retry_count`.
+
+    A failure to write the row is logged and swallowed, except a
+    `db.DB_CONTENTION_ERRORS` one, which is re-raised after the savepoint
+    rollback (#441).
     """
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     sha = hashlib.sha256(raw).digest()
@@ -371,9 +375,17 @@ def record_failed_message(
                 ),
             )
             cur.execute("RELEASE SAVEPOINT fail_log")
-        except Exception:
+        except Exception as log_exc:
             cur.execute("ROLLBACK TO SAVEPOINT fail_log")
             cur.execute("RELEASE SAVEPOINT fail_log")
+            if isinstance(log_exc, DB_CONTENTION_ERRORS):
+                # Swallowed, sync would advance uidnext past a message recorded
+                # nowhere: let each caller's contention handling apply (#441).
+                log.warning(
+                    "could not record failed message UID %s in mailbox %s: DB "
+                    "contention (%s); re-raising", uid, mailbox_id,
+                    type(log_exc).__name__)
+                raise
             log.exception(
                 "could not record failed message UID %s in mailbox %s; "
                 "skipping log row",

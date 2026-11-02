@@ -104,8 +104,8 @@ def _write_terminal(
 ) -> None:
     """Write a terminal status on a FRESH connection (the worker conn may be poisoned).
 
-    The `with psycopg.connect(...)` context commits on clean exit, so no explicit
-    commit is needed here.
+    The connection's `with` block commits on clean exit, so no explicit commit
+    is needed here.
     """
     with conn_factory() as conn:
         with conn.cursor() as cur:
@@ -116,16 +116,31 @@ def _write_terminal(
             )
 
 
+def _sql_literal(value: str | None) -> str:
+    return "NULL" if value is None else "'" + value.replace("'", "''") + "'"
+
+
+def _terminal_sql(job_id: int, status: str, c: _Counters, error_msg: str | None) -> str:
+    """The UPDATE `_write_terminal` failed to run, spelled out for an operator."""
+    return (
+        f"UPDATE import_jobs SET status={_sql_literal(status)}, "
+        f"processed={c.processed}, inserted={c.inserted}, "
+        f"skipped_dup={c.skipped_dup}, failed={c.failed}, "
+        f"error_msg={_sql_literal(error_msg)}, finished_at=now() WHERE id={job_id}")
+
+
 def _mark_terminal(
     conn_factory: ConnFactory, job_id: int, status: str, c: _Counters,
     *, error_msg: str | None = None, attempts: int, backoff_s: float,
     sleep: Callable[[float], None],
 ) -> None:
-    """`_write_terminal`, retried `attempts` times `backoff_s` apart.
+    """`_write_terminal`, tried up to `attempts` times, `backoff_s` apart.
 
-    Unwritten, the row stays `running` and holds the single-active import
-    guard until `reconcile_orphaned_jobs` reaps it at the next serve start,
-    so the last failure is an ERROR naming that remedy, then a raise.
+    Unwritten, the row stays active (`pending` if the worker connection never
+    opened, else `running`) and holds the single-active import guard until
+    `reconcile_orphaned_jobs` reaps it at the next serve start, so the last
+    failure is an ERROR naming that remedy, then a raise. The ERROR carries the
+    row it meant to write, since reaping records 'interrupted', not the outcome.
     """
     for attempt in range(1, attempts + 1):
         try:
@@ -135,11 +150,11 @@ def _mark_terminal(
             if attempt == attempts:
                 log.error(
                     "import job %s: could not write terminal status %r after %d "
-                    "attempt(s): %s: %s. The row stays 'running' and blocks other "
-                    "imports; restart serve to reap it (or, if no import is "
-                    "running: UPDATE import_jobs SET status='failed', "
-                    "finished_at=now() WHERE id=%s)",
-                    job_id, status, attempts, type(exc).__name__, exc, job_id,
+                    "attempt(s): %s: %s. The row stays active and blocks other "
+                    "imports; restart serve to reap it, or, once no process is "
+                    "running this import, record its real outcome: %s",
+                    job_id, status, attempts, type(exc).__name__, exc,
+                    _terminal_sql(job_id, status, c, error_msg),
                     exc_info=True)
                 raise TerminalStatusUnwritten(
                     f"import job {job_id}: could not write terminal status "
@@ -167,6 +182,8 @@ def run_import(
 ) -> None:
     """Execute one import job end-to-end and write its terminal status.
 
+    A job that is missing or no longer `pending` is left untouched.
+
     Raises `TerminalStatusUnwritten` if that write fails on every attempt.
 
     Progress is flushed and cancel is polled on a count cadence
@@ -174,6 +191,9 @@ def run_import(
     after the first message — so a small or slow import stays responsive and
     cancellable (issue #163). `clock` and `sleep` are injectable for tests.
     """
+    if terminal_write_attempts < 1:
+        # Zero attempts would write no terminal status and log nothing: #442 silently.
+        raise ValueError(f"terminal_write_attempts must be >= 1, got {terminal_write_attempts}")
     mark = functools.partial(
         _mark_terminal, conn_factory, job_id, attempts=terminal_write_attempts,
         backoff_s=terminal_write_backoff_s, sleep=sleep)

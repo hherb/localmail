@@ -1274,8 +1274,9 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
       work that no longer existed. `run_import` keeps a `committed` snapshot,
       taken after `_flush`, after a new mailbox's `upsert_mailbox` commit
       (which commits the messages before it too), and after the loop's final
-      commit (so a failure in the "completed" status write still reports
-      every message). Each snapshot point and the handler's use of
+      commit (so a failure after it, now only the worker connection's
+      `close()`, still reports every message; since #442 the "completed"
+      write is retried on its own and never reaches the handler). Each snapshot point and the handler's use of
       `committed` fails a test in `tests/test_importer_runner.py` when
       removed (the `_flush` point and the handler share one). The rolled-back
       poison pills are re-recorded by the re-run, which re-processes them —
@@ -3586,11 +3587,17 @@ for the full design.
   (self-heals; low probability on single-host). **Migration
   `0027_import_jobs_owner.sql`** (#162).
   **The terminal status write is retried, then reported (#442).**
-  `runner._mark_terminal` retries `_write_terminal` `[imports]
-  terminal_write_attempts` times, `terminal_write_backoff_s` apart (5 × 10 s;
-  `sleep` injectable), then logs one ERROR naming the job and the remedy
-  (restart serve, or the `UPDATE` to run by hand) and raises
-  `TerminalStatusUnwritten`. Before, one failed write escaped the in-serve
+  `runner._mark_terminal` tries `_write_terminal` up to `[imports]
+  terminal_write_attempts` times, `terminal_write_backoff_s` apart (5 tries,
+  4 × 10 s waits; `sleep` injectable), then logs one ERROR naming the job and
+  the remedy and raises `TerminalStatusUnwritten`. The row then stays active
+  (`pending` if the worker connection never opened, else `running`).
+  - **The ERROR spells out the row it meant to write** (`_terminal_sql`:
+    status, counters, quoted `error_msg`) as the manual `UPDATE`, because
+    both remedies otherwise lose the outcome: serve-restart reaping records
+    `failed` / "interrupted", which mislabels a completed import and drops a
+    contention failure's "re-run" reason. `run_import` refuses
+    `terminal_write_attempts < 1`, which would write nothing and log nothing. Before, one failed write escaped the in-serve
   thread as Python's unhandled-thread dump, and the row stayed `running`
   holding the single-active guard. `start_job`'s thread target swallows that
   exception (already logged); the CLI turns it into a `ClickException`.
@@ -3601,7 +3608,10 @@ for the full design.
     drives the one such failure left, the worker connection's `close()`.
   - The two tunables are required keywords on `run_import`/`start_job`,
     threaded from `cfg.imports` at all three callers like
-    `checkpoint_seconds`. Tests pass `_TW` (one try, no wait).
+    `checkpoint_seconds`, and each caller is pinned by a spy test with
+    non-default values. `start_job` hands the thread a `functools.partial`
+    rather than `args`/`kwargs` so mypy checks them against `run_import`.
+    Tests pass `_TW` (one try, no wait).
 - **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
   planes for the sync daemon. **Plane B** (process lifecycle) lives in
   [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):

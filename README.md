@@ -267,12 +267,14 @@ with them, and with no way to retry successfully.
    import in progress is unaffected by restarting the `serve` process: startup
    reconciliation only clears import jobs whose owning process is actually gone,
    so the live CLI job keeps running and still blocks a second concurrent import.
-   The job's final status is written on a fresh connection and retried
+   The job's final status is written on a fresh connection, tried up to
    `[imports].terminal_write_attempts` times (default 5),
-   `[imports].terminal_write_backoff_s` apart (default 10). If every attempt
-   fails, an ERROR line names the job and the row stays `running` (blocking
-   other imports) until `serve` restarts and reaps it; `localmail import` then
-   exits 1 with a one-line error.
+   `[imports].terminal_write_backoff_s` apart (default 10 s, so ~40 s in all).
+   If every attempt fails, an ERROR line names the job and gives the `UPDATE`
+   that records its real outcome; the row stays active (blocking other
+   imports) until you run it or `serve` restarts and reaps it as
+   "interrupted". `localmail import` then exits 1, its last stderr line a
+   one-line error.
 
 ### Search backfill & status
 

@@ -188,7 +188,7 @@ def run_import(
                         job_id, uid, msg.mailbox_name, type(exc).__name__, exc)
                     raise
                 log.warning(
-                    "import job %s: skipping poison message uid=%s mailbox=%s: %s: %s",
+                    "import job %s: poison message uid=%s mailbox=%s, recording it: %s: %s",
                     job_id, uid, msg.mailbox_name, type(exc).__name__, exc)
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")

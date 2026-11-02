@@ -1283,6 +1283,19 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
       `failed_messages` row each (pre-existing, #440).
     - Pinned in `tests/test_import_retry_db_contention.py`, reusing #425's
       trigger.
+  - **Recording a poison pill re-raises them too (#441).**
+    `record_failed_message` swallows a failure of its own `failed_messages`
+    upsert (its nested savepoint exists so a logging failure cannot kill the
+    caller), and it swallowed contention with it. In the daemon that was the
+    worst case: `uidnext` advanced past a message recorded nowhere, lost
+    until a manual rewind. It now logs a WARNING (before the rollback, the
+    `retry_failed_messages` rule), rolls back to `fail_log` and re-raises a `DB_CONTENTION_ERRORS` class, so the message lands in
+    each caller's existing contention handling: sync aborts the pass,
+    an import fails the job, `retry-failed` stops. Any other failure to log
+    is still swallowed. Pinned at the function and at all three callers in
+    `tests/test_record_failed_contention.py`, by patching `upsert_message`
+    into a poison pill and raising on the `failed_messages` INSERT, with a
+    `DataException` control each.
   - **The cause of #414's stall is still unknown**: the DGX journal for it had
     rotated away. `run_forever` registers `faulthandler` on
     `STACK_DUMP_SIGNAL` (SIGUSR1), so the next stall is `kill -USR1 <pid>`

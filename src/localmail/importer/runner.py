@@ -7,11 +7,13 @@ Owns the import_jobs row lifecycle: marks running, per-message SAVEPOINT
 isolation (poison pills -> failed_messages, mirroring sync_mailbox; a
 `db.DB_CONTENTION_ERRORS` failure fails the job instead, #437), checkpoint
 counter flushes + last_progress_at heartbeat, cooperative cancel, and a
-guaranteed terminal status (completed / cancelled / failed+error_msg). Takes a
+terminal status (completed / cancelled / failed+error_msg), retried and, if it
+still cannot be written, reported as `TerminalStatusUnwritten` (#442). Takes a
 `conn_factory` (not a pool) so the long-lived worker holds its own connection.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -89,9 +91,16 @@ def _cancel_requested(conn: psycopg.Connection, job_id: int) -> bool:
     return bool(row and row[0])
 
 
-def _mark_terminal(
+class TerminalStatusUnwritten(RuntimeError):
+    """Every attempt at the terminal ``import_jobs`` write failed (#442).
+
+    Already logged at ERROR with the remedy; callers report it, not re-log it.
+    """
+
+
+def _write_terminal(
     conn_factory: ConnFactory, job_id: int, status: str, c: _Counters,
-    *, error_msg: str | None = None,
+    error_msg: str | None,
 ) -> None:
     """Write a terminal status on a FRESH connection (the worker conn may be poisoned).
 
@@ -107,6 +116,41 @@ def _mark_terminal(
             )
 
 
+def _mark_terminal(
+    conn_factory: ConnFactory, job_id: int, status: str, c: _Counters,
+    *, error_msg: str | None = None, attempts: int, backoff_s: float,
+    sleep: Callable[[float], None],
+) -> None:
+    """`_write_terminal`, retried `attempts` times `backoff_s` apart.
+
+    Unwritten, the row stays `running` and holds the single-active import
+    guard until `reconcile_orphaned_jobs` reaps it at the next serve start,
+    so the last failure is an ERROR naming that remedy, then a raise.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            _write_terminal(conn_factory, job_id, status, c, error_msg)
+            return
+        except Exception as exc:
+            if attempt == attempts:
+                log.error(
+                    "import job %s: could not write terminal status %r after %d "
+                    "attempt(s): %s: %s. The row stays 'running' and blocks other "
+                    "imports; restart serve to reap it (or, if no import is "
+                    "running: UPDATE import_jobs SET status='failed', "
+                    "finished_at=now() WHERE id=%s)",
+                    job_id, status, attempts, type(exc).__name__, exc, job_id,
+                    exc_info=True)
+                raise TerminalStatusUnwritten(
+                    f"import job {job_id}: could not write terminal status "
+                    f"{status!r}: {type(exc).__name__}: {exc}") from exc
+            log.warning(
+                "import job %s: terminal status write %d/%d failed: %s: %s; "
+                "retrying in %.1fs", job_id, attempt, attempts,
+                type(exc).__name__, exc, backoff_s)
+            sleep(backoff_s)
+
+
 def _source_iter(job: _Job) -> Iterator[ImportedMessage]:
     path = Path(job.source_path)
     if job.source_kind == "mbox":
@@ -117,15 +161,22 @@ def _source_iter(job: _Job) -> Iterator[ImportedMessage]:
 def run_import(
     conn_factory: ConnFactory, job_id: int, *,
     attachments_root: Path, checkpoint_every: int, checkpoint_seconds: float,
+    terminal_write_attempts: int, terminal_write_backoff_s: float,
     clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Execute one import job end-to-end. Always writes a terminal status.
+    """Execute one import job end-to-end and write its terminal status.
+
+    Raises `TerminalStatusUnwritten` if that write fails on every attempt.
 
     Progress is flushed and cancel is polled on a count cadence
     (`checkpoint_every`) AND a time cadence (`checkpoint_seconds`), plus once
     after the first message — so a small or slow import stays responsive and
-    cancellable (issue #163). `clock` is injectable for deterministic tests.
+    cancellable (issue #163). `clock` and `sleep` are injectable for tests.
     """
+    mark = functools.partial(
+        _mark_terminal, conn_factory, job_id, attempts=terminal_write_attempts,
+        backoff_s=terminal_write_backoff_s, sleep=sleep)
     c = _Counters()
     # The counters as of the worker connection's last commit: what a failed
     # job reports, since closing the connection rolls back everything after
@@ -135,7 +186,7 @@ def run_import(
         conn = conn_factory()
     except Exception as e:  # connection failure before any work
         log.exception("import job %s: could not open connection", job_id)
-        _mark_terminal(conn_factory, job_id, "failed", c, error_msg=f"{type(e).__name__}: {e}")
+        mark("failed", c, error_msg=f"{type(e).__name__}: {e}")
         return
     try:
         job = _load_job(conn, job_id)
@@ -216,8 +267,6 @@ def run_import(
         conn.commit()
         committed = replace(c)
         conn.close()
-        _mark_terminal(
-            conn_factory, job_id, "cancelled" if cancelled else "completed", c)
     except Exception as e:
         log.exception("import job %s failed", job_id)
         try:
@@ -227,5 +276,8 @@ def run_import(
         error_msg = f"{type(e).__name__}: {e}"
         if isinstance(e, DB_CONTENTION_ERRORS):
             error_msg = f"database contention; re-run the import (idempotent): {error_msg}"
-        _mark_terminal(
-            conn_factory, job_id, "failed", committed, error_msg=error_msg)
+        mark("failed", committed, error_msg=error_msg)
+    else:
+        # Outside the `try`: a failed write of a finished import must not be
+        # retried as "failed" by the handler above.
+        mark("cancelled" if cancelled else "completed", c)

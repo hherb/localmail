@@ -67,6 +67,10 @@ class ImportsConfig(BaseModel):
     checkpoint_every: int = 50  # flush progress + commit to DB every N messages
     checkpoint_seconds: float = 2.0  # also flush + poll cancel every N seconds (issue #163)
     stale_seconds: int = 60  # a running job idle longer than this is shown stalled in the panel
+    # The terminal status write is retried so a DB blip cannot leave a job
+    # `running` and holding the single-active guard (#442).
+    terminal_write_attempts: int = Field(default=5, ge=1)
+    terminal_write_backoff_s: float = Field(default=10.0, ge=0)
 
     @field_validator("roots", mode="after")
     @classmethod

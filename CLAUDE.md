@@ -3585,6 +3585,23 @@ for the full design.
   limitation:** pid reuse can rarely keep a dead job's row until the next restart
   (self-heals; low probability on single-host). **Migration
   `0027_import_jobs_owner.sql`** (#162).
+  **The terminal status write is retried, then reported (#442).**
+  `runner._mark_terminal` retries `_write_terminal` `[imports]
+  terminal_write_attempts` times, `terminal_write_backoff_s` apart (5 × 10 s;
+  `sleep` injectable), then logs one ERROR naming the job and the remedy
+  (restart serve, or the `UPDATE` to run by hand) and raises
+  `TerminalStatusUnwritten`. Before, one failed write escaped the in-serve
+  thread as Python's unhandled-thread dump, and the row stayed `running`
+  holding the single-active guard. `start_job`'s thread target swallows that
+  exception (already logged); the CLI turns it into a `ClickException`.
+  - **The `completed`/`cancelled` write sits in the `try`'s `else`**, so its
+    exhaustion is not retried as `failed` by the handler (operator ruling):
+    the data is committed, and a second retry window would only double the
+    wait and the ERROR. #439's "failure after the final commit" test now
+    drives the one such failure left, the worker connection's `close()`.
+  - The two tunables are required keywords on `run_import`/`start_job`,
+    threaded from `cfg.imports` at all three callers like
+    `checkpoint_seconds`. Tests pass `_TW` (one try, no wait).
 - **DaemonSupervisor + HTTP + CLI (Sub-plan 2B.4, shipped):** two control
   planes for the sync daemon. **Plane B** (process lifecycle) lives in
   [src/localmail/serve/daemon_supervisor.py](src/localmail/serve/daemon_supervisor.py):

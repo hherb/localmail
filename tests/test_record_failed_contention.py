@@ -41,6 +41,9 @@ from .test_import_retry_db_contention import (
 from .test_sync import _sync, make_account
 from .test_worker_db_contention import _CASES, _count, _raising_trigger
 
+# One try, no wait: these tests do not fail the terminal write (#442 does).
+_TW = dict(terminal_write_attempts=1, terminal_write_backoff_s=0.0)
+
 
 @pytest.fixture
 def poison(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,7 +112,7 @@ def test_import_fails_the_job_when_the_poison_pill_cannot_be_recorded(
     with _raising_trigger(db_conn, table="failed_messages", event="INSERT", sqlstate=sqlstate):
         runner.run_import(
             _conn_factory, job_id, attachments_root=tmp_path / "blobs",
-            checkpoint_every=50, checkpoint_seconds=3600.0,
+            checkpoint_every=50, checkpoint_seconds=3600.0, **_TW,
         )
 
     db_conn.rollback()

@@ -190,18 +190,33 @@ def reconcile_orphaned_jobs(
         return len(reap_ids)
 
 
+def _run_import_in_thread(*args: object, **kwargs: object) -> None:
+    """`run_import`, minus the already-logged `TerminalStatusUnwritten` (#442).
+
+    Re-raising it would only add Python's unhandled-thread dump beside the
+    ERROR line that already names the job and the remedy.
+    """
+    try:
+        _runner.run_import(*args, **kwargs)  # type: ignore[arg-type]
+    except _runner.TerminalStatusUnwritten:
+        pass
+
+
 def start_job(
     conn_factory: _runner.ConnFactory, job_id: int, *,
     attachments_root: Path, checkpoint_every: int, checkpoint_seconds: float,
+    terminal_write_attempts: int, terminal_write_backoff_s: float,
 ) -> threading.Thread:
     """Spawn a daemon thread running the import. Returns the thread (joinable)."""
     t = threading.Thread(
-        target=_runner.run_import,
+        target=_run_import_in_thread,
         args=(conn_factory, job_id),
         kwargs={
             "attachments_root": attachments_root,
             "checkpoint_every": checkpoint_every,
             "checkpoint_seconds": checkpoint_seconds,
+            "terminal_write_attempts": terminal_write_attempts,
+            "terminal_write_backoff_s": terminal_write_backoff_s,
         },
         name=f"import-job-{job_id}",
         daemon=True,

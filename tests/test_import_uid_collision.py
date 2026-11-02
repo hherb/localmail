@@ -19,7 +19,10 @@ from localmail.importer import runner
 from localmail.sync import retry_failed_messages
 from tests.conftest import TEST_DSN
 
-_IMPORT_KW = dict(checkpoint_every=50, checkpoint_seconds=3600.0)
+# One try, no wait: these tests do not fail the terminal write (#442 does).
+_TW = dict(terminal_write_attempts=1, terminal_write_backoff_s=0.0)
+
+_IMPORT_KW = dict(checkpoint_every=50, checkpoint_seconds=3600.0, **_TW)
 
 
 def _conn_factory():

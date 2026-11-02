@@ -134,7 +134,9 @@ async def create_import(
         lambda: psycopg.connect(dsn, autocommit=False), jid,
         attachments_root=request.app.state.attachments_root,
         checkpoint_every=cfg.checkpoint_every,
-        checkpoint_seconds=cfg.checkpoint_seconds)
+        checkpoint_seconds=cfg.checkpoint_seconds,
+        terminal_write_attempts=cfg.terminal_write_attempts,
+        terminal_write_backoff_s=cfg.terminal_write_backoff_s)
     resp = Response(status_code=200)
     resp.headers["HX-Redirect"] = f"/admin/imports/{jid}"
     return resp

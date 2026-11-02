@@ -1239,6 +1239,50 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
       each SQLSTATE, plus a `DataException` control per site. **Not
       `psycopg.errors.DataError.sqlstate`**: that is the DB-API base class,
       its sqlstate is `None`, and the trigger then raised `UndefinedObject`.
+  - **The importer and `retry-failed` re-raise them too (#437).** Both wrote
+    a `failed_messages` row, so a contended message was reported as
+    malformed. Their connections are bare `psycopg.connect` with no
+    timeout, so a lock wait just blocks: what raises is a deadlock, or a
+    lock/statement timeout an operator configured. Against the daemon's
+    sync threads an import shares only the global `attachment_blobs` rows
+    (dedup is per account, and the daemon never syncs archive accounts),
+    but the embed worker and lang detection claim archive `messages` rows
+    `FOR UPDATE`, which a new `message_labels` row's foreign-key check
+    (`FOR KEY SHARE`) waits on — argued from lock rules, not reproduced;
+    `retry-failed` on a live account's row can also meet it on a
+    Message-Id.
+    - `run_import` logs a WARNING naming the uid, mailbox and exception
+      type, then re-raises **without** `ROLLBACK TO` (closing the connection
+      discards the transaction anyway, and a failing rollback would replace
+      the contention error in `error_msg`). Its outer handler marks the job
+      `failed`, with an `error_msg` that leads with the remedy (`database
+      contention; re-run the import (idempotent): …`) for any contention
+      class, raised inside the per-message `try` or not. `localmail import`
+      now exits 1 on a failed job, where it used to exit 0.
+    - `retry_failed_messages` logs the row and how many were recovered,
+      then raises, leaving that row's `retry_count` alone. Rows retried
+      before it stay committed (each is committed in turn, pinned by a
+      three-row test). The WARNING is emitted before the `ROLLBACK TO`, so a
+      failing rollback cannot lose it. The CLI turns it into a one-line
+      `ClickException` naming `e.diag.message_primary`: psycopg's `str(e)`
+      carries the server's DETAIL/CONTEXT lines, which a real deadlock always
+      has, and would push the remedy off the line.
+    - **A failed job reports the counters as of the worker connection's
+      last commit (#439)**, not its in-memory totals. Closing the connection
+      rolls back everything after that commit, poison pills'
+      `failed_messages` rows included, so the in-memory counts described
+      work that no longer existed. `run_import` keeps a `committed` snapshot,
+      taken after `_flush`, after a new mailbox's `upsert_mailbox` commit
+      (which commits the messages before it too), and after the loop's final
+      commit (so a failure in the "completed" status write still reports
+      every message). Each snapshot point and the handler's use of
+      `committed` fails a test in `tests/test_importer_runner.py` when
+      removed (the `_flush` point and the handler share one). The rolled-back
+      poison pills are re-recorded by the re-run, which re-processes them —
+      and so, under a fresh uid, are the committed ones, adding a second
+      `failed_messages` row each (pre-existing, #440).
+    - Pinned in `tests/test_import_retry_db_contention.py`, reusing #425's
+      trigger.
   - **The cause of #414's stall is still unknown**: the DGX journal for it had
     rotated away. `run_forever` registers `faulthandler` on
     `STACK_DUMP_SIGNAL` (SIGUSR1), so the next stall is `kill -USR1 <pid>`

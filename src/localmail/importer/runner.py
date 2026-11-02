@@ -4,7 +4,8 @@
 """Importer core: stream an archive source through sync.process_one_message.
 
 Owns the import_jobs row lifecycle: marks running, per-message SAVEPOINT
-isolation (poison pills -> failed_messages, mirroring sync_mailbox), checkpoint
+isolation (poison pills -> failed_messages, mirroring sync_mailbox; a
+`db.DB_CONTENTION_ERRORS` failure fails the job instead, #437), checkpoint
 counter flushes + last_progress_at heartbeat, cooperative cancel, and a
 guaranteed terminal status (completed / cancelled / failed+error_msg). Takes a
 `conn_factory` (not a pool) so the long-lived worker holds its own connection.
@@ -13,12 +14,13 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterator
 
 import psycopg
 
+from localmail.db import DB_CONTENTION_ERRORS
 from localmail.importer.job_state import should_checkpoint
 from localmail.importer.sources import ImportedMessage, iter_maildir, iter_mbox
 from localmail.sync import process_one_message, record_failed_message, upsert_mailbox
@@ -125,6 +127,10 @@ def run_import(
     cancellable (issue #163). `clock` is injectable for deterministic tests.
     """
     c = _Counters()
+    # The counters as of the worker connection's last commit: what a failed
+    # job reports, since closing the connection rolls back everything after
+    # it, including the failed_messages rows of poison pills (#439).
+    committed = _Counters()
     try:
         conn = conn_factory()
     except Exception as e:  # connection failure before any work
@@ -147,6 +153,7 @@ def run_import(
                     conn, account_id=job.account_id, name=msg.mailbox_name,
                     delimiter=None, flags=[])
                 conn.commit()
+                committed = replace(c)
                 mailbox_ids[msg.mailbox_name] = mb.id
                 # Continue past whatever a previous import left in this mailbox
                 # (#215). Mailboxes resolve on (account_id, name), so two
@@ -168,10 +175,21 @@ def run_import(
                     cur.execute("RELEASE SAVEPOINT msg")
                 c.inserted += 1 if did_insert else 0
                 c.skipped_dup += 0 if did_insert else 1
-            except Exception as exc:  # poison pill -- isolate to this message
+            except Exception as exc:
+                # A deadlock or lock/statement timeout against another session
+                # is not the message's fault: fail the job, which is safe to
+                # re-run (#437, the sync idiom from #414). No ROLLBACK TO first:
+                # closing the connection discards the transaction anyway, and a
+                # failing rollback would replace this error in error_msg.
+                if isinstance(exc, DB_CONTENTION_ERRORS):
+                    log.warning(
+                        "import job %s: DB contention at uid=%s mailbox=%s; failing "
+                        "the job, re-run it (imports are idempotent): %s: %s",
+                        job_id, uid, msg.mailbox_name, type(exc).__name__, exc)
+                    raise
                 log.warning(
-                    "import job %s: skipping poison message uid=%s mailbox=%s: %s",
-                    job_id, uid, msg.mailbox_name, exc)
+                    "import job %s: skipping poison message uid=%s mailbox=%s: %s: %s",
+                    job_id, uid, msg.mailbox_name, type(exc).__name__, exc)
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")
                     cur.execute("RELEASE SAVEPOINT msg")
@@ -189,12 +207,14 @@ def run_import(
                 checkpoint_seconds=checkpoint_seconds,
             ):
                 _flush(conn, job_id, c)
+                committed = replace(c)
                 processed_at_last_checkpoint = c.processed
                 last_checkpoint_at = now
                 if _cancel_requested(conn, job_id):
                     cancelled = True
                     break
         conn.commit()
+        committed = replace(c)
         conn.close()
         _mark_terminal(
             conn_factory, job_id, "cancelled" if cancelled else "completed", c)
@@ -204,4 +224,8 @@ def run_import(
             conn.close()
         except Exception:
             pass
-        _mark_terminal(conn_factory, job_id, "failed", c, error_msg=f"{type(e).__name__}: {e}")
+        error_msg = f"{type(e).__name__}: {e}"
+        if isinstance(e, DB_CONTENTION_ERRORS):
+            error_msg = f"database contention; re-run the import (idempotent): {error_msg}"
+        _mark_terminal(
+            conn_factory, job_id, "failed", committed, error_msg=error_msg)

@@ -223,3 +223,107 @@ def test_run_import_poison_message_isolated(db_conn, tmp_path, monkeypatch):
     with db_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM failed_messages WHERE account_id=%s", (aid,))
         assert cur.fetchone()[0] == 1
+
+
+def _numbered(n: int) -> bytes:
+    return (
+        f"From: a@example.com\r\nSubject: m{n}\r\n"
+        f"Message-Id: <m{n}-439@example.com>\r\n\r\nbody {n}\r\n"
+    ).encode()
+
+
+def test_a_failed_job_reports_only_what_was_committed(db_conn, tmp_path, monkeypatch):
+    """#439: on a mid-run failure the job's counters describe the committed
+    work, not work the closing connection rolled back.
+
+    Message 1 is inserted and committed by the first-message checkpoint;
+    message 2 is a poison pill, recorded but not yet committed; message 3
+    fails the job. The rollback takes message 2's failed_messages row with
+    it, so the job must report processed=1, inserted=1, failed=0.
+    """
+    aid = _archive(db_conn)
+    path = _make_mbox(tmp_path, _numbered(1), _numbered(2), _numbered(3))
+    jid = _job(db_conn, aid, path)
+    real = runner.process_one_message
+
+    def scripted(conn, *, raw, **kw):
+        if b"Subject: m2" in raw:
+            raise ValueError("poison")
+        if b"Subject: m3" in raw:
+            raise psycopg.errors.DeadlockDetected("contended")
+        return real(conn, raw=raw, **kw)
+
+    monkeypatch.setattr(runner, "process_one_message", scripted)
+    runner.run_import(
+        _conn_factory, jid, attachments_root=tmp_path / "blobs",
+        checkpoint_every=50, checkpoint_seconds=3600.0)
+
+    db_conn.rollback()
+    row = db_conn.execute(
+        "SELECT status, processed, inserted, skipped_dup, failed FROM import_jobs "
+        "WHERE id=%s", (jid,)).fetchone()
+    assert row == ("failed", 1, 1, 0, 0)
+    counts = db_conn.execute(
+        "SELECT (SELECT count(*) FROM messages), (SELECT count(*) FROM failed_messages)"
+    ).fetchone()
+    assert counts == (1, 0)
+
+
+def test_a_new_mailbox_commit_counts_as_committed_work(db_conn, tmp_path, monkeypatch):
+    """#439: first sighting of a mailbox commits too, which also commits the
+    messages processed before it. Root `md` holds m1 and m2, one flushed by
+    the first-message checkpoint and the other not; entering `Archive`
+    commits it; m3 there fails the job. Both committed messages must be
+    reported."""
+    md = _mailbox.Maildir(str(tmp_path / "md"))
+    md.add(_mailbox.MaildirMessage(_numbered(1)))
+    md.add(_mailbox.MaildirMessage(_numbered(2)))
+    md.add_folder("Archive").add(_mailbox.MaildirMessage(_numbered(3)))
+    aid = _archive(db_conn)
+    jid = _job(db_conn, aid, tmp_path / "md", kind="maildir")
+    real = runner.process_one_message
+
+    def scripted(conn, *, raw, **kw):
+        if b"Subject: m3" in raw:
+            raise psycopg.errors.DeadlockDetected("contended")
+        return real(conn, raw=raw, **kw)
+
+    monkeypatch.setattr(runner, "process_one_message", scripted)
+    runner.run_import(
+        _conn_factory, jid, attachments_root=tmp_path / "blobs",
+        checkpoint_every=50, checkpoint_seconds=3600.0)
+
+    db_conn.rollback()
+    row = db_conn.execute(
+        "SELECT status, processed, inserted FROM import_jobs WHERE id=%s", (jid,),
+    ).fetchone()
+    assert row == ("failed", 2, 2)
+    assert db_conn.execute("SELECT count(*) FROM messages").fetchone() == (2,)
+
+
+def test_a_failure_after_the_final_commit_reports_every_message(
+    db_conn, tmp_path, monkeypatch,
+):
+    """#439: once the loop's final commit has run every message is committed,
+    so a failure after it (here the "completed" status write) must not report
+    the older checkpoint's counts."""
+    aid = _archive(db_conn)
+    path = _make_mbox(tmp_path, _numbered(1), _numbered(2))
+    jid = _job(db_conn, aid, path)
+    real = runner._mark_terminal
+
+    def failing_completed(conn_factory, job_id, status, c, **kw):
+        if status == "completed":
+            raise psycopg.OperationalError("status write failed")
+        return real(conn_factory, job_id, status, c, **kw)
+
+    monkeypatch.setattr(runner, "_mark_terminal", failing_completed)
+    runner.run_import(
+        _conn_factory, jid, attachments_root=tmp_path / "blobs",
+        checkpoint_every=50, checkpoint_seconds=3600.0)
+
+    db_conn.rollback()
+    row = db_conn.execute(
+        "SELECT status, processed, inserted FROM import_jobs WHERE id=%s", (jid,),
+    ).fetchone()
+    assert row == ("failed", 2, 2)

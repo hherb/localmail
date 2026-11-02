@@ -411,7 +411,11 @@ uv run localmail retry-failed --account N   # one account only
 
 Successful retries delete the `failed_messages` row and insert the message
 into `messages` via the same code path live sync uses. Persistent failures
-bump `retry_count` and `last_retry_at`.
+bump `retry_count` and `last_retry_at`. A database deadlock (or a lock or
+statement timeout you configured), for example against the running daemon,
+is not counted against the message: `retry-failed` stops with an error
+(rows recovered before it stay recovered) and an import job is marked
+`failed`, with `localmail import` exiting 1. Re-run either.
 
 For rows belonging to an **archive** account, retry assigns a fresh message
 number rather than reusing the stored one. Imported numbers are synthetic, so a

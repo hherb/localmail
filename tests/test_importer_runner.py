@@ -271,9 +271,10 @@ def test_a_failed_job_reports_only_what_was_committed(db_conn, tmp_path, monkeyp
 
 def test_a_new_mailbox_commit_counts_as_committed_work(db_conn, tmp_path, monkeypatch):
     """#439: first sighting of a mailbox commits too, which also commits the
-    messages processed before it. Root `md` holds m1 (flushed) and m2 (not);
-    entering `Archive` commits m2; m3 there fails the job. Both committed
-    messages must be reported."""
+    messages processed before it. Root `md` holds m1 and m2, one flushed by
+    the first-message checkpoint and the other not; entering `Archive`
+    commits it; m3 there fails the job. Both committed messages must be
+    reported."""
     md = _mailbox.Maildir(str(tmp_path / "md"))
     md.add(_mailbox.MaildirMessage(_numbered(1)))
     md.add(_mailbox.MaildirMessage(_numbered(2)))
@@ -298,3 +299,31 @@ def test_a_new_mailbox_commit_counts_as_committed_work(db_conn, tmp_path, monkey
     ).fetchone()
     assert row == ("failed", 2, 2)
     assert db_conn.execute("SELECT count(*) FROM messages").fetchone() == (2,)
+
+
+def test_a_failure_after_the_final_commit_reports_every_message(
+    db_conn, tmp_path, monkeypatch,
+):
+    """#439: once the loop's final commit has run every message is committed,
+    so a failure after it (here the "completed" status write) must not report
+    the older checkpoint's counts."""
+    aid = _archive(db_conn)
+    path = _make_mbox(tmp_path, _numbered(1), _numbered(2))
+    jid = _job(db_conn, aid, path)
+    real = runner._mark_terminal
+
+    def failing_completed(conn_factory, job_id, status, c, **kw):
+        if status == "completed":
+            raise psycopg.OperationalError("status write failed")
+        return real(conn_factory, job_id, status, c, **kw)
+
+    monkeypatch.setattr(runner, "_mark_terminal", failing_completed)
+    runner.run_import(
+        _conn_factory, jid, attachments_root=tmp_path / "blobs",
+        checkpoint_every=50, checkpoint_seconds=3600.0)
+
+    db_conn.rollback()
+    row = db_conn.execute(
+        "SELECT status, processed, inserted FROM import_jobs WHERE id=%s", (jid,),
+    ).fetchone()
+    assert row == ("failed", 2, 2)

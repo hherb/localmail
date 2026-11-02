@@ -175,26 +175,24 @@ def run_import(
                     cur.execute("RELEASE SAVEPOINT msg")
                 c.inserted += 1 if did_insert else 0
                 c.skipped_dup += 0 if did_insert else 1
-            except Exception as exc:  # poison pill -- isolate to this message
+            except Exception as exc:
                 # A deadlock or lock/statement timeout against another session
-                # (the daemon shares only the global attachment_blobs rows) is
-                # not the message's fault: fail the job, which is safe to
-                # re-run (#437, the sync idiom from #414).
-                contended = isinstance(exc, DB_CONTENTION_ERRORS)
-                if contended:
+                # is not the message's fault: fail the job, which is safe to
+                # re-run (#437, the sync idiom from #414). No ROLLBACK TO first:
+                # closing the connection discards the transaction anyway, and a
+                # failing rollback would replace this error in error_msg.
+                if isinstance(exc, DB_CONTENTION_ERRORS):
                     log.warning(
                         "import job %s: DB contention at uid=%s mailbox=%s; failing "
-                        "the job, re-run it (imports are idempotent): %s",
-                        job_id, uid, msg.mailbox_name, exc)
-                else:
-                    log.warning(
-                        "import job %s: skipping poison message uid=%s mailbox=%s: %s",
-                        job_id, uid, msg.mailbox_name, exc)
+                        "the job, re-run it (imports are idempotent): %s: %s",
+                        job_id, uid, msg.mailbox_name, type(exc).__name__, exc)
+                    raise
+                log.warning(
+                    "import job %s: skipping poison message uid=%s mailbox=%s: %s: %s",
+                    job_id, uid, msg.mailbox_name, type(exc).__name__, exc)
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")
                     cur.execute("RELEASE SAVEPOINT msg")
-                if contended:
-                    raise
                 record_failed_message(
                     conn, account_id=job.account_id, mailbox_id=mailbox_id, uid=uid,
                     raw=msg.raw, exc=exc)
@@ -216,6 +214,7 @@ def run_import(
                     cancelled = True
                     break
         conn.commit()
+        committed = replace(c)
         conn.close()
         _mark_terminal(
             conn_factory, job_id, "cancelled" if cancelled else "completed", c)
@@ -225,6 +224,8 @@ def run_import(
             conn.close()
         except Exception:
             pass
+        error_msg = f"{type(e).__name__}: {e}"
+        if isinstance(e, DB_CONTENTION_ERRORS):
+            error_msg = f"database contention; re-run the import (idempotent): {error_msg}"
         _mark_terminal(
-            conn_factory, job_id, "failed", committed,
-            error_msg=f"{type(e).__name__}: {e}")
+            conn_factory, job_id, "failed", committed, error_msg=error_msg)

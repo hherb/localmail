@@ -440,16 +440,19 @@ def retry_failed_messages(
             conn.commit()
             succeeded += 1
         except Exception as exc:
+            contended = isinstance(exc, DB_CONTENTION_ERRORS)
+            if contended:
+                # Contention is not the message's fault: stop, leaving its
+                # retry_count alone; rows already retried are committed (#437).
+                # Logged before the rollback so a failing rollback cannot lose it.
+                log.warning(
+                    "retry-failed: DB contention on failed_messages id=%s uid=%s "
+                    "mailbox_id=%s after %d recovered; stopping, re-run it: %s: %s",
+                    row_id, uid, mailbox_id, succeeded, type(exc).__name__, exc)
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT retry")
                 cur.execute("RELEASE SAVEPOINT retry")
-            if isinstance(exc, DB_CONTENTION_ERRORS):
-                # Contention is not the message's fault: stop, leaving its
-                # retry_count alone; rows already retried are committed (#437).
-                log.warning(
-                    "retry-failed: DB contention on failed_messages id=%s uid=%s "
-                    "mailbox_id=%s after %d recovered; stopping, re-run it: %s",
-                    row_id, uid, mailbox_id, succeeded, exc)
+            if contended:
                 raise
             # Re-record under the *stored* uid, not `attempt_uid`: the row is
             # keyed UNIQUE (account_id, mailbox_id, uid), so this upserts the

@@ -88,8 +88,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | check | result |
 |---|---|
 | RED first | #437: 6 contention cases failed, 2 controls passed. #439: the counters test failed as above |
-| mutation | each re-raise; the per-row retry commit; the CLI catch; `ctx.exit(1)`; each #439 snapshot point and the handler's use of it: every one fails exactly its own test |
-| `uv run pytest -q` | **4484 passed**, 6 warnings (load ~15) |
+| mutation | each re-raise; the per-row retry commit; the CLI catch; `ctx.exit(1)`; each #439 snapshot point (incl. the post-loop one) and the handler's use of it, and the CLI's one-line message: each fails a test (the `_flush` point and the handler share one) |
+| `uv run pytest -q` | **4485 passed**, 6 warnings (after the review fixes) |
 | mypy | Success, 165 files |
 | GUI | not run (no GUI change) |
 | CI | **check on the PR** (`gh pr checks`) |
@@ -121,6 +121,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   - #384: comment or close (2.7 ms warm for 50 prefixes).
   - #369: last-token-wins on scalar operators.
   - #373: an apostrophe inside a word is dropped.
+  - From #438's review: #441 (`record_failed_message` swallows contention;
+    in the daemon that loses a message past `uidnext`, so the most urgent),
+    #440 (re-running an import duplicates poison pills' `failed_messages`
+    rows), #442 (in-serve import stuck `running` if the status write fails).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 

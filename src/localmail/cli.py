@@ -623,7 +623,8 @@ def retry_failed(ctx: click.Context, account_name: str | None) -> None:
             )
         except DB_CONTENTION_ERRORS as e:
             raise click.ClickException(
-                f"stopped on database contention ({type(e).__name__}: {e}); rows "
+                f"stopped on database contention ({type(e).__name__}: "
+                f"{e.diag.message_primary or e}); rows "
                 "recovered before it stay recovered; re-run retry-failed") from e
     click.echo(f"recovered: {ok}    still failing: {still}")
 

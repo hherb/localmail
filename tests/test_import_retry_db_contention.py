@@ -8,9 +8,11 @@ Sync (#414) and the embed worker / lang detection (#425) re-raise
 record them in `failed_messages` as if the message were malformed. Their
 connections carry no timeout, so a lock wait just blocks: what raises is a
 deadlock, or a lock/statement timeout an operator configured. Against the
-daemon an import shares only the global `attachment_blobs` rows (dedup is per
-account, and the daemon never syncs archive accounts); `retry-failed` on a live
-account's row can also meet it on the same Message-Id.
+daemon's sync threads an import shares only the global `attachment_blobs` rows
+(dedup is per account, and the daemon never syncs archive accounts), but the
+embed worker and lang detection lock archive `messages` rows `FOR UPDATE`, which
+a new label row's foreign-key check waits on; `retry-failed` on a live account's
+row can also meet it on the same Message-Id.
 
 The error is raised server-side by `_raising_trigger` (shared with #425's
 tests), so the `ROLLBACK TO SAVEPOINT` ahead of the re-raise runs for real. A
@@ -103,7 +105,8 @@ def test_import_records_only_a_genuine_failure(
         assert (status, failed, recorded) == ("completed", 1, 1)
     else:
         assert (status, failed, recorded) == ("failed", 0, 0)
-        assert error_msg.startswith(f"{raised.__name__}: ")
+        assert error_msg.startswith(
+            f"database contention; re-run the import (idempotent): {raised.__name__}: ")
         assert "DB contention at uid=1 mailbox=Inbox" in caplog.text
 
 
@@ -156,7 +159,7 @@ def _seed_failed(conn: psycopg.Connection, raws: list[bytes]) -> None:
 
 
 def test_retry_keeps_rows_recovered_before_the_contended_one(
-    db_conn: psycopg.Connection, tmp_path: Path,
+    db_conn: psycopg.Connection, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Each recovered row is committed before the next is tried, so a stop on
     row 2 keeps row 1 recovered and never attempts row 3."""
@@ -167,6 +170,7 @@ def test_retry_keeps_rows_recovered_before_the_contended_one(
     ):
         with pytest.raises(psycopg.errors.QueryCanceled):
             retry_failed_messages(db_conn, attachments_root=tmp_path / "blobs")
+    assert "after 1 recovered" in caplog.text
     db_conn.rollback()
     subjects = [r[0] for r in db_conn.execute("SELECT subject FROM messages ORDER BY id")]
     assert subjects == ["s1"]
@@ -183,8 +187,10 @@ def test_cli_retry_failed_reports_contention_without_a_traceback(
         result = CliRunner().invoke(main, ["retry-failed"])
     assert result.exit_code == 1, result.output
     assert isinstance(result.exception, SystemExit)
-    assert "stopped on database contention (QueryCanceled" in result.stderr
-    assert "re-run retry-failed" in result.stderr
+    # One line: psycopg's str(e) would add the server's CONTEXT block.
+    line = next(ln for ln in result.stderr.splitlines() if "stopped on" in ln)
+    assert "stopped on database contention (QueryCanceled" in line
+    assert "re-run retry-failed" in line
 
 
 def test_cli_import_exits_nonzero_when_the_job_fails(
@@ -196,4 +202,5 @@ def test_cli_import_exits_nonzero_when_the_job_fails(
             main, ["import", _mbox(tmp_path), "--account", "arch", "--kind", "mbox"])
     assert result.exit_code == 1, result.output
     assert "status=failed" in result.stdout
-    assert "error: QueryCanceled: " in result.stderr
+    assert "error: database contention; re-run the import (idempotent): QueryCanceled: " \
+        in result.stderr

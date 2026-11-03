@@ -1,15 +1,16 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-03 (session 82).** `main` is **`c282709`** (#446:
-> #373, closed).
+> **Status as of 2026-11-04 (session 83).** `main` is **`08d329c`** (#447:
+> #374, closed).
 >
-> This session has **one open PR** on `fix/374-cli-composer-filters-first`.
-> Its body says **`Closes #374`**. It carries the #374 code and this handoff.
+> This session has **one open PR** on `fix/305-cli-search-catch`. It does
+> **not** close #305 (only its search-catch half is done); the body says
+> `Refs #305`. It carries the code and this handoff.
 >
-> **Both hosts are deployed at `c282709`**; nothing from the #374 PR is
-> deployed (the CLI is not a long-running process: nothing to restart).
+> **Both hosts are deployed at `08d329c`**; nothing from the #305 PR is
+> deployed (CLI only, nothing to restart).
 >
-> **Open issues: 32** (31 once the #374 PR merges).
+> **Open issues: 31.**
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -27,75 +28,71 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### Deploy of `c282709` (#446, #373) to both hosts (no commit)
+### Deploy of `08d329c` (#447, #374) to both hosts (no commit)
 
 - **Mac:** `uv sync --frozen --extra mcp --extra extraction` (no change),
-  kickstarted `com.localmail.serve` only.
-- **DGX:** pulled → `c282709`, synced (reinstalled `nvidia-cusparselt-cu13`
+  kickstarted `com.localmail.serve`.
+- **DGX:** pulled → `08d329c`, synced (reinstalled `nvidia-cusparselt-cu13`
   again, lock unchanged), restarted `localmail-serve`. Both units `active`.
-- Both `/v1/version`: `api_minor` 6, `build_hash` `c282709`.
+- Both `/v1/version`: `api_minor` 6, `build_hash` `08d329c`.
+- **Acceptance met:** `localmail search 'x "y' --from z --format json` on
+  the Mac exits 0 with `from_substr` `z`.
 
-### PR on `fix/374-cli-composer-filters-first` (based on `main` at `c282709`)
+### PR on `fix/305-cli-search-catch` (based on `main` at `08d329c`)
 
 | SHA | What |
 |---|---|
-| `bf7da9f` | #374: CLI search composes the flags ahead of the free text |
-| handoff | this file + `docs/handoffs/2026-11-03T1307Z-cli-composer-filters-first.md` |
+| `66c0ba0` | #305 (search-catch half): a malformed query is a usage error |
+| handoff | this file + `docs/handoffs/2026-11-04T0545Z-cli-search-catch.md` |
 
-- **The defect.** `cli.py::search` built `"<free text> from:\"x\" ..."`, so
-  an unclosed `"` in the query swallowed every flag and the command exited 0
-  unfiltered. Flag values were unsanitized: `--label` unquoted, `"` not
-  stripped from `--from`/`--to`/`--subject`/`--folder`.
-- **The fix.** New pure `src/localmail/cli_search_query.py::compose_cli_query`
-  (flags first, free text last). Every string flag value goes through the new
-  `search/query.py::quoted_filter_value`, which `api.search._quote_value` now
-  delegates to: one stripping rule for both composers. A flag value of only
-  quotes is a `click.UsageError` (exit 2).
-- **Cost:** same precedence flip as #367: `from:bob` in the query out-votes
-  `--from alice` (#369). Documented in README.
-- **Not done (#305):** `cli.py`'s search still catches `RuntimeError` only,
-  so a `QueryParseError` from the query text (e.g. `after:last-week`) still
-  tracebacks.
-- **Tests:** `tests/test_cli_search_query.py` (29: #367's two properties over
-  hostile free text, flag injection, empty-value refusal) and two
-  `CliRunner` tests in `test_cli_search.py`, both RED against `main`'s
-  `cli.py` (checked by swapping the file in). README and CLAUDE.md updated.
-  No migration, no wire change.
+- **The defect.** `cli.py::search` caught `RuntimeError` only, so a
+  `QueryParseError` (`has:attachments`, `after:last-week`, a contradictory
+  `has:` pair; since #373 also `has:'attachment`) was a bare traceback, as
+  would be any `SearchArgumentRefused` member once a sort/cursor flag exists.
+- **The fix.** `except (QueryParseError, SearchArgumentRefused)` →
+  `click.UsageError` (exit 2). Bare `ValueError` deliberately not caught.
+- **Docstring half (option 1 of #305)** was already done:
+  `version_report.py`'s "Scope" paragraph narrows the claim. Nothing to do.
+- **Tests:** 5 in `tests/test_cli_search.py` — three malformed queries
+  through a real `Searcher` whose pool refuses every connection, a fresh
+  family member via a stub, and a bare-`ValueError` control. RED first
+  (4 failed with `QueryParseError`/`_NewMember`, the control passed).
+  Mutations: widening to `ValueError` fails the control; dropping
+  `SearchArgumentRefused` fails the family test.
+- README (two "traceback, #305" notes) and CLAUDE.md (three) updated.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | the 2 `CliRunner` tests fail against `main`'s `cli.py` |
-| `uv run pytest -q` | **4561 passed**, 6 warnings (after the review fixes) |
+| RED first | 4 of the 5 new tests fail against `main`'s `cli.py` |
+| `uv run pytest -q` | **4566 passed**, 6 warnings |
 | mypy | Success, 166 files |
 | GUI | untouched (530 at session 81) |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Merge the #374 PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <n>` all pass; after the merge
-  `gh issue view 374` is `CLOSED`.
+### 1. **Merge the #305 PR** (yours), once CI is green
+- **Acceptance:** `gh pr checks <n>` all pass; #305 stays **OPEN** (the
+  import-deferral half remains).
 
-### 2. **Deploy #374 once merged**
-- Pure Python, CLI only, no migration. A `git pull` + `uv sync` on each host
-  is the whole deploy; restarting serve only moves `build_hash`.
-- **Acceptance:** `localmail search 'x "y' --from z --format json` on the Mac
-  exits 0 and its `query.filters` show `from_substr` `z`.
+### 2. **Deploy once merged** (CLI only: `git pull` + `uv sync` per host)
+- **Acceptance:** `localmail search 'has:attachments'` on the Mac exits 2
+  with `Error: has: expected 'attachment' or 'no-attachment'…`, no traceback.
 
 ### 3. **Next small slice: pick with the operator**
-- Candidates: #305 (widen `cli.py` search's catch to `QueryParseError` /
-  `SearchArgumentRefused`; defer the module-scope imports so `--version`
-  survives a missing dependency), #378 (an operator with an empty value
-  becomes free text), #369 (silent last-token-wins on conflicting scalar
-  operators; needs a refuse-vs-keep call), #383 (drop write-only
+- Candidates: #305's other half (defer `cli.py`'s module-scope imports so
+  `--version` survives a missing dependency; touches many commands, risks
+  moving import errors to first use), #378 (empty/unparsable operator value
+  becomes free text; likely refuse only id/date operators), #369
+  (last-token-wins; needs a refuse-vs-keep call), #383 (drop write-only
   `messages.headers` + GIN in `0039`; one-way door), #365 (product call).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
   `filters.lang` as a list, #419 syntax, #415 dates, `api_minor` 5 and 6
-  features, and #373 (`'` is literal). #374 is CLI-only; nothing to tell.
+  features, and #373 (`'` is literal). #305/#374 are CLI-only.
 
 ### 4. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
@@ -106,17 +103,17 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #378, #369, #372, #368, #365; #375; #305;
+- **Issues:** #383, #378, #369, #372, #368, #365; #375; #305 (imports);
   #358/#357; #330/#327/#328; #340, #363, #285; robustness #218, #226,
   #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The operator asked for `c282709` on both hosts and picked #374** (over
-   #378/#369/#383).
-2. **#374:** the quote-stripping rule moved to `search/query.py` and is
-   shared rather than restated in the CLI (my call); a quotes-only flag
-   value is a usage error rather than an absent filter, matching the API.
+1. **The operator asked for `08d329c` on both hosts and picked #305's
+   search-catch half** (over #305 in full, #378, #369).
+2. **#305:** a malformed query is `click.UsageError` (exit 2, matching the
+   quotes-only flag refusal from #374) rather than a plain `ClickException`
+   (exit 1); my call.
 
 ## Open decisions & risks
 
@@ -131,6 +128,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    an undocumented `from:'Anna Schmidt'` now splits, and `has:'attachment`
    is a 400 (unknown `has:` value). Since #374, in `localmail search` a
    query operator out-votes the matching flag, and `--from '""'` exits 2.
+   Since #305's half, a malformed `localmail search` query exits 2 with a
+   one-line error instead of 1 with a traceback.
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows carry a
    `-0000` Date and are stored 8 h off. None has a NULL `internal_date`, so
    the list/search/changes wire `date` is right; raw `date_sent` readers
@@ -152,7 +151,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~5 this session.** Check
+10. **Load on the Mac was ~6–8 this session.** Check
     `uptime` before trusting any timing.
 
 ## Exact commands to resume
@@ -162,12 +161,12 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/374-cli-composer-filters-first --stat   # empty once merged (squash)
+git diff main origin/fix/305-cli-search-catch --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh issue view 374 --json state --jq .state
+gh issue view 305 --json state --jq .state   # stays OPEN
 gh issue list --limit 200 --json number --jq length
 
-# Deploy — Mac (the repo is the install; no migration for #374; CLI only)
+# Deploy — Mac (the repo is the install; no migration for #305; CLI only)
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version     # api_minor 6, build_hash = merge SHA
@@ -181,8 +180,8 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4559 at session 82
-uv run pytest -q tests/test_cli_search_query.py tests/test_cli_search.py tests/test_query_parser.py
+unset VIRTUAL_ENV && uv run pytest -q              # 4566 at session 83
+uv run pytest -q tests/test_cli_search.py tests/test_cli_search_query.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 166 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```

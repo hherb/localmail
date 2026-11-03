@@ -150,11 +150,12 @@ export function extractDslFilters(query: string): ExtractedFilters {
  * the server as well as here.
  *
  * A bare `join(" ")` does neither. The tokenizer above drops quote
- * characters, so a multi-word token (`to:bob smith`) splits in two. And the
- * server's tokenizer also opens a quote at `'`, so a bare `don't` swallows
+ * characters, so a multi-word token (`to:bob smith`) splits in two. And a
+ * server before #373 opened a quote at `'`, so a bare `don't` swallowed
  * every token after it, filters included. A token holding whitespace or an
- * apostrophe is therefore wrapped in `"`: inside it both tokenizers read `'`
- * as a literal, and no token contains a `"` to unbalance the wrapping.
+ * apostrophe is therefore wrapped in `"`: inside it every tokenizer reads `'`
+ * as a literal, and no token contains a `"` to unbalance the wrapping. A
+ * #373 server reads `'` literally anyway, so the wrapping costs it nothing.
  *
  * A leading `-` stays outside the quotes: the server reads `-"a b"` as
  * excluding the phrase, and `"-a b"` as requiring it (#419).
@@ -162,8 +163,8 @@ export function extractDslFilters(query: string): ExtractedFilters {
  * A token that was typed with quotes is given back as typed (`raw`), since
  * where the quotes sit is meaning to the server: `"OR"` is a word, `"-acme"`
  * requires acme (#421). The exception is a raw spelling with an apostrophe
- * outside its quotes, which the server would read as a quote opener; that
- * falls back to the wrapping above.
+ * outside its quotes, which a pre-#373 server would read as a quote opener;
+ * that falls back to the wrapping above.
  */
 export function joinTokens(tokens: Token[]): string {
   return tokens
@@ -218,8 +219,8 @@ export interface AbsorbedQuery {
  * absorbed only when it is shaped like one: `after:last-week` stays in the
  * query, where the server refuses it by name, rather than riding in a chip.
  *
- * Two imprecisions, both because this reads the query with the tokenizer
- * above rather than the server's, which also opens a quote at `'`:
+ * Two imprecisions against a server before #373, whose tokenizer opened a
+ * quote at `'` (since #373 both read `'` literally and these are gone):
  * - an operator only the server extracts (`'from:bob'`, single-quoted) is
  *   not seen, so its chip can still be out-voted;
  * - an operator an earlier apostrophe hid from the server (`don't from:bob`)

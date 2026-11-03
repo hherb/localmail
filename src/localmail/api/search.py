@@ -89,9 +89,9 @@ def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
     """Compose filter DSL tokens + `free_text` into a single query string.
 
     **The filter tokens come first (#367).** `parse_query`'s tokenizer treats
-    `'` and `"` as quote openers that run to the end of the string, so with
-    the free text first an apostrophe (`O'Brien`, `don't`) swallowed every
-    filter token after it, the ACL's `account_id:` tokens included; when the
+    `"` (and, until #373, `'`) as a quote opener that runs to the end of the
+    string, so with the free text first an unclosed quote, or then an
+    apostrophe (`O'Brien`, `don't`), swallowed every filter token after it, the ACL's `account_id:` tokens included; when the
     swallowed text still parsed, the request was answered 200 with its
     filters gone. Every filter token is self-contained (ids are ASCII digits,
     dates one ASCII token, `has:` a constant, `lang` refused if it

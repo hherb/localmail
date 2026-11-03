@@ -97,3 +97,23 @@ def test_contradictory_has_values_are_refused():
 
 def test_a_repeated_has_value_is_accepted():
     assert parse_query("has:attachment has:attachment").filters.has_attachment is True
+
+
+@pytest.mark.parametrize("query", [
+    "O'Brien contract", "don't forget", "bob's invoice", "'quoted'",
+])
+def test_an_apostrophe_is_literal_text(query):
+    """``'`` is not a quote (#373): dropping it made ``O'Brien`` the token
+    ``OBrien``, which no stored tsvector holds (``'o' 'brien'``). The GUI's
+    tokenizer already reads it literally; ``"`` is the only quote."""
+    assert parse_query(query).free_text == query
+
+
+def test_an_apostrophe_does_not_swallow_later_operators():
+    q = parse_query("bob's from:alice \"final\" invoice")
+    assert q.free_text == "bob's \"final\" invoice"
+    assert q.filters.from_substr == "alice"
+
+
+def test_an_operator_value_keeps_its_apostrophe():
+    assert parse_query("from:o'brien").filters.from_substr == "o'brien"

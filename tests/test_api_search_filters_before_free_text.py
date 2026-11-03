@@ -43,7 +43,8 @@ from localmail.search.searcher import KeysetCursor, Searcher
 
 
 #: Queries whose quote is left open and which set no filter of their own. The
-#: first three are ordinary English and are what #367 reports. ``has:"`` is a
+#: first three are ordinary English and are what #367 reports (``'`` opened a
+#: quote until #373, so they are kept as plain text now). ``has:"`` is a
 #: shape #366 refused; ``from:"`` it served, with the filters swallowed, since
 #: ``from:`` takes any value. An operator with no value is free text.
 _OPEN_QUOTE_TEXT = [
@@ -53,7 +54,9 @@ _OPEN_QUOTE_TEXT = [
 
 #: Open-quote queries whose quoted run *is* an operator value. #366 refused
 #: these too; they parse on their own, so they must be served.
-_OPEN_QUOTE_OPERATORS = ['invoice after:"2024-01-01', "invoice has:'attachment"]
+#: ``has:'attachment`` was the third until #373 made ``'`` literal, which
+#: turns it into an unknown ``has:`` value (a 400); ``"`` keeps the shape.
+_OPEN_QUOTE_OPERATORS = ['invoice after:"2024-01-01', 'invoice has:"attachment']
 
 #: A value for every filter token kind, so a token that is swallowed is
 #: noticed whichever position it was emitted in. ``after``/``before`` emit the
@@ -316,9 +319,9 @@ class _ConstantEmbeddings:
 def _seed_two_folders(conn) -> tuple[int, int, int, int]:
     """One account, folders A and B, one matching message in each.
 
-    The body is spelled ``OBrien``: the tokenizer drops the apostrophe from
-    the query (#373), so a body spelled ``O'Brien`` would match neither
-    before the fix nor after it.
+    The body is spelled ``O'Brien``, so the ``sort="date"`` case (lexical
+    only) also pins #373: the query's apostrophe must reach the FTS
+    predicate, where ``O'Brien`` is ``'o' <-> 'brien'`` on both sides.
     """
     with conn.cursor() as cur:
         cur.execute("INSERT INTO accounts (name, email_address, imap_host,"
@@ -339,7 +342,7 @@ def _seed_two_folders(conn) -> tuple[int, int, int, int]:
                 " raw_bytes, size_bytes, headers, attachments, subject,"
                 " body_text, internal_date)"
                 " VALUES (%s, %s, %s, 'r', 1, '{}'::jsonb, '[]'::jsonb,"
-                " 'contract', 'OBrien contract', %s) RETURNING id",
+                " 'contract', 'O''Brien contract', %s) RETURNING id",
                 (acct, f"<m{n}@x>", bytes([n]) * 32,
                  datetime(2026, 3, n, tzinfo=timezone.utc)))
             row = cur.fetchone()

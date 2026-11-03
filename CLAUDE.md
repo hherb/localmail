@@ -1699,8 +1699,8 @@ for the Phase 2 plan.
   `search/query.py`:
   - `query._tokenize` keeps `"` delimiters in a free-text token (filter
     values still lose them), because the parser dropping quotes is what made
-    a phrase two words. Single quotes are not turned into `"`: Postgres
-    ignores them, and converting would make `it's late` a phrase.
+    a phrase two words. `'` is not a quote at all since #373 (see the
+    #367 entry's "Not closed by it" bullet).
   - A bare `-` token is dropped: `websearch_to_tsquery` reads `Order
     confirmation - Qantas` as `!'qantas'`, so a pasted subject excluded its
     own last word.
@@ -1740,7 +1740,7 @@ for the Phase 2 plan.
     unclosed `"` is dropped, where the server keeps it), and a token typed
     with quotes is re-emitted as typed: `"OR"` stays a word and `"-acme"` a
     required term. The one exception is a raw spelling with an apostrophe
-    *outside* its quotes, which the server would read as a quote opener; it
+    *outside* its quotes, which a pre-#373 server reads as a quote opener; it
     falls back to wrapping the whole text, as an unquoted token with `'` or
     whitespace is. That fallback still keeps a leading `-` outside the
     added quotes (`"-a b"` would require the phrase it was asked to
@@ -6390,12 +6390,23 @@ for the full design.
           twin.** The popover writes both and seeds from the twin, so a
           removed date came back on the next Apply, and the leftover twin
           kept `hasNoScope()` false so the last chip's × never reset.
-    - **Not closed by it:** the tokenizer still drops an apostrophe inside a
-      word (`O'Brien` → `OBrien`), so such a name never matches lexically
-      (the tsvector holds `'o' 'brien'`). That is the free text mangling
-      itself, not swallowing the filters, and is filed as #373. The CLI's
-      `localmail search` has its own composer with the pre-#367 order and
-      unsanitized flag values, filed as #374 (with #305's `cli.py` work).
+    - **#373 closed the other half: `'` is literal text, `"` the only
+      quote.** The tokenizer used to open a quote at `'` and drop it, so
+      `O'Brien` reached the arms as `OBrien`, which no tsvector holds (`'o'
+      'brien'`); `websearch_to_tsquery` reads `O'Brien` as `'o' <-> 'brien'`,
+      which matches. The issue's other option (`'` opens a quote only at a
+      token's start) was not taken: it keeps a second quote syntax nobody
+      documented, and the GUI's tokenizer already reads `'` literally, so
+      the two now agree. Cost: an undocumented `from:'Anna Schmidt'` splits
+      (write `"`), and `has:'attachment` is now an unknown `has:` value (a
+      400). The GUI's `joinTokens` still wraps `'` tokens in `"`: harmless
+      here, and still needed against a pre-#373 server. Pinned in
+      `test_query_parser.py` and end to end by
+      `test_a_folder_filter_restricts_the_rows_of_an_apostrophe_query`, whose
+      seed is spelled `O'Brien` now (it was `OBrien` to dodge this). The
+      CLI's `localmail search` has its own composer with the pre-#367 order
+      and unsanitized flag values, #374 (with #305's `cli.py` work); an
+      apostrophe no longer swallows its flags, an unclosed `"` still does.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.

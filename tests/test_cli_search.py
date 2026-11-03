@@ -140,3 +140,51 @@ def test_cli_search_page_and_grow_are_not_registered():
                  ["search-grow", "deadbeef", "--candidates", "200"]):
         result = runner.invoke(main, argv)
         assert result.exit_code != 0
+
+
+def _capture_query(monkeypatch):
+    """Stub the Searcher; return the dict its ``search`` query lands in."""
+    from localmail.search.query import ParsedQuery
+    from localmail.search.searcher import SearchPage
+
+    seen: dict = {}
+    page = SearchPage(
+        results=[], page=1, page_size=10, pool_size=0, candidates_per_arm=50,
+        has_more_in_pool=False, can_grow_pool=False, search_token=None,
+        query=ParsedQuery(free_text="x"), timing_ms={},
+        sort_applied="rank", rankable=True,
+    )
+
+    class _Stub:
+        def search(self, q, *a, **k):
+            seen["q"] = q
+            return page
+
+    monkeypatch.setattr("localmail.cli.create_searcher", lambda *a, **k: _Stub())
+    return seen
+
+
+def test_an_unclosed_quote_in_the_query_keeps_every_flag(monkeypatch, cli_config):
+    """#374: the flags used to trail the free text and be swallowed by it."""
+    from localmail.search.query import parse_query
+
+    seen = _capture_query(monkeypatch)
+    res = CliRunner().invoke(main, [
+        "search", 'O\'Brien "contract', "--from", "alice",
+        "--after", "2024-01-01", "--has-attachment", "--label", "don't",
+    ])
+    assert res.exit_code == 0, res.output
+    parsed = parse_query(seen["q"])
+    assert parsed.free_text == parse_query('O\'Brien "contract').free_text
+    assert parsed.filters.from_substr == "alice"
+    assert str(parsed.filters.after) == "2024-01-01"
+    assert parsed.filters.has_attachment is True
+    assert parsed.filters.label == "don't"
+
+
+def test_a_flag_value_of_only_quotes_is_a_usage_error(monkeypatch, cli_config):
+    seen = _capture_query(monkeypatch)
+    res = CliRunner().invoke(main, ["search", "x", "--from", '""'])
+    assert res.exit_code == 2
+    assert "--from: value is empty once its quotes are removed" in res.output
+    assert "q" not in seen

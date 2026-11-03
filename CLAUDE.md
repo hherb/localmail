@@ -782,6 +782,7 @@ first is uv's documented resolution behaviour:
 src/localmail/
   cli.py            # click entry point
   cli_help_request.py # pure: is_help_request — keeps the version line off help (#307)
+  cli_search_query.py # pure: compose_cli_query — flags ahead of the free text (#374)
   config.py         # pydantic models + TOML loader
   db.py             # connection pool + migration runner
   secrets.py        # keyring wrapper
@@ -6406,10 +6407,24 @@ for the full design.
       here, and still needed against a pre-#373 server. Pinned in
       `test_query_parser.py` and end to end by
       `test_a_folder_filter_restricts_the_rows_of_an_apostrophe_query`, whose
-      seed is spelled `O'Brien` now (it was `OBrien` to dodge this). The
-      CLI's `localmail search` has its own composer with the pre-#367 order
-      and unsanitized flag values, #374 (with #305's `cli.py` work); an
-      apostrophe no longer swallows its flags, an unclosed `"` still does.
+      seed is spelled `O'Brien` now (it was `OBrien` to dodge this).
+    - **The CLI's `localmail search` composes flags first too (#374).** It
+      had its own composer, free text first and flag values unsanitized, so
+      an unclosed `"` swallowed every flag and the command exited 0
+      unfiltered. The rule is the pure
+      [src/localmail/cli_search_query.py](src/localmail/cli_search_query.py)`::compose_cli_query`;
+      every string flag value (`--account`, `--folder` and `--label`
+      included, which were emitted unquoted or unstripped) goes through
+      `search/query.py::quoted_filter_value`, the stripping rule
+      `api.search._quote_value` now delegates to, so the two composers
+      cannot quote differently. A value of only quotes is a `UsageError`.
+      Same precedence flip as #367: a query operator now out-votes its flag
+      (#369). Pinned by `tests/test_cli_search_query.py` (#367's two
+      properties over hostile free text, plus injection through a flag
+      value) and two `CliRunner` tests in `test_cli_search.py`, both RED
+      against the old `cli.py`. The CLI's catch is still `RuntimeError`
+      only, so a `QueryParseError` from the query text still tracebacks
+      (#305).
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.

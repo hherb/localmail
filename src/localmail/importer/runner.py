@@ -14,6 +14,7 @@ still cannot be written, reported as `TerminalStatusUnwritten` (#442). Takes a
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -26,7 +27,7 @@ from localmail.db import DB_CONTENTION_ERRORS
 from localmail.importer.job_state import should_checkpoint
 from localmail.importer.sources import ImportedMessage, iter_maildir, iter_mbox
 from localmail.sync import process_one_message, record_failed_message, upsert_mailbox
-from localmail.uids import max_label_uid
+from localmail.uids import max_reserved_uid
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,25 @@ def _cancel_requested(conn: psycopg.Connection, job_id: int) -> bool:
         cur.execute("SELECT cancel_requested FROM import_jobs WHERE id=%s", (job_id,))
         row = cur.fetchone()
     return bool(row and row[0])
+
+
+def _failed_uid(
+    conn: psycopg.Connection, account_id: int, mailbox_id: int, raw: bytes,
+) -> int | None:
+    """The uid of an existing `failed_messages` row for these bytes, if any.
+
+    A re-run gives a pill a fresh uid; recording under that one added a second
+    row for the same bytes (#440). Reusing the old uid makes the upsert bump
+    its `retry_count` instead.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT uid FROM failed_messages WHERE account_id = %s AND mailbox_id = %s "
+            "AND raw_sha256 = %s ORDER BY uid LIMIT 1",
+            (account_id, mailbox_id, hashlib.sha256(raw).digest()),
+        )
+        row = cur.fetchone()
+    return None if row is None else int(row[0])
 
 
 class TerminalStatusUnwritten(RuntimeError):
@@ -230,8 +250,10 @@ def run_import(
                 # (#215). Mailboxes resolve on (account_id, name), so two
                 # sources sharing a filename stem land here together; a counter
                 # restarting at 0 would recycle committed UIDs and every
-                # collision would poison-pill a perfectly good message.
-                uid_counters[msg.mailbox_name] = max_label_uid(conn, mb.id)
+                # collision would poison-pill a perfectly good message. Failed
+                # rows reserve their uids too (#440).
+                uid_counters[msg.mailbox_name] = max_reserved_uid(
+                    conn, job.account_id, mb.id)
             uid_counters[msg.mailbox_name] += 1
             uid = uid_counters[msg.mailbox_name]
             mailbox_id = mailbox_ids[msg.mailbox_name]
@@ -264,9 +286,10 @@ def run_import(
                 with conn.cursor() as cur:
                     cur.execute("ROLLBACK TO SAVEPOINT msg")
                     cur.execute("RELEASE SAVEPOINT msg")
+                prior_uid = _failed_uid(conn, job.account_id, mailbox_id, msg.raw)
                 record_failed_message(
-                    conn, account_id=job.account_id, mailbox_id=mailbox_id, uid=uid,
-                    raw=msg.raw, exc=exc)
+                    conn, account_id=job.account_id, mailbox_id=mailbox_id,
+                    uid=uid if prior_uid is None else prior_uid, raw=msg.raw, exc=exc)
                 c.failed += 1
             c.processed += 1
             now = clock()

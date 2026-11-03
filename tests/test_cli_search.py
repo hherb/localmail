@@ -212,9 +212,9 @@ def _real_searcher_without_db(monkeypatch):
 
 
 @pytest.mark.parametrize(("query", "needle"), [
-    ("invoice after:last-week", "after"),
-    ("has:attachments", "has"),
-    ("has:attachment has:no-attachment", "has"),
+    ("invoice after:last-week", "Error: after: expected YYYY-MM-DD"),
+    ("has:attachments", "Error: has: expected 'attachment'"),
+    ("has:attachment has:no-attachment", "Error: has: 'attachment' and"),
 ])
 def test_a_malformed_query_is_a_usage_error_not_a_traceback(
         monkeypatch, cli_config, query, needle):
@@ -242,6 +242,27 @@ def test_a_refused_search_argument_is_a_usage_error(monkeypatch, cli_config):
     res = CliRunner().invoke(main, ["search", "x"])
     assert res.exit_code == 2, res.output
     assert "a fifth guard refused this" in res.output
+
+
+@pytest.mark.parametrize(("label", "message", "expected"), [
+    ("cursor", "it is stale", "Error: cursor: it is stale"),
+    ("", "", "Error: _Blank"),
+])
+def test_a_refusal_renders_through_wire_message(
+        monkeypatch, cli_config, label, message, expected):
+    """The CLI renders like the api boundaries: label joined, never blank."""
+    from localmail.search.argument_errors import SearchArgumentRefused
+
+    member = type("_Blank", (SearchArgumentRefused,), {"label": label})
+
+    class _Stub:
+        def search(self, *a, **k):
+            raise member(message)
+
+    monkeypatch.setattr("localmail.cli.create_searcher", lambda *a, **k: _Stub())
+    res = CliRunner().invoke(main, ["search", "x"])
+    assert res.exit_code == 2, res.output
+    assert res.output.rstrip().endswith(expected), res.output
 
 
 def test_an_unrelated_value_error_is_not_relabelled_a_usage_error(

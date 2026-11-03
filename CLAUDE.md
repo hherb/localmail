@@ -5739,7 +5739,10 @@ for the full design.
           above it.)
           **Done (#305's search-catch half):** the catch is
           `(QueryParseError, SearchArgumentRefused)` → `click.UsageError`
-          (exit 2), ahead of the `RuntimeError` branch. `QueryParseError`
+          (exit 2), ahead of the `RuntimeError` branch. A family member is
+          rendered through `wire_message()`, like the api boundaries, so the
+          CLI does not re-decide the label join or the blank fallback
+          (review of #448; pinned by `test_a_refusal_renders_through_wire_message`). `QueryParseError`
           joined because `parse_query` refuses `has:attachments`,
           `after:last-week` and a contradictory `has:` pair, each a
           traceback before. Pinned in `test_cli_search.py` through a real

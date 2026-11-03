@@ -1075,6 +1075,8 @@ def search(ctx, query, accounts, folders, after, before, from_substr, to_substr,
            rerank_pool, no_rerank, smart, no_cache, fmt, verbose):
     """Hybrid BM25 + vector search over the local archive."""
     from localmail.cli_search_query import compose_cli_query
+    from localmail.search.argument_errors import SearchArgumentRefused
+    from localmail.search.query import QueryParseError
 
     try:
         text_q = compose_cli_query(
@@ -1094,6 +1096,10 @@ def search(ctx, query, accounts, folders, after, before, from_substr, to_substr,
             rerank_pool_size=rerank_pool, use_cache=not no_cache, smart=smart,
             disable_rerank=no_rerank,
         )
+    except (QueryParseError, SearchArgumentRefused) as exc:
+        # The caller's query, not an outage: never widen this to bare
+        # ValueError, which psycopg, datetime and the backends raise (#305).
+        raise click.UsageError(str(exc)) from exc
     except RuntimeError as exc:
         click.echo(f"error: {exc}", err=True)
         sys.exit(2)

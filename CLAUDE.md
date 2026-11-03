@@ -5737,6 +5737,17 @@ for the full design.
           so those need a *cursor* flag. (This entry and #305's own comment
           both said four; the table in that comment contradicted the sentence
           above it.)
+          **Done (#305's search-catch half):** the catch is
+          `(QueryParseError, SearchArgumentRefused)` → `click.UsageError`
+          (exit 2), ahead of the `RuntimeError` branch. `QueryParseError`
+          joined because `parse_query` refuses `has:attachments`,
+          `after:last-week` and a contradictory `has:` pair, each a
+          traceback before. Pinned in `test_cli_search.py` through a real
+          `Searcher` whose pool refuses every connection, plus a new family
+          member (a stub) and a bare-`ValueError` control; widening to
+          `ValueError` and dropping `SearchArgumentRefused` each fail one
+          test. The import-deferral half of #305 (`--version` on a missing
+          dependency) stays open.
     - **The keyset cursor carries its own direction, and the Searcher reads
       it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
       else, so `Searcher.search` paired a directionless cursor with a
@@ -6422,9 +6433,9 @@ for the full design.
       (#369). Pinned by `tests/test_cli_search_query.py` (#367's two
       properties over hostile free text, plus injection through a flag
       value) and two `CliRunner` tests in `test_cli_search.py`, both RED
-      against the old `cli.py`. The CLI's catch is still `RuntimeError`
-      only, so a `QueryParseError` from the query text still tracebacks
-      (#305).
+      against the old `cli.py`. Since #305's search-catch half, a
+      `QueryParseError` from the query text is a usage error (exit 2), not a
+      traceback.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.
@@ -6514,9 +6525,9 @@ for the full design.
     short-circuit, mapped to a 400), `Searcher.search` (a library caller gets
     a named `QueryParseError` before any connection opens), and the
     structured filters arrive composed into that same string. **The CLI is
-    not covered by that**: `cli.py`'s search catches `RuntimeError` only, so
-    it still tracebacks on any `QueryParseError` (#305 tracks widening it) —
-    moot for a NUL, which argv cannot carry. Every character lands in some
+    not covered by that**: since #305's search-catch half `cli.py` maps a
+    `QueryParseError` to a usage error (exit 2) — moot for a NUL, which argv
+    cannot carry. Every character lands in some
     token (the tokenizer drops only whitespace and quote characters), and the
     refusal names the operator that token belongs to, else `query`.
     **Refused, not stripped** with `pgtext.strip_nuls`: that rule is for

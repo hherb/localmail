@@ -6407,7 +6407,7 @@ for the full design.
       here, and still needed against a pre-#373 server. Pinned in
       `test_query_parser.py` and end to end by
       `test_a_folder_filter_restricts_the_rows_of_an_apostrophe_query`, whose
-      seed is spelled `O'Brien` now (it was `OBrien` to dodge this). 
+      seed is spelled `O'Brien` now (it was `OBrien` to dodge this).
     - **The CLI's `localmail search` composes flags first too (#374).** It
       had its own composer, free text first and flag values unsanitized, so
       an unclosed `"` swallowed every flag and the command exited 0

@@ -84,10 +84,14 @@ def test_a_flag_value_cannot_swallow_or_inject(flag, value):
     assert parsed.filters.has_attachment is None
 
 
-@pytest.mark.parametrize("flag", ["from_substr", "to_substr", "subject_substr", "label"])
-def test_a_value_that_is_only_quotes_is_refused(flag):
+@pytest.mark.parametrize(
+    "flag,value",
+    [("from_substr", '""'), ("to_substr", '""'), ("subject_substr", '""'),
+     ("label", '""'), ("accounts", ("gmail", '""')), ("folders", ("",))],
+)
+def test_a_value_that_is_only_quotes_is_refused(flag, value):
     kwargs = _no_flags()
-    kwargs[flag] = '""'
+    kwargs[flag] = value
     with pytest.raises(ValueError, match="empty once its quotes are removed"):
         compose_cli_query("x", **kwargs)
 

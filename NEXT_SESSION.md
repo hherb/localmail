@@ -56,7 +56,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **Not done (#305):** `cli.py`'s search still catches `RuntimeError` only,
   so a `QueryParseError` from the query text (e.g. `after:last-week`) still
   tracebacks.
-- **Tests:** `tests/test_cli_search_query.py` (27: #367's two properties over
+- **Tests:** `tests/test_cli_search_query.py` (29: #367's two properties over
   hostile free text, flag injection, empty-value refusal) and two
   `CliRunner` tests in `test_cli_search.py`, both RED against `main`'s
   `cli.py` (checked by swapping the file in). README and CLAUDE.md updated.
@@ -67,7 +67,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | check | result |
 |---|---|
 | RED first | the 2 `CliRunner` tests fail against `main`'s `cli.py` |
-| `uv run pytest -q` | **4559 passed**, 6 warnings |
+| `uv run pytest -q` | **4561 passed**, 6 warnings (after the review fixes) |
 | mypy | Success, 166 files |
 | GUI | untouched (530 at session 81) |
 | CI | **check on the PR** (`gh pr checks`) |

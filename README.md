@@ -1480,7 +1480,10 @@ are applied whatever the query text holds: an unclosed `"` in the query no
 longer swallows them ([#374](https://github.com/hherb/localmail/issues/374)).
 `"` is stripped from a flag value, and a value with nothing else in it
 (`--from '""'`) is a usage error. When the query text carries the same
-operator as a flag (`from:bob` with `--from alice`), the query's wins.
+operator as a single-valued flag (`from:bob` with `--from alice`), the
+query's wins; `account:` and `folder:` are combined with `--account` and
+`--folder`, and a `has:` contradicting `--has-attachment` is refused
+(for now as a traceback, [#305](https://github.com/hherb/localmail/issues/305)).
 
 An excluded word is excluded on every ordering, `--smart` synonyms included;
 it is matched against the message's subject, body, addresses and (since

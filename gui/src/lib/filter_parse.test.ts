@@ -213,15 +213,16 @@ describe("absorbConflictingOperators", () => {
   });
 
   it.each([
-    // The server's tokenizer opens a quote at a bare apostrophe and swallows
-    // every later token, so these filters were lost when the one-word token
-    // was re-joined unquoted (review of #376).
+    // A pre-#373 server's tokenizer opened a quote at a bare apostrophe and
+    // swallowed every later token, so these filters were lost when the
+    // one-word token was re-joined unquoted (review of #376).
     ['"don\'t" has:attachment from:bob', '"don\'t" has:attachment'],
     ['from:bob "O\'Brien" lang:de', '"O\'Brien" lang:de'],
     ['from:bob "it\'s" to:carol', '"it\'s" to:carol'],
     ['subject:"it\'s" from:bob has:attachment', 'subject:"it\'s" has:attachment'],
-    // An apostrophe outside the quotes is a quote opener to the server, so
-    // that raw spelling is not reused; the whole token is wrapped instead.
+    // An apostrophe outside the quotes is a quote opener to a pre-#373
+    // server, so that raw spelling is not reused; the whole token is wrapped
+    // instead.
     ['o\'b"c d" from:bob has:attachment', '"o\'bc d" has:attachment'],
   ])("quotes a kept apostrophe token so no later filter is swallowed: %s", (query, expected) => {
     const out = absorbConflictingOperators(query, { ...emptyFilters(), from: "alice" });
@@ -236,9 +237,10 @@ describe("absorbConflictingOperators", () => {
   });
 
   it("absorbs an operator the server's tokenizer would have hidden", () => {
-    // Server-side, the apostrophe in `don't` opens a quote that swallows
-    // `from:bob` into free text, so the server applied the chip's alice and
-    // searched for the words "dont from:bob". The typed value is what the
+    // On a pre-#373 server, the apostrophe in `don't` opens a quote that
+    // swallows `from:bob` into free text, so the server applied the chip's
+    // alice and searched for the words "dont from:bob". The typed value is
+    // what the
     // user asked for, so it is applied — not what the server would have done.
     const chips = { ...emptyFilters(), from: "alice" };
     const out = absorbConflictingOperators("don't from:bob", chips);
@@ -320,9 +322,9 @@ describe("quoted single words survive a rebuild (#421)", () => {
 
 describe("joinTokens", () => {
   // The query the client sends after absorbing must tokenize to the same
-  // tokens on the server, whose tokenizer also opens a quote at `'`. Inside
-  // `"` both treat `'` as literal, and the tokenizer never leaves a `"` in a
-  // token, so a quoted token cannot unbalance anything after it.
+  // tokens on the server, whose tokenizer opened a quote at `'` before #373.
+  // Inside `"` both treat `'` as literal, and the tokenizer never leaves a `"`
+  // in a token, so a quoted token cannot unbalance anything after it.
   it.each([
     [["hello", "world"], "hello world"],
     [["don't"], '"don\'t"'],

@@ -23,7 +23,8 @@ const POPOVER_OPERATORS = new Set([
  * A token as read (`text`, `"` dropped) and as typed (`raw`, with its closed
  * `"…"` delimiters kept, as the server's `_tokenize` keeps them). An
  * unclosed `"` is dropped from `raw` too, where the server keeps it and runs
- * it to the end of the string; and `'` is literal here, a quote there.
+ * it to the end of the string. `'` is literal in both (on the server since
+ * #373).
  * `raw` is what lets a rebuild keep `"OR"` a word and `"-acme"` a required
  * term rather than an operator and an exclusion (#421).
  */
@@ -150,11 +151,12 @@ export function extractDslFilters(query: string): ExtractedFilters {
  * the server as well as here.
  *
  * A bare `join(" ")` does neither. The tokenizer above drops quote
- * characters, so a multi-word token (`to:bob smith`) splits in two. And the
- * server's tokenizer also opens a quote at `'`, so a bare `don't` swallows
+ * characters, so a multi-word token (`to:bob smith`) splits in two. And a
+ * server before #373 opened a quote at `'`, so a bare `don't` swallowed
  * every token after it, filters included. A token holding whitespace or an
- * apostrophe is therefore wrapped in `"`: inside it both tokenizers read `'`
- * as a literal, and no token contains a `"` to unbalance the wrapping.
+ * apostrophe is therefore wrapped in `"`: inside it every tokenizer reads `'`
+ * as a literal, and no token contains a `"` to unbalance the wrapping. A
+ * #373 server reads `'` literally anyway, so the wrapping costs it nothing.
  *
  * A leading `-` stays outside the quotes: the server reads `-"a b"` as
  * excluding the phrase, and `"-a b"` as requiring it (#419).
@@ -162,8 +164,8 @@ export function extractDslFilters(query: string): ExtractedFilters {
  * A token that was typed with quotes is given back as typed (`raw`), since
  * where the quotes sit is meaning to the server: `"OR"` is a word, `"-acme"`
  * requires acme (#421). The exception is a raw spelling with an apostrophe
- * outside its quotes, which the server would read as a quote opener; that
- * falls back to the wrapping above.
+ * outside its quotes, which a pre-#373 server would read as a quote opener;
+ * that falls back to the wrapping above.
  */
 export function joinTokens(tokens: Token[]): string {
   return tokens
@@ -218,13 +220,14 @@ export interface AbsorbedQuery {
  * absorbed only when it is shaped like one: `after:last-week` stays in the
  * query, where the server refuses it by name, rather than riding in a chip.
  *
- * Two imprecisions, both because this reads the query with the tokenizer
- * above rather than the server's, which also opens a quote at `'`:
- * - an operator only the server extracts (`'from:bob'`, single-quoted) is
- *   not seen, so its chip can still be out-voted;
- * - an operator an earlier apostrophe hid from the server (`don't from:bob`)
- *   *is* seen and absorbed, so the applied value becomes the typed one where
- *   the server would have kept the chip's. That is what was typed.
+ * One imprecision, because this reads the query with the tokenizer above
+ * rather than the server's: an unclosed `"` runs to the end of the string
+ * on the server but is re-split here, so an operator after it is absorbed
+ * where the server would have kept the chip (`"foo from:bob`), and an
+ * unclosed operator value is cut at its first space (`from:"bob smith`
+ * absorbs `bob`). A server before #373 also opened a quote at `'`, which
+ * added two more: `'from:bob'` was extracted there and not here, and
+ * `don't from:bob` hid the operator there and not here.
  */
 export function absorbConflictingOperators(
   query: string,

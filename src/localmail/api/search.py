@@ -88,16 +88,17 @@ def filter_key_error(filters: Mapping[str, object]) -> str | None:
 def build_query_string(*, free_text: str, filters: dict[str, Any]) -> str:
     """Compose filter DSL tokens + `free_text` into a single query string.
 
-    **The filter tokens come first (#367).** `parse_query`'s tokenizer treats
-    `'` and `"` as quote openers that run to the end of the string, so with
-    the free text first an apostrophe (`O'Brien`, `don't`) swallowed every
-    filter token after it, the ACL's `account_id:` tokens included; when the
-    swallowed text still parsed, the request was answered 200 with its
-    filters gone. Every filter token is self-contained (ids are ASCII digits,
-    dates one ASCII token, `has:` a constant, `lang` refused if it
-    carries whitespace or a quote, quoted values stripped of `"` and
-    non-empty), so the free text starts with the tokenizer in its initial
-    state and no quote in it can reach a filter token. Hence
+    **The filter tokens come first (#367).** In `parse_query`'s tokenizer an
+    unclosed `"` runs to the end of the string, and until #373 so did an
+    apostrophe (`O'Brien`, `don't`), `'` then being a quote too. With the
+    free text first, either swallowed every filter token after it, the ACL's
+    `account_id:` tokens included; when the swallowed text still parsed, the
+    request was answered 200 with its filters gone. Every filter token is
+    self-contained (ids are ASCII digits, dates one ASCII token, `has:` a
+    constant, `lang` refused if it carries whitespace or a quote, quoted
+    values stripped of `"` and non-empty), so the free text starts with the
+    tokenizer in its initial state and no quote in it can reach a filter
+    token. Hence
     ``parse_query(composed).free_text == parse_query(free_text).free_text``
     for every input the composition parses, which is what lets `run_search`'s
     gate and `Searcher.search` read one free text.
@@ -167,8 +168,9 @@ def _filter_tokens(filters: dict[str, Any]) -> list[str]:
                     raise ValidationFailed("lang: empty value not allowed")
                 # Emitted unquoted, so whitespace or a quote here re-tokenizes
                 # the composed query: `en has:no-attachment` injected a filter,
-                # and `en'` would open a quote swallowing every token after
-                # it — the `has:` filter and the free text alike.
+                # and `en"` would open a quote swallowing every token after
+                # it — the `has:` filter and the free text alike. `'` is no
+                # quote since #373, but no language code holds one either.
                 if any(ch.isspace() or ch in "\"'" for ch in s):
                     raise ValidationFailed(
                         f"lang: expected a language code such as 'en', got {one!r}"

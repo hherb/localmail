@@ -1,15 +1,15 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-03 (session 80).** `main` is **`598c401`** (#444:
-> #442, closed).
+> **Status as of 2026-11-03 (session 81).** `main` is **`7bd1448`** (#445:
+> #440, closed).
 >
-> This session has **one open PR** on `fix/440-import-duplicate-failed-rows`.
-> Its body says **`Closes #440`**. It carries the #440 code and this handoff.
+> This session has **one open PR** on `fix/373-apostrophe-is-literal`. Its
+> body says **`Closes #373`**. It carries the #373 code and this handoff.
 >
-> **Both hosts are deployed at `598c401`**; nothing from the #440 PR is
+> **Both hosts are deployed at `7bd1448`**; nothing from the #373 PR is
 > deployed.
 >
-> **Open issues: 34** (33 once the #440 PR merges).
+> **Open issues: 33** (32 once the #373 PR merges).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -27,74 +27,81 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### Deploy of `598c401` (#444, #442) to both hosts (no commit)
+### Deploy of `7bd1448` (#445, #440) to both hosts (no commit)
 
 - **Mac:** `uv sync --frozen --extra mcp --extra extraction` (no change),
-  kickstarted `com.localmail.serve` only (imports run in serve).
-- **DGX:** pulled → `598c401`, synced (reinstalled `nvidia-cusparselt-cu13`
-  again, lock unchanged), restarted `localmail-serve`. Daemon and serve both
-  `active`.
-- Both `/v1/version`: `api_minor` 6, `build_hash` `598c401`.
+  kickstarted `com.localmail.serve` only.
+- **DGX:** pulled → `7bd1448`, synced (reinstalled `nvidia-cusparselt-cu13`
+  again, lock unchanged), restarted `localmail-serve`. Both units `active`.
+- Both `/v1/version`: `api_minor` 6, `build_hash` `7bd1448`.
 
-### PR on `fix/440-import-duplicate-failed-rows` (based on `main` at `598c401`)
+### PR on `fix/373-apostrophe-is-literal` (based on `main` at `7bd1448`)
 
 | SHA | What |
 |---|---|
-| `1544e4d` | #440: a re-run keeps one `failed_messages` row per poison pill |
-| handoff | this file + `docs/handoffs/2026-11-03T0245Z-import-duplicate-failed-rows.md` |
+| `2edbae3` | #373: an apostrophe is literal text, `"` the only quote |
+| handoff | this file + `docs/handoffs/2026-11-03T0345Z-apostrophe-is-literal.md` |
 
-- **The defect, plus a worse neighbour found while reading.** The importer's
-  uid counter started at `max_label_uid`, and a pill gets no label, so its uid
-  was never reserved. (1) A re-run recorded the same bytes under a fresh uid,
-  giving a second row (the issue). (2) **A different pill could land on an old
-  pill's uid**, and `record_failed_message`'s upsert **overwrote the old pill's
-  stored bytes**, losing that record. Reproduced: a run ending on a pill, then
-  a second source in the same mailbox opening with a pill.
-- **The fix.** `uids.max_reserved_uid(conn, account_id, mailbox_id)` (labels
-  **and** failed rows) is the importer's counter base. `runner._failed_uid`
-  looks up an existing row for `(account_id, mailbox_id, raw_sha256)` and
-  records the pill under that uid, so the upsert bumps `retry_count`.
-  `retry_failed_messages` is unchanged: it re-records under the stored uid.
-- **No cleanup needed:** 0 duplicate groups on the Mac (1 failed row) and the
-  DGX (0 rows). Pre-fix duplicates elsewhere would not be merged.
-- New `tests/test_import_failed_rows.py` (2 tests). README (imports
-  paragraph) and CLAUDE.md (#439's note, the uid-numbering section) updated.
-  No migration.
+- **The defect.** `query._tokenize` opened a quote at `'` and dropped it, so
+  `O'Brien` became `OBrien`, which no tsvector holds (`'o' 'brien'`): no
+  lexical match, nothing on `sort=date`, and the vector arm and rewriter saw
+  `OBrien` too.
+- **The fix (the issue's option 2).** `'` is literal; `"` is the only quote.
+  The GUI's tokenizer already did this, so client and server now agree on
+  `'` (they still differ on an unclosed `"`, which the GUI re-splits).
+  `websearch_to_tsquery('simple', "O'Brien")` is `'o' <-> 'brien'` (checked
+  in Postgres), which matches. Option 1 (`'` quotes only at a token's start)
+  was not taken: it keeps an undocumented second quote syntax.
+- **Cost:** `from:'Anna Schmidt'` (undocumented) now splits (`from` =
+  `'Anna`, free text `Schmidt'`); use `"`.
+  `has:'attachment` is now a 400 (unknown `has:` value).
+- **Tests:** 3 new functions (6 cases) in `test_query_parser.py`, plus 3
+  more from the review (phrase apostrophe, both documented costs); the
+  #367 end-to-end test now seeds `O'Brien` (it seeded `OBrien` to dodge this)
+  and was RED on all 4
+  cases before the fix; `test_search_websearch_syntax.py`'s `it's late`
+  case pinned the bug and was updated; one open-quote case swapped `'` for
+  `"`. GUI `joinTokens` code unchanged (its `'` wrapping is harmless here
+  and still right against a pre-#373 server); comments updated. README,
+  CLAUDE.md, `build_query_string`'s docstring updated. No migration, no
+  wire change.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | both new tests failed (2 rows; old pill's row overwritten) |
-| mutation | sha lookup ignored → test 1 fails; counter back to `max_label_uid` → test 2 fails; each only its own |
-| `uv run pytest -q` | **4517 passed**, 6 warnings (load ~6–10; another project's pytest running, not localmail's) |
+| RED first | 10 failed (6 parser, 4 end-to-end) before the fix |
+| `uv run pytest -q` | 4524 passed + 1 failed (the stale `it's late` pin), then that file 57 passed → **4525** |
+| `uv run pytest -q` after the review fixes | **4530 passed**, 6 warnings (5 new tests) |
 | mypy | Success, 165 files |
-| GUI | not run (no GUI change) |
+| GUI `npm test` | 530 passed |
+| load | 7–13 (another project's pytest running, not localmail's) |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Merge the #440 PR** (yours), once CI is green
+### 1. **Merge the #373 PR** (yours), once CI is green
 - **Acceptance:** `gh pr checks <n>` all pass; after the merge
-  `gh issue view 440` is `CLOSED`.
+  `gh issue view 373` is `CLOSED`.
 
-### 2. **Deploy #440 once merged**
-- Pure Python, no migration. Imports run in **serve** (and the CLI), so
-  restarting serve is enough.
+### 2. **Deploy #373 once merged**
+- Pure Python, no migration. Search runs in **serve**, so restarting serve
+  is enough.
 - **Acceptance:** `build_hash` on `/v1/version` equals the merge SHA on both
-  hosts; units `active`.
+  hosts; units `active`; a search for a name with an apostrophe returns
+  lexical hits.
 
 ### 3. **Next small slice: pick with the operator**
-- Candidates: #373 (the query tokenizer drops an in-word apostrophe:
-  `O'Brien` never matches), #369 (silent last-token-wins on conflicting
-  scalar operators), #383 (drop the write-only `messages.headers` + GIN in
-  `0039`, a one-way door), #365 (inline images counted as attachments;
-  product call), #384 (comment or close).
+- Candidates: #374 (CLI composer: filters after free text; an unclosed `"`
+  still swallows its flags; pairs with #305), #369 (silent last-token-wins
+  on conflicting scalar operators; needs refuse-vs-keep call), #378 (an
+  operator with an empty value becomes free text), #383 (drop write-only
+  `messages.headers` + GIN in `0039`; one-way door), #365 (product call).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
-  `filters.lang` as a list, #419 syntax, #415 dates; `api_minor` 5 and 6
-  features. Both hosts serve `api_minor` 6.
+  `filters.lang` as a list, #419 syntax, #415 dates, `api_minor` 5 and 6
+  features, and now #373 (`'` is literal).
 
 ### 4. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
@@ -105,14 +112,16 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #378, #369, #373, #372, #368, #365; #375; #374 + #305;
+- **Issues:** #383, #378, #369, #372, #368, #365; #375; #374 + #305;
   #358/#357; #330/#327/#328; #340, #363, #285; robustness #218, #226,
   #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The operator asked for `598c401` on both hosts and picked #440** (over
-   #373/#383/#369).
+1. **The operator asked for `7bd1448` on both hosts and picked #373** (over
+   #369/#383/#378).
+2. **#373: option 2** (drop single-quote quoting, match the GUI) — my call,
+   recorded in the PR; revert is one line if you prefer option 1.
 
 ## Open decisions & risks
 
@@ -123,7 +132,9 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    exits 1, and the row stays `running` until serve restarts. Since #440,
    a re-imported pill bumps its existing `failed_messages` row; duplicates
    made before #440 are not merged (none exist on either host, checked
-   2026-11-03).
+   2026-11-03). Since #373, `'` in a search query is literal text:
+   an undocumented `from:'Anna Schmidt'` now splits, and `has:'attachment`
+   is a 400 (unknown `has:` value).
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows carry a
    `-0000` Date and are stored 8 h off. None has a NULL `internal_date`, so
    the list/search/changes wire `date` is right; raw `date_sent` readers
@@ -155,12 +166,12 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/440-import-duplicate-failed-rows --stat   # empty once merged (squash)
+git diff main origin/fix/373-apostrophe-is-literal --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh issue view 440 --json state --jq .state
+gh issue view 373 --json state --jq .state
 gh issue list --limit 200 --json number --jq length
 
-# Deploy — Mac (the repo is the install; no migration for #440; serve only)
+# Deploy — Mac (the repo is the install; no migration for #373; serve only)
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version     # api_minor 6, build_hash = merge SHA
@@ -174,10 +185,10 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4517 at session 80
-uv run pytest -q tests/test_import_failed_rows.py tests/test_import_uid_collision.py tests/test_importer_runner.py tests/test_import_terminal_status.py
+unset VIRTUAL_ENV && uv run pytest -q              # 4525 at session 81
+uv run pytest -q tests/test_query_parser.py tests/test_api_search_filters_before_free_text.py tests/test_search_websearch_syntax.py
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
-cd gui && npm test -- --run && npm run check   # 530 at session 72
+cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```
 
 The latest migration is **`0038_messages_attachment_names_strict_idx.sql`**;

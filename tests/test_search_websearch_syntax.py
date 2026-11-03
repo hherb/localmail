@@ -34,8 +34,8 @@ from localmail.search.searcher import Searcher
     # A spaced dash is a separator, not an exclusion of the next word.
     ("Order confirmation - Qantas", "Order confirmation Qantas"),
     ("foo -- bar", "foo bar"),
-    # Single quotes are apostrophes as often as quotes: no phrase.
-    ("it's late payment", "its late payment"),
+    # An apostrophe is text, not a quote (#373): kept, and no phrase.
+    ("it's late payment", "it's late payment"),
     ('""', ""),
 ])
 def test_free_text_keeps_the_syntax_websearch_reads(query, free_text):
@@ -69,6 +69,8 @@ def test_free_text_reparses_to_itself(query):
     ("a OR", "a"),
     # A double dash is a double negation to Postgres, i.e. a required word.
     ("--acme", "--acme"),
+    # An apostrophe is text (#373), in a kept word and an excluded one.
+    ("O'Brien -don't", "O'Brien"),
 ])
 def test_semantic_text_drops_the_operators(query, semantic):
     assert parse_query(query).semantic_text == semantic
@@ -76,6 +78,7 @@ def test_semantic_text_drops_the_operators(query, semantic):
 
 @pytest.mark.parametrize(("query", "excluded"), [
     ("invoice -acme", "-acme"),
+    ("invoice -don't", "-don't"),
     ('invoice -"big co" -acme', '-"big co" -acme'),
     ("invoice", ""),
     ('"-acme"', ""),

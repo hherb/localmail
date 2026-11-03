@@ -1066,7 +1066,12 @@ swallows the filters: they are composed ahead of the query text, so no quote
 in the text can reach a folder, date or attachment filter. Such a query used
 to answer 200 with every filter silently dropped, or a 400 naming the open
 quote when the result failed to parse. Closes
-[#367](https://github.com/hherb/localmail/issues/367). Operators in the text
+[#367](https://github.com/hherb/localmail/issues/367). An apostrophe is
+ordinary text, not a quote: `O'Brien` matches a message containing `O'Brien`
+(it used to be read as `OBrien` and match nothing lexically). Only `"`
+quotes, so write a multi-word operator value as `from:"Anna Schmidt"`; the
+undocumented `from:'Anna Schmidt'` no longer works. Closes
+[#373](https://github.com/hherb/localmail/issues/373). Operators in the text
 still count, though: if `query` carries one that conflicts with a structured
 filter (`"query": "from:bob"` with `"filters": {"from": "alice"}`), the
 query's value now wins where the filter's used to. Both are silent, and

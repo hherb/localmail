@@ -1699,8 +1699,8 @@ for the Phase 2 plan.
   `search/query.py`:
   - `query._tokenize` keeps `"` delimiters in a free-text token (filter
     values still lose them), because the parser dropping quotes is what made
-    a phrase two words. Single quotes are not turned into `"`: Postgres
-    ignores them, and converting would make `it's late` a phrase.
+    a phrase two words. `'` is not a quote at all since #373 (see the
+    #367 entry's #373 bullet).
   - A bare `-` token is dropped: `websearch_to_tsquery` reads `Order
     confirmation - Qantas` as `!'qantas'`, so a pasted subject excluded its
     own last word.
@@ -1740,7 +1740,7 @@ for the Phase 2 plan.
     unclosed `"` is dropped, where the server keeps it), and a token typed
     with quotes is re-emitted as typed: `"OR"` stays a word and `"-acme"` a
     required term. The one exception is a raw spelling with an apostrophe
-    *outside* its quotes, which the server would read as a quote opener; it
+    *outside* its quotes, which a pre-#373 server reads as a quote opener; it
     falls back to wrapping the whole text, as an unquoted token with `'` or
     whitespace is. That fallback still keeps a leading `-` outside the
     added quotes (`"-a b"` would require the phrase it was asked to
@@ -6317,8 +6317,8 @@ for the full design.
         through `run_search` and the MCP wrapper). It asserts equality with
         a non-empty set because before the fix the swallowed id tokens
         became FTS terms and matched *nothing*, so an absence assertion
-        passes against the bug; and it seeds `OBrien`, since #373 means a
-        body spelled `O'Brien` matches on neither side of the fix.
+        passes against the bug; and since #373 it seeds `O'Brien` (see the
+        #373 bullet below).
     - **What it retired:** the gate-vs-Searcher divergence #324's review
       documented as live (the `from:"`/`"` class; see the #324, #326, #345
       and #353 notes, annotated in place), #366's per-branch re-parse and
@@ -6357,9 +6357,10 @@ for the full design.
         The popover seeds scalars typed-first to match.
         - **The rebuilt query goes through `filter_parse.joinTokens`, and a
           whitespace-only re-quote was the first cut's defect.** The client
-          tokenizer drops `"` and reads `'` literally; the server's opens a
-          quote at `'`. So a kept one-word `"don't"` re-joined bare swallowed
-          every later token server-side — a `has:`/`lang:`/`to:` the user
+          tokenizer drops `"` and reads `'` literally; the server's opened a
+          quote at `'` until #373. So a kept one-word `"don't"` re-joined
+          bare swallowed every later token server-side — a
+          `has:`/`lang:`/`to:` the user
           never touched, dropped to fix a chip. `joinTokens` wraps any token
           holding whitespace **or** `'` in `"`, inside which both tokenizers
           read `'` literally; tokens never contain `"`, so the wrapping stays
@@ -6380,22 +6381,35 @@ for the full design.
           and space, rebuilt by the real `joinTokens` and read by the real
           `_tokenize`: 0 queries where the server's tokens differ from the
           client's, against 51 with the apostrophe guard removed.)
-        - **Two imprecisions, both from reading with the client tokenizer.**
-          An operator only the server extracts (`'from:bob'`, single-quoted)
-          is not seen, so its chip can still be out-voted. And an operator an
-          earlier apostrophe hid from the server (`don't from:bob`) *is*
-          seen and absorbed, so the applied value becomes the typed one where
-          the server would have kept the chip's — which is what was typed.
+        - **One imprecision, from reading with the client tokenizer.** An
+          unclosed `"` runs to the end of the string on the server but is
+          re-split here, so an operator after it is absorbed where the server
+          would have kept the chip (`"foo from:bob`), and an unclosed value is
+          cut at its first space (`from:"bob smith` absorbs `bob`). Before
+          #373 the server also opened a quote at `'`, which added two more
+          (`'from:bob'` extracted there and not here; `don't from:bob` hiding
+          the operator there and not here).
         - **Removing an After/Before chip clears its `dateFrom`/`dateTo`
           twin.** The popover writes both and seeds from the twin, so a
           removed date came back on the next Apply, and the leftover twin
           kept `hasNoScope()` false so the last chip's × never reset.
-    - **Not closed by it:** the tokenizer still drops an apostrophe inside a
-      word (`O'Brien` → `OBrien`), so such a name never matches lexically
-      (the tsvector holds `'o' 'brien'`). That is the free text mangling
-      itself, not swallowing the filters, and is filed as #373. The CLI's
-      `localmail search` has its own composer with the pre-#367 order and
-      unsanitized flag values, filed as #374 (with #305's `cli.py` work).
+    - **#373 closed the other half: `'` is literal text, `"` the only
+      quote.** The tokenizer used to open a quote at `'` and drop it, so
+      `O'Brien` reached the arms as `OBrien`, which no tsvector holds (`'o'
+      'brien'`); `websearch_to_tsquery` reads `O'Brien` as `'o' <-> 'brien'`,
+      which matches. The issue's other option (`'` opens a quote only at a
+      token's start) was not taken: it keeps a second quote syntax nobody
+      documented, and the GUI's tokenizer already reads `'` literally, so
+      the two now agree. Cost: an undocumented `from:'Anna Schmidt'` splits
+      (write `"`), and `has:'attachment` is now an unknown `has:` value (a
+      400). The GUI's `joinTokens` still wraps `'` tokens in `"`: harmless
+      here, and still needed against a pre-#373 server. Pinned in
+      `test_query_parser.py` and end to end by
+      `test_a_folder_filter_restricts_the_rows_of_an_apostrophe_query`, whose
+      seed is spelled `O'Brien` now (it was `OBrien` to dodge this). The
+      CLI's `localmail search` has its own composer with the pre-#367 order
+      and unsanitized flag values, #374 (with #305's `cli.py` work); an
+      apostrophe no longer swallows its flags, an unclosed `"` still does.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.

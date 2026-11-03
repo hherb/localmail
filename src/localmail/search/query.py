@@ -112,14 +112,14 @@ _OPERATORS = {
 
 
 def _tokenize(s: str) -> list[tuple[str, str]]:
-    """Whitespace-split, but keep quoted strings (single or double) intact.
+    """Whitespace-split, but keep double-quoted strings intact.
 
     Each token comes back twice: with its quote characters stripped (what an
     operator value is read from), and with its ``"`` delimiters kept (what
     free text is built from, so a phrase reaches ``websearch_to_tsquery``
-    as one, #419). Single quotes are stripped from both and never turned
-    into ``"``: Postgres ignores them, and converting would make ``it's
-    late`` a phrase.
+    as one, #419). ``'`` is literal text, not a quote (#373): as a quote it
+    was dropped, so ``O'Brien`` became ``OBrien``, which no tsvector holds
+    (``'o' 'brien'``). The GUI's tokenizer makes the same call.
 
     An unclosed quote runs to the end of the string: anything after an open
     quote is swallowed into its last token. A composer appending tokens after
@@ -128,20 +128,18 @@ def _tokenize(s: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     buf: list[str] = []
     raw: list[str] = []
-    quote: str | None = None
+    quoted = False
     for ch in s:
-        if quote:
-            if ch == quote:
-                quote = None
-                if ch == '"':
-                    raw.append(ch)
+        if quoted:
+            if ch == '"':
+                quoted = False
+                raw.append(ch)
             else:
                 buf.append(ch)
                 raw.append(ch)
-        elif ch in ('"', "'"):
-            quote = ch
-            if ch == '"':
-                raw.append(ch)
+        elif ch == '"':
+            quoted = True
+            raw.append(ch)
         elif ch.isspace():
             if buf:
                 out.append(("".join(buf), "".join(raw)))

@@ -1,15 +1,15 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-03 (session 81).** `main` is **`7bd1448`** (#445:
-> #440, closed).
+> **Status as of 2026-11-03 (session 82).** `main` is **`c282709`** (#446:
+> #373, closed).
 >
-> This session has **one open PR** on `fix/373-apostrophe-is-literal`. Its
-> body says **`Closes #373`**. It carries the #373 code and this handoff.
+> This session has **one open PR** on `fix/374-cli-composer-filters-first`.
+> Its body says **`Closes #374`**. It carries the #374 code and this handoff.
 >
-> **Both hosts are deployed at `7bd1448`**; nothing from the #373 PR is
-> deployed.
+> **Both hosts are deployed at `c282709`**; nothing from the #374 PR is
+> deployed (the CLI is not a long-running process: nothing to restart).
 >
-> **Open issues: 33** (32 once the #373 PR merges).
+> **Open issues: 32** (31 once the #374 PR merges).
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -27,81 +27,75 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### Deploy of `7bd1448` (#445, #440) to both hosts (no commit)
+### Deploy of `c282709` (#446, #373) to both hosts (no commit)
 
 - **Mac:** `uv sync --frozen --extra mcp --extra extraction` (no change),
   kickstarted `com.localmail.serve` only.
-- **DGX:** pulled → `7bd1448`, synced (reinstalled `nvidia-cusparselt-cu13`
+- **DGX:** pulled → `c282709`, synced (reinstalled `nvidia-cusparselt-cu13`
   again, lock unchanged), restarted `localmail-serve`. Both units `active`.
-- Both `/v1/version`: `api_minor` 6, `build_hash` `7bd1448`.
+- Both `/v1/version`: `api_minor` 6, `build_hash` `c282709`.
 
-### PR on `fix/373-apostrophe-is-literal` (based on `main` at `7bd1448`)
+### PR on `fix/374-cli-composer-filters-first` (based on `main` at `c282709`)
 
 | SHA | What |
 |---|---|
-| `2edbae3` | #373: an apostrophe is literal text, `"` the only quote |
-| handoff | this file + `docs/handoffs/2026-11-03T0345Z-apostrophe-is-literal.md` |
+| `bf7da9f` | #374: CLI search composes the flags ahead of the free text |
+| handoff | this file + `docs/handoffs/2026-11-03T1307Z-cli-composer-filters-first.md` |
 
-- **The defect.** `query._tokenize` opened a quote at `'` and dropped it, so
-  `O'Brien` became `OBrien`, which no tsvector holds (`'o' 'brien'`): no
-  lexical match, nothing on `sort=date`, and the vector arm and rewriter saw
-  `OBrien` too.
-- **The fix (the issue's option 2).** `'` is literal; `"` is the only quote.
-  The GUI's tokenizer already did this, so client and server now agree on
-  `'` (they still differ on an unclosed `"`, which the GUI re-splits).
-  `websearch_to_tsquery('simple', "O'Brien")` is `'o' <-> 'brien'` (checked
-  in Postgres), which matches. Option 1 (`'` quotes only at a token's start)
-  was not taken: it keeps an undocumented second quote syntax.
-- **Cost:** `from:'Anna Schmidt'` (undocumented) now splits (`from` =
-  `'Anna`, free text `Schmidt'`); use `"`.
-  `has:'attachment` is now a 400 (unknown `has:` value).
-- **Tests:** 3 new functions (6 cases) in `test_query_parser.py`, plus 3
-  more from the review (phrase apostrophe, both documented costs); the
-  #367 end-to-end test now seeds `O'Brien` (it seeded `OBrien` to dodge this)
-  and was RED on all 4
-  cases before the fix; `test_search_websearch_syntax.py`'s `it's late`
-  case pinned the bug and was updated; one open-quote case swapped `'` for
-  `"`. GUI `joinTokens` code unchanged (its `'` wrapping is harmless here
-  and still right against a pre-#373 server); comments updated. README,
-  CLAUDE.md, `build_query_string`'s docstring updated. No migration, no
-  wire change.
+- **The defect.** `cli.py::search` built `"<free text> from:\"x\" ..."`, so
+  an unclosed `"` in the query swallowed every flag and the command exited 0
+  unfiltered. Flag values were unsanitized: `--label` unquoted, `"` not
+  stripped from `--from`/`--to`/`--subject`/`--folder`.
+- **The fix.** New pure `src/localmail/cli_search_query.py::compose_cli_query`
+  (flags first, free text last). Every string flag value goes through the new
+  `search/query.py::quoted_filter_value`, which `api.search._quote_value` now
+  delegates to: one stripping rule for both composers. A flag value of only
+  quotes is a `click.UsageError` (exit 2).
+- **Cost:** same precedence flip as #367: `from:bob` in the query out-votes
+  `--from alice` (#369). Documented in README.
+- **Not done (#305):** `cli.py`'s search still catches `RuntimeError` only,
+  so a `QueryParseError` from the query text (e.g. `after:last-week`) still
+  tracebacks.
+- **Tests:** `tests/test_cli_search_query.py` (27: #367's two properties over
+  hostile free text, flag injection, empty-value refusal) and two
+  `CliRunner` tests in `test_cli_search.py`, both RED against `main`'s
+  `cli.py` (checked by swapping the file in). README and CLAUDE.md updated.
+  No migration, no wire change.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | 10 failed (6 parser, 4 end-to-end) before the fix |
-| `uv run pytest -q` | 4524 passed + 1 failed (the stale `it's late` pin), then that file 57 passed → **4525** |
-| `uv run pytest -q` after the review fixes | **4530 passed**, 6 warnings (5 new tests) |
-| mypy | Success, 165 files |
-| GUI `npm test` | 530 passed |
-| load | 7–13 (another project's pytest running, not localmail's) |
+| RED first | the 2 `CliRunner` tests fail against `main`'s `cli.py` |
+| `uv run pytest -q` | **4559 passed**, 6 warnings |
+| mypy | Success, 166 files |
+| GUI | untouched (530 at session 81) |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Merge the #373 PR** (yours), once CI is green
+### 1. **Merge the #374 PR** (yours), once CI is green
 - **Acceptance:** `gh pr checks <n>` all pass; after the merge
-  `gh issue view 373` is `CLOSED`.
+  `gh issue view 374` is `CLOSED`.
 
-### 2. **Deploy #373 once merged**
-- Pure Python, no migration. Search runs in **serve**, so restarting serve
-  is enough.
-- **Acceptance:** `build_hash` on `/v1/version` equals the merge SHA on both
-  hosts; units `active`; a search for a name with an apostrophe returns
-  lexical hits.
+### 2. **Deploy #374 once merged**
+- Pure Python, CLI only, no migration. A `git pull` + `uv sync` on each host
+  is the whole deploy; restarting serve only moves `build_hash`.
+- **Acceptance:** `localmail search 'x "y' --from z --format json` on the Mac
+  exits 0 and its `query.filters` show `from_substr` `z`.
 
 ### 3. **Next small slice: pick with the operator**
-- Candidates: #374 (CLI composer: filters after free text; an unclosed `"`
-  still swallows its flags; pairs with #305), #369 (silent last-token-wins
-  on conflicting scalar operators; needs refuse-vs-keep call), #378 (an
-  operator with an empty value becomes free text), #383 (drop write-only
+- Candidates: #305 (widen `cli.py` search's catch to `QueryParseError` /
+  `SearchArgumentRefused`; defer the module-scope imports so `--version`
+  survives a missing dependency), #378 (an operator with an empty value
+  becomes free text), #369 (silent last-token-wins on conflicting scalar
+  operators; needs a refuse-vs-keep call), #383 (drop write-only
   `messages.headers` + GIN in `0039`; one-way door), #365 (product call).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
   `filters.lang` as a list, #419 syntax, #415 dates, `api_minor` 5 and 6
-  features, and now #373 (`'` is literal).
+  features, and #373 (`'` is literal). #374 is CLI-only; nothing to tell.
 
 ### 4. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
@@ -112,16 +106,17 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #378, #369, #372, #368, #365; #375; #374 + #305;
+- **Issues:** #383, #378, #369, #372, #368, #365; #375; #305;
   #358/#357; #330/#327/#328; #340, #363, #285; robustness #218, #226,
   #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The operator asked for `7bd1448` on both hosts and picked #373** (over
-   #369/#383/#378).
-2. **#373: option 2** (drop single-quote quoting, match the GUI) — my call,
-   recorded in the PR; revert is one line if you prefer option 1.
+1. **The operator asked for `c282709` on both hosts and picked #374** (over
+   #378/#369/#383).
+2. **#374:** the quote-stripping rule moved to `search/query.py` and is
+   shared rather than restated in the CLI (my call); a quotes-only flag
+   value is a usage error rather than an absent filter, matching the API.
 
 ## Open decisions & risks
 
@@ -134,7 +129,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    made before #440 are not merged (none exist on either host, checked
    2026-11-03). Since #373, `'` in a search query is literal text:
    an undocumented `from:'Anna Schmidt'` now splits, and `has:'attachment`
-   is a 400 (unknown `has:` value).
+   is a 400 (unknown `has:` value). Since #374, in `localmail search` a
+   query operator out-votes the matching flag, and `--from '""'` exits 2.
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows carry a
    `-0000` Date and are stored 8 h off. None has a NULL `internal_date`, so
    the list/search/changes wire `date` is right; raw `date_sent` readers
@@ -156,7 +152,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was 8–15 this session** (other projects). Check
+10. **Load on the Mac was ~5 this session.** Check
     `uptime` before trusting any timing.
 
 ## Exact commands to resume
@@ -166,12 +162,12 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/373-apostrophe-is-literal --stat   # empty once merged (squash)
+git diff main origin/fix/374-cli-composer-filters-first --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh issue view 373 --json state --jq .state
+gh issue view 374 --json state --jq .state
 gh issue list --limit 200 --json number --jq length
 
-# Deploy — Mac (the repo is the install; no migration for #373; serve only)
+# Deploy — Mac (the repo is the install; no migration for #374; CLI only)
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version     # api_minor 6, build_hash = merge SHA
@@ -185,9 +181,9 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4525 at session 81
-uv run pytest -q tests/test_query_parser.py tests/test_api_search_filters_before_free_text.py tests/test_search_websearch_syntax.py
-uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 165 files
+unset VIRTUAL_ENV && uv run pytest -q              # 4559 at session 82
+uv run pytest -q tests/test_cli_search_query.py tests/test_cli_search.py tests/test_query_parser.py
+uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 166 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```
 

@@ -27,9 +27,10 @@ from localmail.api.search import run_search
 from localmail.api.search_cursor import SearchCursor, encode_search_cursor
 from localmail.search.searcher import KeysetCursor, PoolMetadata
 
-#: Both raising shapes ``search.query`` has: a date it cannot parse, and an
-#: operator whose value is empty.
-MALFORMED = ["invoice after:last-week", "invoice before:soon", "lang:"]
+#: The raising shapes ``search.query`` has: a date or id it cannot parse,
+#: and an operator whose value is empty (#378 added the last three).
+MALFORMED = ["invoice after:last-week", "invoice before:soon", "lang:",
+             "invoice has:", 'invoice before:"', "account_id:abc invoice"]
 
 
 def _searcher() -> MagicMock:

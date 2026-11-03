@@ -166,6 +166,22 @@ def _tokenize(s: str) -> list[tuple[str, str]]:
     return out
 
 
+#: Operators whose value has a fixed shape, so no ordinary text spells one:
+#: an empty or unparsable value is refused rather than kept as free text
+#: (#378). The text operators (``from:``, ``subject:``, …) are left out on
+#: purpose: ``subject: meeting`` and ``reply to: bob`` are ordinary queries.
+_FIXED_SHAPE_OPERATORS = frozenset({"after", "before", "has", "account_id", "folder_id"})
+
+
+def _parse_id(value: str, field_name: str) -> int:
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise QueryParseError(
+            f"{field_name}: expected an integer id, got {value!r}"
+        ) from exc
+
+
 def _parse_date(value: str, field_name: str) -> date:
     try:
         return datetime.strptime(value, "%Y-%m-%d").date()
@@ -228,9 +244,10 @@ def _reject_unstorable(tok: str) -> None:
 def parse_query(query: str) -> ParsedQuery:
     """Decompose a query string into free text + structured filters.
 
-    Raises ``QueryParseError`` for a malformed date, an empty ``lang:``, an
-    unknown or contradictory ``has:``, and a NUL or lone surrogate anywhere in
-    the query.
+    Raises ``QueryParseError`` for a malformed date or id, an empty ``lang:``
+    or fixed-shape operator (``_FIXED_SHAPE_OPERATORS``), an unknown or
+    contradictory ``has:``, and a NUL or lone surrogate anywhere in the query.
+    An empty text operator (``subject:``) stays free text.
     """
     free_parts: list[str] = []
     f_account_names: list[str] = []
@@ -253,6 +270,8 @@ def parse_query(query: str) -> ParsedQuery:
                     raise QueryParseError("lang: empty value not allowed")
                 f_languages.append(normalized)
                 continue
+            if op_l in _FIXED_SHAPE_OPERATORS and not value:
+                raise QueryParseError(f"{op_l}: empty value not allowed")
             if op_l in _OPERATORS and value:
                 if op_l == "from":
                     f_from = value
@@ -269,17 +288,9 @@ def parse_query(query: str) -> ParsedQuery:
                 elif op_l == "folder":
                     f_folders.append(value)
                 elif op_l == "account_id":
-                    try:
-                        f_account_ids.append(int(value))
-                    except ValueError:
-                        free_parts.append(raw)
-                    continue
+                    f_account_ids.append(_parse_id(value, op_l))
                 elif op_l == "folder_id":
-                    try:
-                        f_folder_ids.append(int(value))
-                    except ValueError:
-                        free_parts.append(raw)
-                    continue
+                    f_folder_ids.append(_parse_id(value, op_l))
                 elif op_l == "after":
                     f_after = _parse_date(value, "after")
                 elif op_l == "before":

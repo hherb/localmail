@@ -45,12 +45,13 @@ from localmail.search.searcher import KeysetCursor, Searcher
 #: Queries whose quote was left open and which set no filter of their own. The
 #: first three are ordinary English and are what #367 reports; they and ``'``
 #: hold no open quote since #373 (``'`` opened one until then) and stay as
-#: regression cases. ``has:"`` is a
-#: shape #366 refused; ``from:"`` it served, with the filters swallowed, since
-#: ``from:`` takes any value. An operator with no value is free text.
+#: regression cases. ``from:"`` #366
+#: served, with the filters swallowed, since ``from:`` takes any value; an
+#: empty text operator is free text. ``has:"`` was here too until #378 made
+#: an empty fixed-shape operator a refusal.
 _OPEN_QUOTE_TEXT = [
     "O'Brien contract", "don't forget", "bob's invoice",
-    'invoice "unclosed phrase', "'", '"', 'has:"', 'from:"',
+    'invoice "unclosed phrase', "'", '"', 'from:"',
 ]
 
 #: Open-quote queries whose quoted run *is* an operator value. #366 refused

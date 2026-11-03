@@ -47,14 +47,18 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   lexical match, nothing on `sort=date`, and the vector arm and rewriter saw
   `OBrien` too.
 - **The fix (the issue's option 2).** `'` is literal; `"` is the only quote.
-  The GUI's tokenizer already did this, so client and server now agree.
+  The GUI's tokenizer already did this, so client and server now agree on
+  `'` (they still differ on an unclosed `"`, which the GUI re-splits).
   `websearch_to_tsquery('simple', "O'Brien")` is `'o' <-> 'brien'` (checked
   in Postgres), which matches. Option 1 (`'` quotes only at a token's start)
   was not taken: it keeps an undocumented second quote syntax.
-- **Cost:** `from:'Anna Schmidt'` (undocumented) now splits; use `"`.
+- **Cost:** `from:'Anna Schmidt'` (undocumented) now splits (`from` =
+  `'Anna`, free text `Schmidt'`); use `"`.
   `has:'attachment` is now a 400 (unknown `has:` value).
-- **Tests:** 3 new in `test_query_parser.py`; the #367 end-to-end test now
-  seeds `O'Brien` (it seeded `OBrien` to dodge this) and was RED on all 4
+- **Tests:** 3 new functions (6 cases) in `test_query_parser.py`, plus 3
+  more from the review (phrase apostrophe, both documented costs); the
+  #367 end-to-end test now seeds `O'Brien` (it seeded `OBrien` to dodge this)
+  and was RED on all 4
   cases before the fix; `test_search_websearch_syntax.py`'s `it's late`
   case pinned the bug and was updated; one open-quote case swapped `'` for
   `"`. GUI `joinTokens` code unchanged (its `'` wrapping is harmless here
@@ -68,6 +72,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 |---|---|
 | RED first | 10 failed (6 parser, 4 end-to-end) before the fix |
 | `uv run pytest -q` | 4524 passed + 1 failed (the stale `it's late` pin), then that file 57 passed → **4525** |
+| `uv run pytest -q` after the review fixes | **4530 passed**, 6 warnings (5 new tests) |
 | mypy | Success, 165 files |
 | GUI `npm test` | 530 passed |
 | load | 7–13 (another project's pytest running, not localmail's) |

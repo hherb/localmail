@@ -1700,7 +1700,7 @@ for the Phase 2 plan.
   - `query._tokenize` keeps `"` delimiters in a free-text token (filter
     values still lose them), because the parser dropping quotes is what made
     a phrase two words. `'` is not a quote at all since #373 (see the
-    #367 entry's "Not closed by it" bullet).
+    #367 entry's #373 bullet).
   - A bare `-` token is dropped: `websearch_to_tsquery` reads `Order
     confirmation - Qantas` as `!'qantas'`, so a pasted subject excluded its
     own last word.
@@ -6317,8 +6317,8 @@ for the full design.
         through `run_search` and the MCP wrapper). It asserts equality with
         a non-empty set because before the fix the swallowed id tokens
         became FTS terms and matched *nothing*, so an absence assertion
-        passes against the bug; and it seeds `OBrien`, since #373 means a
-        body spelled `O'Brien` matches on neither side of the fix.
+        passes against the bug; and since #373 it seeds `O'Brien` (see the
+        #373 bullet below).
     - **What it retired:** the gate-vs-Searcher divergence #324's review
       documented as live (the `from:"`/`"` class; see the #324, #326, #345
       and #353 notes, annotated in place), #366's per-branch re-parse and
@@ -6357,9 +6357,10 @@ for the full design.
         The popover seeds scalars typed-first to match.
         - **The rebuilt query goes through `filter_parse.joinTokens`, and a
           whitespace-only re-quote was the first cut's defect.** The client
-          tokenizer drops `"` and reads `'` literally; the server's opens a
-          quote at `'`. So a kept one-word `"don't"` re-joined bare swallowed
-          every later token server-side — a `has:`/`lang:`/`to:` the user
+          tokenizer drops `"` and reads `'` literally; the server's opened a
+          quote at `'` until #373. So a kept one-word `"don't"` re-joined
+          bare swallowed every later token server-side — a
+          `has:`/`lang:`/`to:` the user
           never touched, dropped to fix a chip. `joinTokens` wraps any token
           holding whitespace **or** `'` in `"`, inside which both tokenizers
           read `'` literally; tokens never contain `"`, so the wrapping stays
@@ -6380,12 +6381,14 @@ for the full design.
           and space, rebuilt by the real `joinTokens` and read by the real
           `_tokenize`: 0 queries where the server's tokens differ from the
           client's, against 51 with the apostrophe guard removed.)
-        - **Two imprecisions, both from reading with the client tokenizer.**
-          An operator only the server extracts (`'from:bob'`, single-quoted)
-          is not seen, so its chip can still be out-voted. And an operator an
-          earlier apostrophe hid from the server (`don't from:bob`) *is*
-          seen and absorbed, so the applied value becomes the typed one where
-          the server would have kept the chip's — which is what was typed.
+        - **One imprecision, from reading with the client tokenizer.** An
+          unclosed `"` runs to the end of the string on the server but is
+          re-split here, so an operator after it is absorbed where the server
+          would have kept the chip (`"foo from:bob`), and an unclosed value is
+          cut at its first space (`from:"bob smith` absorbs `bob`). Before
+          #373 the server also opened a quote at `'`, which added two more
+          (`'from:bob'` extracted there and not here; `don't from:bob` hiding
+          the operator there and not here).
         - **Removing an After/Before chip clears its `dateFrom`/`dateTo`
           twin.** The popover writes both and seeds from the twin, so a
           removed date came back on the next Apply, and the leftover twin

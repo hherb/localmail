@@ -42,9 +42,10 @@ from localmail.search.query import parse_query
 from localmail.search.searcher import KeysetCursor, Searcher
 
 
-#: Queries whose quote is left open and which set no filter of their own. The
-#: first three are ordinary English and are what #367 reports (``'`` opened a
-#: quote until #373, so they are kept as plain text now). ``has:"`` is a
+#: Queries whose quote was left open and which set no filter of their own. The
+#: first three are ordinary English and are what #367 reports; they and ``'``
+#: hold no open quote since #373 (``'`` opened one until then) and stay as
+#: regression cases. ``has:"`` is a
 #: shape #366 refused; ``from:"`` it served, with the filters swallowed, since
 #: ``from:`` takes any value. An operator with no value is free text.
 _OPEN_QUOTE_TEXT = [
@@ -263,7 +264,9 @@ def test_an_open_quote_is_served_rather_than_refused(free_text, cursor) -> None:
     (``has:"``, ``invoice after:"2024-01-01`` and ``invoice has:'attachment``:
     a 400 from #366's per-branch re-parse), and on the keyset branch
     ``from:"`` too (#326's walk guard, the swallowed tokens leaving no free
-    text); the rest were served with the filters silently swallowed. This pins only that they are served, which a
+    text); the rest were served with the filters silently swallowed. Since
+    #373 ``has:'attachment`` is an unknown ``has:`` value and is refused, so
+    it is no longer a case here. This pins only that they are served, which a
     refusal reintroduced for open quotes would fail. That the filters reach
     the Searcher is ``test_both_rowed_branches_hand_the_searcher_every_filter``.
     """
@@ -322,6 +325,8 @@ def _seed_two_folders(conn) -> tuple[int, int, int, int]:
     The body is spelled ``O'Brien``, so the ``sort="date"`` case (lexical
     only) also pins #373: the query's apostrophe must reach the FTS
     predicate, where ``O'Brien`` is ``'o' <-> 'brien'`` on both sides.
+    The rank case pins it too, but only because no chunks are embedded here,
+    so the vector arms return nothing; seed chunks and only ``date`` holds.
     """
     with conn.cursor() as cur:
         cur.execute("INSERT INTO accounts (name, email_address, imap_host,"

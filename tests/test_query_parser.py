@@ -117,3 +117,26 @@ def test_an_apostrophe_does_not_swallow_later_operators():
 
 def test_an_operator_value_keeps_its_apostrophe():
     assert parse_query("from:o'brien").filters.from_substr == "o'brien"
+
+
+def test_an_apostrophe_inside_a_phrase_is_kept():
+    """Inside ``"…"`` the ``'`` reaches both the free text (the phrase
+    ``websearch_to_tsquery`` reads) and the operator value: dropping it from
+    either is #373 again, for a phrase."""
+    q = parse_query('"O\'Brien contract"')
+    assert q.free_text == '"O\'Brien contract"'
+    assert q.semantic_text == "O'Brien contract"
+    assert parse_query('subject:"don\'t forget"').filters.subject_substr == "don't forget"
+
+
+def test_a_single_quoted_operator_value_splits_on_whitespace():
+    """The documented cost of #373: ``'`` no longer groups a value; write ``"``."""
+    q = parse_query("from:'Anna Schmidt'")
+    assert q.filters.from_substr == "'Anna"
+    assert q.free_text == "Schmidt'"
+
+
+def test_a_single_quoted_has_value_is_refused():
+    """``has:'attachment`` is an unknown ``has:`` value since #373, not a quote."""
+    with pytest.raises(QueryParseError, match="has:"):
+        parse_query("has:'attachment")

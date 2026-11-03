@@ -226,7 +226,9 @@ operations are exposed as a JSON API under `/v1/admin/users`.
 localmail can import existing mbox files or maildir directories into an
 `archive` account. The import is idempotent — already-imported messages are
 skipped via the existing per-account Message-Id / raw-SHA256 dedup, so
-re-running is safe.
+re-running is safe. A message that fails to import keeps one `failed_messages`
+row across re-runs (its retry count goes up), and a different failing message
+never takes over that row (#440).
 
 Importing **two sources whose filenames share a stem** into the same account is
 also safe. Folders are named after the source's filename stem, so

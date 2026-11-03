@@ -16,7 +16,8 @@ Widening that gate to a live account would make `backfill_internal_date` FETCH a
 synthetic UID against the real server and write another message's INTERNALDATE
 onto this row -- re-check both claims before touching it.
 
-Everything is pure except `max_label_uid`, which is the one thin DB read.
+Everything is pure except `max_label_uid` and `max_reserved_uid`, the thin DB
+reads.
 """
 from __future__ import annotations
 
@@ -68,6 +69,26 @@ def max_label_uid(conn: psycopg.Connection, mailbox_id: int) -> int:
         cur.execute(
             "SELECT COALESCE(MAX(uid), 0) FROM message_labels WHERE mailbox_id = %s",
             (mailbox_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+def max_reserved_uid(conn: psycopg.Connection, account_id: int, mailbox_id: int) -> int:
+    """Highest UID held in `mailbox_id` by a label OR a `failed_messages` row, else 0.
+
+    The importer allocates from here, not from `max_label_uid`: a poison pill
+    gets no label, so a counter that ignored its row handed the next pill the
+    same uid and the upsert overwrote the first pill's bytes (#440).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT GREATEST("
+            " (SELECT COALESCE(MAX(uid), 0) FROM message_labels WHERE mailbox_id = %s),"
+            " (SELECT COALESCE(MAX(uid), 0) FROM failed_messages"
+            "   WHERE account_id = %s AND mailbox_id = %s))",
+            (mailbox_id, account_id, mailbox_id),
         )
         row = cur.fetchone()
         assert row is not None

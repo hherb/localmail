@@ -1280,8 +1280,8 @@ flag-based denial — it survives provider locales (`[Gmail]/Bin` vs `Trash`).
       `committed` fails a test in `tests/test_importer_runner.py` when
       removed (the `_flush` point and the handler share one). The rolled-back
       poison pills are re-recorded by the re-run, which re-processes them —
-      and so, under a fresh uid, are the committed ones, adding a second
-      `failed_messages` row each (pre-existing, #440).
+      and so are the committed ones, which since #440 bump their existing
+      `failed_messages` row rather than adding a second.
     - Pinned in `tests/test_import_retry_db_contention.py`, reusing #425's
       trigger.
   - **Recording a poison pill re-raises them too (#441).**
@@ -1481,6 +1481,17 @@ thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
   `ON CONFLICT (message_id, mailbox_id)` arbitrates the PK, not the uid index).
   Re-import stays idempotent at the message level; only the label's uid churns
   upward, which nothing reads.
+  - **`MAX(uid)` counts `failed_messages` rows too (#440,
+    `uids.max_reserved_uid`).** A poison pill gets no label, so a counter
+    reading labels alone could hand a *new* pill an old pill's uid, and
+    `record_failed_message`'s upsert then overwrote the old pill's stored
+    bytes: a lost record, not a duplicate. And a re-run pill is recorded under
+    the uid of its existing row for the same bytes
+    (`runner._failed_uid`, keyed `(account_id, mailbox_id, raw_sha256)`), so
+    it bumps `retry_count` instead of adding a row. Duplicates made before the
+    fix are not merged. `retry_failed_messages` still allocates from
+    `max_label_uid`: it re-records under the stored uid, so it cannot
+    overwrite another row.
 - **`retry_failed_messages` re-allocates the UID for archive accounts only**, and
   re-records a still-failing row under its *stored* uid so the
   `UNIQUE (account_id, mailbox_id, uid)` row upserts instead of multiplying.

@@ -1488,9 +1488,11 @@ thin read `max_label_uid`), shared by `sync.py` and `importer/runner.py`.
     bytes: a lost record, not a duplicate. And a re-run pill is recorded under
     the uid of its existing row for the same bytes
     (`runner._failed_uid`, keyed `(account_id, mailbox_id, raw_sha256)`), so
-    it bumps `retry_count` instead of adding a row. Duplicates made before the
-    fix are not merged. `retry_failed_messages` still allocates from
-    `max_label_uid`: it re-records under the stored uid, so it cannot
+    it bumps `retry_count` instead of adding a row. The lookup is per mailbox
+    (a pill in Inbox and Sent keeps a row in each); within one, identical
+    bytes twice in a source also share a row, so `retry_count` can read 1
+    after a single run. Duplicates made before the fix are not merged.
+    `retry_failed_messages` still allocates from `max_label_uid`: it re-records under the stored uid, so it cannot
     overwrite another row.
 - **`retry_failed_messages` re-allocates the UID for archive accounts only**, and
   re-records a still-failing row under its *stored* uid so the

@@ -87,3 +87,21 @@ def test_a_new_pill_never_overwrites_an_older_pills_row(db_conn, tmp_path, monke
     rows = _failed_rows(db_conn)
     assert sorted(_subject(r[1]) for r in rows) == [b"message 2", b"message 3"]
     assert all(r[2] == 0 for r in rows)
+
+
+def test_a_pill_in_two_mailboxes_keeps_a_row_in_each(db_conn, tmp_path, monkeypatch):
+    """The lookup is per mailbox: reusing Inbox's uid for Sent's copy of the
+    pill would leave Sent's counter below it, and a later Sent pill would then
+    land on that uid and overwrite the copy."""
+    _poison_marked_messages(monkeypatch)
+    acct = _account(db_conn, name="arch", auth_method="archive")
+    pill = _poisoned(9)
+    inbox = _mbox_at(tmp_path, "a", "Inbox", _msg(1), _msg(2), pill)
+    sent = _mbox_at(tmp_path, "b", "Sent", pill, _poisoned(10), _poisoned(11))
+
+    _import(db_conn, acct, inbox, tmp_path)
+    _import(db_conn, acct, sent, tmp_path)
+
+    rows = _failed_rows(db_conn)
+    assert sorted(_subject(r[1]) for r in rows) == [
+        b"message 10", b"message 11", b"message 9", b"message 9"]

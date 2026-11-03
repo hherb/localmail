@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from click.testing import CliRunner
 
 from localmail.cli import main
@@ -188,3 +190,89 @@ def test_a_flag_value_of_only_quotes_is_a_usage_error(monkeypatch, cli_config):
     assert res.exit_code == 2
     assert "--from: value is empty once its quotes are removed" in res.output
     assert "q" not in seen
+
+
+def _real_searcher_without_db(monkeypatch):
+    """A real Searcher whose pool refuses every connection.
+
+    The query guards run before any IO, so a refusal reaches the CLI without a
+    database, and a guard that ever moved past the first connection would fail
+    here as an AssertionError rather than pass as a clean refusal.
+    """
+    from unittest.mock import MagicMock
+
+    from localmail.config import SearchConfig
+    from localmail.search.searcher import Searcher
+
+    pool = MagicMock()
+    pool.connection.side_effect = AssertionError("no connection may be opened")
+    searcher = Searcher(pool=pool, cfg=SearchConfig(), embeddings=MagicMock(),
+                        reranker=None, rewriter=None)
+    monkeypatch.setattr("localmail.cli.create_searcher", lambda *a, **k: searcher)
+
+
+@pytest.mark.parametrize(("query", "needle"), [
+    ("invoice after:last-week", "Error: after: expected YYYY-MM-DD"),
+    ("has:attachments", "Error: has: expected 'attachment'"),
+    ("has:attachment has:no-attachment", "Error: has: 'attachment' and"),
+])
+def test_a_malformed_query_is_a_usage_error_not_a_traceback(
+        monkeypatch, cli_config, query, needle):
+    """#305: `QueryParseError` used to escape the RuntimeError-only catch."""
+    _real_searcher_without_db(monkeypatch)
+    res = CliRunner().invoke(main, ["search", query])
+    assert res.exit_code == 2, res.output
+    assert res.exception is None or isinstance(res.exception, SystemExit)
+    assert "Traceback" not in res.output
+    assert needle in res.output
+
+
+def test_a_refused_search_argument_is_a_usage_error(monkeypatch, cli_config):
+    """#305: the whole `SearchArgumentRefused` family, not a named member."""
+    from localmail.search.argument_errors import SearchArgumentRefused
+
+    class _NewMember(SearchArgumentRefused):
+        pass
+
+    class _Stub:
+        def search(self, *a, **k):
+            raise _NewMember("a fifth guard refused this")
+
+    monkeypatch.setattr("localmail.cli.create_searcher", lambda *a, **k: _Stub())
+    res = CliRunner().invoke(main, ["search", "x"])
+    assert res.exit_code == 2, res.output
+    assert "a fifth guard refused this" in res.output
+
+
+@pytest.mark.parametrize(("label", "message", "expected"), [
+    ("cursor", "it is stale", "Error: cursor: it is stale"),
+    ("", "", "Error: _Blank"),
+])
+def test_a_refusal_renders_through_wire_message(
+        monkeypatch, cli_config, label, message, expected):
+    """The CLI renders like the api boundaries: label joined, never blank."""
+    from localmail.search.argument_errors import SearchArgumentRefused
+
+    member = type("_Blank", (SearchArgumentRefused,), {"label": label})
+
+    class _Stub:
+        def search(self, *a, **k):
+            raise member(message)
+
+    monkeypatch.setattr("localmail.cli.create_searcher", lambda *a, **k: _Stub())
+    res = CliRunner().invoke(main, ["search", "x"])
+    assert res.exit_code == 2, res.output
+    assert res.output.rstrip().endswith(expected), res.output
+
+
+def test_an_unrelated_value_error_is_not_relabelled_a_usage_error(
+        monkeypatch, cli_config):
+    """Control: a bare ValueError (psycopg, datetime, a backend) still raises."""
+    class _Stub:
+        def search(self, *a, **k):
+            raise ValueError("backend outage")
+
+    monkeypatch.setattr("localmail.cli.create_searcher", lambda *a, **k: _Stub())
+    res = CliRunner().invoke(main, ["search", "x"])
+    assert isinstance(res.exception, ValueError)
+    assert res.exit_code == 1

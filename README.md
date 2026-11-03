@@ -1483,7 +1483,7 @@ longer swallows them ([#374](https://github.com/hherb/localmail/issues/374)).
 operator as a single-valued flag (`from:bob` with `--from alice`), the
 query's wins; `account:` and `folder:` are combined with `--account` and
 `--folder`, and a `has:` contradicting `--has-attachment` is refused
-(for now as a traceback, [#305](https://github.com/hherb/localmail/issues/305)).
+(a usage error, exit 2).
 
 An excluded word is excluded on every ordering, `--smart` synonyms included;
 it is matched against the message's subject, body, addresses and (since
@@ -1508,8 +1508,7 @@ DSL operators: `from:`, `to:`, `subject:`, `label:`, `account:`, `folder:`,
 `lang:XX` (ISO 639-1 code; matches the `messages.body_lang` column populated
 per-message by `lingua-language-detector`), `has:attachment` and
 `has:no-attachment` (any other `has:` value is refused — a 400 over HTTP and
-MCP; the CLI still shows a traceback, tracked in
-[#305](https://github.com/hherb/localmail/issues/305)). Each operator
+MCP, a usage error with exit 2 on the CLI). Each operator
 may appear multiple times where it makes sense (e.g. multiple `lang:`
 accumulate; `lang:en lang:de` matches either). Bodies shorter than
 `search.body_lang_min_text_chars` (default 20) and detections below

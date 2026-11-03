@@ -537,6 +537,8 @@ def test_imports_config_defaults():
     assert cfg.checkpoint_every == 50
     assert cfg.checkpoint_seconds == 2
     assert cfg.stale_seconds == 60
+    assert cfg.terminal_write_attempts == 5
+    assert cfg.terminal_write_backoff_s == 10.0
 
 
 def test_imports_config_resolves_and_expands_roots():

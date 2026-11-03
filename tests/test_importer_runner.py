@@ -13,6 +13,9 @@ from localmail.importer import runner
 from tests import _eml
 from tests.conftest import TEST_DSN
 
+# One try, no wait: these tests do not fail the terminal write (#442 does).
+_TW = dict(terminal_write_attempts=1, terminal_write_backoff_s=0.0)
+
 
 def _conn_factory():
     return psycopg.connect(TEST_DSN, autocommit=False)
@@ -73,7 +76,7 @@ def test_run_import_inserts_messages_with_received_date(db_conn, tmp_path):
     jid = _job(db_conn, aid, path)
 
     runner.run_import(
-        _conn_factory, jid, attachments_root=tmp_path / "blobs", checkpoint_every=50, checkpoint_seconds=3600)
+        _conn_factory, jid, attachments_root=tmp_path / "blobs", checkpoint_every=50, checkpoint_seconds=3600, **_TW)
 
     job = _read_job(db_conn, jid)
     assert job["status"] == "completed"
@@ -88,12 +91,12 @@ def test_run_import_reimport_is_idempotent(db_conn, tmp_path):
     aid = _archive(db_conn)
     path = _make_mbox(tmp_path, _eml.plain())
     jid1 = _job(db_conn, aid, path)
-    runner.run_import(_conn_factory, jid1, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600)
+    runner.run_import(_conn_factory, jid1, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600, **_TW)
     with db_conn.cursor() as cur:
         cur.execute("UPDATE import_jobs SET status='completed' WHERE id=%s", (jid1,))
     db_conn.commit()
     jid2 = _job(db_conn, aid, path)
-    runner.run_import(_conn_factory, jid2, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600)
+    runner.run_import(_conn_factory, jid2, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600, **_TW)
     job = _read_job(db_conn, jid2)
     assert job["inserted"] == 0
     assert job["skipped_dup"] == 1
@@ -103,7 +106,7 @@ def test_run_import_two_messages_both_insert(db_conn, tmp_path):
     aid = _archive(db_conn)
     path = _make_mbox(tmp_path, _eml.plain(), _eml.multipart_alt())
     jid = _job(db_conn, aid, path)
-    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600, **_TW)
     job = _read_job(db_conn, jid)
     assert job["inserted"] == 2
     assert job["failed"] == 0
@@ -116,14 +119,14 @@ def test_run_import_cancel_stops(db_conn, tmp_path):
     with db_conn.cursor() as cur:
         cur.execute("UPDATE import_jobs SET cancel_requested=TRUE WHERE id=%s", (jid,))
     db_conn.commit()
-    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600, **_TW)
     assert _read_job(db_conn, jid)["status"] == "cancelled"
 
 
 def test_run_import_fatal_error_marks_failed(db_conn, tmp_path):
     aid = _archive(db_conn)
     jid = _job(db_conn, aid, tmp_path / "does-not-exist.mbox")
-    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=50, checkpoint_seconds=3600, **_TW)
     job = _read_job(db_conn, jid)
     assert job["status"] == "failed"
     assert job["error_msg"]
@@ -146,7 +149,7 @@ def test_run_import_flushes_after_first_message(db_conn, tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_flush", counting_flush)
     runner.run_import(
         _conn_factory, jid, attachments_root=tmp_path / "b",
-        checkpoint_every=50, checkpoint_seconds=3600)
+        checkpoint_every=50, checkpoint_seconds=3600, **_TW)
 
     assert flushes["n"] >= 1  # the first-message flush fired despite count < 50
     assert _read_job(db_conn, jid)["status"] == "completed"
@@ -164,7 +167,7 @@ def test_run_import_small_import_is_cancellable(db_conn, tmp_path):
 
     runner.run_import(
         _conn_factory, jid, attachments_root=tmp_path / "b",
-        checkpoint_every=50, checkpoint_seconds=3600)
+        checkpoint_every=50, checkpoint_seconds=3600, **_TW)
 
     assert _read_job(db_conn, jid)["status"] == "cancelled"
 
@@ -191,7 +194,7 @@ def test_run_import_time_cadence_flushes_between_count_boundaries(db_conn, tmp_p
     monkeypatch.setattr(runner, "_flush", counting_flush)
     runner.run_import(
         _conn_factory, jid, attachments_root=tmp_path / "b",
-        checkpoint_every=10_000, checkpoint_seconds=2, clock=fake_clock)
+        checkpoint_every=10_000, checkpoint_seconds=2, clock=fake_clock, **_TW)
 
     # First message (first-message rule) + two more by the 5s>2s time cadence.
     assert flushes["n"] == 3
@@ -213,7 +216,7 @@ def test_run_import_poison_message_isolated(db_conn, tmp_path, monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(runner, "process_one_message", flaky)
-    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600)
+    runner.run_import(_conn_factory, jid, attachments_root=tmp_path / "b", checkpoint_every=1, checkpoint_seconds=3600, **_TW)
 
     job = _read_job(db_conn, jid)
     assert job["status"] == "completed"
@@ -256,7 +259,7 @@ def test_a_failed_job_reports_only_what_was_committed(db_conn, tmp_path, monkeyp
     monkeypatch.setattr(runner, "process_one_message", scripted)
     runner.run_import(
         _conn_factory, jid, attachments_root=tmp_path / "blobs",
-        checkpoint_every=50, checkpoint_seconds=3600.0)
+        checkpoint_every=50, checkpoint_seconds=3600.0, **_TW)
 
     db_conn.rollback()
     row = db_conn.execute(
@@ -291,7 +294,7 @@ def test_a_new_mailbox_commit_counts_as_committed_work(db_conn, tmp_path, monkey
     monkeypatch.setattr(runner, "process_one_message", scripted)
     runner.run_import(
         _conn_factory, jid, attachments_root=tmp_path / "blobs",
-        checkpoint_every=50, checkpoint_seconds=3600.0)
+        checkpoint_every=50, checkpoint_seconds=3600.0, **_TW)
 
     db_conn.rollback()
     row = db_conn.execute(
@@ -302,25 +305,32 @@ def test_a_new_mailbox_commit_counts_as_committed_work(db_conn, tmp_path, monkey
 
 
 def test_a_failure_after_the_final_commit_reports_every_message(
-    db_conn, tmp_path, monkeypatch,
+    db_conn, tmp_path,
 ):
     """#439: once the loop's final commit has run every message is committed,
-    so a failure after it (here the "completed" status write) must not report
-    the older checkpoint's counts."""
+    so a failure after it must not report the older checkpoint's counts. Since
+    #442 the one such failure that reaches the handler is the worker
+    connection's close(); the "completed" write is retried on its own."""
     aid = _archive(db_conn)
     path = _make_mbox(tmp_path, _numbered(1), _numbered(2))
     jid = _job(db_conn, aid, path)
-    real = runner._mark_terminal
+    factory_calls = [0]
 
-    def failing_completed(conn_factory, job_id, status, c, **kw):
-        if status == "completed":
-            raise psycopg.OperationalError("status write failed")
-        return real(conn_factory, job_id, status, c, **kw)
+    def factory():
+        conn = _conn_factory()
+        factory_calls[0] += 1
+        if factory_calls[0] == 1:  # the worker connection
+            real_close = conn.close
 
-    monkeypatch.setattr(runner, "_mark_terminal", failing_completed)
+            def failing_close():
+                conn.close = real_close  # the handler's retry closes it for real
+                raise psycopg.OperationalError("close failed")
+            conn.close = failing_close
+        return conn
+
     runner.run_import(
-        _conn_factory, jid, attachments_root=tmp_path / "blobs",
-        checkpoint_every=50, checkpoint_seconds=3600.0)
+        factory, jid, attachments_root=tmp_path / "blobs",
+        checkpoint_every=50, checkpoint_seconds=3600.0, **_TW)
 
     db_conn.rollback()
     row = db_conn.execute(

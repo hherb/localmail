@@ -814,11 +814,16 @@ def import_cmd(
             raise click.ClickException(str(e))
         conn.commit()
 
-    runner.run_import(
-        lambda: psycopg.connect(cfg.database.dsn, autocommit=False), jid,
-        attachments_root=cfg.attachments.root,
-        checkpoint_every=cfg.imports.checkpoint_every,
-        checkpoint_seconds=cfg.imports.checkpoint_seconds)
+    try:
+        runner.run_import(
+            lambda: psycopg.connect(cfg.database.dsn, autocommit=False), jid,
+            attachments_root=cfg.attachments.root,
+            checkpoint_every=cfg.imports.checkpoint_every,
+            checkpoint_seconds=cfg.imports.checkpoint_seconds,
+            terminal_write_attempts=cfg.imports.terminal_write_attempts,
+            terminal_write_backoff_s=cfg.imports.terminal_write_backoff_s)
+    except runner.TerminalStatusUnwritten as e:  # already logged with the remedy
+        raise click.ClickException(str(e)) from e
 
     with psycopg.connect(cfg.database.dsn) as conn:
         job = imports_svc.get_job(conn, jid)

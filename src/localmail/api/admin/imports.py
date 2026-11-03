@@ -10,6 +10,7 @@ validation and importer.runner for execution.
 """
 from __future__ import annotations
 
+import functools
 import os
 import socket
 import threading
@@ -190,21 +191,34 @@ def reconcile_orphaned_jobs(
         return len(reap_ids)
 
 
+def _run_import_in_thread(run: Callable[[], None]) -> None:
+    """`run`, minus the already-logged `TerminalStatusUnwritten` (#442).
+
+    Re-raising it would only add Python's unhandled-thread dump beside the
+    ERROR line that already names the job and the remedy.
+    """
+    try:
+        run()
+    except _runner.TerminalStatusUnwritten:
+        pass
+
+
 def start_job(
     conn_factory: _runner.ConnFactory, job_id: int, *,
     attachments_root: Path, checkpoint_every: int, checkpoint_seconds: float,
+    terminal_write_attempts: int, terminal_write_backoff_s: float,
 ) -> threading.Thread:
     """Spawn a daemon thread running the import. Returns the thread (joinable)."""
+    # A partial, not args/kwargs, so mypy checks these against run_import.
+    run = functools.partial(
+        _runner.run_import, conn_factory, job_id,
+        attachments_root=attachments_root,
+        checkpoint_every=checkpoint_every,
+        checkpoint_seconds=checkpoint_seconds,
+        terminal_write_attempts=terminal_write_attempts,
+        terminal_write_backoff_s=terminal_write_backoff_s)
     t = threading.Thread(
-        target=_runner.run_import,
-        args=(conn_factory, job_id),
-        kwargs={
-            "attachments_root": attachments_root,
-            "checkpoint_every": checkpoint_every,
-            "checkpoint_seconds": checkpoint_seconds,
-        },
-        name=f"import-job-{job_id}",
-        daemon=True,
-    )
+        target=_run_import_in_thread, args=(run,),
+        name=f"import-job-{job_id}", daemon=True)
     t.start()
     return t

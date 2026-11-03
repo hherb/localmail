@@ -37,6 +37,9 @@ from tests.conftest import TEST_DSN
 
 from .test_worker_db_contention import _CASES, _count, _raising_trigger
 
+# One try, no wait: these tests do not fail the terminal write (#442 does).
+_TW = dict(terminal_write_attempts=1, terminal_write_backoff_s=0.0)
+
 _RAW = (
     b"From: alice@example.com\r\nTo: bob@example.com\r\nSubject: contended\r\n"
     b"Date: Wed, 01 Jan 2025 12:00:00 +0000\r\n"
@@ -91,7 +94,7 @@ def test_import_records_only_a_genuine_failure(
     with _raising_trigger(db_conn, table="messages", event="INSERT", sqlstate=sqlstate):
         runner.run_import(
             _conn_factory, job_id, attachments_root=tmp_path / "blobs",
-            checkpoint_every=50, checkpoint_seconds=3600.0,
+            checkpoint_every=50, checkpoint_seconds=3600.0, **_TW,
         )
 
     db_conn.rollback()

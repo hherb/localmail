@@ -166,6 +166,10 @@ checkpoint_every = 50
 checkpoint_seconds = 2
 # A running job idle longer than this is shown stalled (red) in the panel.
 stale_seconds = 60
+# The job's final status write is tried up to this many times, this far apart, so
+# a database blip cannot leave the job `running` and blocking other imports (#442).
+terminal_write_attempts = 5
+terminal_write_backoff_s = 10
 
 [search]
 # Every search/extraction tunable lives here and every one has a default, so the

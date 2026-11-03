@@ -28,7 +28,12 @@ from localmail.api.search_cursor import (
 )
 from localmail.api.search_projection import fields_error, project_hit
 from localmail.config import SearchConfig
-from localmail.search.query import ParsedQuery, QueryParseError, parse_query
+from localmail.search.query import (
+    ParsedQuery,
+    QueryParseError,
+    parse_query,
+    quoted_filter_value,
+)
 from localmail.search.snippet_width import snippet_width_error
 from localmail.search.page_cache import CacheMissError, PageOutOfPoolError
 from localmail.search.rewrite_status import (
@@ -203,10 +208,10 @@ def _quote_value(v: Any, key: str) -> str:
     the free-text token `key:`, so the filter would vanish and a filter-only
     request would become a text search.
     """
-    s = str(v).replace('"', "").replace("\n", " ").replace("\r", " ")
-    if not s:
+    quoted = quoted_filter_value(v)
+    if quoted is None:
         raise ValidationFailed(f"{key}: value is empty once its quotes are removed")
-    return f'"{s}"'
+    return quoted
 
 
 #: One ASCII token, checked before ``strptime``. A date is emitted unquoted

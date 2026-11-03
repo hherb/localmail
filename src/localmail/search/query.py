@@ -111,6 +111,20 @@ _OPERATORS = {
 }
 
 
+def quoted_filter_value(value: object) -> str | None:
+    """Wrap an operator value in ``"`` so ``_tokenize`` reads it as one token.
+
+    The DSL has no escape syntax, so embedded ``"`` are stripped (one would
+    break out of the quotes and inject operators, or swallow what follows)
+    and newlines become spaces. Returns ``None`` when nothing is left: a
+    composer must refuse that, since ``key:""`` parses as the free-text token
+    ``key:`` and the filter would vanish. Shared by the HTTP/MCP composer and
+    the CLI's (#374), so the two cannot quote differently.
+    """
+    s = str(value).replace('"', "").replace("\n", " ").replace("\r", " ")
+    return f'"{s}"' if s else None
+
+
 def _tokenize(s: str) -> list[tuple[str, str]]:
     """Whitespace-split, but keep double-quoted strings intact.
 

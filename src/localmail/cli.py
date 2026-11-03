@@ -1074,28 +1074,17 @@ def search(ctx, query, accounts, folders, after, before, from_substr, to_substr,
            subject_substr, has_attachment, label, page_size, candidates_per_arm,
            rerank_pool, no_rerank, smart, no_cache, fmt, verbose):
     """Hybrid BM25 + vector search over the local archive."""
-    text_q = " ".join(query)
-    extra: list[str] = []
-    for a in accounts:
-        extra.append(f"account:{a}")
-    for f in folders:
-        extra.append(f'folder:"{f}"')
-    if from_substr:
-        extra.append(f'from:"{from_substr}"')
-    if to_substr:
-        extra.append(f'to:"{to_substr}"')
-    if subject_substr:
-        extra.append(f'subject:"{subject_substr}"')
-    if after:
-        extra.append(f"after:{after.date().isoformat()}")
-    if before:
-        extra.append(f"before:{before.date().isoformat()}")
-    if has_attachment:
-        extra.append("has:attachment")
-    if label:
-        extra.append(f"label:{label}")
-    if extra:
-        text_q = f"{text_q} {' '.join(extra)}".strip()
+    from localmail.cli_search_query import compose_cli_query
+
+    try:
+        text_q = compose_cli_query(
+            " ".join(query), accounts=accounts, folders=folders, after=after,
+            before=before, from_substr=from_substr, to_substr=to_substr,
+            subject_substr=subject_substr, has_attachment=has_attachment,
+            label=label,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     searcher = create_searcher(load_config(ctx.obj["config_path"]))
     try:

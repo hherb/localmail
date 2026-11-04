@@ -102,7 +102,20 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `psql -p 5532 -d localmail -Atc "select max(date_received) from messages m join accounts a on a.id=m.account_id where a.name='hherb-dmc'"`
   moves past 2026-11-03.
 
-### 4. **Next small slice: pick with the operator**
+### 4. **Dependabot fifth round (#186–#196, 11 HIGH) — recommended next**
+- **pypdf `< 6.21.4`** (#186, #191–#196): `_extract_pdf` parses emailed PDFs,
+  so this is the attacker-reachable kind (the #66–#69 / #105–#112 family).
+  Raise the floor to `>=6.21.4` (check the advisories for the highest
+  first-patched version), re-lock in a worktree, and re-run the 300-PDF
+  byte-identical extraction comparison the third round used.
+- **pyasn1 `<= 0.6.4`** (#187–#190): arrives via google-auth; newly declare a
+  floor (the `transformers` lesson) and judge reachability before calling it
+  hygiene.
+- **Acceptance:** `uv lock --dry-run` shows the bump; the lock holds the
+  fixed versions; suite + mypy green; the alerts close after merge.
+- Read each `vulnerable_version_range` against `uv.lock`, not the floor.
+
+### 5. **Next small slice: pick with the operator**
 - Candidates: **#356** (now smaller: only `SearchPage`/`PoolMetadata`
   `__post_init__` left, the wire half is done), **#357** (parsed-free-text
   type for the four sort rules), **#328** (typed page-cache entry; same class
@@ -115,7 +128,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   features, #373 (`'` is literal), #378 (an empty
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
-### 5. **Carried**
+### 6. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
 - **Dependabot #71 / #185:** left open on purpose.

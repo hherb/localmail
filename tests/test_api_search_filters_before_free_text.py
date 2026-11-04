@@ -45,12 +45,13 @@ from localmail.search.searcher import KeysetCursor, Searcher
 #: Queries whose quote was left open and which set no filter of their own. The
 #: first three are ordinary English and are what #367 reports; they and ``'``
 #: hold no open quote since #373 (``'`` opened one until then) and stay as
-#: regression cases. ``has:"`` is a
-#: shape #366 refused; ``from:"`` it served, with the filters swallowed, since
-#: ``from:`` takes any value. An operator with no value is free text.
+#: regression cases. ``from:"`` #366
+#: served, with the filters swallowed, since ``from:`` takes any value; an
+#: empty text operator is free text. ``has:"`` was here too until #378 made
+#: an empty fixed-shape operator a refusal.
 _OPEN_QUOTE_TEXT = [
     "O'Brien contract", "don't forget", "bob's invoice",
-    'invoice "unclosed phrase', "'", '"', 'has:"', 'from:"',
+    'invoice "unclosed phrase', "'", '"', 'from:"',
 ]
 
 #: Open-quote queries whose quoted run *is* an operator value. #366 refused
@@ -265,8 +266,9 @@ def test_an_open_quote_is_served_rather_than_refused(free_text, cursor) -> None:
     a 400 from #366's per-branch re-parse), and on the keyset branch
     ``from:"`` too (#326's walk guard, the swallowed tokens leaving no free
     text); the rest were served with the filters silently swallowed. Since
-    #373 ``has:'attachment`` is an unknown ``has:`` value and is refused, so
-    it is no longer a case here. This pins only that they are served, which a
+    #373 ``has:'attachment`` is an unknown ``has:`` value and is refused, and
+    since #378 ``has:"`` is an empty ``has:`` and is refused, so neither is a
+    case here. This pins only that they are served, which a
     refusal reintroduced for open quotes would fail. That the filters reach
     the Searcher is ``test_both_rowed_branches_hand_the_searcher_every_filter``.
     """

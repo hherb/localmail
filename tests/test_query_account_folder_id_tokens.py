@@ -5,9 +5,11 @@
 
 The integer-keyed tokens populate SearchFilters.account_ids /
 SearchFilters.folder_ids directly, bypassing the name-based resolution path
-the Searcher uses for account: / folder: tokens. Non-integer values are
-silently ignored (DSL has no escape syntax for parser errors)."""
-from localmail.search.query import parse_query
+the Searcher uses for account: / folder: tokens. A non-integer value is
+refused (#378)."""
+import pytest
+
+from localmail.search.query import QueryParseError, parse_query
 
 
 def test_account_id_single_token_populates_account_ids():
@@ -35,11 +37,11 @@ def test_folder_id_multiple_tokens_accumulate():
     assert parsed.filters.folder_ids == [42, 99]
 
 
-def test_account_id_non_integer_value_treated_as_free_text():
-    parsed = parse_query("account_id:foo bar")
-    assert parsed.filters.account_ids is None
-    assert "account_id:foo" in parsed.free_text
-    assert "bar" in parsed.free_text
+def test_account_id_non_integer_value_is_refused():
+    """It used to fall back to free text (#378); the refusal's own pins are
+    in test_query_operator_values.py."""
+    with pytest.raises(QueryParseError, match="account_id: expected an integer id"):
+        parse_query("account_id:foo bar")
 
 
 def test_account_id_and_account_can_coexist():

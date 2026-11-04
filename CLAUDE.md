@@ -6439,6 +6439,17 @@ for the full design.
       against the old `cli.py`. Since #305's search-catch half, a
       `QueryParseError` from the query text is a usage error (exit 2), not a
       traceback.
+  - **An empty or unparsable fixed-shape operator is refused (#378).**
+    `after:`, `before:`, `has:`, `account_id:` and `folder_id:` with no value,
+    and an id that is not ASCII digits (the wire's `parse_int_id` rule:
+    `+7`, `-1`, `1_0` and `٣` included), raise `QueryParseError` (a 400 at `_gate_query`, a
+    usage error in the CLI). They used to fall back to free text, so `has:"`
+    searched for the word "has" and flipped the query to rankable. The set is
+    `query._FIXED_SHAPE_OPERATORS`. **The text operators are left out on
+    purpose**, per the issue's own caution: an empty `subject:`/`to:`/`from:`/`label:`/
+    `account:`/`folder:`/`attachment_name:` stays free text, because
+    `subject: meeting` and `reply to: bob` are ordinary queries. Pinned by
+    `tests/test_query_operator_values.py`.
   - **Unknown keys:** unknown filter keys (`filter_key_error`, inside
     `build_query_string`) and unknown top-level fields (the route, via
     `extra: "allow"` + `model_extra`) are a 400 problem+json naming the key.

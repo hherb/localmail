@@ -1036,7 +1036,13 @@ for a caller with no account grants. So is a NUL character (U+0000) or a
 lone surrogate (such as JSON `"\ud800"`) in `query`, `from`, `to`, `subject`
 or `lang`: Postgres text cannot hold either, and each used to be an unhandled
 500 ([#377](https://github.com/hherb/localmail/issues/377)). They are refused
-rather than stripped, since a stripped query is a different question. `lang` takes a list as well as a string (`["en", "de"]` matches
+rather than stripped, since a stripped query is a different question. The
+same holds for an operator typed into `query` whose value has a fixed shape:
+`after:`, `before:`, `has:`, `account_id:` or `folder_id:` with no value, or
+an id that is not plain ASCII digits (`account_id:abc`, `account_id:-1`), is a 400. Each used to be
+kept as free text, so `has:"` searched for the word "has"
+([#378](https://github.com/hherb/localmail/issues/378)). A text operator with
+no value (`subject: meeting`, `reply to: bob`) is still ordinary text. `lang` takes a list as well as a string (`["en", "de"]` matches
 either), and each member is held to the same rules; an empty list is refused, since it would match every language. A value of the wrong JSON type, or
 out of range (a number for `lang`, `"limit": 500`, a string for `fields`, a
 body that is not a JSON object), is a problem+json 400 too, its `detail` one

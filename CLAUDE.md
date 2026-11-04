@@ -573,16 +573,36 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
       line it would format. The level still matters where it is not decoration —
       `run` after `basicConfig`, `create_app` under uvicorn's `dictConfig`, and
       any embedder constructing `Daemon` directly.
-  - **`--version` still dies on the *other* broken install (#305, open).** What
-    the broad catch buys is an unreadable METADATA, and only that: `cli.py`
-    imports the daemon — and so `sqlparse`, `psycopg`, `keyring` — at module
-    scope, so a partial `uv sync` that dropped any third-party dependency kills
-    the command with a bare traceback before click parses the flag. Reproduced by
-    blocking one module on `sys.meta_path`: `import localmail` succeeds and
-    resolves its version, `import localmail.cli` does not. The module docstring
-    states the scope rather than overclaiming; making it survivable means
-    deferring those imports into the command bodies, which belongs with the
-    `cli.py` refactor already owed.
+  - **`--version` survives the *other* broken install too (#305, closed).**
+    The broad catch buys an unreadable METADATA only: `cli.py` imports the
+    daemon — and so `sqlparse`, `psycopg`, `keyring` — at module scope, so a
+    partial `uv sync` that dropped any third-party dependency killed every
+    command with a bare traceback before click parsed a flag. The console
+    script (and `python -m localmail`, via `__main__.py`) is now
+    [src/localmail/cli_entry.py](src/localmail/cli_entry.py)`::main`, which
+    imports `cli` inside a guard; the pure `startup_failure_report` decides the
+    output.
+    - **A guard at the entry point, not imports deferred into 38 command
+      bodies** — the issue's option 2. Deferral moves the failure from startup
+      to first use and has to be re-learned by every new command; one guard
+      keeps it at startup and covers them all. `cli.py` is unchanged.
+    - `--version` prints its stdout line and exits **0** (the liveness
+      contract); stderr names the missing module and `REPAIR_COMMAND`, after
+      the version diagnostic if there is one. Any other command prints that
+      one line and exits `DEPENDENCY_EXIT_CODE` (1). README's stderr contract
+      widened to "version unresolvable **or a dependency missing**".
+    - **"Dependency" means `ImportError.name` is not under `localmail`.** A
+      failure inside our own tree keeps its traceback (reinstalling would not
+      fix it); a nameless `ImportError` too. `--version` survives either,
+      without the repair text. `from psycopg import x` failing names
+      `psycopg`, so a half-upgraded package counts.
+    - **`cli_entry` imports nothing third-party** (`localmail` and
+      `version_report` are stdlib-only), which is what lets it run on the
+      install it diagnoses. Pinned end to end by subprocesses that block
+      `sqlparse` on `sys.meta_path`, for both the script and `-m` paths, with
+      a positive control that the blocker really breaks `import localmail.cli`.
+    - **Changing the entry point needs a `uv sync`** to regenerate
+      `.venv/bin/localmail`; `uv run` rebuilds it on the next call.
   - **ERROR, not WARNING.** `localmail run --log-level ERROR` is an offered
     `click.Choice` and `run_cmd` calls `basicConfig` with it *before* constructing
     the daemon, so at WARNING the line was filtered out entirely — and
@@ -780,7 +800,8 @@ first is uv's documented resolution behaviour:
 
 ```
 src/localmail/
-  cli.py            # click entry point
+  cli.py            # click CLI (commands)
+  cli_entry.py      # console script: imports cli in a guard (#305)
   cli_help_request.py # pure: is_help_request — keeps the version line off help (#307)
   cli_search_query.py # pure: compose_cli_query — flags ahead of the free text (#374)
   config.py         # pydantic models + TOML loader
@@ -5749,8 +5770,8 @@ for the full design.
           `Searcher` whose pool refuses every connection, plus a new family
           member (a stub) and a bare-`ValueError` control; widening to
           `ValueError` and dropping `SearchArgumentRefused` each fail one
-          test. The import-deferral half of #305 (`--version` on a missing
-          dependency) stays open.
+          test. The other half of #305 (`--version` on a missing dependency)
+          is closed by `cli_entry` — see the version-report notes.
     - **The keyset cursor carries its own direction, and the Searcher reads
       it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
       else, so `Searcher.search` paired a directionless cursor with a

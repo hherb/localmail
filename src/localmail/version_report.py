@@ -44,15 +44,13 @@ The rule is the same one the read obeys: nothing on this path may raise, so
 every step on it degrades instead. See `ResolvedVersion.unreadable`.
 
 **Scope, so the claim above is not read wider than it is (#305).** What survives
-here is an unreadable *METADATA*, and only that. `localmail --version` still
-dies on the *other* broken install: `cli.py` imports the daemon — and so
-`sqlparse`, `psycopg`, `keyring` — at module scope, so a partial `uv sync` that
-dropped any third-party dependency kills the command with a bare traceback
-before click parses the flag. Reproduced by blocking one module on
-`sys.meta_path`: `import localmail` succeeds and resolves its version,
-`import localmail.cli` does not. Making that survivable means deferring those
-imports into the command bodies that need them, which is a change to `cli.py`
-rather than to this module, and belongs with the refactor it already owes.
+here is an unreadable *METADATA*, and only that. The *other* broken install — a
+partial `uv sync` that dropped a third-party dependency `cli.py` imports at
+module scope — is caught one layer out, by `cli_entry`, which imports the CLI
+inside a guard so `--version` still answers and every command fails in one
+line naming the repair. Reproduced by blocking one module on `sys.meta_path`:
+`import localmail` succeeds and resolves its version, `import localmail.cli`
+does not.
 
 **The catch is broader than the remedy can speak to, and the wording admits
 it.** `MemoryError`, `RecursionError` and anything a third-party `sys.meta_path`

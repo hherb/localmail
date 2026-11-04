@@ -90,6 +90,14 @@ version line, so scripts that parse it are unaffected, and the exit status
 stays `0` — the stderr line is the failure signal, so do not consume stdout
 alone when you are verifying an install.
 
+**A missing dependency is reported too.** A partial `uv sync` that dropped a
+package `localmail` imports (`psycopg`, `sqlparse`, `keyring`, …) used to kill
+every command — `--version` included — with a bare traceback. `--version` now
+still prints its stdout line and exits `0`, and stderr names the missing module
+and the repair (`uv sync --extra extraction --extra mcp`). Every other command
+prints that same one line and exits `1`. An import failure inside `localmail`
+itself keeps its traceback, since reinstalling would not fix it.
+
 **Every command reports it, not just `--version`.** A broken install is
 announced once by whichever `localmail` command you run, before it reads
 `config.toml` and before it touches Postgres — so a host that is broken in more
@@ -105,7 +113,7 @@ logged when the version reads normally, and `/v1/version` reports the same
 four outcomes as a machine-readable `version_source` (see below).
 
 For scripts, the contract is: **stderr is non-empty if and only if the version
-could not be resolved.** (This holds for what `localmail` itself writes; a
+could not be resolved, or a dependency the CLI needs is missing.** (This holds for what `localmail` itself writes; a
 dependency emitting an import-time warning would also land on stderr, so a
 script that must be certain should read `version_source` from `/v1/version`
 instead.) stdout stays the single `localmail, version X.Y.Z`

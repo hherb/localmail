@@ -857,6 +857,8 @@ src/localmail/
   shutdown_budget.py # remaining_seconds/supervisor_kill_after (pure) +
                     #   wind_down_threads — the one shutdown budget (#221 A)
   api/search_projection.py # pure: HIT_FIELDS / fields_error / project_hit (slice E)
+  api/search_response.py # SearchResponse + search_response: the one /v1/search
+                    #   response constructor, refusing a mock page (#358)
   search/           # hybrid search subsystem (Phases 1 + 2)
     __init__.py     # public API: create_searcher, Searcher, SearchPage, SearchResult
     arms.py         # retrieval arms: arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
@@ -5250,6 +5252,8 @@ for the full design.
           strings in one scope under a keyword name matching the wrong one)
           and **#358** (`run_search -> dict[str, Any]`, which is why two
           consecutive PRs added a wire field and hit the same MagicMock trap).
+          **#358 is fixed**: see "The search response has one constructor"
+          below.
       - **`SearchPage.rankable` is stamped, not derived — and one site
         proves why.** `api.search._empty_grown_page` builds
         `query=parse_query("")` as a stand-in for an exhausted pool, so a
@@ -6299,6 +6303,34 @@ for the full design.
     `attachments` column no longer matches `attachment_name` (#429, see the
     strict-jsonpath bullet above). A `-0000` `date_sent` is stored as UTC
     since #431 (see the `date_sent` bullet under Schema essentials).
+- **The search response has one constructor, and it refuses a fake (#358).**
+  `run_search` returned `dict[str, Any]` from two hand-written literals (the
+  rowed path and the empty-ACL branch), so a wire field was a bare string key
+  and a `MagicMock` page with an attribute unset *serialised* (as `{}` or
+  `[]`) instead of raising — #345 and #353 both shipped that with the suite
+  green. Now [src/localmail/api/search_response.py](src/localmail/api/search_response.py)
+  holds the `SearchResponse` TypedDict and `search_response(...)`, the only
+  way the response is built (pinned by an AST test over every `return` in
+  `run_search`). It derives `total_estimate` (always `None`, #175) and
+  `rewrite_skipped` (from the status, #176) once, and raises `TypeError` for a
+  `sort_applied` outside `SortMode`, a `rankable` that is not exactly a
+  `bool`, or a non-numeric `took_ms`; `ValueError` for `rank` beside
+  `rankable=False`. That pair check is #356's **wire** half (it covers the
+  empty-ACL dict, which a `SearchPage.__post_init__` would not); #356 stays
+  open for `SearchPage`/`PoolMetadata` themselves, which library and CLI
+  callers see directly.
+  - **The fix found 29 fakes**, in three files, that set `sort_applied` and
+    forgot `rankable` — the trap, still live, in tests no helper asserted on.
+  - **The MCP `search` tool now publishes an `outputSchema`** (all ten keys
+    required) because `server.search` is annotated `SearchResponse`, and the
+    SDK **validates** each tool result against it. So an MCP fake returning a
+    partial dict is refused too; return a real `search_response(...)`.
+    Pinned against the published schema.
+  - **The HTTP route is annotated `SearchResponse` with
+    `response_model=None`**, so FastAPI builds no second validating model and
+    serialization is unchanged. No wire change on either transport: real
+    responses carried every key already. `results` is not checked (each hit
+    comes from `_to_api_result` over real attributes).
 - **Search filters are honoured or refused, never dropped (#364).** Design:
   [docs/superpowers/specs/2026-09-14-search-request-honesty-design.md](docs/superpowers/specs/2026-09-14-search-request-honesty-design.md);
   plan: [docs/superpowers/plans/2026-09-14-search-request-honesty.md](docs/superpowers/plans/2026-09-14-search-request-honesty.md).

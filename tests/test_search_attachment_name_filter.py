@@ -17,6 +17,15 @@ from localmail.search.query import parse_query
 from localmail.search.searcher import Searcher
 
 
+from localmail.api.search_response import search_response
+
+# A real response: the MCP SDK validates tool output against SearchResponse (#358).
+_EMPTY_RESPONSE = search_response(
+    results=[], next_cursor=None, took_ms=0.0, sort_applied="date",
+    rankable=False, rewrite_status="not_requested", rewrite_note=None,
+    rewrite_note_code=None)
+
+
 class _E:
     name = "s"; model = "s"; dimension = 768
     def embed_documents(self, t): return [[1.0] * 768 for _ in t]
@@ -125,7 +134,7 @@ def test_the_mcp_search_tool_forwards_it(db_dsn, monkeypatch) -> None:
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return {"results": [], "next_cursor": None}
+        return _EMPTY_RESPONSE
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)

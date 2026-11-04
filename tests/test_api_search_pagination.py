@@ -57,6 +57,7 @@ def _page(*, results: list, token: str | None, pool_size: int,
     # object there rather than failing. Harmless in-process, but a fake that
     # carries garbage teaches nothing.
     p.sort_applied = "rank"
+    p.rankable = True
     return p
 
 

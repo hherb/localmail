@@ -329,6 +329,11 @@ Two rules for a `search` cursor. Both are enforced, the first only partly:
   query both come back `sort_applied="date"`. So "sorted by date because you
   asked" and "sorted by date because there was nothing to rank" are
   distinguishable only by this field.
+* **The `search` tool publishes an `outputSchema`.** Every key of the
+  response (`results`, `next_cursor`, `total_estimate`, `took_ms`,
+  `sort_applied`, `rankable`, `rewrite_skipped`, `rewrite_status`,
+  `rewrite_note`, `rewrite_note_code`) is listed and required, so a client
+  that reads tool schemas can rely on all of them being present.
 
 If a `search` cursor has expired (its underlying result pool was evicted from
 the in-process cache — TTL, LRU, or a `serve` restart), the tool returns a

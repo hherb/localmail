@@ -61,6 +61,7 @@ def _page(*, token: str | None = None, next_keyset: KeysetCursor | None = None) 
     # object there rather than failing. Harmless in-process, but a fake that
     # carries garbage teaches nothing.
     p.sort_applied = "rank"
+    p.rankable = True
     return p
 
 

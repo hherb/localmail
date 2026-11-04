@@ -29,6 +29,7 @@ from pydantic import AnyHttpUrl, Field
 from localmail.api.acl import allowed_account_ids
 from localmail.api.errors import NotFound, SearchCursorExpired, ValidationFailed
 from localmail.api.ids import parse_int_id
+from localmail.api.search_response import SearchResponse
 from localmail.config import McpConfig
 from localmail.header_block import HeaderMode
 import localmail.mcp.tools as tools
@@ -254,7 +255,7 @@ def build_mcp_server(
             "`unavailable` and `failed`. On a continuation page `smart` is "
             "ignored and the status is `not_attempted`. Defaults to false."))]
             = False,
-    ) -> dict[str, Any]:
+    ) -> SearchResponse:
         """Hybrid lexical + vector search over message text and extracted
         attachment text — the default way to answer "find mail about X".
 

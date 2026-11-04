@@ -284,9 +284,9 @@ def _assert_wire_ordering_fields(body: dict) -> None:
     assertion on one test's expected value says nothing about the next fake
     somebody adds.
 
-    It is a helper, not a fixture: it catches only the fakes whose tests
-    call it, and ``test_serve_search_route.py`` drives the same route
-    without it. Setting the fields on each fake remains discipline.
+    Since #358 this is belt to braces: ``api.search_response.search_response``
+    refuses an unset mock attribute on every path, so a fake that forgets the
+    fields fails in any test that drives ``run_search``, not only here.
     """
     assert body["sort_applied"] in ("rank", "date"), body["sort_applied"]
     assert isinstance(body["rankable"], bool), body["rankable"]

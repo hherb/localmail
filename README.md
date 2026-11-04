@@ -91,12 +91,14 @@ stays `0` — the stderr line is the failure signal, so do not consume stdout
 alone when you are verifying an install.
 
 **A missing dependency is reported too.** A partial `uv sync` that dropped a
-package `localmail` imports (`psycopg`, `sqlparse`, `keyring`, …) used to kill
-every command — `--version` included — with a bare traceback. `--version` now
-still prints its stdout line and exits `0`, and stderr names the missing module
-and the repair (`uv sync --extra extraction --extra mcp`). Every other command
-prints that same one line and exits `1`. An import failure inside `localmail`
-itself keeps its traceback, since reinstalling would not fix it.
+package `localmail` imports (`psycopg`, `sqlparse`, `keyring`, …), or left one
+half-upgraded, used to kill every command — `--version` included — with a bare
+traceback. `--version` now still prints its stdout line and exits `0`, and
+stderr names the failing module and the repair
+(`uv sync --extra extraction --extra mcp`). Every other command prints that
+same stderr line and exits `1`. A failure inside `localmail` itself keeps its
+traceback on every command but `--version`, since reinstalling would not fix
+it; `--version` still answers, naming the failure without the repair.
 
 **Every command reports it, not just `--version`.** A broken install is
 announced once by whichever `localmail` command you run, before it reads
@@ -112,14 +114,14 @@ so it still carries a severity on the paths that print no level. Nothing is
 logged when the version reads normally, and `/v1/version` reports the same
 four outcomes as a machine-readable `version_source` (see below).
 
-For scripts, the contract is: **stderr is non-empty if and only if the version
-could not be resolved, or a dependency the CLI needs is missing.** (This holds for what `localmail` itself writes; a
-dependency emitting an import-time warning would also land on stderr, so a
-script that must be certain should read `version_source` from `/v1/version`
-instead.) stdout stays the single `localmail, version X.Y.Z`
-line and the exit status stays `0` in both cases, so neither is a failure
-signal — check stderr, or read `version_source` from `/v1/version`, which
-reports the same four outcomes as a machine-readable string.
+For scripts, the contract is: **stderr is non-empty if and only if the install
+is broken — the version could not be resolved, or the CLI could not be
+imported.** (This holds for what `localmail` itself writes; a dependency
+emitting an import-time warning would also land on stderr.) stdout stays the
+single `localmail, version X.Y.Z` line and the exit status stays `0` in every
+case, so neither is a failure signal — check stderr. `version_source` on
+`/v1/version` is the machine-readable form of the *version* half only: a host
+that cannot import the CLI cannot run `serve` to answer it.
 
 `GET /v1/version` (unauthenticated) reports six fields: `api_major`,
 `api_minor`, `server_version`, `build_hash`, `build_source`, `version_source`.

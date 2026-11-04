@@ -47,8 +47,8 @@ every step on it degrades instead. See `ResolvedVersion.unreadable`.
 here is an unreadable *METADATA*, and only that. The *other* broken install — a
 partial `uv sync` that dropped a third-party dependency `cli.py` imports at
 module scope — is caught one layer out, by `cli_entry`, which imports the CLI
-inside a guard so `--version` still answers and every command fails in one
-line naming the repair. Reproduced by blocking one module on `sys.meta_path`:
+inside a guard so `--version` still answers and, on a third-party failure,
+every other command fails in one line naming the repair. Reproduced by blocking one module on `sys.meta_path`:
 `import localmail` succeeds and resolves its version, `import localmail.cli`
 does not.
 

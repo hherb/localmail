@@ -9,7 +9,7 @@ killed every command with a bare traceback before click parsed anything.
 That included `--version`, the manual's install-verification step, i.e. the
 command an operator runs *because* the install looks broken.
 
-The fix is here rather than in `cli.py`'s 38 commands: deferring those imports
+The fix is here rather than in `cli.py`'s 42 commands: deferring those imports
 into each command body would move the failure from startup to first use, and
 would have to be re-learned by every command added later. Guarding the one
 import keeps the failure at startup and makes it legible for all of them.
@@ -45,24 +45,58 @@ _OWN_PACKAGE = "localmail"
 
 @dataclass(frozen=True)
 class StartupFailure:
-    """What to print, and how to exit, when the CLI could not be imported."""
+    """What to print, and how to exit, when the CLI could not be imported.
+
+    `exit_code` is `None` when the failure must keep its traceback: print
+    `stderr` (if any) and re-raise.
+    """
 
     stdout: str | None
     stderr: str
-    exit_code: int
+    exit_code: int | None
 
 
-def _is_dependency(exc: ImportError) -> bool:
-    """True when the module that failed is not ours.
+def _top_package(module: str) -> str:
+    return module.split(".", 1)[0]
+
+
+def _raising_module(exc: BaseException) -> str | None:
+    """The module whose code raised `exc`, skipping the import machinery.
+
+    psycopg reports a missing wheel or libpq as an `ImportError` with no
+    `.name` ("no pq wrapper available"), and pydantic a version mismatch as a
+    `SystemError`; in both the raise sits in the dependency's own frame.
+    """
+    module = None
+    tb = exc.__traceback__
+    while tb is not None:
+        name = tb.tb_frame.f_globals.get("__name__")
+        if isinstance(name, str) and _top_package(name) != "importlib":
+            module = name
+        tb = tb.tb_next
+    return module
+
+
+def _is_dependency(exc: Exception) -> bool:
+    """True when the failure is in a third-party package, not in localmail.
 
     `ImportError.name` names the module that could not be imported — or, for
-    `from psycopg import x`, the package `x` was missing from. A failure inside
-    localmail is a bug in this tree, and `uv sync` would not fix it, so it is
-    not reported as one; a nameless `ImportError` is not either.
+    `from psycopg import x`, the package `x` was missing from. Without one,
+    the module that raised decides. A failure inside localmail is a bug in
+    this tree that `uv sync` would not fix, so it keeps its traceback; so does
+    a failure the machinery raised on our import of a dependency (a truncated
+    or unreadable file), since its last non-importlib frame is ours.
+
+    Imprecise in one direction, deliberately: a localmail import naming a
+    package that is not there (a typo like `from psycopg_pool import Typo`, or
+    a dependency never declared) reads as a broken dependency. The line still
+    names the module, and `uv sync` failing to fix it is the tell.
     """
-    if not exc.name:
-        return False
-    return exc.name.split(".", 1)[0] != _OWN_PACKAGE
+    if isinstance(exc, ImportError) and exc.name:
+        module: str | None = exc.name
+    else:
+        module = _raising_module(exc)
+    return module is not None and _top_package(module) != _OWN_PACKAGE
 
 
 def _asks_for_version(argv: Sequence[str]) -> bool:
@@ -73,53 +107,69 @@ def _asks_for_version(argv: Sequence[str]) -> bool:
     return "--version" in before
 
 
+def _render(exc: Exception) -> str:
+    # This runs on a path that must not fail; render_exception_chain's
+    # contract leaves guarding the walk to its caller.
+    try:
+        return render_exception_chain(exc)
+    except Exception:
+        return type(exc).__name__
+
+
 def startup_failure_report(
-    exc: ImportError,
+    exc: Exception,
     *,
     argv: Sequence[str],
     version: str,
     version_diagnostic: str | None,
-) -> StartupFailure | None:
+) -> StartupFailure:
     """Decide what a failed CLI import tells the operator. Pure.
 
-    Returns `None` when the failure should keep its traceback: a non-version
-    command hit an import bug in localmail itself.
+    An unresolvable version is reported on every branch (#304): the group
+    callback that normally does it never runs when the CLI cannot import.
     """
     dependency = _is_dependency(exc)
-    cause = render_exception_chain(exc)
+    cause = _render(exc)
     line = (
         f"{_PROG}: cannot start: {cause}. A dependency is missing or broken; "
         f"repair the install with `{REPAIR_COMMAND}`."
         if dependency
         else f"{_PROG}: cannot start: {cause}"
     )
+    prefix = [] if version_diagnostic is None else [version_diagnostic]
     if _asks_for_version(argv):
-        lines = [line] if version_diagnostic is None else [version_diagnostic, line]
         return StartupFailure(
             stdout=f"{_PROG}, version {version}",
-            stderr="\n".join(lines),
+            stderr="\n".join([*prefix, line]),
             exit_code=0,
         )
     if not dependency:
-        return None
-    return StartupFailure(stdout=None, stderr=line, exit_code=DEPENDENCY_EXIT_CODE)
+        return StartupFailure(stdout=None, stderr="\n".join(prefix), exit_code=None)
+    return StartupFailure(
+        stdout=None,
+        stderr="\n".join([*prefix, line]),
+        exit_code=DEPENDENCY_EXIT_CODE,
+    )
 
 
 def main() -> None:
     """The console script and `python -m localmail`."""
     try:
         from .cli import main as cli_main
-    except ImportError as exc:
+    # Not just ImportError: a half-upgraded package can raise anything at
+    # import (pydantic raises SystemError), and --version must still answer.
+    except Exception as exc:
         report = startup_failure_report(
             exc,
             argv=sys.argv[1:],
             version=__version__,
             version_diagnostic=__version_diagnostic__,
         )
-        if report is None:
-            raise
         if report.stdout is not None:
             print(report.stdout)
-        print(report.stderr, file=sys.stderr)
+        if report.stderr:
+            print(report.stderr, file=sys.stderr)
+        if report.exit_code is None:
+            raise
         sys.exit(report.exit_code)
     cli_main()

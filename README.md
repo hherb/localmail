@@ -1039,7 +1039,7 @@ or `lang`: Postgres text cannot hold either, and each used to be an unhandled
 rather than stripped, since a stripped query is a different question. The
 same holds for an operator typed into `query` whose value has a fixed shape:
 `after:`, `before:`, `has:`, `account_id:` or `folder_id:` with no value, or
-an id that is not an integer (`account_id:abc`), is a 400. Each used to be
+an id that is not plain ASCII digits (`account_id:abc`, `account_id:-1`), is a 400. Each used to be
 kept as free text, so `has:"` searched for the word "has"
 ([#378](https://github.com/hherb/localmail/issues/378)). A text operator with
 no value (`subject: meeting`, `reply to: bob`) is still ordinary text. `lang` takes a list as well as a string (`["en", "de"]` matches

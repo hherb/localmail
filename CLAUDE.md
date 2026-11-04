@@ -6441,7 +6441,8 @@ for the full design.
       traceback.
   - **An empty or unparsable fixed-shape operator is refused (#378).**
     `after:`, `before:`, `has:`, `account_id:` and `folder_id:` with no value,
-    and a non-integer id, raise `QueryParseError` (a 400 at `_gate_query`, a
+    and an id that is not ASCII digits (the wire's `parse_int_id` rule:
+    `+7`, `-1`, `1_0` and `٣` included), raise `QueryParseError` (a 400 at `_gate_query`, a
     usage error in the CLI). They used to fall back to free text, so `has:"`
     searched for the word "has" and flipped the query to rankable. The set is
     `query._FIXED_SHAPE_OPERATORS`. **The text operators are left out on

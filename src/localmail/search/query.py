@@ -174,12 +174,14 @@ _FIXED_SHAPE_OPERATORS = frozenset({"after", "before", "has", "account_id", "fol
 
 
 def _parse_id(value: str, field_name: str) -> int:
+    # ASCII digits only, like the wire's parse_int_id: bare int() also takes
+    # " 7", "+7", "-1", "1_0" and non-ASCII digits such as "\u0663".
     try:
-        return int(value)
-    except ValueError as exc:
-        raise QueryParseError(
-            f"{field_name}: expected an integer id, got {value!r}"
-        ) from exc
+        if value.isascii() and value.isdigit():
+            return int(value)
+    except ValueError:  # past Python's int() digit limit
+        pass
+    raise QueryParseError(f"{field_name}: expected an integer id, got {value!r}")
 
 
 def _parse_date(value: str, field_name: str) -> date:

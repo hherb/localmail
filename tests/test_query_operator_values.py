@@ -18,7 +18,13 @@ from __future__ import annotations
 
 import pytest
 
-from localmail.search.query import SearchFilters, parse_query, QueryParseError
+from localmail.search.query import (
+    _FIXED_SHAPE_OPERATORS,
+    _OPERATORS,
+    QueryParseError,
+    SearchFilters,
+    parse_query,
+)
 
 #: The fixed-shape operators, each with no value.
 _EMPTY = ["after:", "before:", "has:", "account_id:", "folder_id:"]
@@ -40,7 +46,12 @@ def test_the_reproductions_from_378_are_refused(query: str) -> None:
 
 
 @pytest.mark.parametrize("query", ["account_id:abc invoice", "folder_id:x",
-                                   "account_id:1.5", "folder_id:\"7 8\""])
+                                   "account_id:1.5", "folder_id:\"7 8\"",
+                                   # int() takes these; the wire's
+                                   # parse_int_id does not, nor does this.
+                                   'account_id:" 7"', "account_id:+7",
+                                   "account_id:-1", "folder_id:1_0",
+                                   "folder_id:\u0663", "account_id:" + "9" * 5000])
 def test_a_non_integer_id_is_refused(query: str) -> None:
     op = query.partition(":")[0]
     with pytest.raises(QueryParseError, match=rf"^{op}: expected an integer id, got "):
@@ -64,3 +75,8 @@ def test_valid_fixed_shape_operators_still_apply() -> None:
     assert (f.account_ids, f.folder_ids) == ([3], [7])
     assert f.has_attachment is True
     assert f.after is not None and f.before is not None
+
+
+def test_every_fixed_shape_operator_is_an_operator() -> None:
+    """A name dropped from ``_OPERATORS`` but left here is never matched."""
+    assert _FIXED_SHAPE_OPERATORS <= _OPERATORS

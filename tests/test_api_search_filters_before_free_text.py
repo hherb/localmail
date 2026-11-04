@@ -266,8 +266,9 @@ def test_an_open_quote_is_served_rather_than_refused(free_text, cursor) -> None:
     a 400 from #366's per-branch re-parse), and on the keyset branch
     ``from:"`` too (#326's walk guard, the swallowed tokens leaving no free
     text); the rest were served with the filters silently swallowed. Since
-    #373 ``has:'attachment`` is an unknown ``has:`` value and is refused, so
-    it is no longer a case here. This pins only that they are served, which a
+    #373 ``has:'attachment`` is an unknown ``has:`` value and is refused, and
+    since #378 ``has:"`` is an empty ``has:`` and is refused, so neither is a
+    case here. This pins only that they are served, which a
     refusal reintroduced for open quotes would fail. That the filters reach
     the Searcher is ``test_both_rowed_branches_hand_the_searcher_every_filter``.
     """

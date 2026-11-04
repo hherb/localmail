@@ -210,7 +210,7 @@ dev = [
 ]
 
 [project.scripts]
-localmail = "localmail.cli:main"
+localmail = "localmail.cli_entry:main"
 
 [build-system]
 requires = ["hatchling"]

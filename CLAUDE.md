@@ -128,10 +128,12 @@ uv run localmail --version       # installed version; reads no config, no DB (#2
                                  #   stdout = the version line; stderr names the
                                  #   remedy when it cannot be read (#291), the
                                  #   exception that stopped it (#296) and the chain
-                                 #   it was raised from (#303). EVERY command logs
+                                 #   it was raised from (#303), and a dependency that
+                                 #   will not import (#305). EVERY command logs
                                  #   that line at startup (#295, #304); `run`/`serve`
                                  #   do it themselves, the group callback does it for
-                                 #   the other 36 (cli.SELF_REPORTING_COMMANDS).
+                                 #   the other 40 (cli.SELF_REPORTING_COMMANDS), and
+                                 #   cli_entry when the CLI cannot import.
 uv run localmail init-db         # apply pending migrations
 uv run localmail list-accounts   # show config'd accounts and whether a secret is stored
 uv run localmail add-account N   # store password for account N (must exist in config.toml)
@@ -568,21 +570,61 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
       covers the other 36, have not, and nothing they import does — so those
       records go out through `logging.lastResort`: stderr, message only, no
       level, no timestamp, no logger name. Configuring logging in the group
-      callback to fix that was **rejected**: it precedes all 38 commands, and
+      callback to fix that was **rejected**: it precedes every command, and
       installing a root handler for every one of them changes far more than the
       line it would format. The level still matters where it is not decoration —
       `run` after `basicConfig`, `create_app` under uvicorn's `dictConfig`, and
       any embedder constructing `Daemon` directly.
-  - **`--version` still dies on the *other* broken install (#305, open).** What
-    the broad catch buys is an unreadable METADATA, and only that: `cli.py`
-    imports the daemon — and so `sqlparse`, `psycopg`, `keyring` — at module
-    scope, so a partial `uv sync` that dropped any third-party dependency kills
-    the command with a bare traceback before click parses the flag. Reproduced by
-    blocking one module on `sys.meta_path`: `import localmail` succeeds and
-    resolves its version, `import localmail.cli` does not. The module docstring
-    states the scope rather than overclaiming; making it survivable means
-    deferring those imports into the command bodies, which belongs with the
-    `cli.py` refactor already owed.
+  - **`--version` survives the *other* broken install too (#305, closed).**
+    The broad catch buys an unreadable METADATA only: `cli.py` imports the
+    daemon — and so `sqlparse`, `psycopg`, `keyring` — at module scope, so a
+    partial `uv sync` that dropped any third-party dependency killed every
+    command with a bare traceback before click parsed a flag. The console
+    script (and `python -m localmail`, via `__main__.py`) is now
+    [src/localmail/cli_entry.py](src/localmail/cli_entry.py)`::main`, which
+    imports `cli` inside a guard; the pure `startup_failure_report` decides the
+    output.
+    - **A guard at the entry point, not the issue's option 2** (imports
+      deferred into each of the 42 command bodies). Deferral moves the failure from startup
+      to first use and has to be re-learned by every new command; one guard
+      keeps it at startup and covers them all. `cli.py` is unchanged.
+    - `--version` prints its stdout line and exits **0** (the liveness
+      contract); stderr names the failing module and `REPAIR_COMMAND`. Any
+      other command prints that stderr line and exits `DEPENDENCY_EXIT_CODE`
+      (1). README's stderr contract widened to "version unresolvable **or the
+      CLI cannot import**".
+    - **The version diagnostic comes first on every branch**, the re-raise
+      one included (#304): the group callback that normally reports it never
+      runs when `cli` cannot import, and on a failing mount its `cause:` is
+      the real fault while the dependency line points at `uv sync`.
+    - **It catches `Exception`, not `ImportError`** (review of #450): a
+      half-upgraded pydantic raises `SystemError` at import, and an unreadable
+      file `PermissionError`. The broad catch is defensible because every
+      branch reports what it caught (`render_exception_chain`, itself guarded
+      with a type-name fallback), and an own-tree failure is re-raised.
+    - **"Dependency" is decided by `ImportError.name`, else by the raising
+      frame.** `from psycopg import x` failing names `psycopg`, so a
+      half-upgraded package counts. Without a name (psycopg's
+      "no pq wrapper available" for a dropped binary wheel or missing libpq,
+      pydantic's `SystemError`) the last traceback frame outside `importlib`
+      decides — which is also why `.name` is read only off an `ImportError`
+      (a `NameError`'s is a variable). A failure inside our own tree keeps
+      its traceback; so does one the import machinery raised on *our* import
+      of a dependency file, its last non-`importlib` frame being ours — the
+      safe direction. `--version` survives every case, with the repair text
+      only for a dependency. **Known imprecision**: a localmail import naming
+      a package that is not there (a typo, an undeclared dependency) reads as
+      a broken dependency; the line still names the module.
+    - **`cli_entry` imports nothing third-party** (`localmail` and
+      `version_report` are stdlib-only), which is what lets it run on the
+      install it diagnoses. Pinned end to end by subprocesses that block
+      `sqlparse` on `sys.meta_path` (script and `-m` paths), or shadow it with
+      a package raising a nameless `ImportError` / `SystemError`, each with a
+      positive control that it really breaks `import localmail.cli`; plus
+      an own-tree block (`localmail.daemon`) that must keep its traceback.
+      Every branch of `cli_entry` was mutation-checked.
+    - **Changing the entry point needs a `uv sync`** to regenerate
+      `.venv/bin/localmail`; `uv run` rebuilds it on the next call.
   - **ERROR, not WARNING.** `localmail run --log-level ERROR` is an offered
     `click.Choice` and `run_cmd` calls `basicConfig` with it *before* constructing
     the daemon, so at WARNING the line was filtered out entirely — and
@@ -641,7 +683,8 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     The machine-consumer case is stated in README for external monitoring and
     has **no in-tree reader** — do not cite it as though it were shipped. The
     `--version` half of #300 needed no flag: stderr is non-empty iff the version
-    is unresolvable, now stated in README and pinned. And `__version_source__`'s
+    is unresolvable (or, since #305, the CLI cannot import), now stated in
+    README and pinned. And `__version_source__`'s
     retention paid off as predicted — `version_source` is derived from it.
 - **`__init__.py` exports three attributes, and `__version_diagnostic__` is
   rendered there rather than by each reader.** The exception type behind a
@@ -692,7 +735,7 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
       end, one probe in. The dirty probe's `not in (0, 1)` had the rule right
       and the two disagreed; they ask the same question now.
   - **Resolution is lazy and cached, never at import.** `import localmail` runs
-    for all 38 CLI commands and a `git` subprocess there can hang on a stale
+    for every CLI command and a `git` subprocess there can hang on a stale
     mount — the #296 scenario. Caching also gives the semantics the row wants:
     pinned for the life of the process, so it reports what the process is
     *running*, not what the tree says now. That is live on an editable install,
@@ -738,7 +781,8 @@ sentinel existed in `__init__.py` and was surfaced nowhere.
     authenticated endpoint.
   - **`--version` gained no flag.** stderr is non-empty iff the version is
     unresolvable — true since #291, now stated in README and pinned by
-    `tests/test_cli_version_stderr_contract.py`. stdout stays the single line
+    `tests/test_cli_version_stderr_contract.py` — or, since #305, the CLI
+    cannot import (`tests/test_cli_entry.py`; `CliRunner` never reaches it). stdout stays the single line
     and exit stays 0, so neither is a failure signal.
 
 Common gotcha when running ad-hoc commands: shells often have `VIRTUAL_ENV`
@@ -780,7 +824,8 @@ first is uv's documented resolution behaviour:
 
 ```
 src/localmail/
-  cli.py            # click entry point
+  cli.py            # click CLI (commands)
+  cli_entry.py      # console script: imports cli in a guard (#305)
   cli_help_request.py # pure: is_help_request — keeps the version line off help (#307)
   cli_search_query.py # pure: compose_cli_query — flags ahead of the free text (#374)
   config.py         # pydantic models + TOML loader
@@ -5749,8 +5794,8 @@ for the full design.
           `Searcher` whose pool refuses every connection, plus a new family
           member (a stub) and a bare-`ValueError` control; widening to
           `ValueError` and dropping `SearchArgumentRefused` each fail one
-          test. The import-deferral half of #305 (`--version` on a missing
-          dependency) stays open.
+          test. The other half of #305 (`--version` on a missing dependency)
+          is closed by `cli_entry` — see the version-report notes.
     - **The keyset cursor carries its own direction, and the Searcher reads
       it (review of #322).** `KeysetCursor` was `(ts, id)` and nothing
       else, so `Searcher.search` paired a directionless cursor with a

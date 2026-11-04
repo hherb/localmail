@@ -3,7 +3,9 @@
 
 """`localmail --version` already has a machine-readable channel (#300).
 
-stderr is non-empty if and only if the version could not be resolved. That has
+stderr is non-empty if and only if the version could not be resolved — the
+half this file pins; the other half, a CLI that cannot import, is
+`test_cli_entry.py`'s (#305), since `CliRunner` never reaches it. That has
 been true since #291 but was an accident of implementation rather than a stated
 contract, and nothing pinned it — so a future refactor could move the line to
 stdout, or drop it, without a failing test, and every script checking it would

@@ -1,16 +1,20 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-04 (session 84).** `main` is **`82540f9`** (#448:
-> #305's search-catch half; #305 stays open for the import half).
+> **Status as of 2026-11-04 (session 85).** `main` is **`e5152d1`** (#449:
+> #378 refuse empty fixed-shape operators).
 >
-> This session has **one open PR** on `fix/378-refuse-empty-fixed-operators`
-> (closes #378). It carries the code and this handoff.
+> This session has **one open PR** on `fix/305-version-survives-missing-dependency`
+> (closes #305). It carries the code and this handoff.
 >
-> **Mac is deployed at `82540f9`; the DGX is still at `08d329c`** — my ssh
-> deploy was refused by the permission classifier and the operator said they
-> would run it. #305 is CLI-only, so only the DGX `build_hash` lags.
+> **Both hosts are deployed at `e5152d1`** (Mac was already; DGX done this
+> session — the ssh deploy went through this time).
 >
-> **Open issues: 31** (30 once #378 closes).
+> **Open issues: 30** (29 once #305 closes).
+>
+> **A Gmail refresh token on the Mac looks expired.** A review probe ran a
+> real `localmail sync` and it ended in `RefreshError: invalid_grant: Token
+> has been expired or revoked`. Account not identified; check the daemon log
+> and re-run `localmail oauth-login <name>`.
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -28,73 +32,91 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### Deploy of `82540f9` (#448) — Mac only (no commit)
+### Deploy of `e5152d1` (#449) — DGX (no commit)
 
-- `uv sync --frozen --extra mcp --extra extraction` (no change), kickstarted
-  `com.localmail.serve`; `/v1/version` reports `api_minor` 6, `build_hash`
-  `82540f9`.
-- **Acceptance met:** `localmail search 'has:attachments'` exits 2 with
-  `Error: has: expected 'attachment' or 'no-attachment', got 'attachments'`.
-- **DGX not deployed** (classifier refused remote shell writes; operator to run).
+- `git pull`, `uv sync --frozen --extra mcp --extra extraction`, restarted
+  `localmail-serve`; both services `active`; `/v1/version` reports
+  `build_hash` `e5152d1`. The Mac was already at `e5152d1`.
 
-### PR on `fix/378-refuse-empty-fixed-operators` (based on `main` at `82540f9`)
+### PR on `fix/305-version-survives-missing-dependency` (based on `main` at `e5152d1`)
 
 | SHA | What |
 |---|---|
-| `98cf39b` | #378: refuse an empty or unparsable fixed-shape operator |
-| handoff | this file + `docs/handoffs/2026-11-04T1000Z-refuse-empty-fixed-operators.md` |
+| `e1bf976` | #305: `--version` survives a missing dependency |
+| review | review round: frame-based classification, `except Exception`, diagnostic on every branch, docs |
+| handoff | this file + `docs/handoffs/2026-11-04T1230Z-version-survives-missing-dependency.md` |
 
-- **The defect.** `parse_query` kept an operator with an empty value, and an
-  `account_id:`/`folder_id:` whose value is not an int, as free text. `has:"`
-  therefore searched for the word "has" and flipped the query to rankable.
-- **The fix.** `query._FIXED_SHAPE_OPERATORS` = `after`, `before`, `has`,
-  `account_id`, `folder_id`: an empty value raises `QueryParseError("<op>:
-  empty value not allowed")`; a non-int id raises `"<op>: expected an integer
-  id, got …"` (`_parse_id`). Reaches the wire as a 400 via `_gate_query`, the
-  CLI as a usage error (#448).
-- **Ruling (mine, per the issue's caution):** text operators (`from`, `to`,
-  `subject`, `label`, `account`, `folder`, `attachment_name`) keep an empty
-  value as free text — `subject: meeting`, `reply to: bob` are ordinary
-  queries. Pinned as the deliberate half.
-- **Tests:** new `tests/test_query_operator_values.py` (20: 12 RED first,
-  8 controls); `MALFORMED` in `test_api_search_malformed_query.py` gained
-  three shapes (all three `run_search` branches); `has:"` moved out of
-  `_OPEN_QUOTE_TEXT`; `test_account_id_non_integer_value_treated_as_free_text`
-  became `…_is_refused`.
-- README (the "honoured or refused" paragraph) and CLAUDE.md (#364 section)
-  updated.
+- **The defect.** `cli.py` imports the daemon (so `sqlparse`, `psycopg`,
+  `keyring`) at module scope; a partial `uv sync` killed every command,
+  `--version` included, with a bare traceback.
+- **The fix.** New `src/localmail/cli_entry.py`: `main()` imports `cli`
+  inside a guard; pure `startup_failure_report` decides the output.
+  `pyproject.toml`'s script and `__main__.py` both point at it. `cli.py` is
+  unchanged.
+  - `--version`: stdout line as before, exit 0; stderr names the missing
+    module and `uv sync --extra extraction --extra mcp`.
+  - Any other command: that one line on stderr, exit 1.
+  - A failure in our own tree keeps its traceback; `--version` survives it
+    without repair text.
+- **Review round (4 agents) changed three things.**
+  - **Classification reads the raising frame when there is no
+    `ImportError.name`.** psycopg reports a dropped binary wheel / missing
+    libpq as a *nameless* `ImportError`, which the first cut blamed on
+    localmail (traceback on every command — #305 again for psycopg).
+  - **It catches `Exception`**: a half-upgraded pydantic raises
+    `SystemError` at import and still killed `--version`.
+  - **The version diagnostic is printed on every branch** (#304), the
+    re-raise one included.
+  - Also: `render_exception_chain` guarded; README's stderr "iff" reworded
+    (it was false for an own-tree failure); stale "38/36 commands" → 42/40.
+- **Ruling (mine): a guard at the entry point instead of the issue's
+  option 2** (defer imports into 42 command bodies). Smaller, keeps the
+  failure at startup, and a new command cannot forget it.
+- **Tests:** new `tests/test_cli_entry.py` (32): pure rule, the pyproject
+  wiring, and subprocesses that block `sqlparse` on `sys.meta_path` (script
+  and `-m`), shadow it with a package raising a nameless `ImportError` /
+  `SystemError`, or block `localmail.daemon` (must keep its traceback), with
+  positive controls. The review's 21 mutations (10 survived the first cut)
+  and 8 more on the new branches are all caught now, bar one equivalent
+  (`sys.argv` vs `sys.argv[1:]`).
+- README (missing-dependency paragraph; stderr contract widened to "version
+  unresolvable **or the CLI cannot import**"), CLAUDE.md, and
+  `version_report.py`'s scope paragraph updated.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | 12 of 20 new tests failed against `main` |
-| `uv run pytest -q` | **4592 passed**, 6 warnings (first run caught the old free-text pin, since rewritten) |
-| mypy | Success, 166 files |
+| RED first | `test_cli_entry.py` failed collection (no module) |
+| `uv run pytest -q` | **4631 passed**, 6 warnings (after review) |
+| mypy | Success, 167 files |
+| `.venv/bin/localmail --version` | `localmail, version 0.3.0` (script regenerated by `uv run`) |
 | GUI | untouched |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Merge the #378 PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <n>` all pass; `gh issue view 378` CLOSED.
+### 1. **Merge the #305 PR** (yours), once CI is green
+- **Acceptance:** `gh pr checks <n>` all pass; `gh issue view 305` CLOSED.
 
-### 2. **Deploy** (DGX needs `82540f9` anyway; then the #378 merge on both)
-- `/v1/search` changes, so restart `serve` on both hosts.
-- **Acceptance:** both `/v1/version` show the merge SHA;
-  `curl` a `POST /v1/search` with `{"query":"has:\""}` → 400 problem+json
-  `has: empty value not allowed`.
+### 2. **Deploy** on both hosts
+- The entry point changed, so `uv sync` **must** run to regenerate
+  `.venv/bin/localmail`. No migration; no wire change, so no `serve`
+  restart is strictly needed (restart anyway to move `build_hash`).
+- **Acceptance:** `.venv/bin/localmail` contains `from localmail.cli_entry
+  import main`; `localmail --version` prints its line; both `/v1/version`
+  show the merge SHA.
 
 ### 3. **Next small slice: pick with the operator**
-- Candidates: #305's other half (defer `cli.py`'s module-scope imports so
-  `--version` survives a missing dependency; touches many commands), #369
-  (last-token-wins; needs a refuse-vs-keep call), #383 (drop write-only
-  `messages.headers` + GIN in `0039`; one-way door), #365 (product call).
+- Candidates: #369 (last-token-wins; needs a refuse-vs-keep call), #383
+  (drop write-only `messages.headers` + GIN in `0039`; one-way door), #365
+  (product call), #357/#358 (type-safety of the sort rules / `run_search`
+  return type).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
   `filters.lang` as a list, #419 syntax, #415 dates, `api_minor` 5 and 6
-  features, #373 (`'` is literal), and now #378 (an empty
+  features, #373 (`'` is literal), #378 (an empty
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
 ### 4. **Carried**
@@ -106,15 +128,16 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #372, #368, #365; #375; #305 (imports);
-  #358/#357; #330/#327/#328; #340, #363, #285; robustness #218, #226,
-  #225/#227, #200/#211/#208, #206, #204, #25.
+- **Issues:** #383, #369, #372, #368, #365; #375; #358/#357;
+  #330/#327/#328; #340, #363, #285; robustness #218, #226, #225/#227,
+  #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The operator picked #378** and said they would deploy the DGX themselves.
-2. **#378:** refuse only the fixed-shape operators; empty text operators stay
-   free text (my call, following the issue's own caution).
+1. **The operator picked #305 (import half)** and asked me to deploy the DGX.
+2. **#305:** guard the CLI import at the entry point rather than deferring
+   imports into each command (my call; the issue's option 2 worried about
+   moving failures to first use, which this avoids).
 
 ## Open decisions & risks
 
@@ -130,7 +153,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    is a 400 (unknown `has:` value). Since #374, in `localmail search` a
    query operator out-votes the matching flag, and `--from '""'` exits 2.
    Since #305's half, a malformed `localmail search` query exits 2 with a
-   one-line error instead of 1 with a traceback. Since #378, an empty
+   one-line error instead of 1 with a traceback. Since #305, a missing
+   third-party dependency makes `localmail --version` print its line, exit 0
+   and write to stderr (the stderr contract widened); other commands exit 1
+   with one line instead of a traceback. Since #378, an empty
    `after:`/`before:`/`has:`/`account_id:`/`folder_id:`, or a non-int id,
    in a query is a 400 / exit 2 (it was served as free text). The GUI
    shows it as an error banner.
@@ -165,12 +191,12 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/378-refuse-empty-fixed-operators --stat   # empty once merged (squash)
+git diff main origin/fix/305-version-survives-missing-dependency --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh issue view 378 --json state --jq .state   # CLOSED once merged
+gh issue view 305 --json state --jq .state   # CLOSED once merged
 gh issue list --limit 200 --json number --jq length
 
-# Deploy — Mac (the repo is the install; no migration for #378; restart serve)
+# Deploy — Mac (the repo is the install; uv sync regenerates the entry script for #305)
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version     # api_minor 6, build_hash = merge SHA
@@ -184,9 +210,9 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4592 at session 84
-uv run pytest -q tests/test_query_operator_values.py tests/test_api_search_malformed_query.py
-uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 166 files
+unset VIRTUAL_ENV && uv run pytest -q              # 4615 at session 85
+uv run pytest -q tests/test_cli_entry.py tests/test_cli_version_stderr_contract.py
+uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 167 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```
 

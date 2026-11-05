@@ -18,6 +18,7 @@ from localmail.api.attachments import (
 from localmail.api.browse import list_messages as api_list_messages
 from localmail.api.messages import get_message as api_get_message
 from localmail.api.search import run_search
+from localmail.api.search_response import SearchResponse
 from localmail.search.searcher import Searcher
 
 MODE_TEXT = "text"
@@ -36,7 +37,7 @@ def tool_search(
     cursor: str | None = None,
     filters: dict[str, Any] | None = None,
     smart: bool = False,
-) -> dict[str, Any]:
+) -> SearchResponse:
     """Hybrid search, ACL-scoped. Page forward by passing back `next_cursor`.
 
     An unset `sort` resolves to `rank` when the query has free text and to

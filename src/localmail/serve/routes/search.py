@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from localmail.api.acl import allowed_account_ids
 from localmail.api.errors import FeatureUnavailable, ValidationFailed
 from localmail.api.search import run_search
+from localmail.api.search_response import SearchResponse
 from localmail.serve.middleware import get_authenticated_user
 from localmail.serve.request_validation import ProblemJsonValidationRoute
 
@@ -147,12 +148,15 @@ def _unknown_field_error(req: SearchRequest) -> str | None:
             f"supported: {supported}")
 
 
-@router.post("")
+# `response_model=None`: `search_response` already checks every scalar field,
+# so this serializes with `jsonable_encoder` instead of re-validating through
+# pydantic. The cost is that OpenAPI publishes no 200 schema for this route.
+@router.post("", response_model=None)
 def search_endpoint(
     req: SearchRequest,
     request: Request,
     user=Depends(get_authenticated_user),
-) -> dict[str, Any]:
+) -> SearchResponse:
     field_error = _unknown_field_error(req)
     if field_error is not None:
         raise ValidationFailed(field_error)

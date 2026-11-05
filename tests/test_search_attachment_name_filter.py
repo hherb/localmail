@@ -16,6 +16,8 @@ from localmail.db import open_pool
 from localmail.search.query import parse_query
 from localmail.search.searcher import Searcher
 
+from tests._search_response_fakes import empty_search_response
+
 
 class _E:
     name = "s"; model = "s"; dimension = 768
@@ -125,7 +127,7 @@ def test_the_mcp_search_tool_forwards_it(db_dsn, monkeypatch) -> None:
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return {"results": [], "next_cursor": None}
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)

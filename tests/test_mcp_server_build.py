@@ -16,6 +16,8 @@ from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 from localmail.mcp import build_mcp_server  # noqa: E402
 
+from tests._search_response_fakes import empty_search_response
+
 
 def test_build_registers_expected_tools(db_dsn):
     pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
@@ -243,7 +245,7 @@ def test_search_forwards_sort_order_to_the_tool_body(db_dsn, monkeypatch):
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return {"results": [], "next_cursor": None}
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
@@ -273,7 +275,7 @@ def test_search_forwards_an_unstated_sort_order_as_none(db_dsn, monkeypatch):
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return {"results": [], "next_cursor": None}
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
@@ -312,7 +314,7 @@ def test_search_accepts_a_null_query_through_the_argument_model(db_dsn, monkeypa
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return {"results": [], "next_cursor": None}
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
@@ -336,7 +338,7 @@ def test_search_forwards_an_omitted_query_as_empty(db_dsn, monkeypatch):
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return {"results": [], "next_cursor": None}
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
@@ -423,3 +425,27 @@ def test_get_message_maps_a_refused_mode_to_a_tool_error(db_dsn, monkeypatch):
     finally:
         pool.close()
     assert "'compact'" in str(excinfo.value)
+
+
+def test_search_publishes_the_typed_response_as_its_output_schema(db_dsn):
+    """#358: `server.search` is annotated with `SearchResponse`, so FastMCP
+    publishes every wire key as required. Reverting it to `dict[str, Any]`
+    gives agents an untyped object again, with nothing else failing."""
+    from typing import get_type_hints
+
+    from localmail.api.search_response import SearchResponse
+
+    pool = ConnectionPool(db_dsn, min_size=1, max_size=2, open=True)
+    try:
+        server = build_mcp_server(pool, searcher=None, config=McpConfig(enabled=True))
+        tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    finally:
+        pool.close()
+    schema = tools["search"].outputSchema or {}
+    assert set(schema.get("required", [])) == set(get_type_hints(SearchResponse))
+    # Types too, not only key names: `main` already published an untyped
+    # object, and widening a field here would change what agents may rely on.
+    props = schema["properties"]
+    assert props["total_estimate"]["type"] == "null"  # #175: never a number
+    assert set(props["sort_applied"]["enum"]) == {"rank", "date"}
+    assert "enum" in props["rewrite_status"]

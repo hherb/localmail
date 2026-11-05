@@ -269,6 +269,11 @@ def test_run_search_calls_searcher_and_maps_results() -> None:
     # how the wire-level instance of the same fake went unnoticed.
     fake_page.sort_applied = "rank"
     fake_page.rankable = True
+    # And the rewrite outcome, which `run_search` reads off a page-1 page:
+    # `search_response` refuses a MagicMock there (#358).
+    fake_page.rewrite_status = "not_requested"
+    fake_page.rewrite_note = None
+    fake_page.rewrite_note_code = None
 
     fake_searcher.search.return_value = fake_page
 

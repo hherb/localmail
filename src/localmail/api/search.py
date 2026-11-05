@@ -27,6 +27,7 @@ from localmail.api.search_cursor import (
     resolve_cursor_plan,
 )
 from localmail.api.search_projection import fields_error, project_hit
+from localmail.api.search_response import SearchResponse, search_response
 from localmail.config import SearchConfig
 from localmail.search.query import (
     ParsedQuery,
@@ -42,8 +43,9 @@ from localmail.search.rewrite_status import (
     NOT_CONFIGURED,
     NOT_REQUESTED,
     UNAVAILABLE,
+    RewriteNoteCode,
+    RewriteStatus,
     note_for_code,
-    rewrite_skipped_for_status,
 )
 from localmail.search.argument_errors import SearchArgumentRefused
 from localmail.search.sort_axes import (
@@ -281,7 +283,7 @@ def run_search(
     smart: bool = False,
     fields: list[str] | None = None,
     snippet_chars: Any = None,  # pre-gate, so genuinely any JSON value
-) -> dict[str, Any]:
+) -> SearchResponse:
     """Run a search (or continue an existing one) and return the API-shaped response.
 
     ``cursor`` is the opaque ``next_cursor`` returned by a previous call.
@@ -476,16 +478,16 @@ def run_search(
         # on either value — `page.sort_applied` and `page.rankable` are
         # stamped by the branch that produced the rows (`Searcher.search` for
         # fresh and keyset, `continue_page` from the pool's own metadata).
-        return {"results": [], "next_cursor": None, "total_estimate": None,
-                "took_ms": 0.0, "rewrite_skipped": False,
-                "sort_applied": resolve_sort(requested=plan.sort,
-                                             free_text=parsed_free_text),
-                # Present for the reason `sort_applied` is — this branch
-                # returns `next_cursor: None`, so a client that inferred
-                # would have nothing to infer from.
-                "rankable": is_rankable(free_text=parsed_free_text),
-                "rewrite_status": NOT_REQUESTED, "rewrite_note": None,
-                "rewrite_note_code": None}
+        return search_response(
+            results=[], next_cursor=None, took_ms=0.0,
+            sort_applied=resolve_sort(requested=plan.sort,
+                                      free_text=parsed_free_text),
+            # Present for the reason `sort_applied` is — this branch
+            # returns `next_cursor: None`, so a client that inferred
+            # would have nothing to infer from.
+            rankable=is_rankable(free_text=parsed_free_text),
+            rewrite_status=NOT_REQUESTED, rewrite_note=None,
+            rewrite_note_code=None)
 
     cfg = searcher.config
     # smart is a page-1 signal: continuation (cursor present) reuses the
@@ -605,9 +607,9 @@ def run_search(
                                  snippet_chars=snippet_chars)
 
     next_cursor = _next_cursor(page, cfg=cfg)
-    status: str
+    status: RewriteStatus
     note: str | None
-    code: str | None
+    code: RewriteNoteCode | None
     if cursor is None:
         if smart and not searcher.smart_available:
             status, code = UNAVAILABLE, NOT_CONFIGURED
@@ -630,8 +632,8 @@ def run_search(
     if fields is not None and "date_local" in fields:
         local_dates = searcher.message_local_dates(
             [r.message_id for r in page.results])
-    return {
-        "results": [
+    return search_response(
+        results=[
             _to_api_result(r) if fields is None
             else project_hit({
                 **_to_api_result(r),
@@ -641,24 +643,22 @@ def run_search(
             }, fields)
             for r in page.results
         ],
-        "next_cursor": next_cursor,
-        "total_estimate": None,
-        "took_ms": page.timing_ms.get("total", 0.0),
+        next_cursor=next_cursor,
+        took_ms=page.timing_ms.get("total", 0.0),
         # Read off the page, never re-derived here: the branch that produced
         # the rows stamped it, so this layer cannot report an ordering the
         # walk did not use (#345). Same call as `_next_cursor`'s direction.
-        "sort_applied": page.sort_applied,
+        sort_applied=page.sort_applied,
         # Read off the page for the same reason, and answering the question
         # `sort_applied` cannot (#353): a stated `date` is honoured for any
         # query, so the ordering alone cannot say whether rank was ever
         # available. The GUI's sort selector inferred it and re-enabled
         # Relevance on queries that have nothing to rank.
-        "rankable": page.rankable,
-        "rewrite_skipped": rewrite_skipped_for_status(status),
-        "rewrite_status": status,
-        "rewrite_note": note,
-        "rewrite_note_code": code,
-    }
+        rankable=page.rankable,
+        rewrite_status=status,
+        rewrite_note=note,
+        rewrite_note_code=code,
+    )
 
 
 def _check_pool_sort(

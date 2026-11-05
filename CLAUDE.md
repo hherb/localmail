@@ -857,6 +857,8 @@ src/localmail/
   shutdown_budget.py # remaining_seconds/supervisor_kill_after (pure) +
                     #   wind_down_threads — the one shutdown budget (#221 A)
   api/search_projection.py # pure: HIT_FIELDS / fields_error / project_hit (slice E)
+  api/search_response.py # SearchResponse + search_response: the one /v1/search
+                    #   response constructor, refusing a mock page (#358)
   search/           # hybrid search subsystem (Phases 1 + 2)
     __init__.py     # public API: create_searcher, Searcher, SearchPage, SearchResult
     arms.py         # retrieval arms: arm_bm25_messages, arm_bm25_chunks, arm_vector_chunks, arm_vector_attachment_chunks
@@ -5169,7 +5171,9 @@ for the full design.
           until #353 gave it a second field) demands `in ("rank", "date")` on
           every 200 body, which an unset MagicMock attribute fails and a new
           fake cannot get past. An equality assertion on one test's expected
-          value says nothing about the next fake somebody adds.
+          value says nothing about the next fake somebody adds. (**Since
+          #358 it is construction**: `search_response` refuses an unset
+          attribute on every scalar field, so the helper is a backstop.)
       - **The "surviving" mutation survives only one direction.** Reverting
         the *Relevance* input's `checked` binding alone is masked in the
         `(requested=rank, applied=date)` state — radio-group exclusivity
@@ -5250,6 +5254,8 @@ for the full design.
           strings in one scope under a keyword name matching the wrong one)
           and **#358** (`run_search -> dict[str, Any]`, which is why two
           consecutive PRs added a wire field and hit the same MagicMock trap).
+          **#358 is fixed**: see "The search response has one constructor"
+          below.
       - **`SearchPage.rankable` is stamped, not derived — and one site
         proves why.** `api.search._empty_grown_page` builds
         `query=parse_query("")` as a stand-in for an exhausted pool, so a
@@ -5367,7 +5373,7 @@ for the full design.
         failing, and what it serialises to is a property of the
         **serialisation path**, not of the field — measured, bare
         `jsonable_encoder` renders both `sort_applied` and `rankable` as
-        `{}`, while the route's `-> dict[str, Any]` response field renders
+        `{}`, while the route's pre-#358 `-> dict[str, Any]` response model rendered
         both as `[]`. (An earlier wording here read the `{}`/`[]`
         difference as per-field; it is not, and the pre-existing comments in
         `test_serve_search_route.py` and `test_serve_acl_routes.py` said the
@@ -6299,6 +6305,52 @@ for the full design.
     `attachments` column no longer matches `attachment_name` (#429, see the
     strict-jsonpath bullet above). A `-0000` `date_sent` is stored as UTC
     since #431 (see the `date_sent` bullet under Schema essentials).
+- **The search response has one constructor, and it refuses a fake page (#358).**
+  `run_search` returned `dict[str, Any]` from two hand-written literals (the
+  rowed path and the empty-ACL branch), so a wire field was a bare string key
+  and a `MagicMock` page with an attribute unset *serialised* (as `{}` or
+  `[]`) instead of raising — #345 and #353 both shipped that with the suite
+  green. Now [src/localmail/api/search_response.py](src/localmail/api/search_response.py)
+  holds the `SearchResponse` TypedDict and `search_response(...)`, the only
+  way the response is built (pinned by an AST test over every `return` in
+  `run_search`). It derives `total_estimate` (always `None`, #175) and
+  `rewrite_skipped` (from the status, #176) once, and raises `TypeError` for
+  every scalar field a fake could launder: a `sort_applied`, `rewrite_status`
+  or `rewrite_note_code` outside its `Literal` (`SortMode`, `RewriteStatus`,
+  `RewriteNoteCode`), a `rankable` that is not exactly a `bool`, a
+  non-numeric `took_ms`, a `next_cursor` or `rewrite_note` that is neither a
+  `str` nor `None`; `ValueError` for `rank` beside `rankable=False`. That pair
+  check is #356's **wire** half (it covers the empty-ACL dict, which a
+  `SearchPage.__post_init__` would not); #356 stays open for
+  `SearchPage`/`PoolMetadata` themselves, which library and CLI callers see
+  directly. `results` is not checked: hits are dicts from `_to_api_result`,
+  and a fake *hit* is `_assert_wire_hit_fields`' job.
+  - **The first cut checked only the three ordering fields, and review found
+    a live fake behind the other four**: `test_serve_acl_routes.py`'s
+    `_account_scoped_fake_searcher` shipped `rewrite_status`/`rewrite_note`/
+    `rewrite_note_code` as `{}`. It surfaced only because removing
+    `response_model=None` let FastAPI's model refuse it. Checking those fields
+    then caught four more fakes doing the same, in `test_api_search.py`,
+    `test_api_search_cursor_mode.py` and `test_api_search_pagination.py`
+    (five tests), which no assertion had looked at. Before that, adding
+    `rankable` to one `_page` fake in each of three files fixed 26 tests that
+    shared them.
+  - **The MCP `search` tool's `outputSchema` is typed now.** `main` already
+    published one, `{"type": "object", "additionalProperties": true}`, and
+    the SDK already validated against it, which checked nothing. Annotating
+    `server.search` with `SearchResponse` makes all ten keys required and
+    types them (enums for the `Literal`s, `null` for `total_estimate`), so an
+    MCP fake returning a partial dict is refused; return a real
+    `search_response(...)` (`tests/_search_response_fakes.py`). Pinned
+    against the published schema, key set and types.
+  - **The HTTP route is annotated `SearchResponse` with
+    `response_model=None`.** On `main` the `dict[str, Any]` annotation made
+    FastAPI validate and serialize through pydantic; now it is
+    `jsonable_encoder`. Output is byte-identical for every value a real page
+    carries, but two things moved: `/openapi.json` publishes `{}` for the 200
+    schema (was a generic object), and a non-finite `score` would now be a
+    500 where it was `null` (#361 keeps real scores finite). Tool results
+    are unchanged on MCP; only the published schema changed.
 - **Search filters are honoured or refused, never dropped (#364).** Design:
   [docs/superpowers/specs/2026-09-14-search-request-honesty-design.md](docs/superpowers/specs/2026-09-14-search-request-honesty-design.md);
   plan: [docs/superpowers/plans/2026-09-14-search-request-honesty.md](docs/superpowers/plans/2026-09-14-search-request-honesty.md).

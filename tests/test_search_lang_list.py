@@ -25,6 +25,8 @@ from tests.test_serve_search_route import (
     _seed_acct_and_grant,
 )
 
+from tests._search_response_fakes import empty_search_response
+
 
 def _post(db_dsn, api_token, filters):
     searcher = _fake_searcher_returning_one_hit()
@@ -103,7 +105,7 @@ def test_the_mcp_search_tool_forwards_a_lang_list(db_dsn, monkeypatch):
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return {"results": [], "next_cursor": None}
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)

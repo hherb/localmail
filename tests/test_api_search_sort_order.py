@@ -41,6 +41,7 @@ def _page(*, token=None, next_keyset=None):
     p.timing_ms = {"total": 1.0}
     p.next_keyset = next_keyset
     p.sort_applied = "date"
+    p.rankable = False
     p.rewrite_status = "not_requested"
     p.rewrite_note = None
     p.rewrite_note_code = None

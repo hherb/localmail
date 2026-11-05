@@ -48,6 +48,8 @@ from localmail.search.rewrite_status import (
     APPLIED,
     FAILED,
     NOT_REQUESTED,
+    RewriteNoteCode,
+    RewriteStatus,
     classify_rewrite_failure,
     note_for_code,
 )
@@ -581,9 +583,9 @@ class SearchPage:
     #: metadata there and from the branch's own parse everywhere else.
     rankable: bool
     next_keyset: KeysetCursor | None = None
-    rewrite_status: str = NOT_REQUESTED
+    rewrite_status: RewriteStatus = NOT_REQUESTED
     rewrite_note: str | None = None
-    rewrite_note_code: str | None = None
+    rewrite_note_code: RewriteNoteCode | None = None
 
 
 @dataclass(frozen=True)
@@ -1685,9 +1687,9 @@ class Searcher:
                 f"sort={effective_sort!r} with a non-empty query"
             )
 
-        rewrite_status = NOT_REQUESTED
+        rewrite_status: RewriteStatus = NOT_REQUESTED
         rewrite_note: str | None = None
-        rewrite_note_code: str | None = None
+        rewrite_note_code: RewriteNoteCode | None = None
         if smart and parsed.free_text.strip():
             t = time.monotonic()
             try:

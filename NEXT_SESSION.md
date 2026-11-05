@@ -1,20 +1,23 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-04 (session 85).** `main` is **`e5152d1`** (#449:
-> #378 refuse empty fixed-shape operators).
+> **Status as of 2026-11-05 (session 86).** `main` is **`5d361fe`** (#450:
+> #305 `--version` survives a missing dependency).
 >
-> This session has **one open PR** on `fix/305-version-survives-missing-dependency`
-> (closes #305). It carries the code and this handoff.
+> This session has **one open PR** on `fix/358-typed-search-response`
+> (closes #358). It carries the code and this handoff.
 >
-> **Both hosts are deployed at `e5152d1`** (Mac was already; DGX done this
-> session — the ssh deploy went through this time).
+> **Both hosts are deployed at `5d361fe`** (`uv sync` regenerated
+> `.venv/bin/localmail`, which now imports `localmail.cli_entry`).
 >
-> **Open issues: 30** (29 once #305 closes).
+> **Open issues: 29** (28 once #358 closes).
 >
-> **A Gmail refresh token on the Mac looks expired.** A review probe ran a
-> real `localmail sync` and it ended in `RefreshError: invalid_grant: Token
-> has been expired or revoked`. Account not identified; check the daemon log
-> and re-run `localmail oauth-login <name>`.
+> **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (identified
+> this session). Every IDLE/poll pass for it has failed with
+> `RefreshError: invalid_grant: Token has been expired or revoked` since
+> **2026-11-03 20:24**; its last message landed 2026-11-03 18:09. Fix (yours,
+> needs a browser): `localmail oauth-login hherb-dmc`, then
+> `launchctl kickstart -k gui/$(id -u)/com.localmail.daemon`. The DGX has
+> its own token store; not checked.
 >
 > **Leftover worktree `.claude/worktrees/bottie-bearer-token-dbc203`**
 > (detached at `5b85180`). Untouched; ask before removing it.
@@ -32,86 +35,102 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### Deploy of `e5152d1` (#449) — DGX (no commit)
+### Deploy of `5d361fe` (#450) — both hosts (no commit)
 
-- `git pull`, `uv sync --frozen --extra mcp --extra extraction`, restarted
-  `localmail-serve`; both services `active`; `/v1/version` reports
-  `build_hash` `e5152d1`. The Mac was already at `e5152d1`.
+- Mac: `uv sync --frozen --extra mcp --extra extraction`, kickstarted
+  `com.localmail.serve`; `/v1/version` `build_hash` `5d361fe`.
+- DGX: `git pull`, same sync, restarted `localmail-serve`; both services
+  `active`; `build_hash` `5d361fe`.
+- On both, `.venv/bin/localmail` contains `from localmail.cli_entry import
+  main` and `localmail --version` prints `localmail, version 0.3.0`.
 
-### PR on `fix/305-version-survives-missing-dependency` (based on `main` at `e5152d1`)
+### PR on `fix/358-typed-search-response` (based on `main` at `5d361fe`)
 
 | SHA | What |
 |---|---|
-| `e1bf976` | #305: `--version` survives a missing dependency |
-| review | review round: frame-based classification, `except Exception`, diagnostic on every branch, docs |
-| handoff | this file + `docs/handoffs/2026-11-04T1230Z-version-survives-missing-dependency.md` |
+| `016c034` | #358: the search response has one typed constructor that refuses a fake |
+| handoff | this file + `docs/handoffs/2026-11-04T2205Z-typed-search-response.md` |
 
-- **The defect.** `cli.py` imports the daemon (so `sqlparse`, `psycopg`,
-  `keyring`) at module scope; a partial `uv sync` killed every command,
-  `--version` included, with a bare traceback.
-- **The fix.** New `src/localmail/cli_entry.py`: `main()` imports `cli`
-  inside a guard; pure `startup_failure_report` decides the output.
-  `pyproject.toml`'s script and `__main__.py` both point at it. `cli.py` is
-  unchanged.
-  - `--version`: stdout line as before, exit 0; stderr names the missing
-    module and `uv sync --extra extraction --extra mcp`.
-  - Any other command: that one line on stderr, exit 1.
-  - A failure in our own tree keeps its traceback; `--version` survives it
-    without repair text.
-- **Review round (4 agents) changed three things.**
-  - **Classification reads the raising frame when there is no
-    `ImportError.name`.** psycopg reports a dropped binary wheel / missing
-    libpq as a *nameless* `ImportError`, which the first cut blamed on
-    localmail (traceback on every command — #305 again for psycopg).
-  - **It catches `Exception`**: a half-upgraded pydantic raises
-    `SystemError` at import and still killed `--version`.
-  - **The version diagnostic is printed on every branch** (#304), the
-    re-raise one included.
-  - Also: `render_exception_chain` guarded; README's stderr "iff" reworded
-    (it was false for an own-tree failure); stale "38/36 commands" → 42/40.
-- **Ruling (mine): a guard at the entry point instead of the issue's
-  option 2** (defer imports into 42 command bodies). Smaller, keeps the
-  failure at startup, and a new command cannot forget it.
-- **Tests:** new `tests/test_cli_entry.py` (32): pure rule, the pyproject
-  wiring, and subprocesses that block `sqlparse` on `sys.meta_path` (script
-  and `-m`), shadow it with a package raising a nameless `ImportError` /
-  `SystemError`, or block `localmail.daemon` (must keep its traceback), with
-  positive controls. The review's 21 mutations (10 survived the first cut)
-  and 8 more on the new branches are all caught now, bar one equivalent
-  (`sys.argv` vs `sys.argv[1:]`).
-- README (missing-dependency paragraph; stderr contract widened to "version
-  unresolvable **or the CLI cannot import**"), CLAUDE.md, and
-  `version_report.py`'s scope paragraph updated.
+- **The defect.** `run_search -> dict[str, Any]`, built from two
+  hand-written literals (rowed path + empty-ACL branch). A MagicMock page
+  with `sort_applied`/`rankable` unset serialised as `{}`/`[]` instead of
+  raising (the trap behind #345 and #353).
+- **The fix.** New `src/localmail/api/search_response.py`: the
+  `SearchResponse` TypedDict plus `search_response(...)`, now the only way
+  the response is built. It derives `total_estimate` (`None`) and
+  `rewrite_skipped` once. It raises `TypeError` on any scalar field a fake
+  could launder (`sort_applied`, `rewrite_status`, `rewrite_note_code` outside
+  their `Literal`s; a non-`bool` `rankable`; a non-numeric `took_ms`; a
+  non-`str` `next_cursor`/`rewrite_note`), and `ValueError` on `rank` beside
+  `rankable=False` (#356's wire half).
+  - HTTP route annotated `SearchResponse` with `response_model=None`: the
+    serializer moves from pydantic to `jsonable_encoder`. Real output is
+    byte-identical; `/openapi.json`'s 200 schema for the route becomes `{}`.
+  - MCP `server.search` annotated `SearchResponse`, so the tool's
+    `outputSchema` is **typed** now (all ten keys required). `main` already
+    published an untyped one, which the SDK validated against to no effect.
+- **It caught the one `_page` fake in each of three files** (26 tests share
+  them) that set `sort_applied` and forgot `rankable`, plus 6 MCP fakes
+  returning a partial dict. The review round found one more, in
+  `test_serve_acl_routes.py`, shipping the three `rewrite_*` fields as `{}`;
+  checking those fields closed it and caught the same in the `_page` fakes of
+  `test_api_search.py`, `test_api_search_cursor_mode.py` and
+  `test_api_search_pagination.py` (5 tests).
+- **Tests:** new `tests/test_search_response.py` (34), plus a published-schema
+  pin in `test_mcp_server_build.py`. Six mutations (each check off, the
+  server annotation reverted, the empty-ACL return back to `dict(...)`) each
+  fail their own test.
+- CLAUDE.md (new entry + layout line), `docs/mcp-usage.md` (outputSchema
+  note) updated. README unchanged: no response on either transport changed,
+  only the published schemas.
 
 ## Verification
 
 | check | result |
 |---|---|
-| RED first | `test_cli_entry.py` failed collection (no module) |
-| `uv run pytest -q` | **4631 passed**, 6 warnings (after review) |
-| mypy | Success, 167 files |
-| `.venv/bin/localmail --version` | `localmail, version 0.3.0` (script regenerated by `uv run`) |
+| RED first | `test_search_response.py` failed collection (no module) |
+| `uv run pytest -q` | **4666 passed**, 6 warnings (pre-existing), after the review round |
+| mypy | Success, 168 files |
 | GUI | untouched |
 | CI | **check on the PR** (`gh pr checks`) |
 
 ## What's next
 
-### 1. **Merge the #305 PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <n>` all pass; `gh issue view 305` CLOSED.
+### 1. **Merge the #358 PR** (yours), once CI is green
+- **Acceptance:** `gh pr checks <n>` all pass; `gh issue view 358` CLOSED.
 
 ### 2. **Deploy** on both hosts
-- The entry point changed, so `uv sync` **must** run to regenerate
-  `.venv/bin/localmail`. No migration; no wire change, so no `serve`
-  restart is strictly needed (restart anyway to move `build_hash`).
-- **Acceptance:** `.venv/bin/localmail` contains `from localmail.cli_entry
-  import main`; `localmail --version` prints its line; both `/v1/version`
-  show the merge SHA.
+- No migration and no entry-point change; restart `serve` (the MCP schema
+  and `build_hash` move). The daemon need not restart.
+- **Acceptance:** both `/v1/version` show the merge SHA; an MCP `tools/list`
+  shows `search`'s `outputSchema` with `title: SearchResponse` and ten
+  `required` keys (`main` already had an untyped one).
 
-### 3. **Next small slice: pick with the operator**
-- Candidates: #369 (last-token-wins; needs a refuse-vs-keep call), #383
-  (drop write-only `messages.headers` + GIN in `0039`; one-way door), #365
-  (product call), #357/#358 (type-safety of the sort rules / `run_search`
-  return type).
+### 3. **Re-authorise `hherb-dmc`** (yours, browser)
+- **Acceptance:** `daemon.err.log` shows no new `crashed for hherb-dmc`
+  after the kickstart, and
+  `psql -p 5532 -d localmail -Atc "select max(date_received) from messages m join accounts a on a.id=m.account_id where a.name='hherb-dmc'"`
+  moves past 2026-11-03.
+
+### 4. **Dependabot fifth round (#186–#196, 11 HIGH) — recommended next**
+- **pypdf `< 6.21.4`** (#186, #191–#196): `_extract_pdf` parses emailed PDFs,
+  so this is the attacker-reachable kind (the #66–#69 / #105–#112 family).
+  Raise the floor to `>=6.21.4` (check the advisories for the highest
+  first-patched version), re-lock in a worktree, and re-run the 300-PDF
+  byte-identical extraction comparison the third round used.
+- **pyasn1 `<= 0.6.4`** (#187–#190): arrives via google-auth; newly declare a
+  floor (the `transformers` lesson) and judge reachability before calling it
+  hygiene.
+- **Acceptance:** `uv lock --dry-run` shows the bump; the lock holds the
+  fixed versions; suite + mypy green; the alerts close after merge.
+- Read each `vulnerable_version_range` against `uv.lock`, not the floor.
+
+### 5. **Next small slice: pick with the operator**
+- Candidates: **#356** (now smaller: only `SearchPage`/`PoolMetadata`
+  `__post_init__` left, the wire half is done), **#357** (parsed-free-text
+  type for the four sort rules), **#328** (typed page-cache entry; same class
+  as #358, one layer in), #369 (needs a refuse-vs-keep call), #383 (one-way
+  door, `0039`), #365 (product call).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
@@ -119,7 +138,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   features, #373 (`'` is literal), #378 (an empty
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
-### 4. **Carried**
+### 6. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
 - **Dependabot #71 / #185:** left open on purpose.
@@ -128,16 +147,20 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #372, #368, #365; #375; #358/#357;
+- **Issues:** #383, #369, #372, #368, #365; #375; #357/#356;
   #330/#327/#328; #340, #363, #285; robustness #218, #226, #225/#227,
   #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The operator picked #305 (import half)** and asked me to deploy the DGX.
-2. **#305:** guard the CLI import at the entry point rather than deferring
-   imports into each command (my call; the issue's option 2 worried about
-   moving failures to first use, which this avoids).
+1. **The operator picked #358** and approved the DGX deploy.
+2. **#358 (mine):** a TypedDict plus a checking constructor rather than a
+   pydantic `response_model` (transport-neutral, as the issue suggested), and
+   the `rank`+unrankable pair check folded in since every response now passes
+   one place. `SearchPage`'s own `__post_init__` (#356) left for its own slice.
+3. **The MCP output schema** came free with the annotation and was kept: it
+   documents the contract to agents and makes the SDK's existing validation
+   check something (it validated against an untyped object before).
 
 ## Open decisions & risks
 
@@ -181,7 +204,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~11–14 this session** (full suite 5½ min). Check
+10. **Load on the Mac was ~7–19 this session** (full suite 4½ min). Check
     `uptime` before trusting any timing.
 
 ## Exact commands to resume
@@ -191,12 +214,12 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/305-version-survives-missing-dependency --stat   # empty once merged (squash)
+git diff main origin/fix/358-typed-search-response --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh issue view 305 --json state --jq .state   # CLOSED once merged
+gh issue view 358 --json state --jq .state   # CLOSED once merged
 gh issue list --limit 200 --json number --jq length
 
-# Deploy — Mac (the repo is the install; uv sync regenerates the entry script for #305)
+# Deploy — Mac (the repo is the install)
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 curl -sk https://127.0.0.1:8443/v1/version     # api_minor 6, build_hash = merge SHA
@@ -210,9 +233,9 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4615 at session 85
-uv run pytest -q tests/test_cli_entry.py tests/test_cli_version_stderr_contract.py
-uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 167 files
+unset VIRTUAL_ENV && uv run pytest -q              # 4653 at session 86
+uv run pytest -q tests/test_search_response.py tests/test_mcp_server_build.py
+uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 168 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```
 

@@ -8,7 +8,9 @@ grown one), read by ``continue_page``, ``grow_pool`` and
 ``get_pool_metadata``. It used to be a ``dict[str, Any]``, so a writer that
 forgot a key failed as a ``KeyError`` in a reader, at continuation time.
 Every field here has no default, so the same slip is a ``TypeError`` at the
-writer; ``PageCache``'s ``value_type`` refuses anything that is not one.
+writer; ``PageCache``'s ``value_type`` refuses anything that is not one. The
+two cross-field rules are checked here too, so a broken writer fails at the
+``put`` rather than at the next continuation.
 """
 
 from __future__ import annotations
@@ -17,7 +19,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from localmail.search.query import ParsedQuery
-from localmail.search.sort_axes import SortMode, SortOrder
+from localmail.search.sort_axes import (
+    SortMode, SortOrder, is_rankable, ordering_pair_error,
+)
 
 
 @dataclass(frozen=True)
@@ -41,3 +45,17 @@ class PoolEntry:
     # before it served (#426). A fresh pool is ``1`` and empty.
     first_page: int
     excluded_ids: frozenset[int]
+
+    def __post_init__(self) -> None:
+        # Readers zip the two with ``strict=True``; this moves that failure
+        # from continuation time to the writer.
+        if len(self.scores) != len(self.hydrated):
+            raise ValueError(
+                f"PoolEntry scores ({len(self.scores)}) and hydrated "
+                f"({len(self.hydrated)}) must be parallel")
+        # The fourth holder of #356's pair, beside SearchPage, PoolMetadata
+        # and search_response; rankability is the pool query's own.
+        pair_error = ordering_pair_error(
+            sort=self.sort, rankable=is_rankable(free_text=self.parsed.free_text))
+        if pair_error is not None:
+            raise ValueError(pair_error)

@@ -6,7 +6,8 @@ beside ``rankable=False`` at construction (#356).
 directly, and library callers and api/ read ``PoolMetadata`` through
 ``get_pool_metadata``, so the guarantee has to hold there too — by
 construction, not by every emitter deriving both fields from one string.
-One rule, ``sort_axes.ordering_pair_error``, shared by all three.
+One rule, ``sort_axes.ordering_pair_error``, shared by all four holders:
+``PoolEntry`` (#328), the cached pool those readers are built from, too.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from localmail.api.search_response import search_response
+from localmail.search.pool_entry import PoolEntry
 from localmail.search.query import parse_query
 from localmail.search.rewrite_status import NOT_REQUESTED
 from localmail.search.searcher import PoolMetadata, SearchPage
@@ -37,6 +39,16 @@ def _meta(*, sort, rankable) -> PoolMetadata:
     )
 
 
+def _entry(*, sort, rankable) -> PoolEntry:
+    # PoolEntry derives rankability from its query rather than storing it.
+    return PoolEntry(
+        parsed=parse_query("invoice" if rankable else ""), hydrated=[],
+        scores=[], candidates_per_arm=50, rerank_pool_size=100, page_size=10,
+        user_id=None, sort=sort, sort_order="desc",
+        first_page=1, excluded_ids=frozenset(),
+    )
+
+
 def _wire(*, sort, rankable):
     return search_response(
         results=[], next_cursor=None, took_ms=1.0, sort_applied=sort,
@@ -46,8 +58,8 @@ def _wire(*, sort, rankable):
 
 
 _HOLDERS = pytest.mark.parametrize(
-    "build", [_page, _meta, _wire],
-    ids=["SearchPage", "PoolMetadata", "search_response"])
+    "build", [_page, _meta, _entry, _wire],
+    ids=["SearchPage", "PoolMetadata", "PoolEntry", "search_response"])
 
 
 def test_the_rule_words_the_pair_exactly() -> None:

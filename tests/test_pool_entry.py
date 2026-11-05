@@ -15,6 +15,7 @@ runs no mypy (#285) and a type hint alone would guard nothing.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 
 import pytest
 
@@ -45,8 +46,21 @@ def test_the_fixture_names_every_field():
 def test_every_field_is_required(name):
     kwargs = _fields()
     del kwargs[name]
-    with pytest.raises(TypeError, match=name):
+    with pytest.raises(TypeError, match=rf"'{name}'"):
         PoolEntry(**kwargs)
+
+
+def test_scores_must_be_parallel_to_hydrated():
+    # Readers zip them strictly; a mismatch must fail at the writer instead.
+    with pytest.raises(ValueError, match="parallel"):
+        PoolEntry(**{**_fields(), "scores": [0.5]})
+
+
+def test_value_type_has_no_default():
+    # ``object`` as a default would check nothing; the docstring says so, and
+    # the Searcher's wiring test cannot see a default nobody relies on.
+    p = inspect.signature(PageCache.__init__).parameters["value_type"]
+    assert p.kind is p.KEYWORD_ONLY and p.default is p.empty
 
 
 def test_an_entry_is_frozen():

@@ -201,8 +201,9 @@ def ordering_pair_error(*, sort: str, rankable: bool) -> str | None:
     built by something that did not derive both from one string. The GUI
     renders that pair as a checked *and* disabled Relevance radio (#355).
 
-    The one rule for all three holders of the pair —
-    ``searcher.SearchPage``, ``searcher.PoolMetadata`` and
+    The one rule for all four holders of the pair —
+    ``searcher.SearchPage``, ``searcher.PoolMetadata``,
+    ``pool_entry.PoolEntry`` (#328) and
     ``api.search_response.search_response`` — so the wording cannot drift.
     Each raises ``ValueError`` with it: a caller bug with no repair, so loud
     rather than normalised (``QueueCounts``' call, not ``ExtractedText``'s).

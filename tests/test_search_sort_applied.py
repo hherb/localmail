@@ -269,6 +269,24 @@ def test_grow_pool_reads_the_pool_s_sort_rather_than_assuming_rank(searcher):
     assert grown.sort_applied == "date"
 
 
+def test_grow_pool_keeps_the_pool_s_sort_order(searcher):
+    """The grown entry must carry ``sort_order`` over, not reset it.
+
+    Every real pool is ``desc`` (``rank`` + ``asc`` is refused before
+    retrieval), so only an ascending pool put straight into the cache can
+    tell a carried value from a hardcoded default.
+    """
+    searcher._cache.put("tok-grow-asc", PoolEntry(
+        parsed=parse_query("needle"), hydrated=[], scores=[],
+        page_size=5, candidates_per_arm=2, rerank_pool_size=20,
+        user_id=1, sort="rank", sort_order="asc",
+        first_page=1, excluded_ids=frozenset(),
+    ))
+    searcher.grow_pool("tok-grow-asc", 8, page=1, user_id=1)
+    meta = searcher.get_pool_metadata("tok-grow-asc", user_id=1)
+    assert meta is not None and meta.sort_order == "asc"
+
+
 def test_a_pool_exhausted_at_the_cap_reports_the_pool_s_sort(searcher):
     """``_empty_grown_page`` stands in for a page ``continue_page`` would
     have served, so it must report that pool's ordering and not a default."""

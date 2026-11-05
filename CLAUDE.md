@@ -4424,6 +4424,15 @@ for the full design.
         against its own test). The readers' `entry.get("sort", "rank")`
         mutation is no longer spellable, so its two `KeyError` pins were
         removed rather than ported.
+        - **`PoolEntry.__post_init__` checks the two cross-field rules**
+          (review of #454): `scores` parallel to `hydrated` (the readers'
+          `zip(strict=True)`, moved to the writer) and #356's pair through
+          `ordering_pair_error`, rankability derived from `parsed`. It is
+          the fourth holder in `test_search_page_ordering_pair.py`. The
+          signature pin `test_value_type_has_no_default` exists because a
+          `value_type = object` default survived all 180 related tests, and
+          `test_grow_pool_keeps_the_pool_s_sort_order` because a grow
+          resetting `sort_order` did (every real pool is `desc`).
     - **`Searcher.search` raises on a `keyset_cursor` it will not read**,
       independently of the route: the drop is a property of the Searcher's own
       dispatch, and the CLI and library callers reach it without passing
@@ -5280,7 +5289,8 @@ for the full design.
           `continue_page`'s page since #426), and the empty-ACL branch —
           with `_empty_grown_page` copying both from a `PoolMetadata`. Now
           the pure `sort_axes.ordering_pair_error` is the one rule, and
-          `SearchPage.__post_init__`, `PoolMetadata.__post_init__` and
+          `SearchPage.__post_init__`, `PoolMetadata.__post_init__`,
+          `PoolEntry.__post_init__` (#328, the cached pool) and
           `search_response` (the wire half, #358) each raise `ValueError`
           with its message, so the wording is shared. It tests
           `rankable is not True`, not truthiness, because the dataclasses
@@ -6252,8 +6262,9 @@ for the full design.
       writes `first_page=1` and an empty `excluded_ids`, so a put path that
       forgets them fails rather than a pool silently reading as ungrown —
       #426 again, with tests green. The `entry["sort"]` rule; since #328 a
-      `TypeError` at the put, not a `KeyError` at the read. `grow_pool`'s `page` is keyword-only with
-      **no default** for the same reason (#234's shape).
+      `TypeError` at the put, not a `KeyError` at the read. `grow_pool`'s
+      `page` is keyword-only with **no default** for the same reason
+      (#234's shape).
     - **A grow that finds nothing unseen is grown again** in
       `_continue_or_grow`, up to the cap, inside the same request: served
       as is it was an empty page still carrying a `next_cursor`, each one a

@@ -1,16 +1,16 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-05 (session 89).** `main` is **`7214de8`** (#453:
-> #356, `SearchPage`/`PoolMetadata` refuse `rank` beside `rankable=False`).
+> **Status as of 2026-11-06 (session 90).** `main` is **`753133c`** (#454:
+> #328, the page-cache entry is a checked `PoolEntry`).
 >
-> This session has **one open PR** on `fix/328-typed-pool-entry` (#328). It
+> This session has **one open PR** on `fix/330-sort-vocabulary` (#330). It
 > carries the code and this handoff.
 >
-> **Both hosts are deployed at `8dce550`**, one behind `main`. #453 changes
-> no behaviour for a correct emitter, so it was not deployed; deploy it with
-> this PR.
+> **Both hosts are deployed at `753133c`** (deployed this session, verified
+> via `/v1/version`). #330 changes no wire behaviour; deploy it with the
+> next PR or after merge.
 >
-> **Open issues: 28** (27 once this PR merges and closes #328). **Open
+> **Open issues: 27** (26 once this PR merges and closes #330). **Open
 > Dependabot alerts: 2** (#71, #185, open on purpose; carried, not
 > re-checked).
 >
@@ -34,55 +34,52 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### PR on `fix/328-typed-pool-entry` (based on `main` at `7214de8`)
+- **Deployed `753133c`** (#356 + #328) to the Mac and the DGX; both report
+  `build_hash: 753133c`.
+
+### PR on `fix/330-sort-vocabulary` (based on `main` at `753133c`)
 
 | SHA | What |
 |---|---|
-| `d842a7b` | #328: `search/pool_entry.py::PoolEntry` (frozen, no defaults) is the cache value; `PageCache[V]` takes a required `value_type` and refuses other values at `put`; readers use attributes, `grow_pool` uses `dataclasses.replace`; CLAUDE.md updated |
-| handoff | this file + `docs/handoffs/2026-11-05T2355Z-328-typed-pool-entry.md` |
+| `fa44f7c` | #330: `serve/routes/search.py`, `mcp/server.py`, `mcp/tools.py` annotate `sort`/`sort_order` with `sort_axes.SortMode`/`SortOrder` instead of restating the `Literal`s; CLAUDE.md note |
+| handoff | this file + `docs/handoffs/2026-11-06T0100Z-330-sort-vocabulary.md` |
 
-- **Why `value_type` and not just a type hint:** CI runs no mypy (#285), so
-  a hint alone would let a raw dict back in. The check is one `isinstance`.
-- Tests: `tests/test_pool_entry.py` (15). Three mutations, each failing
-  exactly its own test: drop the `isinstance` in `put` (2 fail), wire the
-  Searcher's cache with `value_type=object` (1), give three fields defaults
-  (3 parametrised cases).
-- The two `KeyError` pins in `test_searcher_pool_metadata.py`
-  (`entry.get("sort", "rank")`) were removed, not ported: that mutation is
-  no longer spellable, and a forgotten field is now covered at construction.
-- Seven test sites that put dicts into the cache now build `PoolEntry`
-  (two of them were pre-#426 dicts missing `first_page`/`excluded_ids`,
-  which the reader they reached never read).
+- Tests: `tests/test_sort_vocabulary.py` (7). An AST rule refuses any
+  `Literal` spelling either vocabulary in `src/` outside `sort_axes.py`
+  (with a negative control and a check the authority still matches), and
+  the published HTTP (`SearchRequest.model_json_schema()`) and MCP
+  (`inputSchema`) enums are compared with `get_args`.
+- Mutations: restating `Literal["desc", "asc"]` in the route fails only the
+  AST rule; a stale `Literal["rank"]` in `mcp/server.py` fails only the MCP
+  schema pin.
+- **Not done:** the issue's larger idea (`SortOrder` as a `str` Enum
+  carrying its ORDER BY). The wire is unchanged because the aliases are the
+  same `Literal`s in the same order.
 
 ## Verification
 
 | check | result |
 |---|---|
-| `uv run pytest -q` | **4701 passed**, 6 warnings (pre-existing), 5:53 at load ~30–80 |
+| `uv run pytest -q` | **4715 passed**, 6 warnings (pre-existing), 5:12 |
 | mypy | Success, 169 files |
 | GUI | untouched |
 | CI | not yet run when this was written; check `gh pr checks` |
 
-The 4701 is not comparable to session 88's 4673 (that was the #356 branch
-at its first commit; not re-measured against a clean `main`).
-
 ## What's next
 
-### 1. **Merge the #328 PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <PR>` all pass; `gh issue view 328` closed.
-- Then deploy `main` to both hosts (it carries #356 and #328; neither
-  changes behaviour for a correct emitter).
+### 1. **Merge the #330 PR** (yours), once CI is green
+- **Acceptance:** `gh pr checks <PR>` all pass; `gh issue view 330` closed.
 
 ### 2. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
 ### 3. **Next small slice: pick with the operator**
-- Candidates: **#285** (does mypy/ruff gate CI — would make #357 and every
-  type-level guard real; needs a ruff-pin call), **#357**
-  (`ParsedFreeText` NewType; only worth it with #285), **#327**/**#330**
-  (the sibling type-design follow-ups of #328), #369 (refuse-vs-keep call),
-  #383 (one-way door, `0039`), #365 (product call).
+- Candidates: **#327** (pool-mode `CursorPlan` carries `sort`/`sort_order`
+  it must ignore; the last of the #322 type-design follow-ups), **#285**
+  (does mypy/ruff gate CI — needs a ruff-pin call), **#357** (only worth it
+  with #285), #369 (refuse-vs-keep call), #383 (one-way door, `0039`),
+  #365 (product call).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
@@ -99,17 +96,15 @@ at its first commit; not re-measured against a clean `main`).
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #372, #368, #365; #375; #357;
-  #330/#327; #340, #363, #285; robustness #218, #226, #225/#227,
-  #200/#211/#208, #206, #204, #25.
+- **Issues:** #383, #369, #372, #368, #365; #375; #357; #327; #340, #363,
+  #285; robustness #218, #226, #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The operator picked #328** over #357/#285 (runtime-enforced beats a
-   type hint CI never checks).
-2. **`PageCache` checks its value type at `put`** (mine): `value_type` is
-   keyword-only with no default, since `object` would be the unchecked bag
-   again. `test_page_cache.py` passes `value_type=dict`.
+1. **The operator picked #330** and asked for both hosts to be deployed at
+   `753133c` first.
+2. **Import the aliases, not the Enum** (mine): the smallest change that
+   closes the drift; the Enum would rewrite `date_keyset` for no wire gain.
 
 ## Open decisions & risks
 
@@ -153,8 +148,8 @@ at its first commit; not re-measured against a clean `main`).
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~16–80 this session** (full suite 6 min; a
-    bmlib pytest was running beside it). Check
+10. **Load on the Mac was ~7–30 this session** (full suite 5 min; a
+    bmlibrarian pytest was running beside it). Check
     `uptime` before trusting any timing.
 
 ## Exact commands to resume
@@ -164,7 +159,7 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/328-typed-pool-entry --stat   # empty once merged (squash)
+git diff main origin/fix/330-sort-vocabulary --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq length   # 2 once Dependabot rescans
 gh issue list --limit 200 --json number --jq length
@@ -183,7 +178,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4701 at session 89
+unset VIRTUAL_ENV && uv run pytest -q              # 4715 at session 90
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```

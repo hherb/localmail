@@ -1,24 +1,23 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-05 (session 87).** `main` is **`db9c3ec`** (#451:
-> #358 typed search response).
+> **Status as of 2026-11-05 (session 88).** `main` is **`8dce550`** (#452:
+> pypdf 6.21.4, pyasn1 0.6.5).
 >
-> This session has **one open PR** on `fix/dependabot-round5` (Dependabot
-> #186–#196). It carries the code and this handoff.
+> This session has **one open PR** on `fix/356-searchpage-rankable-pair`
+> (#356). It carries the code and this handoff.
 >
-> **Both hosts are deployed at `db9c3ec`** (serve restarted; daemon not).
+> **Both hosts are deployed at `8dce550`** (serve **and** daemon restarted;
+> pypdf 6.21.4 on both).
 >
-> **Open issues: 28.** Open Dependabot alerts: 13 (11 close with this PR;
-> #71 and #185 stay open on purpose).
+> **Open issues: 28** (27 once this PR merges and closes #356). **Open
+> Dependabot alerts: 2** (#71, #185, open on purpose); round 5 auto-closed.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
 > hherb-dmc`, then `launchctl kickstart -k gui/$(id -u)/com.localmail.daemon`.
 >
-> **Leftover worktrees:** `.claude/worktrees/bottie-bearer-token-dbc203`
-> (carried; ask before removing), and this session's `../localmail-dep5`
-> (branch) and `../localmail-dep5-main` (detached baseline) — remove both
-> once the PR merges.
+> **Leftover worktree:** `.claude/worktrees/bottie-bearer-token-dbc203`
+> (carried; ask before removing). Session 87's two worktrees are removed.
 
 ## Project context (1-minute version)
 
@@ -33,68 +32,61 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-### Deploy of `db9c3ec` (#451) — both hosts (no commit)
+### Deploy of `8dce550` (#452) — both hosts (no commit)
 
-- Mac: `uv sync --frozen --extra mcp --extra extraction`, kickstarted
-  `com.localmail.serve`; `/v1/version` `build_hash` `db9c3ec`.
-- DGX: `git pull`, same sync, restarted `localmail-serve`; daemon and serve
-  `active`; `build_hash` `db9c3ec`.
-- **Not checked:** the MCP `tools/list` outputSchema acceptance (needs a
-  bearer token). The suite pins it.
+- Mac: `uv sync --frozen --extra mcp --extra extraction` (only pypdf and
+  pyasn1 moved), kickstarted serve and daemon; `/v1/version` `build_hash`
+  `8dce550`; venv imports pypdf 6.21.4, pyasn1 0.6.5.
+- DGX: `git pull`, same sync, restarted daemon and serve; both `active`;
+  pypdf 6.21.4; `build_hash` `8dce550`.
 
-### PR on `fix/dependabot-round5` (based on `main` at `db9c3ec`)
+### PR on `fix/356-searchpage-rankable-pair` (based on `main` at `8dce550`)
 
 | SHA | What |
 |---|---|
-| `f90dba6` (PR #452) | pypdf floor `>=6.21.4`, new `pyasn1>=0.6.5`; re-lock; CLAUDE.md entry |
-| handoff | this file + `docs/handoffs/2026-11-05T2230Z-dependabot-round5.md` |
+| `bad5720` | #356: `sort_axes.ordering_pair_error`, applied by `SearchPage.__post_init__`, `PoolMetadata.__post_init__` and `search_response`; CLAUDE.md updated |
+| handoff | this file + `docs/handoffs/2026-11-05T2240Z-356-ordering-pair.md` |
 
-- **pypdf 6.21.2 → 6.21.4** (#186, #191–#196, HIGH): mail-reachable via
-  `_extract_pdf`. 300 archive PDFs through `LightweightExtractor` in a
-  main-venv worktree and a branch-venv worktree: **byte-identical** (284
-  extract, the same 16 raise `ExtractorError`). Script in the scratchpad,
-  not kept (same call as the third round).
-- **pyasn1 0.6.4 → 0.6.5** (#187–#190, HIGH), newly declared. Its only
-  importer is google-auth's `crypt/_python_rsa.py`, which cannot import
-  (`rsa` is not in the lock); the OAuth flow modules never load pyasn1.
-- `uv lock -P pypdf -P pyasn1` moved **only** those two packages.
+- **Wire half was already done by #358**; this is the library/CLI half.
+  The rule is shared, so all three raise the same message.
+- Tests: `tests/test_search_page_ordering_pair.py`. Mutation-checked:
+  disabling either `__post_init__` guard fails exactly its own test.
+- Review round (same PR): the class refusals assert the message *equals*
+  the rule's (a `match="rankable=False"` survived a hand-written copy);
+  the wording is pinned to one literal; the rule tests `rankable is not
+  True` so a truthy fake cannot pass; the weaker duplicate
+  `test_search_response.py::test_rank_beside_unrankable_is_refused` is
+  folded into the parametrised holder test.
+- No production emitter tripped it (full suite green), as #355 predicted.
 
 ## Verification
 
 | check | result |
 |---|---|
-| `uv run pytest -q` (branch worktree) | **4666 passed**, 6 warnings (pre-existing) |
+| `uv run pytest -q` | **4673 passed**, 6 warnings (pre-existing) |
 | mypy | Success, 168 files |
-| 300-PDF extraction diff | identical |
 | GUI | untouched |
-| CI | **check on the PR** (`gh pr checks`) |
+| CI (PR #453) | **green**: pytest 3.12 + 3.13, Cloudflare Pages |
 
 ## What's next
 
-### 1. **Merge PR #452** (yours), once CI is green
-- **Acceptance:** `gh pr checks <n>` all pass; after merge,
-  `gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open' --jq length`
-  is **2** (#71, #185).
+### 1. **Merge the #356 PR** (yours), once CI is green
+- **Acceptance:** `gh pr checks 453` all pass; `gh issue view 356` closed.
+- No deploy is strictly needed (no behaviour change for a correct emitter);
+  deploy with the next code change.
 
-### 2. **Deploy** on both hosts
-- `uv sync` installs the two packages. Restart **both** serve and the
-  daemon: the extract worker runs in the daemon and imports pypdf.
-- **Acceptance:** both `/v1/version` show the merge SHA;
-  `.venv/bin/python -c 'import pypdf;print(pypdf.__version__)'` prints
-  `6.21.4` on both hosts; daemon `active`.
+### 2. ~~Confirm Dependabot closed the round-5 alerts~~ — **done**
+- Open alerts read `[185, 71]` this session, after #452 merged.
 
 ### 3. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
-### 4. **Remove this session's worktrees** after the merge
-- `git worktree remove ../localmail-dep5 && git worktree remove ../localmail-dep5-main && git branch -D fix/dependabot-round5`
-
-### 5. **Next small slice: pick with the operator**
-- Candidates: **#356** (only `SearchPage`/`PoolMetadata` `__post_init__` left), **#357** (parsed-free-text
-  type for the four sort rules), **#328** (typed page-cache entry; same class
-  as #358, one layer in), #369 (needs a refuse-vs-keep call), #383 (one-way
-  door, `0039`), #365 (product call).
+### 4. **Next small slice: pick with the operator**
+- Candidates: **#357** (parsed-free-text type for the four sort rules),
+  **#328** (typed page-cache entry; the #358 class, one layer in), #369
+  (needs a refuse-vs-keep call), #383 (one-way door, `0039`), #365 (product
+  call).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
@@ -102,7 +94,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   features, #373 (`'` is literal), #378 (an empty
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
-### 6. **Carried**
+### 5. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
 - **Dependabot #71 / #185:** left open on purpose.
@@ -111,16 +103,18 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #372, #368, #365; #375; #357/#356;
+- **Issues:** #383, #369, #372, #368, #365; #375; #357;
   #330/#327/#328; #340, #363, #285; robustness #218, #226, #225/#227,
   #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **The operator approved deploying `db9c3ec` to both hosts** and picked
-   the Dependabot round as the session's work.
-2. **pyasn1 is hygiene** (mine), on the evidence above; pypdf is the
-   mail-reachable one and got the extraction diff.
+1. **The operator approved deploying `8dce550` to both hosts** (serve and
+   daemon) and picked **#356** as the slice.
+2. **One shared rule rather than three copies** (mine): the existing wire
+   check in `search_response` now calls `ordering_pair_error` too, so its
+   message changed wording (only `ValueError` text; no wire behaviour, since
+   no real page carries the pair).
 
 ## Open decisions & risks
 
@@ -164,7 +158,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~7–16 this session** (full suite 4½ min). Check
+10. **Load on the Mac was ~6–17 this session** (full suite 4 min). Check
     `uptime` before trusting any timing.
 
 ## Exact commands to resume
@@ -174,12 +168,12 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/dependabot-round5 --stat   # empty once merged (squash)
+git diff main origin/fix/356-searchpage-rankable-pair --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq length   # 2 once merged
+gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq length   # 2 once Dependabot rescans
 gh issue list --limit 200 --json number --jq length
 
-# Deploy — Mac (the repo is the install); restart BOTH (pypdf is in the daemon)
+# Deploy — Mac (the repo is the install); restart BOTH
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
@@ -193,7 +187,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4666 at session 87
+unset VIRTUAL_ENV && uv run pytest -q              # 4673 at session 88
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 168 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```

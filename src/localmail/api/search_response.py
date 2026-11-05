@@ -29,7 +29,7 @@ from localmail.search.rewrite_status import (
     RewriteStatus,
     rewrite_skipped_for_status,
 )
-from localmail.search.sort_axes import SortMode
+from localmail.search.sort_axes import SortMode, ordering_pair_error
 
 _SORT_MODES = get_args(SortMode)
 _REWRITE_STATUSES = get_args(RewriteStatus)
@@ -94,9 +94,9 @@ def search_response(
                         f"{_REWRITE_NOTE_CODES} or None, got {rewrite_note_code!r}")
     _require_optional_str("rewrite_note", rewrite_note)
     _require_optional_str("next_cursor", next_cursor)
-    if sort_applied == "rank" and not rankable:
-        raise ValueError("sort_applied='rank' beside rankable=False: "
-                         "nothing could have been ranked")
+    pair_error = ordering_pair_error(sort=sort_applied, rankable=rankable)
+    if pair_error is not None:
+        raise ValueError(pair_error)
     return {
         "results": results,
         "next_cursor": next_cursor,

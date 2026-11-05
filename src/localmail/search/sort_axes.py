@@ -75,9 +75,10 @@ def is_rankable(*, free_text: str) -> bool:
     ``sort_applied="rank"`` beside ``rankable=False``. What holds the pairing
     is that **every** emitter goes through this pair on one string: the two
     ``Searcher.search`` stamps, the three pool readers, and (since that fix)
-    the empty-ACL branch. Nothing rejects the pair at construction —
-    ``SearchPage`` has no ``__post_init__`` — so a new emitter must join that
-    list rather than assume it is protected.
+    the empty-ACL branch. Since #356 the pair is also refused at
+    construction (``ordering_pair_error``, applied by ``SearchPage``,
+    ``PoolMetadata`` and ``search_response``), so a new emitter that gets it
+    wrong fails loudly instead of shipping it.
 
     It needs a **positive** term, not just free text (#419): ``-acme`` is
     free text, so it still takes the text walk, but every row scores 0
@@ -189,4 +190,28 @@ def sort_membership_error(
     if sort_order is not None and sort_order not in get_args(SortOrder):
         return (f"unknown sort_order {sort_order!r}; expected one of "
                 f"{sorted(get_args(SortOrder))}")
+    return None
+
+
+def ordering_pair_error(*, sort: str, rankable: bool) -> str | None:
+    """Why ``sort`` cannot sit beside ``rankable``, or ``None`` (#356).
+
+    ``resolve_sort`` returns ``rank`` only for a query ``is_rankable``
+    accepts, so a page or pool claiming ``rank`` with ``rankable=False`` was
+    built by something that did not derive both from one string. The GUI
+    renders that pair as a checked *and* disabled Relevance radio (#355).
+
+    The one rule for all three holders of the pair —
+    ``searcher.SearchPage``, ``searcher.PoolMetadata`` and
+    ``api.search_response.search_response`` — so the wording cannot drift.
+    Each raises ``ValueError`` with it: a caller bug with no repair, so loud
+    rather than normalised (``QueueCounts``' call, not ``ExtractedText``'s).
+
+    ``is not True``, not truthiness: ``rank`` needs a real ``True``, so a
+    truthy fake (a ``MagicMock``, ``"false"``) cannot launder the pair (#358's
+    trap, on the dataclass path, which checks no types of its own).
+    """
+    if sort == "rank" and rankable is not True:
+        return (f"sort={sort!r} beside rankable={rankable!r}: resolve_sort "
+                "cannot return 'rank' for a query with nothing to rank")
     return None

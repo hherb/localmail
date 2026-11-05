@@ -115,13 +115,6 @@ def test_took_ms_may_not_be_a_bool():
         _ok(took_ms=True)
 
 
-def test_rank_beside_unrankable_is_refused():
-    # The pair #355 found reachable on the wire (#356's wire half): a
-    # checked AND disabled Relevance radio in the GUI.
-    with pytest.raises(ValueError, match="rankable"):
-        _ok(sort_applied="rank", rankable=False)
-
-
 def test_every_run_search_return_goes_through_the_constructor():
     """Structural: a dict literal returned beside the constructor is the
     drift this module exists to end, and nothing at runtime would see it."""

@@ -46,7 +46,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | SHA | What |
 |---|---|
-| `f90dba6` | pypdf floor `>=6.21.4`, new `pyasn1>=0.6.5`; re-lock; CLAUDE.md entry |
+| `f90dba6` (PR #452) | pypdf floor `>=6.21.4`, new `pyasn1>=0.6.5`; re-lock; CLAUDE.md entry |
 | handoff | this file + `docs/handoffs/2026-11-05T2230Z-dependabot-round5.md` |
 
 - **pypdf 6.21.2 → 6.21.4** (#186, #191–#196, HIGH): mail-reachable via
@@ -71,7 +71,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What's next
 
-### 1. **Merge the Dependabot PR** (yours), once CI is green
+### 1. **Merge PR #452** (yours), once CI is green
 - **Acceptance:** `gh pr checks <n>` all pass; after merge,
   `gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open' --jq length`
   is **2** (#71, #185).

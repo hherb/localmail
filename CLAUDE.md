@@ -4528,6 +4528,29 @@ for the full design.
     `searcher._cache` or `searcher._cfg`. The accessor's `user_id`
     scoping mirrors `continue_page` / `grow_pool` exactly. Tests in
     `tests/test_searcher_pool_metadata.py` enforce.
+  - **The transports import the sort vocabulary; they do not restate it
+    (#330).** The HTTP request model, `mcp/server.py` and `mcp/tools.py`
+    each spelled `Literal["rank", "date"]` / `Literal["asc", "desc"]`, so
+    a member added to `sort_axes.SortMode`/`SortOrder` reached neither
+    published schema. They annotate with the aliases now, and the published
+    schemas are byte-identical to before. `tests/test_sort_vocabulary.py`
+    pins it twice:
+    - **An AST rule** refuses any `Literal` outside `sort_axes.py` sharing
+      **two or more** members with a vocabulary. Exact equality was the
+      first cut, and review showed it blind to a copy left stale by a grown
+      authority — which in `mcp/tools.py` nothing else sees, since
+      `tool_search` publishes no schema. It resolves `Literal as L` aliases.
+      Its negative control is built from `get_args`; hard-coded, it failed
+      on the very growth #330 exists to allow.
+    - **The published HTTP and MCP schemas** are compared with `get_args`,
+      reading `const` as well as `enum`, which catches what the rule cannot
+      see (a split `Literal["rank"] | Literal["date"]`, a plain `str`). The
+      MCP half needs no database (an unopened pool).
+    - **Not covered:** the GUI's TypeScript copies (they cannot import
+      Python; `sort_display.asSortMode` degrades an unknown member) and the
+      hand-written prose in `mcp/server.py`'s field descriptions.
+    The issue's larger idea — `SortOrder` as a `str` Enum carrying its
+    ORDER BY — was not done.
   - **`sort_order` is a second axis, orthogonal to `sort`, not a new
     `sort` member.** Design:
     [docs/superpowers/specs/2026-08-24-search-sort-order-design.md](docs/superpowers/specs/2026-08-24-search-sort-order-design.md);

@@ -36,6 +36,7 @@ import localmail.mcp.tools as tools
 from localmail.mcp.auth import LocalmailTokenVerifier, user_id_from_access_token
 from localmail.mcp.discovery import accepted_resources_for, mcp_resource_url
 from localmail.search.searcher import Searcher
+from localmail.search.sort_axes import SortMode, SortOrder
 
 SERVER_NAME = "localmail"
 
@@ -165,7 +166,7 @@ def build_mcp_server(
             "Filter operators typed here (`from:`, `to:`, `subject:`, "
             "`after:`, `before:`) override the matching parameter below, so "
             "set a constraint in one place, not both."))] = "",
-        sort: Annotated[Literal["rank", "date"] | None, Field(description=(
+        sort: Annotated[SortMode | None, Field(description=(
             'Result ordering: "rank" (hybrid relevance — what an omitted '
             '`sort` resolves to whenever the query has text to rank, with '
             'equally relevant messages returned newest first) or '
@@ -177,7 +178,7 @@ def build_mcp_server(
             'operators such as subject:): there is nothing to rank, so '
             '"rank" is rejected for such a query and unset resolves to the '
             "ordering that will actually serve it."))] = None,
-        sort_order: Annotated[Literal["asc", "desc"] | None, Field(description=(
+        sort_order: Annotated[SortOrder | None, Field(description=(
             'Direction for `sort`: "desc" (the default when omitted) or '
             '"asc". Only applicable to sort="date" — oldest first; '
             'sort="rank" with sort_order="asc" is rejected, because the '

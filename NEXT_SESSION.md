@@ -10,8 +10,7 @@
 > pypdf 6.21.4 on both).
 >
 > **Open issues: 28** (27 once this PR merges and closes #356). **Open
-> Dependabot alerts: 13** right after the merge; 11 should auto-close when
-> Dependabot rescans `main` (#71, #185 stay open on purpose).
+> Dependabot alerts: 2** (#71, #185, open on purpose); round 5 auto-closed.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
@@ -61,7 +60,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | `uv run pytest -q` | **4673 passed**, 6 warnings (pre-existing) |
 | mypy | Success, 168 files |
 | GUI | untouched |
-| CI | **check on the PR** (`gh pr checks`) |
+| CI (PR #453) | **green**: pytest 3.12 + 3.13, Cloudflare Pages |
 
 ## What's next
 
@@ -70,10 +69,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - No deploy is strictly needed (no behaviour change for a correct emitter);
   deploy with the next code change.
 
-### 2. **Confirm Dependabot closed the round-5 alerts**
-- **Acceptance:** `gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open' --jq length`
-  is **2** (#71, #185). If still 13 a day later, check the alerts against
-  `uv.lock` (pypdf 6.21.4, pyasn1 0.6.5 are locked on `main`).
+### 2. ~~Confirm Dependabot closed the round-5 alerts~~ — **done**
+- Open alerts read `[185, 71]` this session, after #452 merged.
 
 ### 3. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after

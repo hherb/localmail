@@ -3032,6 +3032,21 @@ and shipped in fastembed 0.9.1.
   `= 0.23.40`, while `gui/src-tauri/Cargo.lock` has held 0.23.46 since the
   second round. Dismiss it; do not chase it.
 
+**The November 2026 round (Dependabot #186–#196, 11 HIGH) raised pypdf and
+declared pyasn1.** The re-lock moved exactly those two packages.
+
+- **`pypdf>=6.21.4`** (#186, #191–#196): page tree, dictionary cloning, page
+  labels, strict-mode exceptions, encrypted files, cross-reference streams and
+  the xref trailer search. Mail-reachable, the #66–#69 family. Verified the
+  third round's way: `LightweightExtractor` over **300 archive PDFs** is
+  byte-identical under 6.21.2 and 6.21.4 (284 extract, the same 16 raise
+  `ExtractorError`), each venv in its own worktree.
+- **`pyasn1>=0.6.5`** (#187–#190, newly declared): hygiene, and more so than
+  argued. It arrives via google-auth → pyasn1-modules, and its only importer,
+  `google/auth/crypt/_python_rsa.py`, cannot import here because `rsa` is not
+  in the lock. Loading the OAuth flow modules leaves `pyasn1` out of
+  `sys.modules`.
+
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
 MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for

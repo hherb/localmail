@@ -77,7 +77,11 @@ dependencies = [
     # extraction byte-identical across the bump. Raised to 6.21.1 for
     # Dependabot #148 (LOW, unvalidated JPEG data loading), which needs
     # `page.images`; `_extract_pdf` never calls it, so that one is hygiene.
-    "pypdf>=6.21.1",
+    # Raised to 6.21.4 for Dependabot #186 and #191–#196 (HIGH: page tree,
+    # dictionary cloning, page labels, strict-mode exceptions, encrypted
+    # files, cross-reference streams, xref trailer search). Reachable the
+    # same way, by an emailed PDF; verified byte-identical the same way.
+    "pypdf>=6.21.4",
     "python-docx>=1.1",
     "python-pptx>=1.0",
     "striprtf>=0.0.26",
@@ -101,6 +105,14 @@ dependencies = [
     # Hugging Face hub and rapidocr's model host (modelscope.cn) — nothing
     # mail-borne reaches it — so this is hygiene, not an incident.
     "urllib3>=2.8.0",
+    # Transitive via google-auth → pyasn1-modules, declared for the
+    # `transformers` reason: Dependabot #187–#190 (HIGH, quadratic-time BER
+    # decoding) against <= 0.6.4. Its only importer is google-auth's
+    # `crypt/_python_rsa.py`, which parses service-account private keys and
+    # cannot even import here (it needs `rsa`, which is not in the lock), so
+    # the OAuth flows never load pyasn1 at all. Nothing mail-borne reaches an
+    # ASN.1 decoder: hygiene.
+    "pyasn1>=0.6.5",
     # The CA bundle behind requests and httpx, declared for the
     # `transformers` reason: Dependabot #138 (CRITICAL), compromised emSign
     # intermediates. 2026.10.19 drops one root, emSign ECC Root CA - G3. It

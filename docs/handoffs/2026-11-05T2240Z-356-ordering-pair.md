@@ -66,7 +66,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 ## What's next
 
 ### 1. **Merge the #356 PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <n>` all pass; `gh issue view 356` closed.
+- **Acceptance:** `gh pr checks 453` all pass; `gh issue view 356` closed.
 - No deploy is strictly needed (no behaviour change for a correct emitter);
   deploy with the next code change.
 

@@ -6,7 +6,7 @@ accessor. Transport-free and individually unit-testable against a real conn.
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 import psycopg
 
@@ -20,6 +20,7 @@ from localmail.api.messages import get_message as api_get_message
 from localmail.api.search import run_search
 from localmail.api.search_response import SearchResponse
 from localmail.search.searcher import Searcher
+from localmail.search.sort_axes import SortMode, SortOrder
 
 MODE_TEXT = "text"
 MODE_METADATA = "metadata"
@@ -31,8 +32,8 @@ def tool_search(
     user_id: int,
     allowed_account_ids: list[int],
     query: str = "",
-    sort: Literal["rank", "date"] | None = None,
-    sort_order: Literal["asc", "desc"] | None = None,
+    sort: SortMode | None = None,
+    sort_order: SortOrder | None = None,
     limit: int = 50,
     cursor: str | None = None,
     filters: dict[str, Any] | None = None,

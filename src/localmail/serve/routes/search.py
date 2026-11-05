@@ -4,7 +4,7 @@
 """POST /v1/search endpoint."""
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -13,6 +13,7 @@ from localmail.api.acl import allowed_account_ids
 from localmail.api.errors import FeatureUnavailable, ValidationFailed
 from localmail.api.search import run_search
 from localmail.api.search_response import SearchResponse
+from localmail.search.sort_axes import SortMode, SortOrder
 from localmail.serve.middleware import get_authenticated_user
 from localmail.serve.request_validation import ProblemJsonValidationRoute
 
@@ -74,7 +75,7 @@ class SearchRequest(BaseModel):
     # asking for it: alongside a `cursor` the cursor decides the ordering,
     # and a *stated* sort it cannot serve is a 400 rather than a silently
     # dropped cursor.
-    sort: Literal["rank", "date"] | None = None
+    sort: SortMode | None = None
     # Direction for the sort criterion above. Orthogonal to `sort` so a
     # future criterion inherits it without doubling the `sort` enum.
     # "asc" is rejected for a *resolved* sort="rank": the rank path serves a
@@ -87,7 +88,7 @@ class SearchRequest(BaseModel):
     # `cursor` the cursor decides the direction, and a model default would
     # be a statement the caller never made — contradicting every ascending
     # cursor.
-    sort_order: Literal["asc", "desc"] | None = None
+    sort_order: SortOrder | None = None
     cursor: str | None = None
     # Opt-in LLM query rewrite (Phase 4). Ignored gracefully when the server
     # has no rewriter configured — the response's rewrite_skipped reflects it.

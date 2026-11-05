@@ -4528,6 +4528,17 @@ for the full design.
     `searcher._cache` or `searcher._cfg`. The accessor's `user_id`
     scoping mirrors `continue_page` / `grow_pool` exactly. Tests in
     `tests/test_searcher_pool_metadata.py` enforce.
+  - **The transports import the sort vocabulary; they do not restate it
+    (#330).** The HTTP request model, `mcp/server.py` and `mcp/tools.py`
+    each spelled `Literal["rank", "date"]` / `Literal["asc", "desc"]`, so
+    a member added to `sort_axes.SortMode`/`SortOrder` reached no wire. They
+    annotate with the aliases now, and the published schemas are unchanged
+    (same `Literal`, same member order). `tests/test_sort_vocabulary.py`
+    pins it twice: an AST rule refusing a `Literal` spelling either
+    vocabulary outside `sort_axes.py` (catches an identical copy), and the
+    published HTTP and MCP schemas compared with `get_args` (catches a stale
+    one). The issue's larger idea — `SortOrder` as a `str` Enum carrying its
+    ORDER BY — was not done.
   - **`sort_order` is a second axis, orthogonal to `sort`, not a new
     `sort` member.** Design:
     [docs/superpowers/specs/2026-08-24-search-sort-order-design.md](docs/superpowers/specs/2026-08-24-search-sort-order-design.md);

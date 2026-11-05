@@ -5258,16 +5258,23 @@ for the full design.
           fails too.
         - **The pair is refused at construction now (#356, fixed).** It
           used to be held only by every emitter going through that pair on
-          one string: the two `Searcher.search` stamps, the three pool
-          readers, and the empty-ACL branch. Now the pure
-          `sort_axes.ordering_pair_error` is the one rule, and
+          one string: the two `Searcher.search` stamps, the pool readers
+          (`continue_page` and `get_pool_metadata`; `grow_pool` returns
+          `continue_page`'s page since #426), and the empty-ACL branch —
+          with `_empty_grown_page` copying both from a `PoolMetadata`. Now
+          the pure `sort_axes.ordering_pair_error` is the one rule, and
           `SearchPage.__post_init__`, `PoolMetadata.__post_init__` and
           `search_response` (the wire half, #358) each raise `ValueError`
-          with its message, so the wording is shared. Each guard was
-          mutation-checked against its own test in
-          `tests/test_search_page_ordering_pair.py`. Note a `__post_init__` would **not** have caught the defect
-          above, the empty-ACL branch building a raw `dict` rather than a
-          `SearchPage`. Two more were filed from the same round: **#357**
+          with its message, so the wording is shared. It tests
+          `rankable is not True`, not truthiness, because the dataclasses
+          check no types and a truthy `MagicMock` would otherwise pass.
+          `tests/test_search_page_ordering_pair.py` asserts each holder's
+          message *equals* the rule's (a `match=` substring survived a
+          hand-written copy, by mutation) and pins the wording to one
+          literal. Note a `__post_init__` would **not** have caught the
+          defect above, the empty-ACL branch having built a raw `dict`
+          rather than a `SearchPage` (it calls `search_response` since
+          #358). Two more were filed from the same round: **#357**
           (the four sort rules take a bare `str` whose "already parsed"
           precondition lives only in prose, now that `run_search` holds both
           strings in one scope under a keyword name matching the wrong one)
@@ -6340,9 +6347,10 @@ for the full design.
   non-numeric `took_ms`, a `next_cursor` or `rewrite_note` that is neither a
   `str` nor `None`; `ValueError` for `rank` beside `rankable=False`. That pair
   check is #356's **wire** half (it covers the empty-ACL dict, which a
-  `SearchPage.__post_init__` would not); since #356 `SearchPage` and
-  `PoolMetadata`, which library and CLI callers see directly, refuse it too,
-  through the same `sort_axes.ordering_pair_error`. `results` is not checked: hits are dicts from `_to_api_result`,
+  `SearchPage.__post_init__` would not); since #356 `SearchPage` (which
+  library and CLI callers see directly) and `PoolMetadata` (which library
+  callers and api/ read through `get_pool_metadata`) refuse it too, through
+  the same `sort_axes.ordering_pair_error`. `results` is not checked: hits are dicts from `_to_api_result`,
   and a fake *hit* is `_assert_wire_hit_fields`' job.
   - **The first cut checked only the three ordering fields, and review found
     a live fake behind the other four**: `test_serve_acl_routes.py`'s

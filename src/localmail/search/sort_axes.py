@@ -206,8 +206,12 @@ def ordering_pair_error(*, sort: str, rankable: bool) -> str | None:
     ``api.search_response.search_response`` — so the wording cannot drift.
     Each raises ``ValueError`` with it: a caller bug with no repair, so loud
     rather than normalised (``QueueCounts``' call, not ``ExtractedText``'s).
+
+    ``is not True``, not truthiness: ``rank`` needs a real ``True``, so a
+    truthy fake (a ``MagicMock``, ``"false"``) cannot launder the pair (#358's
+    trap, on the dataclass path, which checks no types of its own).
     """
-    if sort == "rank" and not rankable:
-        return ("sort='rank' beside rankable=False: resolve_sort cannot "
-                "return 'rank' for a query with nothing to rank")
+    if sort == "rank" and rankable is not True:
+        return (f"sort={sort!r} beside rankable={rankable!r}: resolve_sort "
+                "cannot return 'rank' for a query with nothing to rank")
     return None

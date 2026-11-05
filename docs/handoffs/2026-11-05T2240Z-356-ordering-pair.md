@@ -49,8 +49,14 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 - **Wire half was already done by #358**; this is the library/CLI half.
   The rule is shared, so all three raise the same message.
-- Tests: `tests/test_search_page_ordering_pair.py` (7). Mutation-checked:
+- Tests: `tests/test_search_page_ordering_pair.py`. Mutation-checked:
   disabling either `__post_init__` guard fails exactly its own test.
+- Review round (same PR): the class refusals assert the message *equals*
+  the rule's (a `match="rankable=False"` survived a hand-written copy);
+  the wording is pinned to one literal; the rule tests `rankable is not
+  True` so a truthy fake cannot pass; the weaker duplicate
+  `test_search_response.py::test_rank_beside_unrankable_is_refused` is
+  folded into the parametrised holder test.
 - No production emitter tripped it (full suite green), as #355 predicted.
 
 ## Verification

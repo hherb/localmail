@@ -4,14 +4,15 @@
 """Bounded LRU + TTL cache for paginated search results.
 
 Keys are opaque search_token strings (the Searcher generates them). Values
-are dicts holding the reranked pool plus parsed query metadata.
+are of one type, named at construction and checked at ``put`` (#328): the
+Searcher stores ``PoolEntry`` objects, and a raw dict is refused where it is
+written rather than failing later where it is read.
 """
 
 from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from typing import Any
 
 
 class CacheMissError(KeyError):
@@ -22,27 +23,36 @@ class PageOutOfPoolError(IndexError):
     """Requested page beyond the cached pool's size."""
 
 
-class PageCache:
+class PageCache[V]:
     """Thread-unsafe LRU+TTL store; wrap in a lock if shared across threads.
 
     For this project the cache is only touched from inside Searcher methods
     that are themselves called from one request at a time per process; if
     that changes (e.g. concurrent MCP tool calls), add a threading.Lock.
+
+    ``value_type`` is keyword-only with no default: ``object`` would accept
+    anything, which is the unchecked bag this parameter exists to end.
     """
 
-    def __init__(self, maxsize: int, ttl_s: float) -> None:
+    def __init__(self, maxsize: int, ttl_s: float, *, value_type: type[V]) -> None:
         self._maxsize = maxsize
         self._ttl = ttl_s
-        self._data: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+        self._value_type = value_type
+        self._data: OrderedDict[str, tuple[float, V]] = OrderedDict()
 
-    def put(self, key: str, value: Any) -> None:
+    def put(self, key: str, value: V) -> None:
+        if not isinstance(value, self._value_type):
+            raise TypeError(
+                f"PageCache holds {self._value_type.__name__} values, "
+                f"not {type(value).__name__}"
+            )
         if key in self._data:
             self._data.move_to_end(key)
         self._data[key] = (time.monotonic(), value)
         while len(self._data) > self._maxsize:
             self._data.popitem(last=False)
 
-    def get(self, key: str) -> Any:
+    def get(self, key: str) -> V:
         if key not in self._data:
             raise CacheMissError(key)
         stamp, value = self._data[key]

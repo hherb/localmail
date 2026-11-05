@@ -878,7 +878,9 @@ src/localmail/
     text_empty.py   # pure: is_blank — the one "nothing to index" rule (#266)
     attachment_presence.py # pure: HAS_ATTACHMENT_SQL — the one "has
                     #   attachments" rule, filter and hit flag alike (#364)
-    page_cache.py   # in-process LRU cache for paginated result pools
+    page_cache.py   # in-process LRU cache for paginated result pools;
+                    #   checks its value type at put (#328)
+    pool_entry.py   # PoolEntry: the cached pool, every field required (#328)
     sweep_pacing.py # pure: SweepOutcome + idle-streak/sleep arithmetic (#259)
     failure_pacing.py # pure: how often a repeating batch failure reports (#267)
     query.py        # parse_query() -> ParsedQuery, SearchFilters, filter DSL
@@ -4407,6 +4409,21 @@ for the full design.
         `test_pool_metadata_reports_the_sort_the_pool_was_actually_built_with`,
         which reaches past retrieval and puts a date pool in the cache — every
         other test of this field mocks it, so nothing exercised the real read.
+      - **Since #328 the entry is a `PoolEntry`, so the forgotten key fails at
+        the `put`, not the read.** The cache value was a `dict[str, Any]`
+        written by hand-matched literals, so the loud `KeyError` above still
+        surfaced in a *different* method, at continuation time. `PoolEntry`
+        (`search/pool_entry.py`) is a frozen dataclass with **no defaults**,
+        so a writer omitting a field is a `TypeError` where it writes;
+        `grow_pool` rewrites it with `dataclasses.replace`. `PageCache` takes
+        a keyword-only, defaultless `value_type` and refuses any other value
+        at `put`, because CI runs no mypy (#285): a type hint alone would let
+        a raw dict back in. Pinned per field by
+        `tests/test_pool_entry.py::test_every_field_is_required`, plus the
+        cache's refusal and the Searcher's wiring of it (each mutation-checked
+        against its own test). The readers' `entry.get("sort", "rank")`
+        mutation is no longer spellable, so its two `KeyError` pins were
+        removed rather than ported.
     - **`Searcher.search` raises on a `keyset_cursor` it will not read**,
       independently of the route: the drop is a property of the Searcher's own
       dispatch, and the CLI and library callers reach it without passing
@@ -5290,7 +5307,7 @@ for the full design.
         `meta.rankable` instead. Defaultless for `sort_applied`'s reason.
       - **The three pool readers derive it; the pool *branch* cannot be
         pinned and that is not the same thing.** `continue_page`,
-        `grow_pool` and `get_pool_metadata` read `entry["parsed"]`, and
+        `grow_pool` and `get_pool_metadata` read `entry.parsed`, and
         hardcoding `True` in each survived until pinned with a **textless
         pool put straight into the cache** — the technique
         `test_search_sort_applied.py` uses for `sort`, and for the reason
@@ -6231,11 +6248,11 @@ for the full design.
     exactly the rows `_build_results` served. Pinned end to end through
     `run_search` (`test_paging_past_a_grow_serves_each_message_once`: 88
     hits for 30 messages on the old code).
-    - **Both keys are subscripted, never `.get`-defaulted** (review): the
-      first `search()` put writes `first_page: 1` and an empty
-      `excluded_ids`, so a put path that forgets them is a `KeyError` rather
-      than a pool silently read as ungrown — #426 again, with tests green.
-      The `entry["sort"]` rule. `grow_pool`'s `page` is keyword-only with
+    - **Both keys have no default** (review): the first `search()` put
+      writes `first_page=1` and an empty `excluded_ids`, so a put path that
+      forgets them fails rather than a pool silently reading as ungrown —
+      #426 again, with tests green. The `entry["sort"]` rule; since #328 a
+      `TypeError` at the put, not a `KeyError` at the read. `grow_pool`'s `page` is keyword-only with
       **no default** for the same reason (#234's shape).
     - **A grow that finds nothing unseen is grown again** in
       `_continue_or_grow`, up to the cap, inside the same request: served

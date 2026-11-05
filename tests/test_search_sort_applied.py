@@ -32,6 +32,7 @@ from localmail.api.search import run_search
 from localmail.api.search_cursor import SearchCursor, encode_search_cursor
 from localmail.config import SearchConfig
 from localmail.db import open_pool
+from localmail.search.pool_entry import PoolEntry
 from localmail.search.query import parse_query
 from localmail.search.searcher import SearchPage, Searcher
 
@@ -234,17 +235,17 @@ def test_continue_page_reads_the_pool_s_sort_rather_than_assuming_rank(searcher)
     uses, and for the same reason: encoding "pool ⟹ rank" in a reader makes
     a future dispatch change silently wrong.
     """
-    searcher._cache.put("tok-date", {
-        "parsed": parse_query("needle"), "hydrated": [], "scores": {},
-        "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
-        "user_id": None, "sort": "date", "sort_order": "desc",
-        "first_page": 1, "excluded_ids": frozenset(),
-    })
+    searcher._cache.put("tok-date", PoolEntry(
+        parsed=parse_query("needle"), hydrated=[], scores=[],
+        page_size=5, candidates_per_arm=50, rerank_pool_size=20,
+        user_id=None, sort="date", sort_order="desc",
+        first_page=1, excluded_ids=frozenset(),
+    ))
     assert searcher.continue_page("tok-date", 1).sort_applied == "date"
 
 
 def test_grow_pool_reads_the_pool_s_sort_rather_than_assuming_rank(searcher):
-    """``grow_pool`` is the third reader of ``entry["sort"]`` and had the
+    """``grow_pool`` is the third reader of ``entry.sort`` and had the
     argument but not the technique.
 
     ``test_growing_a_pool_reports_the_pool_s_own_sort`` above grows a
@@ -258,12 +259,12 @@ def test_grow_pool_reads_the_pool_s_sort_rather_than_assuming_rank(searcher):
     the pool it *writes* inherits the sort it read, which is what the
     returned page must report.
     """
-    searcher._cache.put("tok-grow-date", {
-        "parsed": parse_query("needle"), "hydrated": [], "scores": {},
-        "page_size": 5, "candidates_per_arm": 2, "rerank_pool_size": 20,
-        "user_id": 1, "sort": "date", "sort_order": "desc",
-        "first_page": 1, "excluded_ids": frozenset(),
-    })
+    searcher._cache.put("tok-grow-date", PoolEntry(
+        parsed=parse_query("needle"), hydrated=[], scores=[],
+        page_size=5, candidates_per_arm=2, rerank_pool_size=20,
+        user_id=1, sort="date", sort_order="desc",
+        first_page=1, excluded_ids=frozenset(),
+    ))
     grown = searcher.grow_pool("tok-grow-date", 8, page=1, user_id=1)
     assert grown.sort_applied == "date"
 
@@ -272,13 +273,13 @@ def test_a_pool_exhausted_at_the_cap_reports_the_pool_s_sort(searcher):
     """``_empty_grown_page`` stands in for a page ``continue_page`` would
     have served, so it must report that pool's ordering and not a default."""
     cfg = searcher.config
-    searcher._cache.put("tok-capped", {
-        "parsed": parse_query("needle"), "hydrated": [], "scores": {},
-        "page_size": 5, "candidates_per_arm": cfg.candidates_per_arm_max,
-        "rerank_pool_size": 20,
-        "user_id": 1, "sort": "date", "sort_order": "desc",
-        "first_page": 1, "excluded_ids": frozenset(),
-    })
+    searcher._cache.put("tok-capped", PoolEntry(
+        parsed=parse_query("needle"), hydrated=[], scores=[],
+        page_size=5, candidates_per_arm=cfg.candidates_per_arm_max,
+        rerank_pool_size=20,
+        user_id=1, sort="date", sort_order="desc",
+        first_page=1, excluded_ids=frozenset(),
+    ))
     out = run_search(searcher=searcher, free_text="needle", filters={},
                      limit=5, allowed_account_ids=[1], user_id=1,
                      cursor=encode_search_cursor(SearchCursor(token="tok-capped",

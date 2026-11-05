@@ -265,6 +265,13 @@ def _account_scoped_fake_searcher(account_to_hits: dict[int, list[dict[str, obje
         # reaches the real route, so it must state the applied sort too.
         page.sort_applied = "rank"
         page.rankable = True
+        # Same trap for the rewrite outcome: run_search reads these three off
+        # the page on page 1, and this fake shipped them as `{}` until #358's
+        # review (search_response checks them now, so leaving them unset
+        # raises rather than serialising).
+        page.rewrite_status = "not_requested"
+        page.rewrite_note = None
+        page.rewrite_note_code = None
         return page
 
     s.search.side_effect = _search
@@ -279,14 +286,14 @@ def _assert_wire_ordering_fields(body: dict) -> None:
     auto-attribute is *serialised* rather than raising, and what it
     serialises to is a property of the path rather than of the field —
     measured, bare ``jsonable_encoder`` renders both as ``{}`` while the
-    route's ``-> dict[str, Any]`` response field renders both as ``[]``. So
-    there is no particular wrong value to look for, and an equality
-    assertion on one test's expected value says nothing about the next fake
-    somebody adds.
+    route's pre-#358 ``-> dict[str, Any]`` response model rendered both as
+    ``[]``. So there is no particular wrong value to look for, and an
+    equality assertion on one test's expected value says nothing about the
+    next fake somebody adds.
 
     Since #358 this is belt to braces: ``api.search_response.search_response``
-    refuses an unset mock attribute on every path, so a fake that forgets the
-    fields fails in any test that drives ``run_search``, not only here.
+    checks every scalar response field, so a fake page that leaves one unset
+    fails in any test that drives ``run_search``, not only here.
     """
     assert body["sort_applied"] in ("rank", "date"), body["sort_applied"]
     assert isinstance(body["rankable"], bool), body["rankable"]

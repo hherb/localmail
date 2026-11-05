@@ -25,14 +25,7 @@ from tests.test_serve_search_route import (
     _seed_acct_and_grant,
 )
 
-
-from localmail.api.search_response import search_response
-
-# A real response: the MCP SDK validates tool output against SearchResponse (#358).
-_EMPTY_RESPONSE = search_response(
-    results=[], next_cursor=None, took_ms=0.0, sort_applied="date",
-    rankable=False, rewrite_status="not_requested", rewrite_note=None,
-    rewrite_note_code=None)
+from tests._search_response_fakes import empty_search_response
 
 
 def _post(db_dsn, api_token, filters):
@@ -112,7 +105,7 @@ def test_the_mcp_search_tool_forwards_a_lang_list(db_dsn, monkeypatch):
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return _EMPTY_RESPONSE
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)

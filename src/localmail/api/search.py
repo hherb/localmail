@@ -43,6 +43,8 @@ from localmail.search.rewrite_status import (
     NOT_CONFIGURED,
     NOT_REQUESTED,
     UNAVAILABLE,
+    RewriteNoteCode,
+    RewriteStatus,
     note_for_code,
 )
 from localmail.search.argument_errors import SearchArgumentRefused
@@ -605,9 +607,9 @@ def run_search(
                                  snippet_chars=snippet_chars)
 
     next_cursor = _next_cursor(page, cfg=cfg)
-    status: str
+    status: RewriteStatus
     note: str | None
-    code: str | None
+    code: RewriteNoteCode | None
     if cursor is None:
         if smart and not searcher.smart_available:
             status, code = UNAVAILABLE, NOT_CONFIGURED

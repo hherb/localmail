@@ -16,14 +16,7 @@ from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 from localmail.mcp import build_mcp_server  # noqa: E402
 
-
-from localmail.api.search_response import search_response
-
-# A real response: the MCP SDK validates tool output against SearchResponse (#358).
-_EMPTY_RESPONSE = search_response(
-    results=[], next_cursor=None, took_ms=0.0, sort_applied="date",
-    rankable=False, rewrite_status="not_requested", rewrite_note=None,
-    rewrite_note_code=None)
+from tests._search_response_fakes import empty_search_response
 
 
 def test_build_registers_expected_tools(db_dsn):
@@ -252,7 +245,7 @@ def test_search_forwards_sort_order_to_the_tool_body(db_dsn, monkeypatch):
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return _EMPTY_RESPONSE
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
@@ -282,7 +275,7 @@ def test_search_forwards_an_unstated_sort_order_as_none(db_dsn, monkeypatch):
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return _EMPTY_RESPONSE
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
@@ -321,7 +314,7 @@ def test_search_accepts_a_null_query_through_the_argument_model(db_dsn, monkeypa
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return _EMPTY_RESPONSE
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
@@ -345,7 +338,7 @@ def test_search_forwards_an_omitted_query_as_empty(db_dsn, monkeypatch):
 
     def _recording_tool_search(**kwargs):
         seen.update(kwargs)
-        return _EMPTY_RESPONSE
+        return empty_search_response()
 
     monkeypatch.setattr(server_mod.tools, "tool_search", _recording_tool_search)
     monkeypatch.setattr(server_mod, "_current_user_id", lambda: 1)
@@ -450,3 +443,9 @@ def test_search_publishes_the_typed_response_as_its_output_schema(db_dsn):
         pool.close()
     schema = tools["search"].outputSchema or {}
     assert set(schema.get("required", [])) == set(get_type_hints(SearchResponse))
+    # Types too, not only key names: `main` already published an untyped
+    # object, and widening a field here would change what agents may rely on.
+    props = schema["properties"]
+    assert props["total_estimate"]["type"] == "null"  # #175: never a number
+    assert set(props["sort_applied"]["enum"]) == {"rank", "date"}
+    assert "enum" in props["rewrite_status"]

@@ -1,7 +1,7 @@
 """The /v1/search response has one constructor, and it refuses a fake (#358).
 
 ``run_search`` returned ``dict[str, Any]`` from two hand-written ``return``
-literals plus the empty-ACL dict, so a new wire field was a bare string key
+literals (the rowed path and the empty-ACL branch), so a new wire field was a bare string key
 and a ``MagicMock`` page with the attribute unset *serialised* (as ``{}`` or
 ``[]``, depending on the path) instead of raising. #345 and #353 both shipped
 that garbage with the suite green. ``search_response`` is now the only way
@@ -58,7 +58,10 @@ def test_a_valid_rank_response_is_accepted():
     assert _ok(sort_applied="rank", rankable=True)["sort_applied"] == "rank"
 
 
-@pytest.mark.parametrize("field", ["sort_applied", "rankable", "took_ms"])
+@pytest.mark.parametrize("field", [
+    "sort_applied", "rankable", "took_ms", "next_cursor",
+    "rewrite_status", "rewrite_note", "rewrite_note_code",
+])
 def test_an_unset_mock_attribute_is_refused(field):
     with pytest.raises(TypeError, match=field):
         _ok(**{field: MagicMock()})
@@ -74,6 +77,37 @@ def test_an_unknown_ordering_is_refused(value):
 def test_rankable_must_be_a_real_bool(value):
     with pytest.raises(TypeError, match="rankable"):
         _ok(rankable=value)
+
+
+def test_an_integral_took_ms_reaches_the_wire_as_a_float():
+    took = _ok(took_ms=2)["took_ms"]
+    assert type(took) is float and took == 2.0
+
+
+@pytest.mark.parametrize("value", ["Applied", "", None])
+def test_an_unknown_rewrite_status_is_refused(value):
+    with pytest.raises(TypeError, match="rewrite_status"):
+        _ok(rewrite_status=value)
+
+
+@pytest.mark.parametrize("value", ["Not_Configured", ""])
+def test_an_unknown_rewrite_note_code_is_refused(value):
+    with pytest.raises(TypeError, match="rewrite_note_code"):
+        _ok(rewrite_note_code=value)
+
+
+def test_known_note_codes_and_strings_are_accepted():
+    r = _ok(next_cursor="K|abc", rewrite_status=UNAVAILABLE,
+            rewrite_note="smart search is not configured on this server",
+            rewrite_note_code="not_configured")
+    assert (r["next_cursor"], r["rewrite_note_code"]) == ("K|abc",
+                                                          "not_configured")
+
+
+@pytest.mark.parametrize("field", ["next_cursor", "rewrite_note"])
+def test_a_non_string_cursor_or_note_is_refused(field):
+    with pytest.raises(TypeError, match=field):
+        _ok(**{field: 0})
 
 
 def test_took_ms_may_not_be_a_bool():

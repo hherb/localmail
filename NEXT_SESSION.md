@@ -58,29 +58,38 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **The fix.** New `src/localmail/api/search_response.py`: the
   `SearchResponse` TypedDict plus `search_response(...)`, now the only way
   the response is built. It derives `total_estimate` (`None`) and
-  `rewrite_skipped` once. It raises `TypeError` on a `sort_applied` outside
-  `SortMode`, a non-`bool` `rankable`, or a non-numeric `took_ms`, and
-  `ValueError` on `rank` beside `rankable=False` (#356's wire half).
-  - HTTP route annotated `SearchResponse` with `response_model=None`
-    (serialization unchanged).
-  - MCP `server.search` annotated `SearchResponse`, so the tool now
-    **publishes an `outputSchema`** with all ten keys required, and the SDK
-    validates results against it.
-- **It caught 29 live fakes** (3 files) that set `sort_applied` and forgot
-  `rankable`, plus 6 MCP fakes returning a partial dict.
-- **Tests:** new `tests/test_search_response.py` (21), plus a published-schema
+  `rewrite_skipped` once. It raises `TypeError` on any scalar field a fake
+  could launder (`sort_applied`, `rewrite_status`, `rewrite_note_code` outside
+  their `Literal`s; a non-`bool` `rankable`; a non-numeric `took_ms`; a
+  non-`str` `next_cursor`/`rewrite_note`), and `ValueError` on `rank` beside
+  `rankable=False` (#356's wire half).
+  - HTTP route annotated `SearchResponse` with `response_model=None`: the
+    serializer moves from pydantic to `jsonable_encoder`. Real output is
+    byte-identical; `/openapi.json`'s 200 schema for the route becomes `{}`.
+  - MCP `server.search` annotated `SearchResponse`, so the tool's
+    `outputSchema` is **typed** now (all ten keys required). `main` already
+    published an untyped one, which the SDK validated against to no effect.
+- **It caught the one `_page` fake in each of three files** (26 tests share
+  them) that set `sort_applied` and forgot `rankable`, plus 6 MCP fakes
+  returning a partial dict. The review round found one more, in
+  `test_serve_acl_routes.py`, shipping the three `rewrite_*` fields as `{}`;
+  checking those fields closed it and caught the same in the `_page` fakes of
+  `test_api_search.py`, `test_api_search_cursor_mode.py` and
+  `test_api_search_pagination.py` (5 tests).
+- **Tests:** new `tests/test_search_response.py` (34), plus a published-schema
   pin in `test_mcp_server_build.py`. Six mutations (each check off, the
   server annotation reverted, the empty-ACL return back to `dict(...)`) each
   fail their own test.
 - CLAUDE.md (new entry + layout line), `docs/mcp-usage.md` (outputSchema
-  note) updated. README unchanged: no wire change on HTTP.
+  note) updated. README unchanged: no response on either transport changed,
+  only the published schemas.
 
 ## Verification
 
 | check | result |
 |---|---|
 | RED first | `test_search_response.py` failed collection (no module) |
-| `uv run pytest -q` | **4653 passed**, 6 warnings (pre-existing) |
+| `uv run pytest -q` | **4666 passed**, 6 warnings (pre-existing), after the review round |
 | mypy | Success, 168 files |
 | GUI | untouched |
 | CI | **check on the PR** (`gh pr checks`) |
@@ -94,7 +103,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - No migration and no entry-point change; restart `serve` (the MCP schema
   and `build_hash` move). The daemon need not restart.
 - **Acceptance:** both `/v1/version` show the merge SHA; an MCP `tools/list`
-  shows `search` with an `outputSchema`.
+  shows `search`'s `outputSchema` with `title: SearchResponse` and ten
+  `required` keys (`main` already had an untyped one).
 
 ### 3. **Re-authorise `hherb-dmc`** (yours, browser)
 - **Acceptance:** `daemon.err.log` shows no new `crashed for hherb-dmc`
@@ -149,7 +159,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    the `rank`+unrankable pair check folded in since every response now passes
    one place. `SearchPage`'s own `__post_init__` (#356) left for its own slice.
 3. **The MCP output schema** came free with the annotation and was kept: it
-   documents the contract to agents and adds SDK-side validation.
+   documents the contract to agents and makes the SDK's existing validation
+   check something (it validated against an untyped object before).
 
 ## Open decisions & risks
 

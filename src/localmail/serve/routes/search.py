@@ -148,8 +148,9 @@ def _unknown_field_error(req: SearchRequest) -> str | None:
             f"supported: {supported}")
 
 
-# `response_model=None`: the annotation documents the contract; FastAPI's
-# own model would re-validate a response `search_response` already checked.
+# `response_model=None`: `search_response` already checks every scalar field,
+# so this serializes with `jsonable_encoder` instead of re-validating through
+# pydantic. The cost is that OpenAPI publishes no 200 schema for this route.
 @router.post("", response_model=None)
 def search_endpoint(
     req: SearchRequest,

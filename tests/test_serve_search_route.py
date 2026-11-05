@@ -78,8 +78,8 @@ def _fake_searcher_returning_one_hit():
     # Same trap, same remedy (#353). Do not go looking for a particular wrong
     # value: what an unset attribute serialises to is a property of the
     # *path*, not the field. Measured — bare `jsonable_encoder` renders both
-    # of these as `{}`, while the route's `-> dict[str, Any]` response field
-    # renders both as `[]`. The rule is that it serialises to *something*
+    # of these as `{}`, while the route's pre-#358 `-> dict[str, Any]`
+    # response model rendered both as `[]`. The rule is that it serialises to *something*
     # rather than failing, so assert on type, never on a value.
     page.rankable = True
     s.search.return_value = page
@@ -109,6 +109,10 @@ def test_search_returns_results(db_dsn: str, api_token: str, db_conn, api_user) 
     # And rankability beside it (#353), through the same real route and for
     # the same reason — this is the key the client stops inferring from.
     assert body["rankable"] is True
+    # The route passes `run_search`'s value straight through, so nothing
+    # downstream of `search_response` re-checks these on HTTP (#358 review).
+    assert body["total_estimate"] is None  # #175: never 0
+    assert isinstance(body["took_ms"], float)
 
 
 def test_search_sort_param_is_forwarded_to_searcher(

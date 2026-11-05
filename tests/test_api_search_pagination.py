@@ -58,6 +58,11 @@ def _page(*, results: list, token: str | None, pool_size: int,
     # carries garbage teaches nothing.
     p.sort_applied = "rank"
     p.rankable = True
+    # And the rewrite outcome, which `run_search` reads off a page-1 page:
+    # `search_response` refuses a MagicMock there (#358).
+    p.rewrite_status = "not_requested"
+    p.rewrite_note = None
+    p.rewrite_note_code = None
     return p
 
 

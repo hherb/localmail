@@ -60,7 +60,8 @@ class SearchRequest(BaseModel):
     query: str | None = ""
     filters: SearchFiltersModel = Field(default_factory=SearchFiltersModel)
     limit: int = Field(default=50, ge=1, le=SEARCH_LIMIT_MAX)
-    # "rank" orders by rerank relevance; "date" takes the date-ordered
+    # "rank" orders by hybrid relevance (fused RRF, reranked only when
+    # `reranker_enabled`); "date" takes the date-ordered
     # keyset walk directly rather than the hybrid pool, ordering by
     # COALESCE(internal_date, date_sent) DESC NULLS LAST.
     #

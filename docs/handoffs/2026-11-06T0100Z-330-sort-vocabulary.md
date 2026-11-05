@@ -44,14 +44,23 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | `fa44f7c` | #330: `serve/routes/search.py`, `mcp/server.py`, `mcp/tools.py` annotate `sort`/`sort_order` with `sort_axes.SortMode`/`SortOrder` instead of restating the `Literal`s; CLAUDE.md note |
 | handoff | this file + `docs/handoffs/2026-11-06T0100Z-330-sort-vocabulary.md` |
 
-- Tests: `tests/test_sort_vocabulary.py` (7). An AST rule refuses any
-  `Literal` spelling either vocabulary in `src/` outside `sort_axes.py`
-  (with a negative control and a check the authority still matches), and
+- Tests: `tests/test_sort_vocabulary.py` (8). An AST rule refuses any
+  `Literal` in `src/` outside `sort_axes.py` sharing two or more members
+  with either vocabulary (aliases like `Literal as L` resolved; negative
+  control built from `get_args`; a check the authority still matches), and
   the published HTTP (`SearchRequest.model_json_schema()`) and MCP
-  (`inputSchema`) enums are compared with `get_args`.
-- Mutations: restating `Literal["desc", "asc"]` in the route fails only the
-  AST rule; a stale `Literal["rank"]` in `mcp/server.py` fails only the MCP
-  schema pin.
+  (`inputSchema`, unopened pool, no DB) enums are compared with `get_args`,
+  reading `const` too.
+- Review round (same PR): the first cut matched exact sets only, so a copy
+  in `mcp/tools.py` left stale by a grown authority was caught by nothing,
+  and the hard-coded negative control failed on a legitimate growth. Both
+  fixed; GUI TS copies and `mcp/server.py` description prose are documented
+  as uncovered.
+- Mutations (copied tree, import path verified): a legitimate `SortMode`
+  growth stays green; a grown authority with stale `tools.py`, an aliased
+  `L["rank", "date"]` in the route, and reordering fail the AST rule; a
+  split `Literal["rank"] | Literal["date", "x"]` or stale `Literal["rank"]`
+  fails only the schema pin.
 - **Not done:** the issue's larger idea (`SortOrder` as a `str` Enum
   carrying its ORDER BY). The wire is unchanged because the aliases are the
   same `Literal`s in the same order.
@@ -60,7 +69,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | check | result |
 |---|---|
-| `uv run pytest -q` | **4715 passed**, 6 warnings (pre-existing), 5:12 |
+| `uv run pytest -q` | **4716 passed**, 6 warnings (pre-existing), 8:18 |
 | mypy | Success, 169 files |
 | GUI | untouched |
 | CI | not yet run when this was written; check `gh pr checks` |
@@ -178,7 +187,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4715 at session 90
+unset VIRTUAL_ENV && uv run pytest -q              # 4716 at session 90
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```

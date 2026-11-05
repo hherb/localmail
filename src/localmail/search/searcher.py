@@ -60,6 +60,7 @@ from localmail.search.sort_axes import (
     SortMode,
     SortOrder,
     is_rankable,
+    ordering_pair_error,
     resolve_sort,
     sort_applicability_error,
     sort_membership_error,
@@ -587,6 +588,13 @@ class SearchPage:
     rewrite_note: str | None = None
     rewrite_note_code: RewriteNoteCode | None = None
 
+    def __post_init__(self) -> None:
+        # The library/CLI half of #356; ``search_response`` is the wire half.
+        pair_error = ordering_pair_error(
+            sort=self.sort_applied, rankable=self.rankable)
+        if pair_error is not None:
+            raise ValueError(pair_error)
+
 
 @dataclass(frozen=True)
 class PoolMetadata:
@@ -620,6 +628,13 @@ class PoolMetadata:
     # reader cannot outlive it. ``_empty_grown_page`` is the consumer: it
     # stands in for a page of this pool and has no query of its own.
     rankable: bool
+
+    def __post_init__(self) -> None:
+        # Same rule as ``SearchPage``'s (#356): a pool is minted only on the
+        # rank branch, so ``rank`` with ``rankable=False`` is a builder bug.
+        pair_error = ordering_pair_error(sort=self.sort, rankable=self.rankable)
+        if pair_error is not None:
+            raise ValueError(pair_error)
 
 
 class Searcher:

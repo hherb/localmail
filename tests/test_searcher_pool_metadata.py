@@ -20,6 +20,7 @@ import pytest
 from localmail.config import SearchConfig
 from localmail.db import open_pool
 from localmail.search.embed_worker import run_embed_worker_once
+from localmail.search.pool_entry import PoolEntry
 from localmail.search.query import parse_query
 from localmail.search.searcher import DEFAULT_SORT, PoolMetadata, Searcher
 
@@ -121,24 +122,16 @@ def test_pool_metadata_reports_the_sort_the_pool_was_actually_built_with(db_dsn)
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
         # Reach past retrieval: the field must mirror the entry, and only a
         # date-built pool can tell a truthful read from a hardcoded "rank".
-        s._cache.put("tok-date", {
-            "parsed": parse_query("invoice"), "hydrated": [], "scores": {},
-            "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
-            "user_id": None, "sort": "date", "sort_order": "desc",
-        })
+        s._cache.put("tok-date", PoolEntry(
+            parsed=parse_query("invoice"), hydrated=[], scores=[],
+            page_size=5, candidates_per_arm=50, rerank_pool_size=20,
+            user_id=None, sort="date", sort_order="desc",
+            first_page=1, excluded_ids=frozenset(),
+        ))
         assert s.get_pool_metadata("tok-date").sort == "date"
-
-        # And the fallback's own failure shape: an entry *missing* the key.
-        # Asserting only the date pool above passes against
-        # `entry.get("sort", "rank")` — the mutant answers "date" too,
-        # because the key is there. What the fallback actually does is
-        # answer "rank" for a writer that forgot, which is the silence the
-        # defaultless field exists to end, so that is what must be loud.
-        entry = dict(s._cache.get("tok-date"))
-        del entry["sort"]
-        s._cache.put("tok-no-sort", entry)
-        with pytest.raises(KeyError):
-            s.get_pool_metadata("tok-no-sort")
+        # A writer that forgets `sort` used to be a KeyError here, at read
+        # time; since #328 it is a TypeError at the put, pinned per field by
+        # test_pool_entry.py::test_every_field_is_required.
     finally:
         pool.close()
 
@@ -162,25 +155,20 @@ def test_pool_metadata_reports_the_order_the_pool_was_actually_built_with(db_dsn
     pool = open_pool(db_dsn)
     try:
         s = Searcher(pool=pool, cfg=cfg, embeddings=_E(), reranker=_R(), rewriter=None)
-        s._cache.put("tok-asc", {
-            "parsed": parse_query("invoice"), "hydrated": [], "scores": {},
-            "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
-            "user_id": None, "sort": "rank", "sort_order": "asc",
-        })
+        s._cache.put("tok-asc", PoolEntry(
+            parsed=parse_query("invoice"), hydrated=[], scores=[],
+            page_size=5, candidates_per_arm=50, rerank_pool_size=20,
+            user_id=None, sort="rank", sort_order="asc",
+            first_page=1, excluded_ids=frozenset(),
+        ))
         meta = s.get_pool_metadata("tok-asc")
         # The entry's two values differ, so each field is pinned to its own
         # key: swapping the two reads makes *both* lines wrong rather than
         # leaving one to pass on a coincidence.
         assert meta.sort_order == "asc"
         assert meta.sort == "rank"
-
-        # And the defaultless field's own failure shape, as for ``sort``:
-        # a writer that forgot the key must be loud, not silently "desc".
-        entry = dict(s._cache.get("tok-asc"))
-        del entry["sort_order"]
-        s._cache.put("tok-no-order", entry)
-        with pytest.raises(KeyError):
-            s.get_pool_metadata("tok-no-order")
+        # A writer that forgets `sort_order` fails at the put (#328), as for
+        # `sort` above.
     finally:
         pool.close()
 

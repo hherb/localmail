@@ -29,6 +29,7 @@ unrankable, so the field is explicit and defaultless rather than a property.
 """
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 
 import pytest
@@ -37,6 +38,7 @@ from localmail.api.search import run_search
 from localmail.api.search_cursor import SearchCursor, encode_search_cursor
 from localmail.config import SearchConfig
 from localmail.db import open_pool
+from localmail.search.pool_entry import PoolEntry
 from localmail.search.query import parse_query
 from localmail.search.searcher import SearchPage, Searcher
 
@@ -203,14 +205,13 @@ def test_a_cached_pool_reports_itself_rankable(searcher):
 
 
 def _textless_pool(searcher, token, **overrides):
-    entry = {
-        "parsed": parse_query(""), "hydrated": [], "scores": {},
-        "page_size": 5, "candidates_per_arm": 50, "rerank_pool_size": 20,
-        "user_id": None, "sort": "date", "sort_order": "desc",
-        "first_page": 1, "excluded_ids": frozenset(),
-    }
-    entry.update(overrides)
-    searcher._cache.put(token, entry)
+    entry = PoolEntry(
+        parsed=parse_query(""), hydrated=[], scores=[],
+        page_size=5, candidates_per_arm=50, rerank_pool_size=20,
+        user_id=None, sort="date", sort_order="desc",
+        first_page=1, excluded_ids=frozenset(),
+    )
+    searcher._cache.put(token, dataclasses.replace(entry, **overrides))
 
 
 def test_continue_page_derives_rankability_from_the_pool_s_query(searcher):
@@ -384,13 +385,13 @@ def test_a_pool_exhausted_at_the_cap_reports_the_pool_as_rankable(searcher):
     ``sort_applied`` does.
     """
     cfg = searcher.config
-    searcher._cache.put("tok-capped", {
-        "parsed": parse_query("needle"), "hydrated": [], "scores": {},
-        "page_size": 5, "candidates_per_arm": cfg.candidates_per_arm_max,
-        "rerank_pool_size": 20,
-        "user_id": 1, "sort": "rank", "sort_order": "desc",
-        "first_page": 1, "excluded_ids": frozenset(),
-    })
+    searcher._cache.put("tok-capped", PoolEntry(
+        parsed=parse_query("needle"), hydrated=[], scores=[],
+        page_size=5, candidates_per_arm=cfg.candidates_per_arm_max,
+        rerank_pool_size=20,
+        user_id=1, sort="rank", sort_order="desc",
+        first_page=1, excluded_ids=frozenset(),
+    ))
     out = run_search(searcher=searcher, free_text="needle", filters={},
                      limit=5, allowed_account_ids=[1], user_id=1,
                      cursor=encode_search_cursor(SearchCursor(token="tok-capped",

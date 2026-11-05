@@ -40,6 +40,7 @@ from localmail.search.hit_dates import fetch_local_dates
 from localmail.search.page_cache import (
     CacheMissError, PageCache, PageOutOfPoolError,
 )
+from localmail.search.pool_entry import PoolEntry
 from localmail.search.query import ParsedQuery, parse_query
 from localmail.search.relevance_order import date_key, finite_scores, relevance_key
 from localmail.search.reranker import Reranker
@@ -602,7 +603,7 @@ class PoolMetadata:
 
     Returned by :meth:`Searcher.get_pool_metadata` so callers can decide
     whether to grow the pool further without reaching into the cache's
-    entry-dict shape. Stable across future cache refactors.
+    ``PoolEntry`` (#328). Stable across future cache refactors.
     """
     candidates_per_arm: int
     page_size: int
@@ -660,7 +661,9 @@ class Searcher:
         self._embeddings = embeddings
         self._reranker = reranker
         self._rewriter = rewriter
-        self._cache = PageCache(maxsize=cfg.page_cache_size, ttl_s=cfg.page_cache_ttl_s)
+        self._cache: PageCache[PoolEntry] = PageCache(
+            maxsize=cfg.page_cache_size, ttl_s=cfg.page_cache_ttl_s,
+            value_type=PoolEntry)
         self._lang_warning_emitted = False
 
     @property
@@ -729,23 +732,23 @@ class Searcher:
         path when ``continue_page`` raises ``PageOutOfPoolError``: it needs
         the current ``candidates_per_arm`` to decide whether to double the
         pool (and the cached ``page_size`` for the "at cap" sentinel page).
-        Keeping this on Searcher means the cache's entry-dict shape can
+        Keeping this on Searcher means the cache's ``PoolEntry`` can
         evolve without breaking that recovery path (issue #71).
         """
         try:
             entry = self._cache.get(search_token)
         except CacheMissError:
             return None
-        if user_id is not None and entry.get("user_id") != user_id:
+        if user_id is not None and entry.user_id != user_id:
             return None
         return PoolMetadata(
-            candidates_per_arm=int(entry["candidates_per_arm"]),
-            page_size=int(entry["page_size"]),
-            rerank_pool_size=int(entry["rerank_pool_size"]),
-            pool_size=len(entry["hydrated"]),
-            sort=entry["sort"],
-            sort_order=entry["sort_order"],
-            rankable=is_rankable(free_text=entry["parsed"].free_text),
+            candidates_per_arm=entry.candidates_per_arm,
+            page_size=entry.page_size,
+            rerank_pool_size=entry.rerank_pool_size,
+            pool_size=len(entry.hydrated),
+            sort=entry.sort,
+            sort_order=entry.sort_order,
+            rankable=is_rankable(free_text=entry.parsed.free_text),
         )
 
     def _maybe_warn_unpopulated_body_lang(
@@ -1245,14 +1248,14 @@ class Searcher:
         width = self._snippet_width(snippet_chars)
         import math
         entry = self._cache.get(search_token)  # may raise CacheMissError
-        if user_id is not None and entry.get("user_id") != user_id:
+        if user_id is not None and entry.user_id != user_id:
             raise CacheMissError(search_token)
-        page_size = entry["page_size"]
-        hydrated = entry["hydrated"]
+        page_size = entry.page_size
+        hydrated = entry.hydrated
         pool_size = len(hydrated)
         # A grown pool starts at the page that triggered the grow, with every
         # row served before it removed (#426). Ungrown pools start at 1.
-        first_page = entry["first_page"]
+        first_page = entry.first_page
         if 1 <= page < first_page:
             # Pages served before a grow are not in the grown pool; the
             # caller re-runs the search, as for any expired cursor.
@@ -1267,27 +1270,27 @@ class Searcher:
         needs_filename = any(
             item["fused"].best_chunk_table == "attachment_chunks" for item in hydrated
         )
-        sort: SortMode = entry["sort"]
+        sort: SortMode = entry.sort
         if needs_filename:
             with self._pool.connection() as conn:
                 results = self._build_results(
-                    hydrated, entry["parsed"], entry["scores"], local_page,
+                    hydrated, entry.parsed, entry.scores, local_page,
                     page_size, conn=conn, sort=sort, snippet_width=width,
                 )
         else:
             results = self._build_results(
-                hydrated, entry["parsed"], entry["scores"], local_page,
+                hydrated, entry.parsed, entry.scores, local_page,
                 page_size, conn=None, sort=sort, snippet_width=width,
             )
         return SearchPage(
             results=results, page=page, page_size=page_size, pool_size=pool_size,
-            candidates_per_arm=entry["candidates_per_arm"],
+            candidates_per_arm=entry.candidates_per_arm,
             has_more_in_pool=pool_size > local_page * page_size,
             can_grow_pool=True,
-            search_token=search_token, query=entry["parsed"],
+            search_token=search_token, query=entry.parsed,
             timing_ms={"cache_hit": 0.0},
             sort_applied=sort,
-            rankable=is_rankable(free_text=entry["parsed"].free_text),
+            rankable=is_rankable(free_text=entry.parsed.free_text),
         )
 
     def grow_pool(
@@ -1317,20 +1320,20 @@ class Searcher:
         """
         width = self._snippet_width(snippet_chars)
         entry = self._cache.get(search_token)
-        if user_id is not None and entry.get("user_id") != user_id:
+        if user_id is not None and entry.user_id != user_id:
             raise CacheMissError(search_token)
-        first_page = entry["first_page"]
+        first_page = entry.first_page
         if page < first_page:
             raise CacheMissError(search_token)
-        page_size = entry["page_size"]
-        served = _ordered_pool(entry["hydrated"], entry["scores"], entry["sort"])
-        excluded: frozenset[int] = entry["excluded_ids"] | {
+        page_size = entry.page_size
+        served = _ordered_pool(entry.hydrated, entry.scores, entry.sort)
+        excluded: frozenset[int] = entry.excluded_ids | {
             item["fused"].message_id
             for item, _ in served[:(page - first_page) * page_size]
         }
-        parsed = entry["parsed"]
+        parsed = entry.parsed
         # rerank pool grows proportionally so the larger arm output isn't wasted
-        rps = max(candidates_per_arm, entry["rerank_pool_size"])
+        rps = max(candidates_per_arm, entry.rerank_pool_size)
         with self._pool.connection() as conn:
             parsed = self._resolve_account_names(conn, parsed)
             fused = self._retrieve_pool(conn, parsed, candidates_per_arm, rps,
@@ -1348,15 +1351,15 @@ class Searcher:
             )
         else:
             scores = [item["fused"].rrf_score for item in hydrated]
-        # `sort` and `sort_order` are copied from the entry, never defaulted:
-        # `PoolMetadata` reads them back to decide whether a paging request
-        # contradicts the pool (#312).
-        self._cache.put(search_token, {
-            **entry,
-            "parsed": parsed, "hydrated": hydrated, "scores": scores,
-            "candidates_per_arm": candidates_per_arm, "rerank_pool_size": rps,
-            "first_page": page, "excluded_ids": excluded,
-        })
+        # `replace` carries `sort`, `sort_order` and `user_id` over from the
+        # entry: `PoolMetadata` reads the first two back to decide whether a
+        # paging request contradicts the pool (#312).
+        self._cache.put(search_token, replace(
+            entry,
+            parsed=parsed, hydrated=hydrated, scores=scores,
+            candidates_per_arm=candidates_per_arm, rerank_pool_size=rps,
+            first_page=page, excluded_ids=excluded,
+        ))
         return self.continue_page(search_token, page, user_id=user_id,
                                   snippet_chars=width)
 
@@ -1823,17 +1826,16 @@ class Searcher:
         token: str | None = None
         if use_cache:
             token = uuid.uuid4().hex[:16]
-            self._cache.put(token, {
-                "parsed": parsed, "hydrated": hydrated, "scores": scores,
-                "candidates_per_arm": cpa, "rerank_pool_size": rps,
-                "page_size": effective_page_size,
-                "user_id": user_id,
-                "sort": effective_sort,
-                "sort_order": effective_order,
-                # Rewritten by grow_pool; read by subscript, so a put that
-                # forgets them fails loudly rather than reading as ungrown.
-                "first_page": 1, "excluded_ids": frozenset(),
-            })
+            self._cache.put(token, PoolEntry(
+                parsed=parsed, hydrated=hydrated, scores=scores,
+                candidates_per_arm=cpa, rerank_pool_size=rps,
+                page_size=effective_page_size,
+                user_id=user_id,
+                sort=effective_sort,
+                sort_order=effective_order,
+                # A fresh pool; grow_pool rewrites both (#426).
+                first_page=1, excluded_ids=frozenset(),
+            ))
         pool_size = len(hydrated)
         return SearchPage(
             results=results, page=1, page_size=effective_page_size,

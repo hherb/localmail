@@ -56,6 +56,26 @@ class ApiKeyNotFound(Exception):
     """No API key, or no API-key principal, with that id."""
 
 
+class NotAnApiKeyPrincipal(ApiKeyNotFound):
+    """The id is a person's: the ``is_service`` guard refused it (#319).
+
+    A subclass so the JSON route and the CLI keep mapping it as a not-found,
+    while the panel can tell a security refusal from "already revoked".
+    """
+
+
+def _not_found(cur: psycopg.Cursor, user_id: int, message: str) -> ApiKeyNotFound:
+    """The exception for an ``is_service``-guarded statement that matched nothing."""
+    cur.execute(
+        "SELECT 1 FROM api_users WHERE id = %s AND is_service IS FALSE", (user_id,),
+    )
+    if cur.fetchone() is not None:
+        return NotAnApiKeyPrincipal(
+            f"user id={user_id} is a person, not an API-key principal"
+        )
+    return ApiKeyNotFound(message)
+
+
 @dataclass(frozen=True)
 class CreatedKey:
     user_id: int
@@ -235,7 +255,7 @@ def set_grant(
             (user_id,),
         )
         if cur.fetchone() is None:
-            raise ApiKeyNotFound(f"no API-key principal with id={user_id}")
+            raise _not_found(cur, user_id, f"no API-key principal with id={user_id}")
     if granted:
         try:
             acl.grant_account(conn, user_id, account_id)
@@ -274,7 +294,7 @@ def revoke_key(conn: psycopg.Connection, user_id: int) -> None:
             (user_id,),
         )
         if cur.rowcount == 0:
-            raise ApiKeyNotFound(f"no API key for principal id={user_id}")
+            raise _not_found(cur, user_id, f"no API key for principal id={user_id}")
 
 
 def delete_key_principal(conn: psycopg.Connection, user_id: int) -> None:
@@ -289,4 +309,4 @@ def delete_key_principal(conn: psycopg.Connection, user_id: int) -> None:
             (user_id,),
         )
         if cur.rowcount == 0:
-            raise ApiKeyNotFound(f"no API-key principal with id={user_id}")
+            raise _not_found(cur, user_id, f"no API-key principal with id={user_id}")

@@ -7,8 +7,8 @@ Thin wrapper over `localmail.api.admin.api_keys`. Every route requires an admin
 credential; every mutating route validates a method-bound CSRF token. IDs are
 strings on the wire (#33), and the id of an API key is its principal's id.
 
-Guard mapping: validation (`ApiKeyFieldError`) → 400; absence
-(`ApiKeyNotFound`) → 404.
+Guard mapping: validation (`ApiKeyFieldError`) → 400; absence, or a person's
+id (`ApiKeyNotFound`, incl. its subclass `NotAnApiKeyPrincipal`, #319) → 404.
 
 The raw key appears in exactly one response — the 201 from create — and in no
 other route, because nothing can recover it afterwards.

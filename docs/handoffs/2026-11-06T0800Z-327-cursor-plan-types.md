@@ -11,8 +11,10 @@
 > deploy both after #327 merges.
 >
 > **Open issues: 26** (25 once this PR merges and closes #327). **Open
-> Dependabot alerts: 2** (#71, #185, open on purpose; carried, not
-> re-checked).
+> Dependabot alerts: 3**: #71, #185 (open on purpose) and **new #197**
+> (HIGH, `oauthlib < 4.0.1`, device-flow bearer leak in the *server*
+> endpoints; localmail is only an OAuth client, so hygiene — raise the
+> `oauthlib>=4.0.0` floor to `>=4.0.1` in its own small PR).
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
@@ -100,7 +102,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 ### 5. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
-- **Dependabot #71 / #185:** left open on purpose.
+- **Dependabot #71 / #185:** left open on purpose. **#197** (oauthlib
+  4.0.1): bump the floor, re-lock with `uv lock --upgrade-package oauthlib`.
 - **docling > 2.144:** probe the next release when it lands.
 - **emSign G3:** re-check the trust stores after OS updates.
 - **kastellan slice C:** ask whether it is still wanted.
@@ -173,7 +176,7 @@ git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 git diff main origin/fix/327-cursor-plan-types --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq length   # 2 once Dependabot rescans
+gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq length   # 3 (#71, #185, #197)
 gh issue list --limit 200 --json number --jq length
 
 # Deploy — Mac (the repo is the install); restart BOTH

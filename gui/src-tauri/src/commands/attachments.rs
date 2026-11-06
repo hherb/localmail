@@ -1,6 +1,7 @@
 //! Attachment download.
 //!
-//! GET /v1/attachments/{sha256} → stream bytes to disk, return byte count.
+//! GET /v1/attachments/{sha256} → read the body (bounded, see
+//! [`crate::http::body::read_capped`]), write it to disk, return byte count.
 //! Caller (Svelte) provides the destination path obtained from a save dialog.
 //!
 //! Errors surface via the dedicated [`AttachmentError`] enum so the auth-domain
@@ -55,6 +56,8 @@ pub enum AttachmentError {
     #[error("invalid sha256: {0}")]
     InvalidSha256(String),
 
+    /// `size` is the declared `Content-Length`, or without one the bytes
+    /// received when the read stopped (a lower bound).
     #[error("attachment too large: {size} bytes (max {max})")]
     TooLarge { size: u64, max: u64 },
 
@@ -178,6 +181,15 @@ pub async fn fetch_attachment_bytes_cmd(sha256: String) -> Result<AttachmentBlob
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::body::test_support::{write_past, MAX_OVERSHOOT};
+    use crate::storage::keyring::{MemKeyring, Slot};
+
+    // 64 lowercase 'a' — passes validate_sha256.
+    const VALID_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn fake_store() -> KeyringStore {
+        KeyringStore::with_backend(MemKeyring::new())
+    }
 
     // The capped read reports only the size; the command's own ceiling must
     // be what reaches the wire as `max`, and a read error keep its text.
@@ -195,13 +207,53 @@ mod tests {
             AttachmentError::Read(m) if m == "reset"
         ));
     }
-    use crate::storage::keyring::{MemKeyring, Slot};
 
-    // 64 lowercase 'a' — passes validate_sha256.
-    const VALID_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    // Pins the wiring, not just the helper: a command that went back to
+    // buffering the body and checking afterwards would report the full size.
+    async fn oversized_attachment_server() -> (mockito::ServerGuard, mockito::Mock, KeyringStore) {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", format!("/v1/attachments/{VALID_SHA}").as_str())
+            .with_chunked_body(write_past(MAX_ATTACHMENT_BYTES))
+            .create_async()
+            .await;
+        let s = fake_store();
+        s.put(Slot::ServerUrl, &format!("{}/", server.url()))
+            .unwrap();
+        s.put(Slot::CertPin, "deadbeef").unwrap();
+        s.put(Slot::BearerToken, "tok").unwrap();
+        (server, mock, s)
+    }
 
-    fn fake_store() -> KeyringStore {
-        KeyringStore::with_backend(MemKeyring::new())
+    fn assert_cut_off_at_the_cap(err: AttachmentError) {
+        assert!(
+            matches!(
+                err,
+                AttachmentError::TooLarge { size, max: MAX_ATTACHMENT_BYTES }
+                    if size > MAX_ATTACHMENT_BYTES && size <= MAX_ATTACHMENT_BYTES + MAX_OVERSHOOT
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_bytes_cuts_an_oversized_chunked_body_off_at_the_cap() {
+        let (_server, _m, s) = oversized_attachment_server().await;
+        let err = fetch_attachment_bytes(&s, VALID_SHA).await.unwrap_err();
+        assert_cut_off_at_the_cap(err);
+    }
+
+    #[tokio::test]
+    async fn download_cuts_an_oversized_chunked_body_off_and_writes_nothing() {
+        let (_server, _m, s) = oversized_attachment_server().await;
+        let dest =
+            std::env::temp_dir().join(format!("localmail-218-{}-{VALID_SHA}", std::process::id()));
+        let _ = std::fs::remove_file(&dest);
+        let err = download_attachment(&s, VALID_SHA, dest.clone())
+            .await
+            .unwrap_err();
+        assert_cut_off_at_the_cap(err);
+        assert!(!dest.exists(), "nothing may be written on refusal");
     }
 
     #[tokio::test]

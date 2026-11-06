@@ -7306,10 +7306,27 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   `resp.bytes().await` and then compared the length, so a chunked response
   with no `Content-Length` buffered without bound first. All three go through
   [gui/src-tauri/src/http/body.rs](gui/src-tauri/src/http/body.rs)`::read_capped`,
-  which reads `resp.chunk()` and refuses once the running total passes the
-  ceiling. `TooLarge.size` is then the bytes received when the read stopped,
-  a lower bound. Pinned by a mockito body that never ends, under a timeout.
-  The JSON helpers in `http/client.rs` (`.json()`) are still unbounded.
+  which refuses an over-cap `Content-Length` up front, then reads
+  `resp.chunk()` and refuses once the running total passes the ceiling.
+  `TooLarge.size` is the declared length when there is one; without one it
+  is the bytes received when the read stopped, a lower bound. It still
+  buffers (bounded), it does not stream to disk.
+  - **Pinned at the helper and at each caller.** The helper's tests include a
+    mockito body that never ends, under a timeout. Those alone left the wiring
+    unpinned: reverting any caller to `resp.bytes()` passed every test (review
+    of #463). Each command now has a server-driven test with a *finite*
+    chunked body just past its cap (`body::test_support::write_past`),
+    asserting the reported size is near the cap. Only a bounded read reports
+    that, and a finite body keeps a regression from buffering until the
+    client timeout. Pinned clients speak plain HTTP to mockito, so no TLS is
+    needed. All six mutations (each caller, fast-fail removed, `>=` there, a
+    read error reported as `TooLarge`) fail their own test.
+  - **Still unbounded:** the JSON helpers in `http/client.rs`, both
+    `.json()` and the error-path `resp.text()` reads in all six (including
+    `http_post_empty`, `http_post_json_no_resp` and `http_delete`).
+  - Filed from the same review: #464 (a body timeout reads as a generic
+    "read body" error) and #465 (a failed disk write leaves a truncated
+    file).
 - **`--all-targets` clippy is clean now, and CI still doesn't run it.** The
   long-standing `approx_constant` failure in
   `gui/src-tauri/src/commands/search.rs` (a `3.14` dummy `took_ms`) is fixed.

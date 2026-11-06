@@ -10,7 +10,7 @@
 > verified on each). #218 is GUI-only (Tauri), so merging it needs **no server
 > deploy**; the desktop GUI needs a rebuild to pick it up.
 >
-> **Open issues: 24** (23 once #463 closes #218). **Open Dependabot alerts: 2**
+> **Open issues: 26** (25 once #463 closes #218; #464 and #465 filed in review). **Open Dependabot alerts: 2**
 > — #71 and #185, both open on purpose.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
@@ -45,23 +45,31 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | SHA | What |
 |---|---|
 | `b56a2e6` | New `gui/src-tauri/src/http/body.rs::read_capped(resp, max)`: refuses an over-cap `Content-Length` up front, then reads `resp.chunk()` and returns `BodyError::TooLarge` once the running total would pass `max`. `download_attachment`, `fetch_attachment_bytes` and `get_message_raw` use it (via `From<BodyError>` per command error enum), replacing three copies of buffer-then-check; `check_content_length` deleted. 5 helper tests + 1 mapping test per module. CLAUDE.md bullet in the GUI section |
-| next | this handoff |
+| `27e8861` | this handoff |
+| next | `/finalcheck` review fixes: a server-driven wiring test per caller (reverting any caller to `resp.bytes()` passed every test before), three helper tests closing surviving mutations (fast-fail removed, `>=` there, the `Read` branch), `Vec` pre-sized from a declared length, doc corrections. Six mutations each fail their own test. #464 and #465 filed |
 
 - **Verification:** RED first. The helper landed holding today's logic, and
   the endless-chunked-body test timed out (`Elapsed`) while the other four
-  passed. The loop made it green. `cargo test --lib`: **118 passed**.
-  `cargo clippy --all-targets -- -D warnings` is clean. No Python or TS
-  changed, so neither suite was re-run.
+  passed. The loop made it green. After the review fixes `cargo test --lib`:
+  **123 passed**; `cargo clippy` with and without `--all-targets` and
+  `cargo fmt --check` are clean. No Python or TS changed, so neither suite
+  was re-run.
+- **The commit also carries rustfmt reflows** in ~15 untouched Rust files
+  (behaviour-neutral, checked line by line in review). gui-ci has no
+  `cargo fmt --check`, so nothing gated them.
 - **Wire nuance:** without a `Content-Length`, `TooLarge.size` is the bytes
   received when the read stopped. That is a lower bound, not the real size.
-- **Not done (scoped out):** the JSON helpers in `http/client.rs` (`.json()`)
-  still read unbounded bodies. Noted in CLAUDE.md, not filed.
+- **Not done (scoped out):** the JSON helpers in `http/client.rs` still read
+  unbounded bodies, both `.json()` and the error-path `.text()` in all six.
+  Noted in CLAUDE.md, not filed.
+- **Filed from review:** #464 (a body timeout reads as a generic "read body"
+  error), #465 (a failed disk write leaves a truncated file).
 
 ## What's next
 
 ### 1. **Merge #463** (yours), once CI is green
 - **Acceptance:** `gh pr checks 463` all pass (gui-ci runs the Rust tests);
-  #218 closes; `gh issue list` shows 23. No server deploy needed.
+  #218 closes; `gh issue list` shows 25. No server deploy needed.
 
 ### 2. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
@@ -94,7 +102,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #368, #365; #375; #357; #363, #285;
+- **Issues:** #464, #465 (GUI downloads); #383, #369, #368, #365; #375; #357; #363, #285;
   robustness #226, #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
@@ -175,7 +183,7 @@ uptime; pgrep -fl pytest
 unset VIRTUAL_ENV && uv run pytest -q              # 4761 at session 94 (not re-run in 95)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
-cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 118, session 95
+cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 123, session 95
 ```
 
 The latest migration is **`0038_messages_attachment_names_strict_idx.sql`**;

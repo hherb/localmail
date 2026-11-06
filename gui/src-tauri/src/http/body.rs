@@ -18,16 +18,19 @@ pub enum BodyError {
     Read(String),
 }
 
-/// Read the whole body of `resp`, refusing anything larger than `max` bytes
-/// without ever holding more than `max` plus one chunk in memory.
+/// Read the whole body of `resp`, refusing anything larger than `max` bytes.
+/// The collected body never exceeds `max` bytes plus the one chunk in hand.
 pub async fn read_capped(mut resp: reqwest::Response, max: u64) -> Result<Vec<u8>, BodyError> {
+    let declared = resp.content_length();
     // Fail fast on an honest declaration, before reading a byte.
-    if let Some(len) = resp.content_length() {
+    if let Some(len) = declared {
         if len > max {
             return Err(BodyError::TooLarge { size: len });
         }
     }
-    let mut body = Vec::new();
+    // shortcut: with no Content-Length the Vec grows by doubling, so its
+    // capacity can reach ~2x `max`; fine at the GUI's 100 MiB caps.
+    let mut body = Vec::with_capacity(declared.unwrap_or(0) as usize);
     while let Some(chunk) = resp
         .chunk()
         .await
@@ -43,6 +46,27 @@ pub async fn read_capped(mut resp: reqwest::Response, max: u64) -> Result<Vec<u8
     Ok(body)
 }
 
+/// Test support for the commands: a finite chunked body comfortably past
+/// `max`, and how far past `max` a bounded read may report having got.
+/// Finite so that a regression to buffer-then-check buffers a bounded amount
+/// rather than running until the client timeout.
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub const MAX_OVERSHOOT: u64 = 1024 * 1024;
+
+    pub fn write_past(max: u64) -> impl Fn(&mut dyn std::io::Write) -> std::io::Result<()> {
+        move |w| {
+            let chunk = [b'x'; 64 * 1024];
+            let mut sent = 0;
+            while sent <= max + 2 * MAX_OVERSHOOT {
+                w.write_all(&chunk)?;
+                sent += chunk.len() as u64;
+            }
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,7 +80,7 @@ mod tests {
     const CHUNK: [u8; 8192] = [b'x'; 8192];
     // hyper may hand back several written chunks as one read, so "stopped
     // near the cap" is asserted with slack rather than to the byte.
-    const MAX_OVERSHOOT: u64 = 1024 * 1024;
+    use super::test_support::MAX_OVERSHOOT;
 
     async fn get(server: &mockito::Server, path: &str) -> reqwest::Response {
         reqwest::Client::new()
@@ -90,16 +114,52 @@ mod tests {
         assert_eq!(body.unwrap().len(), CHUNK.len());
     }
 
+    // Several chunks long, so a read that skipped the declared-length check
+    // would report the first chunk's size instead of the declared one.
     #[tokio::test]
     async fn a_declared_length_over_the_cap_is_refused_with_that_length() {
+        const DECLARED: usize = 4 * 1024 * 1024;
         let mut server = mockito::Server::new_async().await;
         let _m = server
             .mock("GET", "/big")
-            .with_body(vec![b'x'; 100])
+            .with_body(vec![b'x'; DECLARED])
             .create_async()
             .await;
         let body = read_capped(get(&server, "/big").await, 10).await;
-        assert_eq!(body, Err(BodyError::TooLarge { size: 100 }));
+        assert_eq!(
+            body,
+            Err(BodyError::TooLarge {
+                size: DECLARED as u64
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_length_equal_to_the_cap_is_accepted() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/declared-exact")
+            .with_body(vec![b'x'; 100])
+            .create_async()
+            .await;
+        let resp = get(&server, "/declared-exact").await;
+        assert_eq!(resp.content_length(), Some(100));
+        assert_eq!(read_capped(resp, 100).await.unwrap().len(), 100);
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_mid_body_is_a_read_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/broken")
+            .with_chunked_body(|w| {
+                w.write_all(b"x")?;
+                Err(std::io::Error::other("boom"))
+            })
+            .create_async()
+            .await;
+        let body = read_capped(get(&server, "/broken").await, SMALL_CAP).await;
+        assert!(matches!(body, Err(BodyError::Read(_))), "{body:?}");
     }
 
     #[tokio::test]

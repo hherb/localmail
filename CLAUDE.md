@@ -4629,6 +4629,44 @@ for the full design.
       happened in the first place: two predicates for one rule is what let
       the api gate and the retrieval branch disagree about what counted as
       a blank query.
+      - **Since #327 it returns one type per mode** — `FreshPlan(sort,
+        sort_order)`, `KeysetPlan(cursor)` (decoded; `sort`/`sort_order`
+        are properties off the cursor) and `PoolPlan(cursor, stated_sort,
+        stated_sort_order)` — and `run_search` is a `match` over them. The
+        one class carried a resolved *default* ordering on pool mode, and
+        the rank+asc refusal read it: a pool cursor paged with
+        `sort_order="asc"` was refused for naming `sort='rank' (the
+        default)` before the pool was consulted. A stated `asc` alone now
+        reaches `_check_pool_sort` and is told the order the pool actually
+        has (`this cursor continues a descending search`). A `PoolPlan` has
+        no `sort` attribute, by design: only the cached pool knows.
+        - **The rank+asc rule is one function, judged in the resolver**
+          (review of #327): `sort_axes.sort_order_applicability_error(sort=,
+          sort_order=, continuing_pool=)`, asked by `Searcher.search` and by
+          `resolve_cursor_plan`'s fresh arm (the *resolved* pair) and pool
+          arm (a *stated* pair only). The api copy had been hand-written, a
+          prefix of the Searcher's. `continuing_pool` is keyword-only with
+          no default and picks the remedy: "pass sort='date'" for a fresh
+          request, "start a fresh sort='date' search" with a pool cursor,
+          where sort='date' would contradict the pool and earn another 400.
+          The fresh api message gained the Searcher's rationale sentence.
+        - **A *stated* `sort="rank"` + `sort_order="asc"` on a pool cursor
+          stays a 400 ahead of the empty-ACL short-circuit.** The first cut
+          made it pool-judged, so a grant-nothing caller got a 200 empty
+          page and an evicted pool a 409 for a pair no pool can hold (a
+          fresh rank + asc is refused, so none is built). It is refused
+          from the statement, with no cache probe.
+        - **Wire consequences, all on edge paths:** a malformed **pool**
+          cursor is a 400 ahead of the empty-ACL short-circuit (it was a
+          200 for a grant-nothing caller; the keyset payload already was);
+          `reject_pool_sort_mismatch`'s order half is reached end to end;
+          and a stated `asc` with **no stated sort** on a pool cursor is
+          left to the pool — a 200 empty page for a grant-nothing caller
+          and a 409 for an evicted pool, where both were 400s. Deliberate:
+          only the pool knows whether that `asc` contradicts it. Pinned in
+          `tests/test_api_search_cursor_plan_types.py` and
+          `tests/test_sort_axes.py`; the three refusal sites are each
+          mutation-checked.
     - **Ascending SQL is `ASC NULLS FIRST, id ASC` — never `NULLS LAST` —
       and this is measured, not a style choice.** It is the exact reverse
       of `messages_recent_idx`'s `DESC NULLS LAST, id DESC`, so it is
@@ -4920,10 +4958,9 @@ for the full design.
             the whole cursor rather than scanning its prefix, which also
             moves a malformed **payload** ahead of the empty-ACL
             short-circuit — where this module already said such a request
-            belongs. `run_search` decodes a second time for the position it
-            forwards; deliberate, since hoisting the cursor onto
-            `CursorPlan` would add a third field its pool-mode consumer
-            must ignore (#327).
+            belongs. (`run_search` used to decode a second time, to avoid a
+            third field on `CursorPlan`; since #327 the decoded cursor rides
+            on `KeysetPlan`/`PoolPlan` and it decodes once.)
           - **That gate's `parse_query` was a 500 on two paths that used to
             answer 200** (review of #333). `QueryParseError` — raised for a
             malformed `after:`/`before:` date and an empty `lang:` — is a
@@ -5146,7 +5183,8 @@ for the full design.
         landing it *with* its renderer, which is the test that objection
         actually sets.
       - **The empty-ACL short-circuit reports
-        `resolve_sort(requested=plan.sort, free_text=…)`**, which is exact
+        `resolve_sort(requested=plan.sort, free_text=…)`** (a `PoolPlan`'s
+        `stated_sort` since #327), which is exact
         on the **keyset** mode (`KEYSET_SORT`, which `resolve_sort`
         returns for any query) and, **since #367**, on the **fresh** mode
         too. Until then fresh was the *gate's* resolution of the raw request
@@ -5155,7 +5193,7 @@ for the full design.
         and `date` in the Searcher, `"` the reverse. The gate parses the
         composition now and the filters come first, so both read the same
         free text. On **pool** mode it describes a pool that branch never
-        consults (`CursorPlan` says so). That one is accepted only because
+        consults (a `PoolPlan` knows only what was stated, #327). That one is accepted only because
         **no rows come back** — nothing is mislabelled because nothing is
         labelled. The rowed paths never read it: `Searcher.search` stamps
         fresh and keyset, `continue_page` reads the pool's own metadata, and
@@ -5291,9 +5329,9 @@ for the full design.
         - **That is not by itself the wire guarantee, and reading it as one
           shipped the pair it forbids** (review of #355). `run_search`'s
           empty-ACL branch took `sort_applied` from `plan.sort` raw, and
-          `resolve_cursor_plan`'s pool arm is `DEFAULT_SORT if
-          requested_sort is None else requested_sort` — it never consults
-          `is_rankable`. So a **pool cursor with a textless query** answered
+          `resolve_cursor_plan`'s pool arm was `DEFAULT_SORT if
+          requested_sort is None else requested_sort` — it never consulted
+          `is_rankable` (since #327 it resolves no sort). So a **pool cursor with a textless query** answered
           `sort_applied="rank"` beside `rankable=False`: the one combination
           declared impossible, and the pair the GUI renders as a checked
           *and* disabled Relevance radio above a note saying there is
@@ -5497,7 +5535,8 @@ for the full design.
         made invisible.** (1) The parametrised branch tests asserted only
         `pytest.raises(ValidationFailed)`, which `run_search` raises from at
         least three sites that never touch the searcher — mutating
-        `elif plan.mode == "keyset"` to `elif False` left all four keyset
+        `elif plan.mode == "keyset"` to `elif False` (the pre-#327 dispatch;
+        it is a `match` with `assert_never` now) left all four keyset
         cases green, control falling through to the pool branch where
         `decode_search_cursor` raises a *different* `ValidationFailed` over
         the same cursor. They assert `search.assert_called_once()` and the

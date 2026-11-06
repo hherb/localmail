@@ -65,6 +65,7 @@ from localmail.search.sort_axes import (
     resolve_sort,
     sort_applicability_error,
     sort_membership_error,
+    sort_order_applicability_error,
 )
 from localmail.search.keyset_walk import (
     KeysetWalk,
@@ -1657,13 +1658,11 @@ class Searcher:
         # the two had to be fixed together — whatever page 1 decides a stated
         # sort means for a textless query, this guard reasons from the same
         # thing.
-        if effective_sort == "rank" and effective_order == "asc":
-            raise SortOrderNotApplicable(
-                "sort_order='asc' is not applicable to sort='rank' (the "
-                "default); pass sort='date' for oldest-first. The rank path "
-                "serves a bounded candidate pool, so reversing it returns "
-                "the least relevant of the top hits, not of the archive."
-            )
+        order_error = sort_order_applicability_error(
+            sort=effective_sort, sort_order=effective_order,
+            continuing_pool=False)
+        if order_error is not None:
+            raise SortOrderNotApplicable(order_error)
 
         # The date branch below is the only reader of ``keyset_cursor``
         # (#308), so a cursor surviving to here selected the hybrid pool,

@@ -157,46 +157,40 @@ def test_a_stated_order_contradicting_the_cursor_is_a_400() -> None:
 
 
 def test_a_pool_cursor_with_an_ascending_order_is_refused() -> None:
-    """A pool cursor cannot be carried into an ascending walk.
+    """A pool cursor cannot be carried into an ascending walk — and the pool
+    is what says so (#327).
 
-    The refusal this exercises is the rank+asc guard, **not** the pool
-    mismatch check: with no ``sort`` stated the plan resolves to rank, so
-    the request is turned away before ``get_pool_metadata`` is called and
-    the metadata below is never read. That shadowing is structural — a
-    stated order of "asc" needs ``sort="date"`` to clear the rank guard,
-    and the pool guard's *sort* half then rejects that against a rank-built
-    pool. ``reject_pool_sort_mismatch``'s order half is therefore
-    unreachable from here and is tested directly in
-    ``test_api_search_cursor_direction.py``.
+    This used to be the rank+asc guard's refusal, reasoning from a ``sort``
+    resolved to its default before the pool was read; the metadata below
+    was never consulted. That guard is a fresh-plan rule now, so the stated
+    order reaches ``_check_pool_sort`` and is judged against the order the
+    pool was actually built with.
     """
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
         candidates_per_arm=50, page_size=2, rerank_pool_size=100, pool_size=10,
         sort="rank", sort_order="desc", rankable=True,
     )
-    with pytest.raises(ValidationFailed, match="sort_order"):
+    with pytest.raises(ValidationFailed, match="continues a descending search"):
         run_search(searcher=s, free_text="invoice", filters={}, limit=2,
                    allowed_account_ids=[1], user_id=99, sort_order="asc",
                    cursor="tok-1:2")
-    s.get_pool_metadata.assert_not_called()
+    s.get_pool_metadata.assert_called_once()
 
 
 def test_a_stated_order_reaches_the_pool_guard_and_is_checked_against_it() -> None:
     """``run_search`` must hand the caller's stated order to the pool guard.
 
-    The test above proves only that the *ascending* case never gets there,
-    so nothing drove ``_check_pool_sort``'s ``requested_sort_order``
-    argument end to end: every other pool-cursor test states no order at
+    Before #327 the ascending case never got there, so nothing drove
+    ``_check_pool_sort``'s ``requested_sort_order`` argument end to end: every other pool-cursor test states no order at
     all, which makes ``_reject_order_mismatch`` a no-op by construction.
     Dropping that argument — passing ``None`` where the caller's value
     belongs — therefore left the whole suite green while silently
     un-checking one half of the pool guard.
 
-    ``sort_order="desc"`` is the only stated order that reaches the guard
-    (``"asc"`` is shadowed by the rank+asc refusal), so the pool it is
-    checked against has to be an ascending one for the comparison to have
-    an answer. Such a pool cannot arise in production — which is the point:
-    a mocked one is the only way to observe that the argument arrived.
+    Checked against an ascending pool, which cannot arise in production —
+    which is the point: a mocked one is the only way to observe that a
+    stated ``"desc"`` arrived. (The ``"asc"`` direction is the test above.)
     """
     s = _searcher()
     s.get_pool_metadata.return_value = PoolMetadata(
@@ -283,18 +277,3 @@ def test_the_fresh_rank_asc_refusal_names_the_remedy_that_works() -> None:
     message = str(exc.value)
     assert "pass sort='date' for oldest-first" in message, message
     assert "cursor" not in message, message
-
-
-def test_the_pool_cursor_rank_asc_refusal_says_the_cursor_cannot_carry_over() -> None:
-    """With a pool cursor in hand the short remedy is actively wrong.
-
-    ``sort='date'`` alongside a rank-built pool cursor is a *different*
-    400, so this caller's fix is to start over rather than to add a field.
-    """
-    s = _searcher()
-    with pytest.raises(ValidationFailed) as exc:
-        run_search(searcher=s, free_text="invoice", filters={}, limit=2,
-                   allowed_account_ids=[1], user_id=99, sort_order="asc",
-                   cursor="tok-1:2")
-    message = str(exc.value)
-    assert "cannot be carried over" in message, message

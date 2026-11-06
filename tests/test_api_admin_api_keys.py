@@ -132,13 +132,39 @@ def test_delete_principal_refuses_a_human_user(db_conn):
         row = cur.fetchone()
     assert row is not None
     db_conn.commit()
-    with pytest.raises(svc.ApiKeyNotFound):
+    with pytest.raises(svc.NotAnApiKeyPrincipal):
         svc.delete_key_principal(db_conn, int(row[0]))
 
 
 def test_revoke_unknown_is_not_found(db_conn):
-    with pytest.raises(svc.ApiKeyNotFound):
+    with pytest.raises(svc.ApiKeyNotFound) as exc:
         svc.revoke_key(db_conn, 999999)
+    assert not isinstance(exc.value, svc.NotAnApiKeyPrincipal)
+
+
+def test_revoke_refuses_a_human_user_as_not_a_key_principal(db_conn):
+    """#319: a person's id is a guard refusal, not "already revoked". It
+    subclasses ApiKeyNotFound so the JSON route and CLI map it as before."""
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash) VALUES ('root', 'x') "
+            "RETURNING id"
+        )
+        row = cur.fetchone()
+    assert row is not None
+    db_conn.commit()
+    with pytest.raises(svc.NotAnApiKeyPrincipal):
+        svc.revoke_key(db_conn, int(row[0]))
+    assert issubclass(svc.NotAnApiKeyPrincipal, svc.ApiKeyNotFound)
+
+
+def test_revoking_an_already_revoked_key_is_plain_not_found(db_conn):
+    created = svc.create_key(db_conn, name="bot", account_ids=[])
+    svc.revoke_key(db_conn, created.user_id)
+    db_conn.commit()
+    with pytest.raises(svc.ApiKeyNotFound) as exc:
+        svc.revoke_key(db_conn, created.user_id)
+    assert not isinstance(exc.value, svc.NotAnApiKeyPrincipal)
 
 
 def test_an_unknown_account_is_a_field_error(db_conn):
@@ -187,7 +213,7 @@ def test_set_grant_refuses_a_human_principal(db_conn):
         row = cur.fetchone()
     assert row is not None
     db_conn.commit()
-    with pytest.raises(svc.ApiKeyNotFound):
+    with pytest.raises(svc.NotAnApiKeyPrincipal):
         svc.set_grant(db_conn, int(row[0]), aid, True)
 
 

@@ -3384,6 +3384,15 @@ for the full design.
     `delete_key_principal` removes the bot; its `is_service IS TRUE` predicate
     is load-bearing, since the route is addressed by user id and would
     otherwise become a second way to delete a person.
+    - **That guard's refusal is `NotAnApiKeyPrincipal` (#319)**, raised by
+      `revoke_key`, `delete_key_principal` and `set_grant` when the id is a
+      person's. It subclasses `ApiKeyNotFound`, so the JSON route (404) and
+      the CLI map it as before. The panel used to catch both as "already
+      gone" and re-render the table as if it had succeeded; it now shows a
+      `role="alert"` notice, still on a 200 so htmx swaps it (#148).
+      `ApiKeyNotFound` still derives from bare `Exception`, not
+      `api.errors.NotFound`; every route catches it explicitly, so that is
+      latent.
   - **`create_key` runs in one transaction.** A failure after the principal is
     created would leave a row that the operator's retry then collides with.
     Its check-then-INSERT is still not atomic, so a concurrent mint (a

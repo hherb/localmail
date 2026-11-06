@@ -109,19 +109,21 @@ def revoke_api_key(
     check_csrf(request, admin, x_csrf_token, f"/admin/api-keys/{key_id}/revoke")
     uid = parse_int_id(key_id, field="key_id")
     pool = request.app.state.pool
+    notice = None
     with pool.connection() as conn:
         try:
             svc.revoke_key(conn, uid)
             conn.commit()
+        except svc.NotAnApiKeyPrincipal as e:
+            # A guard refusal, not "already done": say so (#319).
+            conn.rollback()
+            notice = str(e)
         except svc.ApiKeyNotFound:
             # Already gone IS success for an idempotent delete, and re-rendering
             # the table shows the operator the current truth. Raising instead
             # would leave the button inert under htmx, which is the #148 defect.
             conn.rollback()
-    return templates.TemplateResponse(
-        request=request, name="api_keys/_table.html",
-        context=_list_context(request, admin),
-    )
+    return _table_response(request, admin, notice)
 
 
 @router.post("/api-keys/{key_id}/delete", response_class=HTMLResponse)
@@ -132,14 +134,26 @@ def delete_api_key_principal(
     check_csrf(request, admin, x_csrf_token, f"/admin/api-keys/{key_id}/delete")
     uid = parse_int_id(key_id, field="key_id")
     pool = request.app.state.pool
+    notice = None
     with pool.connection() as conn:
         try:
             svc.delete_key_principal(conn, uid)
             conn.commit()
+        except svc.NotAnApiKeyPrincipal as e:
+            conn.rollback()
+            notice = str(e)
         except svc.ApiKeyNotFound:
             # Idempotent, for the reason given in revoke_api_key above.
             conn.rollback()
+    return _table_response(request, admin, notice)
+
+
+def _table_response(
+    request: Request, admin: AdminUser, notice: str | None,
+) -> HTMLResponse:
+    """The key table, with ``notice`` shown above it when an action was refused."""
+    ctx = _list_context(request, admin)
+    ctx["notice"] = notice
     return templates.TemplateResponse(
-        request=request, name="api_keys/_table.html",
-        context=_list_context(request, admin),
+        request=request, name="api_keys/_table.html", context=ctx
     )

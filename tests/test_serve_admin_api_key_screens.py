@@ -229,3 +229,32 @@ def test_a_successful_create_clears_a_previous_name_error(client, admin_id):
     assert resp.status_code == 200
     slot = re.search(r'id="api-key-name-error"[^>]*>([^<]*)<', resp.text)
     assert slot and slot.group(1).strip() == ""
+
+
+@pytest.mark.parametrize("action", ["revoke", "delete"])
+def test_a_person_s_id_is_reported_as_refused_not_done(client, db_conn, admin_id, action):
+    """#319: the is_service guard refusing a person's id used to re-render the
+    table exactly as a success. It stays a 200 (a non-2xx leaves the button
+    inert under htmx, #148) but now says what happened, and nothing changed."""
+    path = f"/admin/api-keys/{admin_id}/{action}"
+    resp = client.post(path, headers={"X-CSRF-Token": _csrf(admin_id, "POST", path)})
+    assert resp.status_code == 200
+    assert 'role="alert"' in resp.text
+    assert "not an API-key principal" in resp.text
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM api_users WHERE id = %s", (admin_id,))
+        row = cur.fetchone()
+    assert row is not None and row[0] == 1
+
+
+def test_an_ordinary_revoke_shows_no_refusal(client, admin_id):
+    client.post(
+        "/admin/api-keys", data={"name": "bot"},
+        headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
+    )
+    uid_match = re.search(r'id="api-key-row-(\d+)"', client.get("/admin/api-keys").text)
+    assert uid_match
+    path = f"/admin/api-keys/{uid_match.group(1)}/revoke"
+    resp = client.post(path, headers={"X-CSRF-Token": _csrf(admin_id, "POST", path)})
+    assert resp.status_code == 200
+    assert 'role="alert"' not in resp.text

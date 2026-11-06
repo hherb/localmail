@@ -11,7 +11,8 @@
 > **Both hosts are deployed at `2234775`** (carried from session 93; #458 was
 > test-only). #460 and #319 change runtime code, so **deploy after merging**.
 >
-> **Open issues: 25** (23 once both PRs close #372 and #319). **Open
+> **Open issues: 26** (24 once both PRs close #372 and #319; #462, filed by
+> #461's pre-merge review, holds its two optional low-severity leftovers). **Open
 > Dependabot alerts: 2** — #71 and #185, both open on purpose.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not

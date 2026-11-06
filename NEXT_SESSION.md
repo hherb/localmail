@@ -1,17 +1,18 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-06 (session 93).** `main` is **`2234775`** (#457:
-> oauthlib 4.0.1, rustls floor).
+> **Status as of 2026-11-07 (session 94).** `main` is **`84ed6ee`** (#458:
+> harness lock DSN rule, closes #340).
 >
-> This session has **one open PR** on `fix/340-harness-lock-dsn`. It carries
-> the code and this handoff.
+> This session has **two open PRs**, both based on `main` at `84ed6ee`:
+> **#460** (`fix/372-ghost-hits`, code only, CI green when written) and the
+> PR on `fix/319-not-a-key-principal`, which carries its code **and this
+> handoff**. They touch different files and can merge in either order.
 >
-> **Both hosts are deployed at `2234775`** (verified via `/v1/version`; the
-> DGX now has oauthlib 4.0.1, the ssh deploy was not blocked this time).
-> This PR is test-only, so it needs no deploy.
+> **Both hosts are deployed at `2234775`** (carried from session 93; #458 was
+> test-only). #460 and #319 change runtime code, so **deploy after merging**.
 >
-> **Open issues: 26** (25 once this PR closes #340; #459, the residual, was filed by the review). **Open Dependabot
-> alerts: 2** — #71 and #185, both open on purpose. #115 and #197–#200 closed.
+> **Open issues: 25** (23 once both PRs close #372 and #319). **Open
+> Dependabot alerts: 2** — #71 and #185, both open on purpose.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
@@ -33,46 +34,54 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-- **Deployed `2234775` to both hosts** (Mac: launchd kickstart; DGX: the
-  ssh line from the resume commands). Both report `build_hash: 2234775`.
+- **Confirmed #458 merged** (`84ed6ee`) and #340 closed.
+- **The 6 test warnings are all third-party deprecations** (starlette's
+  `anyio.abc.BlockingPortal`, three from docling, the two websockets ones of
+  #25). The `force_full_page_ocr` one fires inside docling's own serializer
+  even though we set `mode=FULL_PAGE`. Nothing to fix. Earlier sessions
+  recorded 2 because their runs had no `[extraction]` docling tests.
 
-### PR on `fix/340-harness-lock-dsn` (based on `main` at `2234775`)
+### PR #460 on `fix/372-ghost-hits`
 
 | SHA | What |
 |---|---|
-| `e84b705` | `tests/acceptance/_harness_lock.py::_mismatched_dsn_calls`: inside a `with harness_db_lock(X)` body, every `DB_ENTRY_CALLS` member's DSN spelling (first positional, else `conninfo=`/`dsn=`) must equal `X`'s; an unreadable one (`**params`) is reported as `<unreadable>`. #340 option 1. New `tests/test_acceptance_harness_lock_dsn.py` (8 tests); CLAUDE.md #337 entry updated |
-| next | this handoff |
-| review | `/finalcheck` fixes: two fail-open cases closed — two `<unreadable>` DSNs no longer match each other, and a call carrying any other keyword or `**` (`dbname=`, `host=`, `connect_kwargs=`) is `<unreadable>`; 10 more tests (`test_acceptance_harness_lock_dsn.py` now 18); residual (helper mismatch, rebinding) filed as **#459** |
+| `108d648` | `Searcher._hydrate` skips a fused hit whose message is gone (DEBUG line) instead of serving `msgs.get(id, {})` as a ghost row; keeps it out of the rerank input and the cached pool too. The `has_attachments … if m else False` guard (ghost-only) removed; its pin replaced by a DB test of `_hydrate` (`test_search_has_attachments_flag.py`). CLAUDE.md: one line under `_fetch_sort_dates` |
 
-- **Verification:** RED first (5 fail, 3 controls pass); three mutations
-  (drop the keyword read, drop the report, drop the comparison) each fail
-  their test; all five real harnesses still pass the rule (no harness
-  changed). Full suite **4752 passed, 6 warnings** after the review fixes (4742 before) (warnings not
-  inspected; earlier sessions recorded 2); mypy clean, 169 files.
-- **Known limit (in a `shortcut:` comment, tracked as #459):** a mismatch
-  inside a helper reached under the lock, and a name rebound inside the body
-  (`dsn = live`), are still missed; a rebound copy (`d = args.dsn`) is
-  reported (fails closed).
+### PR on `fix/319-not-a-key-principal`
+
+| SHA | What |
+|---|---|
+| `471d303` | `api/admin/api_keys.py`: `NotAnApiKeyPrincipal(ApiKeyNotFound)` raised by `revoke_key`, `delete_key_principal` and `set_grant` when the id is a person's (via `_not_found`). Panel's revoke/delete catch it and render a `role="alert"` "Refused: …" notice above the table on a 200. JSON route and CLI unchanged (subclass), though their 404 detail now names the person case. 5 new tests + 2 tightened. CLAUDE.md API-keys bullet |
+| next | this handoff |
+
+- **Verification:** both RED first. Mutations caught: #319 — dropping the
+  panel's notice (2 tests fail), making `_not_found` never see a person (3
+  fail). #372's fix was RED-then-green; no separate mutation run. Full suite
+  **4757 passed, 6 warnings** on the #319 branch (4752 on #460's); mypy clean,
+  169 files.
+- **Not done (#319's "related" half):** `ApiKeyNotFound` still derives from
+  bare `Exception`, not `api.errors.NotFound`. Every route catches it
+  explicitly, so it is latent; noted in CLAUDE.md.
 
 ## What's next
 
-### 1. **Merge this PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <PR>` all pass; #340 closes (`Closes #340`
-  in the body).
+### 1. **Merge both PRs** (yours), once CI is green
+- **Acceptance:** `gh pr checks 460` and the #319 PR all pass; #372 and #319
+  close (`Closes #N` in each body); `gh issue list` shows 23.
 
-### 2. **Check the 6 test warnings**
-- **Acceptance:** `uv run pytest -q -rw` lists them; either they match a
-  baseline on `main` or the new ones are filed/fixed.
+### 2. **Deploy both hosts** after merging (runtime code changed)
+- **Acceptance:** `/v1/version` on both hosts reports the newer merge SHA.
 
 ### 3. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
 ### 4. **Next small slice: pick with the operator**
-- Candidates: **#285** (does mypy/ruff gate CI — needs a ruff-pin call),
-  **#357** (only worth it with #285), #369 (refuse-vs-keep call), #383
-  (one-way door, `0039`), #365 (product call), #363 (rerank degradation on
-  the wire — needs a renderer).
+- Candidates: **#368** (MCP ignores unknown args — no supported FastMCP
+  hook, needs a design call), **#208** (DaemonPanel message never
+  dismisses; small GUI), **#218** (GUI download buffers before the size
+  cap), **#285** (ruff/mypy in CI — needs a ruff-pin call), #369, #383
+  (`0039`), #365, #363.
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
@@ -81,24 +90,26 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
 ### 5. **Carried**
-- **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
+- **Migrations:** `0038` is taken. #319's sibling #318 and #320 need `0039`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
+- **#459:** harness-lock DSN residual (helpers, rebinding).
 - **Dependabot #71 / #185:** left open on purpose.
 - **docling > 2.144:** probe the next release when it lands.
 - **emSign G3:** re-check the trust stores after OS updates.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #372, #368, #365; #375; #357; #363, #285;
+- **Issues:** #383, #369, #368, #365; #375; #357; #363, #285;
   robustness #218, #226, #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **Operator picked #340** and asked for both deploys.
-2. **#340 option 1, not 2 or 3** (mine): the cheap in-frame comparison
-   covers the realistic mistake (two DSN expressions side by side in
-   `main`) and false-positives on no current harness; option 3 (runtime)
-   would need every harness connection routed through the lock.
+1. **Operator picked "both, one PR each"** for #372 and #319.
+2. **#372 fixed in `_hydrate`, not `_build_results`** (mine): the issue
+   proposed the page builder, but the hydrated pool is what gets reranked and
+   cached, so dropping there removes the ghost from every downstream stage.
+3. **#319 as a subclass, not a `RevokeOutcome` enum** (mine): one new class,
+   zero changes to the JSON route and CLI.
 
 ## Open decisions & risks
 
@@ -111,7 +122,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    `localmail search` flag; #305 a malformed `localmail search` query exits 2,
    and a missing dependency makes `--version` exit 0 with a stderr line;
    #378 an empty fixed-shape operator or non-int id in a query is a 400 /
-   exit 2.
+   exit 2. **New:** #372 a page can hold fewer hits than `pool_size`
+   suggested only if a message was deleted mid-search; #319 the JSON
+   revoke/delete 404 detail for a person's id now reads "… is a person, not
+   an API-key principal".
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows are
    stored 8 h off in `date_sent` (wire `date` is right). A repair should
    re-parse `raw_bytes`. Read-only count:
@@ -123,17 +137,16 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    decided.
 5. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.** After a squash
    merge `main..origin/<branch>` is non-empty by construction; compare with
-   `git diff main origin/<branch> --stat` (empty = landed).
+   `git diff main origin/<branch> --stat` (empty = landed; errors once the
+   branch is deleted).
 6. **Never run two localmail pytest sessions against one test DB** (port
    5532, the same cluster as the live archive).
 7. **Restore a mutation from a file copy, never with `git checkout`.**
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was 15–40 this session.** Check `uptime` before
+10. **Load on the Mac was 7–18 this session.** Check `uptime` before
     trusting any timing.
-11. **Deploy was allowed this session** (the DGX ssh line ran). If the
-    classifier refuses it again, run it yourself.
 
 ## Exact commands to resume
 
@@ -142,8 +155,8 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/340-harness-lock-dsn --stat   # empty once merged (squash)
-gh pr list --state all --limit 3
+gh pr list --state all --limit 4
+gh pr checks 460
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
 
@@ -161,7 +174,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4752 at session 93 (after review)
+unset VIRTUAL_ENV && uv run pytest -q              # 4757 on the #319 branch, session 94
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```

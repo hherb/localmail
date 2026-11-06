@@ -80,16 +80,23 @@ def main() -> int:
 
 
 def _mismatch_source(call: str) -> str:
-    calls = {
-        "apply_migrations": "apply_migrations(other_dsn)",
-        "open_pool": "pool = open_pool(other_dsn)",
-        "connect": "conn = psycopg.connect(other_dsn)",
-    }
+    # A bare call: `_called_name` reads a `Name` as readily as an attribute,
+    # so the case is built from the member itself and a fourth needs no edit.
     return _IMPORTS + f"""
 def main() -> int:
     with harness_db_lock(dsn):
         apply_migrations(dsn)
-        {calls[call]}
+        {call}(other_dsn)
+    return 0
+"""
+
+
+def _locked_body(body: str, lock: str = "harness_db_lock(dsn)") -> str:
+    indented = "\n".join(f"        {line}" for line in body.strip().splitlines())
+    return _IMPORTS + f"""
+def main() -> int:
+    with {lock}:
+{indented}
     return 0
 """
 
@@ -125,3 +132,76 @@ def test_a_call_whose_dsn_cannot_be_read_is_reported() -> None:
     problem = harness_lock_error(_UNREADABLE_DSN, "run_x.py")
     assert problem is not None
     assert "connect(`<unreadable>`)" in problem
+
+
+def test_two_unreadable_dsns_are_not_a_match() -> None:
+    """Both sides render as the sentinel; equal sentinels prove nothing."""
+    source = _locked_body("psycopg.connect(**other)", lock="harness_db_lock(**kw)")
+    problem = harness_lock_error(source, "run_x.py")
+    assert problem is not None
+    assert "connect(`<unreadable>`)" in problem
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "psycopg.connect(dsn, dbname='localmail')",
+        "psycopg.connect(conninfo=dsn, host='elsewhere')",
+        "psycopg.connect(dsn, **live)",
+        "open_pool(dsn, connect_kwargs={'dbname': 'localmail'})",
+    ],
+)
+def test_keywords_that_may_redirect_the_same_dsn_are_reported(call: str) -> None:
+    """libpq keywords override the conninfo string, so the spelling alone
+    does not say which database the call reaches."""
+    problem = harness_lock_error(_locked_body(call), "run_x.py")
+    assert problem is not None
+    assert "(`<unreadable>`)" in problem
+
+
+def test_a_keyword_dsn_naming_another_database_is_reported() -> None:
+    problem = harness_lock_error(
+        _locked_body("psycopg.connect(conninfo=other_dsn)"), "run_x.py"
+    )
+    assert problem is not None
+    assert "connect(`other_dsn`)" in problem
+
+
+def test_a_non_dsn_keyword_is_not_read_as_the_dsn() -> None:
+    problem = harness_lock_error(
+        _locked_body("psycopg.connect(autocommit=True)"), "run_x.py"
+    )
+    assert problem is not None
+    assert "connect(`<unreadable>`)" in problem
+
+
+def test_a_helper_that_takes_the_lock_itself_is_compared() -> None:
+    source = _IMPORTS + """
+def _work(d):
+    with harness_db_lock(d):
+        apply_migrations(other_dsn)
+
+def main() -> int:
+    _work(args.dsn)
+    return 0
+"""
+    problem = harness_lock_error(source, "run_x.py")
+    assert problem is not None
+    assert "session lock on `d` but apply_migrations(`other_dsn`)" in problem
+
+
+def test_the_lock_s_dsn_is_read_even_when_it_is_not_the_first_item() -> None:
+    source = _locked_body(
+        "apply_migrations(dsn)",
+        lock="contextlib.ExitStack(), harness_db_lock(dsn)",
+    )
+    assert harness_lock_error(source, "run_x.py") is None
+
+
+def test_every_mismatch_is_named_not_just_the_first() -> None:
+    problem = harness_lock_error(
+        _locked_body("apply_migrations(a)\napply_migrations(b)"), "run_x.py"
+    )
+    assert problem is not None
+    assert "apply_migrations(`a`)" in problem
+    assert "apply_migrations(`b`)" in problem

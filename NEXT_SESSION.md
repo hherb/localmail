@@ -10,7 +10,7 @@
 > DGX now has oauthlib 4.0.1, the ssh deploy was not blocked this time).
 > This PR is test-only, so it needs no deploy.
 >
-> **Open issues: 25** (24 once this PR closes #340). **Open Dependabot
+> **Open issues: 26** (25 once this PR closes #340; #459, the residual, was filed by the review). **Open Dependabot
 > alerts: 2** — #71 and #185, both open on purpose. #115 and #197–#200 closed.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
@@ -42,15 +42,17 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 |---|---|
 | `e84b705` | `tests/acceptance/_harness_lock.py::_mismatched_dsn_calls`: inside a `with harness_db_lock(X)` body, every `DB_ENTRY_CALLS` member's DSN spelling (first positional, else `conninfo=`/`dsn=`) must equal `X`'s; an unreadable one (`**params`) is reported as `<unreadable>`. #340 option 1. New `tests/test_acceptance_harness_lock_dsn.py` (8 tests); CLAUDE.md #337 entry updated |
 | next | this handoff |
+| review | `/finalcheck` fixes: two fail-open cases closed — two `<unreadable>` DSNs no longer match each other, and a call carrying any other keyword or `**` (`dbname=`, `host=`, `connect_kwargs=`) is `<unreadable>`; 10 more tests (`test_acceptance_harness_lock_dsn.py` now 18); residual (helper mismatch, rebinding) filed as **#459** |
 
 - **Verification:** RED first (5 fail, 3 controls pass); three mutations
   (drop the keyword read, drop the report, drop the comparison) each fail
   their test; all five real harnesses still pass the rule (no harness
-  changed). Full suite **4742 passed, 6 warnings** (warnings not
+  changed). Full suite **4752 passed, 6 warnings** after the review fixes (4742 before) (warnings not
   inspected; earlier sessions recorded 2); mypy clean, 169 files.
-- **Known limit (in a `shortcut:` comment):** a mismatch inside a helper
-  reached under the lock is still missed (needs #340 option 2, argument
-  binding); a rebound name (`d = args.dsn`) is reported (fails closed).
+- **Known limit (in a `shortcut:` comment, tracked as #459):** a mismatch
+  inside a helper reached under the lock, and a name rebound inside the body
+  (`dsn = live`), are still missed; a rebound copy (`d = args.dsn`) is
+  reported (fails closed).
 
 ## What's next
 
@@ -159,7 +161,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4742 at session 93
+unset VIRTUAL_ENV && uv run pytest -q              # 4752 at session 93 (after review)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```

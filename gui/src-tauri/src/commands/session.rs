@@ -47,7 +47,9 @@ mod tests {
     #[test]
     fn read_endpoint_without_pin_returns_not_connected() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         let err = read_endpoint(&store).unwrap_err();
         assert!(matches!(err, AuthError::NotConnected));
     }
@@ -55,7 +57,9 @@ mod tests {
     #[test]
     fn read_authenticated_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = read_authenticated(&store).unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
@@ -64,7 +68,9 @@ mod tests {
     #[test]
     fn read_authenticated_returns_full_triple_when_all_present() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         store.put(Slot::BearerToken, "tok").unwrap();
         let (url, pin, token) = read_authenticated(&store).unwrap();

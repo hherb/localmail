@@ -59,7 +59,11 @@ pub struct WhoamiResponse {
     pub is_admin: bool,
 }
 
-pub async fn login(store: &KeyringStore, username: &str, password: &str) -> Result<LoginSummary, AuthError> {
+pub async fn login(
+    store: &KeyringStore,
+    username: &str,
+    password: &str,
+) -> Result<LoginSummary, AuthError> {
     let (url, pin) = read_endpoint(store)?;
     let client = build_pinned_client(&pin)?;
     let body = LoginRequest { username, password };
@@ -67,8 +71,12 @@ pub async fn login(store: &KeyringStore, username: &str, password: &str) -> Resu
     let tok: TokenResponse = http_post_json(&client, &endpoint, &body, None).await?;
     // Token first: if this write fails, we abort before mutating Username, so the
     // store does not end up advertising a new identity with no token to back it.
-    store.put(Slot::BearerToken, &tok.token).map_err(|e| AuthError::Keyring(e.to_string()))?;
-    store.put(Slot::Username, username).map_err(|e| AuthError::Keyring(e.to_string()))?;
+    store
+        .put(Slot::BearerToken, &tok.token)
+        .map_err(|e| AuthError::Keyring(e.to_string()))?;
+    store
+        .put(Slot::Username, username)
+        .map_err(|e| AuthError::Keyring(e.to_string()))?;
     Ok(LoginSummary {
         username: username.to_string(),
         expires_at: tok.expires_at,
@@ -77,7 +85,9 @@ pub async fn login(store: &KeyringStore, username: &str, password: &str) -> Resu
 
 pub async fn logout(store: &KeyringStore) -> Result<(), AuthError> {
     let (url, pin) = read_endpoint(store)?;
-    let token_opt = store.get(Slot::BearerToken).map_err(|e| AuthError::Keyring(e.to_string()))?;
+    let token_opt = store
+        .get(Slot::BearerToken)
+        .map_err(|e| AuthError::Keyring(e.to_string()))?;
 
     if let Some(tok) = &token_opt {
         let client = build_pinned_client(&pin)?;
@@ -88,8 +98,12 @@ pub async fn logout(store: &KeyringStore) -> Result<(), AuthError> {
             );
         }
     }
-    store.delete(Slot::BearerToken).map_err(|e| AuthError::Keyring(e.to_string()))?;
-    store.delete(Slot::Username).map_err(|e| AuthError::Keyring(e.to_string()))?;
+    store
+        .delete(Slot::BearerToken)
+        .map_err(|e| AuthError::Keyring(e.to_string()))?;
+    store
+        .delete(Slot::Username)
+        .map_err(|e| AuthError::Keyring(e.to_string()))?;
     Ok(())
 }
 
@@ -105,8 +119,11 @@ pub async fn refresh(store: &KeyringStore) -> Result<LoginSummary, AuthError> {
         .ok_or(AuthError::NotLoggedIn)?;
     let client = build_pinned_client(&pin)?;
     let endpoint = format!("{url}v1/auth/refresh");
-    let tok: TokenResponse = http_post_json(&client, &endpoint, &serde_json::json!({}), Some(&token)).await?;
-    store.put(Slot::BearerToken, &tok.token).map_err(|e| AuthError::Keyring(e.to_string()))?;
+    let tok: TokenResponse =
+        http_post_json(&client, &endpoint, &serde_json::json!({}), Some(&token)).await?;
+    store
+        .put(Slot::BearerToken, &tok.token)
+        .map_err(|e| AuthError::Keyring(e.to_string()))?;
     Ok(LoginSummary {
         username,
         expires_at: tok.expires_at,
@@ -178,7 +195,9 @@ mod tests {
     #[tokio::test]
     async fn whoami_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = whoami(&store).await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
@@ -187,7 +206,9 @@ mod tests {
     #[tokio::test]
     async fn refresh_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = refresh(&store).await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
@@ -196,7 +217,9 @@ mod tests {
     #[tokio::test]
     async fn refresh_without_username_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         store.put(Slot::BearerToken, "stale-token").unwrap();
         let err = refresh(&store).await.unwrap_err();
@@ -248,7 +271,9 @@ mod tests {
     #[tokio::test]
     async fn logout_without_token_is_idempotent() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         logout(&store).await.unwrap();
         assert!(store.get(Slot::BearerToken).unwrap().is_none());

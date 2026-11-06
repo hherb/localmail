@@ -48,7 +48,10 @@ pub async fn list_accounts(store: &KeyringStore) -> Result<Vec<AccountSummary>, 
     Ok(accounts)
 }
 
-pub async fn list_folders(store: &KeyringStore, account_id: &str) -> Result<Vec<FolderSummary>, AuthError> {
+pub async fn list_folders(
+    store: &KeyringStore,
+    account_id: &str,
+) -> Result<Vec<FolderSummary>, AuthError> {
     let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
     let endpoint = format!("{url}v1/accounts/{account_id}/folders");
@@ -87,7 +90,9 @@ mod tests {
     #[tokio::test]
     async fn list_accounts_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = list_accounts(&store).await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
@@ -96,7 +101,9 @@ mod tests {
     #[tokio::test]
     async fn list_folders_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = list_folders(&store, "1").await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));

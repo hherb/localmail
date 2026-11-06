@@ -160,7 +160,11 @@ mod tests {
 
         let v = TofuVerifier::new(TofuMode::Probe);
         let result = v.verify_server_cert(&cert, &[], &server_name(), &[], now());
-        assert!(result.is_ok(), "Probe should accept any cert, got {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Probe should accept any cert, got {:?}",
+            result.err()
+        );
 
         assert_eq!(v.captured_fingerprint().as_deref(), Some(expected.as_str()));
     }
@@ -172,7 +176,11 @@ mod tests {
 
         let v = TofuVerifier::new(TofuMode::Pinned { expected_hex: pin });
         let result = v.verify_server_cert(&cert, &[], &server_name(), &[], now());
-        assert!(result.is_ok(), "Pinned matching should accept, got {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Pinned matching should accept, got {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -194,9 +202,12 @@ mod tests {
     fn fingerprint_capture_is_lowercase_hex_64_chars() {
         let cert = make_cert_der();
         let v = TofuVerifier::new(TofuMode::Probe);
-        v.verify_server_cert(&cert, &[], &server_name(), &[], now()).unwrap();
+        v.verify_server_cert(&cert, &[], &server_name(), &[], now())
+            .unwrap();
         let fp = v.captured_fingerprint().unwrap();
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit() && (c.is_numeric() || c.is_ascii_lowercase())));
+        assert!(fp
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && (c.is_numeric() || c.is_ascii_lowercase())));
         assert_eq!(fp.len(), 64);
     }
 }

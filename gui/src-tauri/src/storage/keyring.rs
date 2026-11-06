@@ -221,11 +221,7 @@ mod tests {
         s.put(Slot::BearerToken, "t").unwrap();
         s.clear_all().unwrap();
         for slot in ALL_SLOTS {
-            assert!(
-                s.get(slot).unwrap().is_none(),
-                "{:?} should be gone",
-                slot
-            );
+            assert!(s.get(slot).unwrap().is_none(), "{:?} should be gone", slot);
         }
     }
 }

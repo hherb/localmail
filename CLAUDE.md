@@ -7301,6 +7301,15 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   also has no backing field — `_account_dict` exposes no secret status and no
   `/v1/admin` endpoint reports one. Both are backend gaps. `clear_secret`
   likewise has a service function but no JSON route.
+- **Download bodies are read under the cap, not checked after (#218).**
+  `get_message_raw`, `download_attachment` and `fetch_attachment_bytes` used
+  `resp.bytes().await` and then compared the length, so a chunked response
+  with no `Content-Length` buffered without bound first. All three go through
+  [gui/src-tauri/src/http/body.rs](gui/src-tauri/src/http/body.rs)`::read_capped`,
+  which reads `resp.chunk()` and refuses once the running total passes the
+  ceiling. `TooLarge.size` is then the bytes received when the read stopped,
+  a lower bound. Pinned by a mockito body that never ends, under a timeout.
+  The JSON helpers in `http/client.rs` (`.json()`) are still unbounded.
 - **`--all-targets` clippy is clean now, and CI still doesn't run it.** The
   long-standing `approx_constant` failure in
   `gui/src-tauri/src/commands/search.rs` (a `3.14` dummy `took_ms`) is fixed.

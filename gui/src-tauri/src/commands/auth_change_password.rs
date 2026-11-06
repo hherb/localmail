@@ -85,7 +85,9 @@ mod tests {
     #[tokio::test]
     async fn change_password_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = change_password(&store, "old", "new").await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));

@@ -229,7 +229,12 @@ mod tests {
         let client = Client::new();
         let url = format!("{}/echo", server.url());
         let got: Echo = http_get_json(&client, &url, None).await.unwrap();
-        assert_eq!(got, Echo { message: "hi".into() });
+        assert_eq!(
+            got,
+            Echo {
+                message: "hi".into()
+            }
+        );
     }
 
     #[tokio::test]
@@ -243,7 +248,9 @@ mod tests {
             .await;
         let client = Client::new();
         let url = format!("{}/forbidden", server.url());
-        let err = http_get_json::<Echo>(&client, &url, None).await.unwrap_err();
+        let err = http_get_json::<Echo>(&client, &url, None)
+            .await
+            .unwrap_err();
         match err {
             HttpError::HttpStatus { status, body } => {
                 assert_eq!(status, 403);
@@ -288,7 +295,9 @@ mod tests {
         let m = server
             .mock("PATCH", "/thing")
             .match_header("authorization", "Bearer tok")
-            .match_body(mockito::Matcher::JsonString(r#"{"message":"set"}"#.to_string()))
+            .match_body(mockito::Matcher::JsonString(
+                r#"{"message":"set"}"#.to_string(),
+            ))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"message":"set"}"#)
@@ -298,7 +307,9 @@ mod tests {
         let client = Client::new();
         let url = format!("{}/thing", server.url());
         let body = serde_json::json!({ "message": "set" });
-        let got: Echo = http_patch_json(&client, &url, &body, Some("tok")).await.unwrap();
+        let got: Echo = http_patch_json(&client, &url, &body, Some("tok"))
+            .await
+            .unwrap();
         assert_eq!(got.message, "set");
         m.assert_async().await;
     }

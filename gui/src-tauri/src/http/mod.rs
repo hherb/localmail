@@ -5,6 +5,7 @@
 //! - `client`: thin reqwest wrappers (http_get_json, http_post_json, http_post_empty)
 //! - `errors::HttpError`: typed errors that serialize cleanly to the JS side
 
+pub mod body;
+pub mod client;
 pub mod errors;
 pub mod verifier;
-pub mod client;

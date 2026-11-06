@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
+use crate::http::body::{read_capped, BodyError};
 use crate::http::client::build_pinned_client;
 use crate::http::errors::HttpError;
 use crate::storage::keyring::KeyringStore;
@@ -50,6 +51,18 @@ pub enum RawMessageError {
     Read(String),
 }
 
+impl From<BodyError> for RawMessageError {
+    fn from(e: BodyError) -> Self {
+        match e {
+            BodyError::TooLarge { size } => RawMessageError::TooLarge {
+                size,
+                max: MAX_RAW_BYTES,
+            },
+            BodyError::Read(msg) => RawMessageError::Read(msg),
+        }
+    }
+}
+
 pub async fn get_message_raw(
     store: &KeyringStore,
     message_id: &str,
@@ -68,25 +81,7 @@ pub async fn get_message_raw(
     if !resp.status().is_success() {
         return Err(RawMessageError::Http(resp.status().as_u16()));
     }
-    if let Some(len) = resp.content_length() {
-        if len > MAX_RAW_BYTES {
-            return Err(RawMessageError::TooLarge {
-                size: len,
-                max: MAX_RAW_BYTES,
-            });
-        }
-    }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| RawMessageError::Read(e.to_string()))?;
-    if bytes.len() as u64 > MAX_RAW_BYTES {
-        return Err(RawMessageError::TooLarge {
-            size: bytes.len() as u64,
-            max: MAX_RAW_BYTES,
-        });
-    }
-    Ok(bytes.to_vec())
+    Ok(read_capped(resp, MAX_RAW_BYTES).await?)
 }
 
 #[tauri::command]
@@ -98,6 +93,23 @@ pub async fn get_message_raw_cmd(message_id: String) -> Result<Vec<u8>, RawMessa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The capped read reports only the size; the command's own ceiling must
+    // be what reaches the wire as `max`, and a read error keep its text.
+    #[test]
+    fn body_errors_map_onto_this_commands_ceiling() {
+        assert!(matches!(
+            RawMessageError::from(BodyError::TooLarge { size: 7 }),
+            RawMessageError::TooLarge {
+                size: 7,
+                max: MAX_RAW_BYTES
+            }
+        ));
+        assert!(matches!(
+            RawMessageError::from(BodyError::Read("reset".into())),
+            RawMessageError::Read(m) if m == "reset"
+        ));
+    }
     use crate::storage::keyring::{MemKeyring, Slot};
 
     fn fake_store() -> KeyringStore {
@@ -122,10 +134,7 @@ mod tests {
             .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = get_message_raw(&store, "1").await.unwrap_err();
-        assert!(matches!(
-            err,
-            RawMessageError::Auth(AuthError::NotLoggedIn)
-        ));
+        assert!(matches!(err, RawMessageError::Auth(AuthError::NotLoggedIn)));
     }
 
     #[tokio::test]

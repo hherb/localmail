@@ -74,7 +74,9 @@ mod tests {
     #[tokio::test]
     async fn list_recent_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = list_recent_messages(&store).await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));

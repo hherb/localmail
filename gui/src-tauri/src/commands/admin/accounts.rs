@@ -251,10 +251,7 @@ pub async fn test_admin_account_connection(
 }
 
 #[tauri::command]
-pub async fn delete_admin_account_cmd(
-    account_id: String,
-    force: bool,
-) -> Result<(), AuthError> {
+pub async fn delete_admin_account_cmd(account_id: String, force: bool) -> Result<(), AuthError> {
     let store = KeyringStore::new();
     delete_admin_account(&store, &account_id, force).await
 }
@@ -277,9 +274,7 @@ pub async fn test_admin_account_connection_cmd(
 }
 
 #[tauri::command]
-pub async fn create_admin_account_cmd(
-    input: AdminAccountInput,
-) -> Result<AdminAccount, AuthError> {
+pub async fn create_admin_account_cmd(input: AdminAccountInput) -> Result<AdminAccount, AuthError> {
     let store = KeyringStore::new();
     create_admin_account(&store, input).await
 }

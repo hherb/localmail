@@ -1040,6 +1040,9 @@ class Searcher:
     def _hydrate(self, conn: psycopg.Connection, fused: list[FusedHit]) -> list[dict]:
         """Pull message + chunk text for each fused hit, returned in fused order.
 
+        A hit whose message no longer exists is dropped, so the result can be
+        shorter than ``fused`` (#372).
+
         For message_chunks hits, also fetches the chunk text and kind so that
         the snippet reflects the exact matched chunk rather than the message body.
         For attachment_chunks hits, fetches chunk text and the sha256 (bytes) so
@@ -1089,7 +1092,13 @@ class Searcher:
 
         out = []
         for h in fused:
-            m = msgs.get(h.message_id, {})
+            m = msgs.get(h.message_id)
+            if m is None:
+                # Deleted between the arms and this SELECT (READ COMMITTED);
+                # dropped rather than served as a row of defaults (#372).
+                log.debug("search hit dropped: message %s gone before hydration",
+                          h.message_id)
+                continue
             chunk_kind: str | None = None
             attachment_sha256_hex: str | None = None
 
@@ -1221,7 +1230,7 @@ class Searcher:
                 # present row is subscripted rather than `.get(…, False)`:
                 # `_hydrate` always selects the key, and if it ever stops, a
                 # `KeyError` beats a silent `False`.
-                has_attachments=m["has_attachments"] if m else False,
+                has_attachments=m["has_attachments"],
                 matched_chunk_id=h.best_chunk_id,
                 matched_chunk_table=h.best_chunk_table,
             ))

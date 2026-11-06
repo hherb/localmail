@@ -187,26 +187,31 @@ def test_the_filter_selects_exactly_the_flagged_hits(db_dsn, db_conn, free_text)
     assert set(without_attachments) == {m for m, flag in everything.items() if not flag}
 
 
-def test_a_message_deleted_before_hydration_reports_no_attachments() -> None:
-    """``_hydrate`` reads each hit's row with ``msgs.get(id, {})``, so a
-    message deleted between retrieval and hydration arrives as ``{}``.
-    Subscripting the flag there raised ``KeyError`` — a 500 — where every
-    other field has a default; the guard is what stops it. Dropping such a
-    ghost hit instead is #372, which will replace this pin.
+def test_a_message_deleted_before_hydration_is_dropped_not_faked(
+    db_conn: psycopg.Connection,
+) -> None:
+    """A fused hit whose message is gone by hydration time is dropped (#372).
+
+    The arms and the hydration SELECT are separate statements, so under READ
+    COMMITTED a message can be deleted in between. ``_hydrate`` used to read
+    it as ``msgs.get(id, {})`` and emit a ghost row (``account_id=0``, null
+    subject and date, ``has_attachments=False``) that satisfied no filter, and
+    the page cache then replayed it on later pages. Dropping it in
+    ``_hydrate`` keeps it out of the rerank input and the cached pool too.
     """
     from unittest.mock import MagicMock
 
-    from localmail.search.query import parse_query
     from localmail.search.searcher import FusedHit
 
-    ghost = {
-        "fused": FusedHit(message_id=7, best_chunk_id=None, best_chunk_table="message",
-                          rrf_score=0.5, contributing_arms=[0]),
-        "msg": {},
-        "snippet_source_text": "",
-    }
+    _, ids = _seed(db_conn)
+    gone = max(ids.values()) + 1000
+
+    def hit(mid: int) -> FusedHit:
+        return FusedHit(message_id=mid, best_chunk_id=None, best_chunk_table="message",
+                        rrf_score=0.5, contributing_arms=[0])
+
     searcher = Searcher(pool=MagicMock(), cfg=SearchConfig(), embeddings=None,
                         reranker=None, rewriter=None)
-    [result] = searcher._build_results([ghost], parse_query("x"), [0.5],
-                                       page=1, page_size=10, snippet_width=200)
-    assert result.has_attachments is False
+    hydrated = searcher._hydrate(db_conn, [hit(ids["ticket"]), hit(gone), hit(ids["lunch"])])
+    assert [item["fused"].message_id for item in hydrated] == [ids["ticket"], ids["lunch"]]
+    assert all(item["msg"] for item in hydrated)

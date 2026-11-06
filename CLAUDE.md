@@ -6092,6 +6092,10 @@ for the full design.
           `[h for h in fused if h.message_id in dates]` an **equivalent
           mutant** — the predicate is vacuously true — which is the totality
           working, not a coverage gap.
+          **Hydration then drops it (#372)**: `_hydrate` skips a hit whose
+          message is gone, so it is never served as a row of defaults
+          (`account_id=0`, null subject) or cached for later pages. The cut
+          keeps it only so that it, not a live row, is what goes missing.
         - **Measured, not assumed**, on a 130,000-row table: `Index Scan
           using messages_pkey`, **0.36 ms** at the default 200 fused ids,
           1.27 ms at 800, **5.07 ms** at the 3200 the

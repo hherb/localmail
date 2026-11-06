@@ -21,7 +21,9 @@ import pytest
 
 from localmail.api.errors import ValidationFailed
 from localmail.api.search_cursor import (
-    CursorPlan,
+    FreshPlan,
+    KeysetPlan,
+    PoolPlan,
     decode_keyset_cursor,
     encode_keyset_cursor,
     is_keyset_cursor,
@@ -64,7 +66,8 @@ def test_a_legacy_cursor_still_means_descending() -> None:
     assert keyset_order(legacy) == "desc"
     plan = resolve_cursor_plan(cursor=legacy, requested_sort=None,
                                requested_sort_order=None, free_text="")
-    assert plan == CursorPlan(mode="keyset", sort="date", sort_order="desc")
+    assert isinstance(plan, KeysetPlan)
+    assert (plan.sort, plan.sort_order) == ("date", "desc")
 
 
 def test_an_ascending_cursor_alone_continues_ascending() -> None:
@@ -72,7 +75,8 @@ def test_an_ascending_cursor_alone_continues_ascending() -> None:
     raw = encode_keyset_cursor(replace(_KS, order="asc"))
     plan = resolve_cursor_plan(cursor=raw, requested_sort=None,
                                requested_sort_order=None, free_text="")
-    assert plan == CursorPlan(mode="keyset", sort="date", sort_order="asc")
+    assert isinstance(plan, KeysetPlan)
+    assert (plan.sort, plan.sort_order) == ("date", "asc")
 
 
 def test_a_stated_order_contradicting_the_cursor_is_rejected() -> None:
@@ -95,7 +99,7 @@ def test_a_fresh_request_resolves_both_defaults() -> None:
     textless one resolves to ``date`` — the case below."""
     plan = resolve_cursor_plan(cursor=None, requested_sort=None,
                                requested_sort_order=None, free_text="invoice")
-    assert plan == CursorPlan(mode="fresh", sort="rank", sort_order="desc")
+    assert plan == FreshPlan(sort="rank", sort_order="desc")
 
 
 def test_a_fresh_textless_request_resolves_sort_to_date() -> None:
@@ -104,31 +108,28 @@ def test_a_fresh_textless_request_resolves_sort_to_date() -> None:
     ``rank`` here is what made #322's cursor contradict its own page 1."""
     plan = resolve_cursor_plan(cursor=None, requested_sort=None,
                                requested_sort_order=None, free_text="")
-    assert plan == CursorPlan(mode="fresh", sort="date", sort_order="desc")
+    assert plan == FreshPlan(sort="date", sort_order="desc")
 
 
 def test_a_fresh_request_keeps_what_the_caller_stated() -> None:
     plan = resolve_cursor_plan(cursor=None, requested_sort="date",
                                requested_sort_order="asc", free_text="")
-    assert plan == CursorPlan(mode="fresh", sort="date", sort_order="asc")
+    assert plan == FreshPlan(sort="date", sort_order="asc")
 
 
 def test_a_pool_cursor_reports_the_pool_mode() -> None:
     plan = resolve_cursor_plan(cursor="tok-1:2", requested_sort=None,
                                requested_sort_order=None, free_text="")
-    assert plan.mode == "pool"
+    assert isinstance(plan, PoolPlan)
 
 
-# --- the pool guard's order half, which no request can reach --------------
+# --- the pool guard's order half ------------------------------------------
 #
-# A pool cursor whose stated order is "asc" is answered by `run_search`'s
-# rank+asc refusal long before the pool is probed, and getting past that
-# refusal forces `requested_sort="date"`, which the sort half then rejects
-# against a rank-built pool. Pools are rank-only by construction, so the
-# order half is unreachable end to end — deliberately, for the reason
-# `PoolMetadata.sort_order` exists: encoding "pools are rank-only" into the
-# reader is what makes a future dispatch change silently wrong. Unreachable
-# is not untested, so it is exercised directly here.
+# Until #327 a pool cursor with a stated "asc" was answered by `run_search`'s
+# rank+asc refusal before the pool was probed, which made this half
+# unreachable end to end. That refusal is now a fresh-plan rule, so "asc"
+# reaches this guard and is judged against the pool's own order
+# (`test_api_search_cursor_plan_types.py` drives it through `run_search`).
 
 
 def test_the_pool_guard_accepts_an_order_matching_the_pool() -> None:

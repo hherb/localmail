@@ -25,7 +25,12 @@ import pytest
 
 from localmail.api.errors import ValidationFailed
 from localmail.api.search import run_search
-from localmail.api.search_cursor import CursorPlan, resolve_cursor_plan
+from localmail.api.search_cursor import (
+    FreshPlan,
+    PoolPlan,
+    SearchCursor,
+    resolve_cursor_plan,
+)
 from localmail.search.searcher import KeysetCursor
 
 
@@ -44,13 +49,13 @@ def test_a_fresh_textless_request_resolves_to_date_not_rank() -> None:
     contradicted it."""
     plan = resolve_cursor_plan(cursor=None, requested_sort=None,
                                requested_sort_order=None, free_text="")
-    assert plan == CursorPlan(mode="fresh", sort="date", sort_order="desc")
+    assert plan == FreshPlan(sort="date", sort_order="desc")
 
 
 def test_a_fresh_request_with_free_text_still_defaults_to_rank() -> None:
     plan = resolve_cursor_plan(cursor=None, requested_sort=None,
                                requested_sort_order=None, free_text="invoice")
-    assert plan == CursorPlan(mode="fresh", sort="rank", sort_order="desc")
+    assert plan == FreshPlan(sort="rank", sort_order="desc")
 
 
 def test_a_stated_rank_on_a_fresh_textless_request_is_refused() -> None:
@@ -68,10 +73,10 @@ def test_a_stated_date_on_a_fresh_textless_request_is_accepted() -> None:
 def test_a_textless_request_may_now_ask_for_ascending_order() -> None:
     """#324's inverse face at the boundary: with no stated sort the plan
     resolves to ``date``, so ``run_search``'s rank+asc refusal — which reads
-    ``plan.sort`` — no longer fires for a path it would never have taken."""
+    the fresh plan's ``sort`` — no longer fires for a path it would never have taken."""
     plan = resolve_cursor_plan(cursor=None, requested_sort=None,
                                requested_sort_order="asc", free_text="")
-    assert plan == CursorPlan(mode="fresh", sort="date", sort_order="asc")
+    assert plan == FreshPlan(sort="date", sort_order="asc")
 
 
 def test_a_pool_cursor_is_not_judged_by_the_textless_rule() -> None:
@@ -82,7 +87,8 @@ def test_a_pool_cursor_is_not_judged_by_the_textless_rule() -> None:
     pool may well serve."""
     plan = resolve_cursor_plan(cursor="tok-1:2", requested_sort="rank",
                                requested_sort_order=None, free_text="")
-    assert plan == CursorPlan(mode="pool", sort="rank", sort_order="desc")
+    assert plan == PoolPlan(cursor=SearchCursor(token="tok-1", page=2),
+                            stated_sort="rank", stated_sort_order=None)
 
 
 def test_a_keyset_cursor_keeps_reporting_the_cursor_as_the_reason() -> None:

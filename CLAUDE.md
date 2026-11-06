@@ -4629,6 +4629,25 @@ for the full design.
       happened in the first place: two predicates for one rule is what let
       the api gate and the retrieval branch disagree about what counted as
       a blank query.
+      - **Since #327 it returns one type per mode** — `FreshPlan(sort,
+        sort_order)`, `KeysetPlan(cursor)` (decoded; `sort`/`sort_order`
+        are properties off the cursor) and `PoolPlan(cursor, stated_sort,
+        stated_sort_order)` — and `run_search` is a `match` over them. The
+        one class carried a resolved *default* ordering on pool mode, and
+        the rank+asc refusal read it: a pool cursor paged with
+        `sort_order="asc"` was refused for naming `sort='rank' (the
+        default)` before the pool was consulted. The refusal is a
+        `FreshPlan` rule now, so that request reaches `_check_pool_sort`
+        and is told the order the pool actually has (`this cursor
+        continues a descending search`); the "a cursor from a rank-ordered
+        search cannot be carried over" remedy is gone with it. A
+        `PoolPlan` has no `sort` attribute, by design: only the cached
+        pool knows. Two wire consequences, both on edge paths: a malformed
+        **pool** cursor is now a 400 ahead of the empty-ACL short-circuit
+        (the keyset payload already was), and `reject_pool_sort_mismatch`'s
+        order half, once unreachable end to end, is reached. Pinned in
+        `tests/test_api_search_cursor_plan_types.py`, each wiring point
+        mutation-checked.
     - **Ascending SQL is `ASC NULLS FIRST, id ASC` — never `NULLS LAST` —
       and this is measured, not a style choice.** It is the exact reverse
       of `messages_recent_idx`'s `DESC NULLS LAST, id DESC`, so it is
@@ -4920,10 +4939,9 @@ for the full design.
             the whole cursor rather than scanning its prefix, which also
             moves a malformed **payload** ahead of the empty-ACL
             short-circuit — where this module already said such a request
-            belongs. `run_search` decodes a second time for the position it
-            forwards; deliberate, since hoisting the cursor onto
-            `CursorPlan` would add a third field its pool-mode consumer
-            must ignore (#327).
+            belongs. (`run_search` used to decode a second time, to avoid a
+            third field on `CursorPlan`; since #327 the decoded cursor rides
+            on `KeysetPlan`/`PoolPlan` and it decodes once.)
           - **That gate's `parse_query` was a 500 on two paths that used to
             answer 200** (review of #333). `QueryParseError` — raised for a
             malformed `after:`/`before:` date and an empty `lang:` — is a
@@ -5155,7 +5173,7 @@ for the full design.
         and `date` in the Searcher, `"` the reverse. The gate parses the
         composition now and the filters come first, so both read the same
         free text. On **pool** mode it describes a pool that branch never
-        consults (`CursorPlan` says so). That one is accepted only because
+        consults (a `PoolPlan` knows only what was stated, #327). That one is accepted only because
         **no rows come back** — nothing is mislabelled because nothing is
         labelled. The rowed paths never read it: `Searcher.search` stamps
         fresh and keyset, `continue_page` reads the pool's own metadata, and

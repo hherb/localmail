@@ -13,14 +13,15 @@ import difflib
 import re
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, assert_never
 
 from localmail.api.errors import SearchCursorExpired, ValidationFailed
 from localmail.api.ids import parse_int_id
 from localmail.api.search_cursor import (
+    FreshPlan,
+    KeysetPlan,
+    PoolPlan,
     SearchCursor,
-    decode_keyset_cursor,
-    decode_search_cursor,
     encode_keyset_cursor,
     encode_search_cursor,
     reject_pool_sort_mismatch,
@@ -412,35 +413,18 @@ def run_search(
     # library callers, who never reach this function. Ahead of the empty-ACL
     # short-circuit below, which answers with an empty page indistinguishable
     # from "you have reached the end" — a contradictory request must not be
-    # reported as a completed one.
+    # reported as a completed one. Worded as `Searcher.search`'s guard on the
+    # same condition is: two guards for one condition must not disagree.
     #
-    # The mode conjunct keeps this judging what the *caller* stated on a fresh
-    # or pool request: a keyset plan's ordering came from the cursor and was
-    # validated against it above, so it is not this refusal's to re-litigate.
-    # Written out rather than left to `plan.sort == "rank"` to exclude it,
-    # which is true only while KEYSET_SORT happens to be "date".
-    if plan.mode != "keyset" and plan.sort == "rank" and plan.sort_order == "asc":
-        # The remedy differs by mode, so it is branched rather than written
-        # as one string covering both. On a **fresh** request — no cursor,
-        # which is the commonest way to reach this — "pass sort='date'" is
-        # the whole fix, and is word for word what `Searcher.search`'s guard
-        # on the same condition already says; two guards for one condition
-        # disagreeing about the remedy is the drift. Telling that caller to
-        # "run a fresh search" and explaining that a cursor cannot be carried
-        # over are both non-sequiturs for a request that *is* fresh and
-        # carries no cursor. With a **pool** cursor in hand the shorter
-        # remedy is actively wrong: passing sort='date' then contradicts the
-        # rank-built pool and yields a different 400, so there the fix really
-        # is to start over.
-        remedy = (
-            "start a fresh sort='date' search for oldest-first (a cursor from "
-            "a rank-ordered search cannot be carried over)"
-            if plan.mode == "pool"
-            else "pass sort='date' for oldest-first"
-        )
+    # A fresh plan only (#327). A keyset plan's ordering came from the cursor
+    # and was validated against it above; a pool plan does not know what
+    # ordering will run, so a stated `asc` there is judged against the pool's
+    # own metadata by `_check_pool_sort`, which names the order the pool has.
+    if (isinstance(plan, FreshPlan) and plan.sort == "rank"
+            and plan.sort_order == "asc"):
         raise ValidationFailed(
             "sort_order='asc' is not applicable to sort='rank' (the "
-            f"default); {remedy}"
+            "default); pass sort='date' for oldest-first"
         )
 
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
@@ -457,8 +441,8 @@ def run_search(
         #
         # Both fields are resolved from the **same** string, through the same
         # `resolve_sort`/`is_rankable` pair the Searcher uses, so they cannot
-        # contradict each other. `sort_applied` used to be `plan.sort` raw,
-        # and `resolve_cursor_plan`'s pool arm never consults `is_rankable` —
+        # contradict each other. `sort_applied` used to be the plan's sort raw,
+        # and `resolve_cursor_plan`'s pool arm never consulted `is_rankable` —
         # so a pool cursor presented with a textless query reported
         # `sort_applied="rank"` beside `rankable=False`, the one combination
         # `is_rankable`'s docstring calls impossible, and the pair the GUI
@@ -471,7 +455,7 @@ def run_search(
         # On the **fresh** and **keyset** modes both are what the Searcher
         # would have stamped: `parsed_free_text` is the free text it reads.
         # On **pool** mode both describe a pool this branch never consults
-        # (`CursorPlan` says so).
+        # (`PoolPlan` knows only what was stated), resolved from that.
         #
         # That one is accepted because **no rows come back**: nothing is
         # mislabelled, since nothing is labelled. The rowed paths never rely
@@ -480,8 +464,10 @@ def run_search(
         # fresh and keyset, `continue_page` from the pool's own metadata).
         return search_response(
             results=[], next_cursor=None, took_ms=0.0,
-            sort_applied=resolve_sort(requested=plan.sort,
-                                      free_text=parsed_free_text),
+            sort_applied=resolve_sort(
+                requested=(plan.stated_sort if isinstance(plan, PoolPlan)
+                           else plan.sort),
+                free_text=parsed_free_text),
             # Present for the reason `sort_applied` is — this branch
             # returns `next_cursor: None`, so a client that inferred
             # would have nothing to infer from.
@@ -496,115 +482,110 @@ def run_search(
     # for but unavailable, degrade gracefully and report rewrite_status.
     effective_smart = smart and searcher.smart_available
 
-    # Tested on `cursor` rather than `plan.mode == "fresh"` (the resolver's
-    # matching verdict) because this is what narrows `cursor` to `str` for the
-    # two branches below, which decode it. The two cannot disagree: "fresh" is
-    # returned for `cursor is None` and for nothing else.
-    if cursor is None:
-        query = build_query_string(free_text=free_text, filters=scoped_filters)
-        try:
-            # The caller's **raw** axes, not `plan`'s resolution of them.
-            # `plan.sort` is never None, so an *unstated* sort would arrive
-            # looking stated, and the Searcher's guard would refuse a caller
-            # who omitted `sort` with "pass sort='date' or omit sort" — a
-            # remedy they had already followed (#324's own defect). The gate
-            # and the Searcher read the same free text, so the gate refuses
-            # first and the two forms answer alike on the wire; forwarding the
-            # caller's statement is what keeps the Searcher judging only what
-            # the caller wrote, for the day they do not.
-            #
-            # The Searcher's guard is the authority for CLI and library
-            # callers, who never reach this function. The gate is the early
-            # refusal that answers before any work and before the empty-ACL
-            # short-circuit.
-            page = searcher.search(query, page_size=limit, user_id=user_id,
-                                   sort=sort, sort_order=sort_order,
-                                   smart=effective_smart,
-                                   allowed_account_ids=allowed_account_ids,
-                                   snippet_chars=snippet_chars)
-        except SearchArgumentRefused as exc:
-            # The whole family, not the members this branch can name (#344).
-            # It used to enumerate `(SortNotApplicable,
-            # SortOrderNotApplicable)`, with the keyset branch below naming
-            # a different three — so a fifth guard added without widening a
-            # tuple was an operator-facing 500, `serve.app` handling only
-            # `APIError`. #342 shipped exactly that hole one branch over.
-            #
-            # A backstop: the gate above reads the same free text and refuses
-            # first. Kept so the next divergence is a 400 rather than a 500.
-            #
-            # Caught by the family, never by bare ValueError — psycopg,
-            # datetime and the embedding backends raise that, and
-            # relabelling a real outage as a caller error would send them
-            # to fix a blameless query.
-            raise ValidationFailed(exc.wire_message()) from exc
-        except QueryParseError as exc:
-            # The Searcher's own parse of this composition, backstopped for
-            # the same reason. The class is named, so nothing else is caught.
-            raise ValidationFailed(str(exc)) from exc
-    elif plan.mode == "keyset":
-        # Keyset cursor → date-keyset continuation. The cursor carries only
-        # (ts, id) and the direction it was minted in; the query + filters
-        # come from the request body (the GUI re-sends them on every
-        # loadMore). Both axes come from the plan rather than the caller's
-        # raw arguments because the cursor's kind is what selects the date
-        # path in Searcher.search — the resolver above has already rejected
-        # a stated sort or order that disagrees.
-        keyset = decode_keyset_cursor(cursor)
-        query = build_query_string(free_text=free_text, filters=scoped_filters)
-        try:
-            page = searcher.search(query, page_size=limit, user_id=user_id,
-                                   sort=plan.sort, sort_order=plan.sort_order,
-                                   keyset_cursor=keyset,
-                                   allowed_account_ids=allowed_account_ids,
-                                   snippet_chars=snippet_chars)
-        except SearchArgumentRefused as exc:
-            # The same family as the fresh branch (#344). It used to name
-            # three members and argue, per member, which were unreachable
-            # here — an argument that goes stale silently and had already:
-            # `SortNotApplicable` was absent, and the omission was safe only
-            # because `KEYSET_SORT is TEXTLESS_SORT`, a decision made in
-            # `search_cursor.py`. Catching the family retires the reasoning
-            # along with the enumeration.
-            #
-            # #326's walk guard is the member that could arrive, and it asks
-            # what `resolve_cursor_plan` already asked, of the same free text:
-            # a backstop, like the fresh branch's.
-            #
-            # The `cursor:` prefix comes off the *exception*, not off this
-            # branch (#331 point 3). Written here, it was applied to
-            # everything the branch caught — so a `sort_order` refusal on a
-            # request whose cursor was fine would read `cursor: sort_order=
-            # 'asc' is not applicable…`, a category error. It stays
-            # unreachable, but widening this catch to the whole family put
-            # *more members* within reach of the mislabel — the wording rots
-            # exactly where nothing can trip over it.
-            #
-            # Caught by the family, never by bare ValueError — psycopg,
-            # datetime and the embedding backends raise that, and
-            # relabelling a real outage as a cursor problem would send the
-            # caller to re-send a blameless query.
-            raise ValidationFailed(exc.wire_message()) from exc
-        except QueryParseError as exc:
-            # As on the fresh branch.
-            raise ValidationFailed(str(exc)) from exc
-    else:
-        # No `SearchArgumentRefused` catch here, and that is a fact about this
-        # branch rather than an omission: it never calls `searcher.search`.
-        # `_check_pool_sort` and `_continue_or_grow` reach `get_pool_metadata`
-        # / `continue_page` / `grow_pool`, which raise `CacheMissError`,
-        # `PageOutOfPoolError` and `APIError` subclasses — no family member can
-        # arrive. Route pool continuation through `search()` and this branch
-        # needs the catch its two siblings carry, or #344 returns on the one
-        # branch its fix did not touch.
-        parsed = decode_search_cursor(cursor)
-        # The **raw** arguments, not the plan's resolved ones: a resolved
-        # default would read as a contradiction against a pool built the
-        # other way, which is #312's defect exactly.
-        _check_pool_sort(searcher, parsed, requested_sort=sort,
-                         requested_sort_order=sort_order, user_id=user_id)
-        page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg,
-                                 snippet_chars=snippet_chars)
+    match plan:
+        case FreshPlan():
+            query = build_query_string(free_text=free_text, filters=scoped_filters)
+            try:
+                # The caller's **raw** axes, not `plan`'s resolution of them.
+                # `plan.sort` is never None, so an *unstated* sort would arrive
+                # looking stated, and the Searcher's guard would refuse a caller
+                # who omitted `sort` with "pass sort='date' or omit sort" — a
+                # remedy they had already followed (#324's own defect). The gate
+                # and the Searcher read the same free text, so the gate refuses
+                # first and the two forms answer alike on the wire; forwarding the
+                # caller's statement is what keeps the Searcher judging only what
+                # the caller wrote, for the day they do not.
+                #
+                # The Searcher's guard is the authority for CLI and library
+                # callers, who never reach this function. The gate is the early
+                # refusal that answers before any work and before the empty-ACL
+                # short-circuit.
+                page = searcher.search(query, page_size=limit, user_id=user_id,
+                                       sort=sort, sort_order=sort_order,
+                                       smart=effective_smart,
+                                       allowed_account_ids=allowed_account_ids,
+                                       snippet_chars=snippet_chars)
+            except SearchArgumentRefused as exc:
+                # The whole family, not the members this branch can name (#344).
+                # It used to enumerate `(SortNotApplicable,
+                # SortOrderNotApplicable)`, with the keyset branch below naming
+                # a different three — so a fifth guard added without widening a
+                # tuple was an operator-facing 500, `serve.app` handling only
+                # `APIError`. #342 shipped exactly that hole one branch over.
+                #
+                # A backstop: the gate above reads the same free text and refuses
+                # first. Kept so the next divergence is a 400 rather than a 500.
+                #
+                # Caught by the family, never by bare ValueError — psycopg,
+                # datetime and the embedding backends raise that, and
+                # relabelling a real outage as a caller error would send them
+                # to fix a blameless query.
+                raise ValidationFailed(exc.wire_message()) from exc
+            except QueryParseError as exc:
+                # The Searcher's own parse of this composition, backstopped for
+                # the same reason. The class is named, so nothing else is caught.
+                raise ValidationFailed(str(exc)) from exc
+        case KeysetPlan(cursor=keyset):
+            # Keyset cursor → date-keyset continuation. The cursor carries only
+            # (ts, id) and the direction it was minted in; the query + filters
+            # come from the request body (the GUI re-sends them on every
+            # loadMore). Both axes come from the plan rather than the caller's
+            # raw arguments because the cursor's kind is what selects the date
+            # path in Searcher.search — the resolver above has already rejected
+            # a stated sort or order that disagrees.
+            query = build_query_string(free_text=free_text, filters=scoped_filters)
+            try:
+                page = searcher.search(query, page_size=limit, user_id=user_id,
+                                       sort=plan.sort, sort_order=plan.sort_order,
+                                       keyset_cursor=keyset,
+                                       allowed_account_ids=allowed_account_ids,
+                                       snippet_chars=snippet_chars)
+            except SearchArgumentRefused as exc:
+                # The same family as the fresh branch (#344). It used to name
+                # three members and argue, per member, which were unreachable
+                # here — an argument that goes stale silently and had already:
+                # `SortNotApplicable` was absent, and the omission was safe only
+                # because `KEYSET_SORT is TEXTLESS_SORT`, a decision made in
+                # `search_cursor.py`. Catching the family retires the reasoning
+                # along with the enumeration.
+                #
+                # #326's walk guard is the member that could arrive, and it asks
+                # what `resolve_cursor_plan` already asked, of the same free text:
+                # a backstop, like the fresh branch's.
+                #
+                # The `cursor:` prefix comes off the *exception*, not off this
+                # branch (#331 point 3). Written here, it was applied to
+                # everything the branch caught — so a `sort_order` refusal on a
+                # request whose cursor was fine would read `cursor: sort_order=
+                # 'asc' is not applicable…`, a category error. It stays
+                # unreachable, but widening this catch to the whole family put
+                # *more members* within reach of the mislabel — the wording rots
+                # exactly where nothing can trip over it.
+                #
+                # Caught by the family, never by bare ValueError — psycopg,
+                # datetime and the embedding backends raise that, and
+                # relabelling a real outage as a cursor problem would send the
+                # caller to re-send a blameless query.
+                raise ValidationFailed(exc.wire_message()) from exc
+            except QueryParseError as exc:
+                # As on the fresh branch.
+                raise ValidationFailed(str(exc)) from exc
+        case PoolPlan(cursor=parsed):
+            # No `SearchArgumentRefused` catch here, and that is a fact about this
+            # branch rather than an omission: it never calls `searcher.search`.
+            # `_check_pool_sort` and `_continue_or_grow` reach `get_pool_metadata`
+            # / `continue_page` / `grow_pool`, which raise `CacheMissError`,
+            # `PageOutOfPoolError` and `APIError` subclasses — no family member can
+            # arrive. Route pool continuation through `search()` and this branch
+            # needs the catch its two siblings carry, or #344 returns on the one
+            # branch its fix did not touch.
+            _check_pool_sort(searcher, parsed, requested_sort=plan.stated_sort,
+                             requested_sort_order=plan.stated_sort_order,
+                             user_id=user_id)
+            page = _continue_or_grow(searcher, parsed, user_id=user_id, cfg=cfg,
+                                     snippet_chars=snippet_chars)
+        case _:
+            assert_never(plan)
 
     next_cursor = _next_cursor(page, cfg=cfg)
     status: RewriteStatus

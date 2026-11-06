@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import product
-from typing import Literal, get_args
+from typing import get_args
 
 from localmail.api.browse_cursor import (
     BrowseCursor, decode_browse_cursor, encode_browse_cursor,
@@ -41,7 +41,6 @@ from localmail.search.argument_errors import KeysetCursorUnusable
 from localmail.search.keyset_walk import KeysetWalk, keyset_walk_error
 from localmail.search.searcher import KeysetCursor
 from localmail.search.sort_axes import (
-    DEFAULT_SORT,
     DEFAULT_SORT_ORDER,
     TEXTLESS_SORT,
     SortMode,
@@ -131,49 +130,70 @@ if len(_TABLE_KEYSET_PAIRS) != len(_KEYSET_PREFIXES):
 #: is why the alias stays.
 KEYSET_SORT: SortMode = TEXTLESS_SORT
 
-CursorMode = Literal["fresh", "pool", "keyset"]
+@dataclass(frozen=True)
+class SearchCursor:
+    token: str
+    page: int
+
+
+# One plan type per mode, rather than one class whose ordering fields meant
+# something different per mode (#327). A ``match`` in ``run_search``
+# dispatches on them; each arm reads only what its mode can know.
+#
+# One resolver deciding all three rather than one function per axis: two
+# predicates for one rule is what produced the #308 follow-up defect, where
+# the api gate and the retrieval branch disagreed about what counted as a
+# blank query — so the axes are decided together or not at all.
 
 
 @dataclass(frozen=True)
-class CursorPlan:
-    """Which retrieval mode a request continues, and in what order.
+class FreshPlan:
+    """No cursor. The ordering is resolved: stated, else derived from the
+    query (#324: ``TEXTLESS_SORT`` for a query with nothing to rank), else
+    the module defaults.
 
-    Returned by :func:`resolve_cursor_plan`. ``sort`` and ``sort_order``
-    are what the request was resolved to: the cursor's own for a keyset
-    cursor, otherwise the caller's stated values, otherwise the module
-    defaults — except that on ``mode="fresh"`` ``sort`` may also be
-    ``TEXTLESS_SORT``, derived from the query rather than from either
-    (#324), which is neither a stated value nor ``DEFAULT_SORT``.
-
-    They are **not** forwarded to ``Searcher.search`` on the *fresh*
-    branch, which passes the caller's raw axes so the Searcher can still
-    tell "unstated" from "stated" and resolve them from the composed query
-    it alone sees. There they serve this layer's own early refusals. The
-    *keyset* branch does forward them, deliberately: the cursor's kind is
-    what selects the date path, and any stated value contradicting the
-    cursor has already been rejected above.
-
-    For ``mode="pool"`` they are **not** what the request will run with.
-    ``continue_page`` serves whatever ordering the pool was built with, so
-    these carry the caller's statement (or a default) *about* that pool,
-    which is only ever a claim to be checked — and is why
-    ``_check_pool_sort`` compares the raw arguments against the pool's own
-    metadata rather than anything here.
-
-    One object rather than one function per axis. Two predicates for one
-    rule is what produced the #308 follow-up defect, where the api gate
-    and the retrieval branch disagreed about what counted as a blank
-    query — so the axes are decided together or not at all.
+    Not forwarded to ``Searcher.search``, which is passed the caller's raw
+    axes so it can still tell "unstated" from "stated" and resolve them from
+    the composed query it alone sees. It serves this layer's own early
+    refusals and the empty-ACL branch's ``sort_applied``.
     """
-    mode: CursorMode
     sort: SortMode
     sort_order: SortOrder
 
 
 @dataclass(frozen=True)
-class SearchCursor:
-    token: str
-    page: int
+class KeysetPlan:
+    """A keyset cursor, decoded. Its ordering is the cursor's own — any
+    stated value contradicting it was refused by the resolver — so it *is*
+    forwarded to the Searcher: the cursor's kind is what selects the date
+    path."""
+    cursor: KeysetCursor
+
+    @property
+    def sort(self) -> SortMode:
+        return KEYSET_SORT
+
+    @property
+    def sort_order(self) -> SortOrder:
+        return self.cursor.order
+
+
+@dataclass(frozen=True)
+class PoolPlan:
+    """A pool cursor, decoded, plus what the caller *stated* about ordering.
+
+    It deliberately cannot answer "what ordering will run": ``continue_page``
+    serves whatever the pool was built with, which only the cached pool
+    knows. The stated values are a claim, checked against the pool's own
+    metadata by ``_check_pool_sort``; ``None`` means nothing was stated, so
+    there is nothing to check.
+    """
+    cursor: SearchCursor
+    stated_sort: SortMode | None
+    stated_sort_order: SortOrder | None
+
+
+CursorPlan = FreshPlan | KeysetPlan | PoolPlan
 
 
 def encode_search_cursor(cursor: SearchCursor) -> str:
@@ -312,20 +332,15 @@ def resolve_cursor_plan(
                                               free_text=free_text)
         if sort_error is not None:
             raise ValidationFailed(sort_error)
-        return CursorPlan(
-            mode="fresh",
+        return FreshPlan(
             sort=resolve_sort(requested=requested_sort, free_text=free_text),
             sort_order=(DEFAULT_SORT_ORDER if requested_sort_order is None
                         else requested_sort_order),
         )
     if is_keyset_cursor(cursor):
         # Decoded rather than prefix-scanned because the walk is needed
-        # below. ``run_search`` decodes again for the position it passes on;
-        # the two cannot disagree (pure function, same string), and the
-        # duplicate is a base64 read. Deliberately *not* hoisted onto
-        # ``CursorPlan`` — that type already carries two fields its
-        # pool-mode consumer must ignore (#327), and a third would be one
-        # more.
+        # below, and carried on the plan so ``run_search`` does not decode
+        # it a second time.
         #
         # Decoding here also moves a malformed *payload* from ``run_search``
         # to ahead of the empty-ACL short-circuit, which is where this
@@ -347,13 +362,10 @@ def resolve_cursor_plan(
             # the refusal, reported early.
             raise ValidationFailed(
                 KeysetCursorUnusable(walk_error).wire_message())
-        return CursorPlan(mode="keyset", sort=KEYSET_SORT, sort_order=ks.order)
-    return CursorPlan(
-        mode="pool",
-        sort=DEFAULT_SORT if requested_sort is None else requested_sort,
-        sort_order=(DEFAULT_SORT_ORDER if requested_sort_order is None
-                    else requested_sort_order),
-    )
+        return KeysetPlan(cursor=ks)
+    return PoolPlan(cursor=decode_search_cursor(cursor),
+                    stated_sort=requested_sort,
+                    stated_sort_order=requested_sort_order)
 
 
 def reject_pool_sort_mismatch(

@@ -8,7 +8,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from localmail.api.auth import hash_password, issue_token
+from localmail.api.auth import hash_password, issue_token, verify_token
 from localmail.config import ServeConfig
 from localmail.serve.app import create_app
 
@@ -312,3 +312,37 @@ def test_editing_grants_over_a_cookie_session_requires_csrf(cookie_admin, db_con
     assert resp.status_code == 400
     row = cookie_admin.get("/v1/admin/api-keys").json()["api_keys"][0]
     assert row["account_names"] == []
+
+
+def test_a_person_s_id_is_404_on_every_key_route_and_changes_nothing(
+    client, db_conn, admin_headers,
+):
+    """#319: the subclass keeps the JSON routes on 404 (pinned at the transport,
+    not only by issubclass), and the is_service guard leaves the person intact."""
+    aid = _account(db_conn, "work")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO api_users (username, password_hash) VALUES ('amy', 'x') "
+            "RETURNING id"
+        )
+        row = cur.fetchone()
+    assert row is not None
+    uid = int(row[0])
+    tok, _ = issue_token(db_conn, uid)
+    db_conn.commit()
+    responses = [
+        client.delete(f"/v1/admin/api-keys/{uid}", headers=admin_headers),
+        client.delete(f"/v1/admin/api-keys/{uid}/principal", headers=admin_headers),
+        client.post(
+            f"/v1/admin/api-keys/{uid}/grants",
+            json={"account_id": str(aid), "granted": True}, headers=admin_headers,
+        ),
+    ]
+    for resp in responses:
+        assert resp.status_code == 404, resp.text
+        assert "is a person" in resp.text
+    assert verify_token(db_conn, tok) is not None
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM user_accounts WHERE user_id = %s", (uid,))
+        grants = cur.fetchone()
+    assert grants is not None and grants[0] == 0

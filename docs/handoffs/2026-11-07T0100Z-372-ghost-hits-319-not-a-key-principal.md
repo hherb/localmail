@@ -5,7 +5,7 @@
 >
 > This session has **two open PRs**, both based on `main` at `84ed6ee`:
 > **#460** (`fix/372-ghost-hits`, code only, CI green when written) and the
-> PR on `fix/319-not-a-key-principal`, which carries its code **and this
+> **#461** (`fix/319-not-a-key-principal`), which carries its code **and this
 > handoff**. They touch different files and can merge in either order.
 >
 > **Both hosts are deployed at `2234775`** (carried from session 93; #458 was
@@ -51,13 +51,14 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | SHA | What |
 |---|---|
-| `471d303` | `api/admin/api_keys.py`: `NotAnApiKeyPrincipal(ApiKeyNotFound)` raised by `revoke_key`, `delete_key_principal` and `set_grant` when the id is a person's (via `_not_found`). Panel's revoke/delete catch it and render a `role="alert"` "Refused: …" notice above the table on a 200. JSON route and CLI unchanged (subclass), though their 404 detail now names the person case. 5 new tests + 2 tightened. CLAUDE.md API-keys bullet |
+| `471d303` | `api/admin/api_keys.py`: `NotAnApiKeyPrincipal(ApiKeyNotFound)` raised by `revoke_key`, `delete_key_principal` and `set_grant` when the id is a person's (via `_not_found`). Panel's revoke/delete catch it and render a `role="alert"` "Refused: …" notice above the table on a 200. JSON routes (404) and CLI unchanged (subclass), though the JSON 404 detail and the CLI error message now name the person case. 5 new tests + 3 tightened; the finalcheck review added 4 more (person's id on all three JSON routes, unknown id plain at delete/grant, repeated revoke/delete shows no refusal). CLAUDE.md API-keys bullet |
 | next | this handoff |
 
 - **Verification:** both RED first. Mutations caught: #319 — dropping the
-  panel's notice (2 tests fail), making `_not_found` never see a person (3
-  fail). #372's fix was RED-then-green; no separate mutation run. Full suite
-  **4757 passed, 6 warnings** on the #319 branch (4752 on #460's); mypy clean,
+  panel's notice (2 tests fail), making `_not_found` never see a person (6
+  fail since the finalcheck round; it was 5, not the 3 first written), a
+  notice on the panel's plain not-found branch (1 fail, added by finalcheck). #372's fix was RED-then-green; no separate mutation run. Full suite
+  **4761 passed, 6 warnings** on the #319 branch (4752 on #460's); mypy clean,
   169 files.
 - **Not done (#319's "related" half):** `ApiKeyNotFound` still derives from
   bare `Exception`, not `api.errors.NotFound`. Every route catches it
@@ -123,9 +124,9 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    and a missing dependency makes `--version` exit 0 with a stderr line;
    #378 an empty fixed-shape operator or non-int id in a query is a 400 /
    exit 2. **New:** #372 a page can hold fewer hits than `pool_size`
-   suggested only if a message was deleted mid-search; #319 the JSON
-   revoke/delete 404 detail for a person's id now reads "… is a person, not
-   an API-key principal".
+   suggested only if a message was deleted mid-search; #319 a person's id now reads "… is a person, not an API-key principal"
+   in the 404 detail of all three JSON key routes (revoke, delete, grants)
+   and in `revoke-api-key` / `remove-api-key`'s CLI error.
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows are
    stored 8 h off in `date_sent` (wire `date` is right). A repair should
    re-parse `raw_bytes`. Read-only count:
@@ -174,7 +175,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4757 on the #319 branch, session 94
+unset VIRTUAL_ENV && uv run pytest -q              # 4761 on the #319 branch, session 94
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```

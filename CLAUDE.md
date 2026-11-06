@@ -3386,10 +3386,12 @@ for the full design.
     otherwise become a second way to delete a person.
     - **That guard's refusal is `NotAnApiKeyPrincipal` (#319)**, raised by
       `revoke_key`, `delete_key_principal` and `set_grant` when the id is a
-      person's. It subclasses `ApiKeyNotFound`, so the JSON route (404) and
-      the CLI map it as before. The panel used to catch both as "already
-      gone" and re-render the table as if it had succeeded; it now shows a
-      `role="alert"` notice, still on a 200 so htmx swaps it (#148).
+      person's. It subclasses `ApiKeyNotFound`, so the three JSON routes
+      (404) and the CLI map it as before, now with a detail naming the
+      person case. The panel's revoke and delete handlers used to catch it
+      as "already gone" and re-render the table as if it had succeeded; it now shows a
+      `role="alert"` notice, still on a 200 so htmx swaps it (#148); a
+      repeated (double-clicked) revoke or delete still shows none, pinned.
       `ApiKeyNotFound` still derives from bare `Exception`, not
       `api.errors.NotFound`; every route catches it explicitly, so that is
       latent.

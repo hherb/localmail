@@ -167,6 +167,17 @@ def test_revoking_an_already_revoked_key_is_plain_not_found(db_conn):
     assert not isinstance(exc.value, svc.NotAnApiKeyPrincipal)
 
 
+@pytest.mark.parametrize("call", [
+    lambda conn: svc.delete_key_principal(conn, 999999),
+    lambda conn: svc.set_grant(conn, 999999, 1, True),
+], ids=["delete", "set_grant"])
+def test_an_unknown_id_is_plain_not_found_at_every_guard(db_conn, call):
+    """An absent id is not a person: each call site must not report a refusal."""
+    with pytest.raises(svc.ApiKeyNotFound) as exc:
+        call(db_conn)
+    assert not isinstance(exc.value, svc.NotAnApiKeyPrincipal)
+
+
 def test_an_unknown_account_is_a_field_error(db_conn):
     with pytest.raises(svc.ApiKeyFieldError):
         svc.create_key(db_conn, name="bot", account_ids=[999999])

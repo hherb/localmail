@@ -247,14 +247,18 @@ def test_a_person_s_id_is_reported_as_refused_not_done(client, db_conn, admin_id
     assert row is not None and row[0] == 1
 
 
-def test_an_ordinary_revoke_shows_no_refusal(client, admin_id):
+@pytest.mark.parametrize("action", ["revoke", "delete"])
+def test_repeating_an_action_shows_no_refusal(client, admin_id, action):
+    """A double-click reaches the plain not-found branch the second time; that
+    is the idempotent "already done", so it must not read as a refusal."""
     client.post(
         "/admin/api-keys", data={"name": "bot"},
         headers={"X-CSRF-Token": _csrf(admin_id, "POST", "/admin/api-keys")},
     )
     uid_match = re.search(r'id="api-key-row-(\d+)"', client.get("/admin/api-keys").text)
     assert uid_match
-    path = f"/admin/api-keys/{uid_match.group(1)}/revoke"
-    resp = client.post(path, headers={"X-CSRF-Token": _csrf(admin_id, "POST", path)})
-    assert resp.status_code == 200
-    assert 'role="alert"' not in resp.text
+    path = f"/admin/api-keys/{uid_match.group(1)}/{action}"
+    for _ in range(2):
+        resp = client.post(path, headers={"X-CSRF-Token": _csrf(admin_id, "POST", path)})
+        assert resp.status_code == 200
+        assert 'role="alert"' not in resp.text

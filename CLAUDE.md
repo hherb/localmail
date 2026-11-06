@@ -7527,10 +7527,25 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
       `with harness_db_lock(dsn), psycopg.connect(dsn):` is *reported* though
       it is genuinely locked, since only the `with` body is covered — it
       fails closed, so it costs a spurious report and never a missed one.
-      **#340 is the third and is open**: the rule compares call positions,
-      never arguments, so locking one database while working against another
-      passes. Latent (all five harnesses use one `dsn`), and a correct check
-      needs parameter-flow analysis across the helper walk above.
+    - **#340 — the DSN is compared too, in each lock block only.** The rule
+      used to compare call positions and never arguments, so locking one
+      database while working against another passed.
+      `_mismatched_dsn_calls` now compares each `DB_ENTRY_CALLS` member's
+      DSN *spelling* (first positional, else a `conninfo=`/`dsn=` keyword)
+      against the lock's, inside each `with harness_db_lock(...)` body —
+      #340's option 1. **Not caught (#459):** a mismatch inside a helper
+      reached under the lock (there the database is a parameter with its own
+      name — `run_chunk_insert_bench` locks `args.dsn` and connects `dsn` in
+      `_run_mode` — so comparing across the call needs argument binding), and
+      a name rebound inside the body (`dsn = live`). **Fails closed
+      otherwise:** a rebound copy (`d = args.dsn; connect(d)`) is reported,
+      and a DSN is `<unreadable>` — which never matches, **not even another
+      `<unreadable>`** (review of #458: `harness_db_lock(**a)` with
+      `connect(**b)` passed) — when it is not readable or the call carries
+      any other keyword or `**`, since `dbname=`, `host=` or `open_pool`'s
+      `connect_kwargs=` override the conninfo string. No harness passes such
+      keywords today. Pinned by `tests/test_acceptance_harness_lock_dsn.py`;
+      no harness changed.
     - **The AST, not the text**, for the reason `_mentions_version_option`
       gives: every harness names the helper in prose while explaining why it
       calls it, and a substring scan reads that as compliance.

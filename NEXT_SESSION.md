@@ -1,21 +1,17 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-06 (session 92).** `main` is **`db31db5`** (#456:
-> #327, one plan type per cursor mode).
+> **Status as of 2026-11-06 (session 93).** `main` is **`2234775`** (#457:
+> oauthlib 4.0.1, rustls floor).
 >
-> This session has **one open PR** on `deps/oauthlib-rustls-floors`. It
-> carries the code and this handoff.
+> This session has **one open PR** on `fix/340-harness-lock-dsn`. It carries
+> the code and this handoff.
 >
-> **Both hosts are still at `753133c`.** This session's deploy of `db31db5`
-> was **refused by the permission classifier** ("Remote Shell Writes"), so
-> nothing was deployed. #330, #327 and this PR change no wire behaviour on any
-> normal path. Deploy is yours (commands below), ideally after this PR merges.
+> **Both hosts are deployed at `2234775`** (verified via `/v1/version`; the
+> DGX now has oauthlib 4.0.1, the ssh deploy was not blocked this time).
+> This PR is test-only, so it needs no deploy.
 >
-> **Open issues: 25.** **Open Dependabot alerts: 7** before this PR merges:
-> #71, #185 (open on purpose), #115 (stale), #197 (fixed by this PR), #198,
-> #199, #200 (rustls, stale like #115: the lock already holds 0.23.46). After
-> the merge, dismiss #115 and #198–#200 as stale if Dependabot does not close
-> them itself.
+> **Open issues: 26** (25 once this PR closes #340; #459, the residual, was filed by the review). **Open Dependabot
+> alerts: 2** — #71 and #185, both open on purpose. #115 and #197–#200 closed.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
@@ -37,50 +33,46 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-- **#327 merged** as `db31db5` (PR #456) before the session started.
+- **Deployed `2234775` to both hosts** (Mac: launchd kickstart; DGX: the
+  ssh line from the resume commands). Both report `build_hash: 2234775`.
 
-### PR on `deps/oauthlib-rustls-floors` (based on `main` at `db31db5`)
+### PR on `fix/340-harness-lock-dsn` (based on `main` at `2234775`)
 
 | SHA | What |
 |---|---|
-| `7ac9b69` | `oauthlib>=4.0.1` (Dependabot #197), re-locked with `uv lock --upgrade-package oauthlib` (4.0.0 → 4.0.1, nothing else moved); `rustls` floor 0.23.45 → 0.23.46 in both `gui/src-tauri/Cargo.toml` entries (#198–#200; `Cargo.lock` unchanged, already 0.23.46) |
-| next | CLAUDE.md note (second November round) + this handoff |
-| next | `.claude/skills/finalcheck/SKILL.md`: the pre-merge review → fix → CI-green loop, adapted from `~/src/secretary` (localmail's workflows, no required checks, the 3.12 leg reproduced only in a worktree, no deploy from the skill) |
+| `e84b705` | `tests/acceptance/_harness_lock.py::_mismatched_dsn_calls`: inside a `with harness_db_lock(X)` body, every `DB_ENTRY_CALLS` member's DSN spelling (first positional, else `conninfo=`/`dsn=`) must equal `X`'s; an unreadable one (`**params`) is reported as `<unreadable>`. #340 option 1. New `tests/test_acceptance_harness_lock_dsn.py` (8 tests); CLAUDE.md #337 entry updated |
+| next | this handoff |
+| review | `/finalcheck` fixes: two fail-open cases closed — two `<unreadable>` DSNs no longer match each other, and a call carrying any other keyword or `**` (`dbname=`, `host=`, `connect_kwargs=`) is `<unreadable>`; 10 more tests (`test_acceptance_harness_lock_dsn.py` now 18); residual (helper mismatch, rebinding) filed as **#459** |
 
-- **Reach, checked:** #197 is in oauthlib's *server* device-flow endpoints;
-  localmail is only an OAuth client. #198 needs rustls' `brotli` feature,
-  #200 post-quantum key exchange (aws-lc-rs); `cargo tree -e features -i
-  rustls` shows only `ring`, `std`, `tls12`. #199 needs a Debug-formatted TLS
-  session; `gui/src-tauri/src` has none.
-- **Verification (in a throwaway worktree + venv, the Mac venv untouched):**
-  the 196 OAuth/Gmail tests pass on 4.0.1; the `InstalledAppFlow` consent URL
-  (fixed state + verifier) is byte-identical under 4.0.0 and 4.0.1;
-  `cargo metadata --locked` accepts the new floor.
-- **Not run:** the full Python suite (load ~22 on the Mac); CI runs it on both
-  legs, and `gui-ci` covers the Rust build. Check `gh pr checks`.
+- **Verification:** RED first (5 fail, 3 controls pass); three mutations
+  (drop the keyword read, drop the report, drop the comparison) each fail
+  their test; all five real harnesses still pass the rule (no harness
+  changed). Full suite **4752 passed, 6 warnings** after the review fixes (4742 before) (warnings not
+  inspected; earlier sessions recorded 2); mypy clean, 169 files.
+- **Known limit (in a `shortcut:` comment, tracked as #459):** a mismatch
+  inside a helper reached under the lock, and a name rebound inside the body
+  (`dsn = live`), are still missed; a rebound copy (`d = args.dsn`) is
+  reported (fails closed).
 
 ## What's next
 
 ### 1. **Merge this PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <PR>` all pass; Dependabot #197 closes.
+- **Acceptance:** `gh pr checks <PR>` all pass; #340 closes (`Closes #340`
+  in the body).
 
-### 2. **Deploy `main` to both hosts** (yours this time; the classifier blocked me)
-- **Acceptance:** `/v1/version` on both reports the merge SHA. The Mac venv
-  needs `uv sync` for oauthlib 4.0.1.
+### 2. **Check the 6 test warnings**
+- **Acceptance:** `uv run pytest -q -rw` lists them; either they match a
+  baseline on `main` or the new ones are filed/fixed.
 
-### 3. **Dismiss stale rustls alerts** #115, #198, #199, #200 if they stay open
-- **Acceptance:** `gh api …/dependabot/alerts?state=open` lists only #71 and
-  #185.
-
-### 4. **Re-authorise `hherb-dmc`** (yours, browser; carried)
+### 3. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
-### 5. **Next small slice: pick with the operator**
+### 4. **Next small slice: pick with the operator**
 - Candidates: **#285** (does mypy/ruff gate CI — needs a ruff-pin call),
   **#357** (only worth it with #285), #369 (refuse-vs-keep call), #383
-  (one-way door, `0039`), #365 (product call), #340 (harness lock DSN
-  arguments), #363 (rerank degradation on the wire — needs a renderer).
+  (one-way door, `0039`), #365 (product call), #363 (rerank degradation on
+  the wire — needs a renderer).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
@@ -88,7 +80,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   features, #373 (`'` is literal), #378 (an empty
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
-### 6. **Carried**
+### 5. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
 - **Dependabot #71 / #185:** left open on purpose.
@@ -97,16 +89,16 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #372, #368, #365; #375; #357; #340, #363,
-  #285; robustness #218, #226, #225/#227, #200/#211/#208, #206, #204, #25.
+- **Issues:** #383, #369, #372, #368, #365; #375; #357; #363, #285;
+  robustness #218, #226, #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **No slice picked with the operator**; I took the outstanding Dependabot
-   work (#197 was flagged last session as "its own small PR"), adding the
-   rustls floor because three new alerts arrived for it.
-2. **Raise the rustls floor even though the lock is already fixed** (mine):
-   the lock is the state, the floor is the constraint (the icalendar lesson).
+1. **Operator picked #340** and asked for both deploys.
+2. **#340 option 1, not 2 or 3** (mine): the cheap in-frame comparison
+   covers the realistic mistake (two DSN expressions side by side in
+   `main`) and false-positives on no current harness; option 3 (runtime)
+   would need every harness connection routed through the lock.
 
 ## Open decisions & risks
 
@@ -138,11 +130,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~22 this session.** Check `uptime` before
+10. **Load on the Mac was 15–40 this session.** Check `uptime` before
     trusting any timing.
-11. **Deploy needs your permission.** The auto-mode classifier refuses the
-    `ssh 10.0.0.3 '… git pull … systemctl restart'` line as a remote shell
-    write. Either run it yourself or add an allow rule.
+11. **Deploy was allowed this session** (the DGX ssh line ran). If the
+    classifier refuses it again, run it yourself.
 
 ## Exact commands to resume
 
@@ -151,7 +142,7 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/deps/oauthlib-rustls-floors --stat   # empty once merged (squash)
+git diff main origin/fix/340-harness-lock-dsn --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
@@ -170,7 +161,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4723 at session 91
+unset VIRTUAL_ENV && uv run pytest -q              # 4752 at session 93 (after review)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
 ```

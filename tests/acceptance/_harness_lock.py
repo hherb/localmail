@@ -325,6 +325,81 @@ def _uncovered_db_calls(
     return names
 
 
+#: Keyword names a DSN may be passed under, when it is not the first
+#: positional argument: psycopg's ``connect(conninfo=…)`` and localmail's
+#: ``apply_migrations(dsn=…)`` / ``open_pool(dsn=…)``.
+DSN_KEYWORDS = frozenset({"conninfo", "dsn"})
+
+#: Rendered in place of a DSN argument the rule cannot read. It never
+#: matches, not even itself: two unreadable DSNs prove nothing alike.
+UNREADABLE_DSN = "<unreadable>"
+
+
+def _dsn_expression(call: ast.Call) -> str:
+    """The source spelling of ``call``'s DSN argument, or :data:`UNREADABLE_DSN`.
+
+    Unreadable too when the call carries any other keyword or a ``**``:
+    libpq keywords (``dbname=``, ``host=``) and ``open_pool``'s
+    ``connect_kwargs=`` override the conninfo string, so the spelling alone
+    no longer says which database is reached.
+
+    shortcut: every extra keyword counts, harmless ones (``autocommit=``)
+    included, since no harness passes any; allowlist them if one ever must.
+    """
+    if any(kw.arg not in DSN_KEYWORDS for kw in call.keywords):
+        return UNREADABLE_DSN
+    if call.args:
+        return ast.unparse(call.args[0])
+    for keyword in call.keywords:
+        if keyword.arg in DSN_KEYWORDS:
+            return ast.unparse(keyword.value)
+    return UNREADABLE_DSN
+
+
+def _mismatched_dsn_calls(tree: ast.Module) -> list[str]:
+    """DB entry calls inside a lock block that name a different DSN (#340).
+
+    Compares *spellings*, within each ``with harness_db_lock(...)`` body —
+    option 1 of #340. A helper reached under the lock is not followed,
+    because there the database is a parameter with its own name
+    (``run_chunk_insert_bench`` locks ``args.dsn`` in ``main`` and connects
+    ``dsn`` in ``_run_mode``), and comparing across the call needs
+    argument-to-parameter binding.
+
+    shortcut: spelling, not value — ``d = args.dsn`` then ``connect(d)`` under
+    ``harness_db_lock(args.dsn)`` is reported (fails closed), while a mismatch
+    inside a helper, or a name rebound after the lock (``dsn = live`` in the
+    body), is missed; upgrade to binding/data-flow (#459) if a harness ever
+    needs either.
+    """
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        locks = [
+            item.context_expr
+            for item in node.items
+            if _is_lock_call(item.context_expr)
+        ]
+        if not locks:
+            continue
+        assert isinstance(locks[0], ast.Call)  # _is_lock_call guarantees it
+        locked = _dsn_expression(locks[0])
+        for statement in node.body:
+            for inner in ast.walk(statement):
+                if not isinstance(inner, ast.Call):
+                    continue
+                name = _called_name(inner)
+                if name not in DB_ENTRY_CALLS:
+                    continue
+                used = _dsn_expression(inner)
+                if used == UNREADABLE_DSN or used != locked:
+                    found.append(
+                        f"session lock on `{locked}` but {name}(`{used}`)"
+                    )
+    return found
+
+
 def _imports_the_helper(tree: ast.Module) -> bool:
     """Does the module import the real :data:`LOCK_HELPER_NAME`?
 
@@ -353,10 +428,11 @@ def harness_lock_error(source: str, filename: str) -> str | None:
     The rule is that every :data:`DB_ENTRY_CALLS` member reachable from
     ``main`` — directly, or through a module-level helper it calls — sits
     inside a ``with`` block holding :data:`LOCK_HELPER_NAME`, and that the
-    module does nothing to the database at import time. Requiring only that
-    the helper appear *somewhere* would accept a harness that migrates first
-    and locks afterwards, which is taking no lock at all — the truncate has
-    already run by then.
+    module does nothing to the database at import time, and that each such
+    call inside the lock block names the lock's own DSN expression (#340).
+    Requiring only that the helper appear *somewhere* would accept a harness
+    that migrates first and locks afterwards, which is taking no lock at all
+    — the truncate has already run by then.
 
     **Known imprecision, deliberate.** A call listed as the lock's *sibling*
     context expression — ``with harness_db_lock(dsn), psycopg.connect(dsn):``
@@ -395,6 +471,16 @@ def harness_lock_error(source: str, filename: str) -> str | None:
             f"other's tables and neither errors (#329, #337). Wrap the database "
             f"work — from apply_migrations onward — in "
             f"`with {LOCK_HELPER_NAME}(dsn):`."
+        )
+
+    mismatched = _mismatched_dsn_calls(tree)
+    if mismatched:
+        return (
+            f"{filename} locks one database and works against another: "
+            f"{'; '.join(mismatched)}. The lock serialises only the database "
+            f"it names, so work against the other runs unguarded (#329, "
+            f"#340). Pass the same DSN expression to {LOCK_HELPER_NAME} and "
+            f"to the work."
         )
 
     if not _imports_the_helper(tree):

@@ -42,8 +42,10 @@ dependencies = [
     # ever the OAuth *client* here (`oauth-login` and the admin Connect
     # flow), so this is hygiene, not an incident. 4.0.0 is a major release;
     # the consent URL and the token-exchange request both flows build were
-    # verified identical across the bump.
-    "oauthlib>=4.0.0",
+    # verified identical across the bump. 4.0.1 is Dependabot #197 (device-flow
+    # bearer retrievable with a known client id): server endpoints again, so
+    # hygiene too.
+    "oauthlib>=4.0.1",
     "html2text>=2024.2.26",
     # Floor is security-driven, and the floor is what fixes it: GHSA
     # (Dependabot #66) is algorithmic complexity in `Component.__eq__`,

@@ -7527,10 +7527,21 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
       `with harness_db_lock(dsn), psycopg.connect(dsn):` is *reported* though
       it is genuinely locked, since only the `with` body is covered — it
       fails closed, so it costs a spurious report and never a missed one.
-      **#340 is the third and is open**: the rule compares call positions,
-      never arguments, so locking one database while working against another
-      passes. Latent (all five harnesses use one `dsn`), and a correct check
-      needs parameter-flow analysis across the helper walk above.
+      **#340 is fixed for the frame that takes the lock, and only there.**
+      The rule used to compare call positions and never arguments, so
+      locking one database while working against another passed.
+      `_mismatched_dsn_calls` now compares each `DB_ENTRY_CALLS` member's
+      DSN *spelling* (first positional, else a `conninfo=`/`dsn=` keyword)
+      against the lock's, inside the `with` body — #340's option 1. A helper
+      reached under the lock is **not** compared, because there the database
+      is a parameter with its own name (`run_chunk_insert_bench` locks
+      `args.dsn` and connects `dsn` in `_run_mode`), so a mismatch inside a
+      helper is still missed; binding arguments to parameters (option 2) is
+      the upgrade. Spelling, not value: `d = args.dsn; connect(d)` is
+      reported, and an unreadable DSN (`connect(**params)`) is reported as
+      `<unreadable>` — both fail closed. Pinned by
+      `tests/test_acceptance_harness_lock_dsn.py`, three mutations each
+      caught; no harness changed.
     - **The AST, not the text**, for the reason `_mentions_version_option`
       gives: every harness names the helper in prose while explaining why it
       calls it, and a substring scan reads that as compliance.

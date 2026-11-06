@@ -325,6 +325,67 @@ def _uncovered_db_calls(
     return names
 
 
+#: Keyword names a DSN may be passed under, when it is not the first
+#: positional argument: psycopg's ``connect(conninfo=…)`` and localmail's
+#: ``apply_migrations(dsn=…)`` / ``open_pool(dsn=…)``.
+DSN_KEYWORDS = frozenset({"conninfo", "dsn"})
+
+#: Rendered in place of a DSN argument the rule cannot read.
+UNREADABLE_DSN = "<unreadable>"
+
+
+def _dsn_expression(call: ast.Call) -> str:
+    """The source spelling of ``call``'s DSN argument, or :data:`UNREADABLE_DSN`."""
+    if call.args:
+        return ast.unparse(call.args[0])
+    for keyword in call.keywords:
+        if keyword.arg in DSN_KEYWORDS:
+            return ast.unparse(keyword.value)
+    return UNREADABLE_DSN
+
+
+def _mismatched_dsn_calls(tree: ast.Module) -> list[str]:
+    """DB entry calls inside a lock block that name a different DSN (#340).
+
+    Compares *spellings*, within the frame that takes the lock only — option
+    1 of #340. A helper reached under the lock is not followed, because there
+    the database is a parameter with its own name (``run_chunk_insert_bench``
+    locks ``args.dsn`` in ``main`` and connects ``dsn`` in ``_run_mode``), and
+    comparing across the call needs argument-to-parameter binding.
+
+    shortcut: spelling, not value — ``d = args.dsn`` then ``connect(d)`` under
+    ``harness_db_lock(args.dsn)`` is reported (fails closed), and a mismatch
+    inside a helper is missed; upgrade to single-hop binding (#340 option 2)
+    if a harness ever needs either.
+    """
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        locks = [
+            item.context_expr
+            for item in node.items
+            if _is_lock_call(item.context_expr)
+        ]
+        if not locks:
+            continue
+        assert isinstance(locks[0], ast.Call)  # _is_lock_call guarantees it
+        locked = _dsn_expression(locks[0])
+        for statement in node.body:
+            for inner in ast.walk(statement):
+                if not isinstance(inner, ast.Call):
+                    continue
+                name = _called_name(inner)
+                if name not in DB_ENTRY_CALLS:
+                    continue
+                used = _dsn_expression(inner)
+                if used != locked:
+                    found.append(
+                        f"session lock on `{locked}` but {name}(`{used}`)"
+                    )
+    return found
+
+
 def _imports_the_helper(tree: ast.Module) -> bool:
     """Does the module import the real :data:`LOCK_HELPER_NAME`?
 
@@ -395,6 +456,15 @@ def harness_lock_error(source: str, filename: str) -> str | None:
             f"other's tables and neither errors (#329, #337). Wrap the database "
             f"work — from apply_migrations onward — in "
             f"`with {LOCK_HELPER_NAME}(dsn):`."
+        )
+
+    mismatched = _mismatched_dsn_calls(tree)
+    if mismatched:
+        return (
+            f"{filename} locks one database and works against another: "
+            f"{'; '.join(mismatched)}. The lock serialises only the database "
+            f"it names, so the other is truncated unguarded (#329, #340). Pass "
+            f"the same DSN expression to {LOCK_HELPER_NAME} and to the work."
         )
 
     if not _imports_the_helper(tree):

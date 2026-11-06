@@ -343,8 +343,8 @@ def test_the_empty_acl_branch_never_pairs_rank_with_unrankable(searcher,
     to produce it.
 
     ``sort_applied`` here was ``plan.sort`` raw, and ``resolve_cursor_plan``'s
-    pool arm is ``DEFAULT_SORT if requested_sort is None else requested_sort``
-    — it never consults ``is_rankable``. So a **pool cursor** presented with a
+    pool arm was ``DEFAULT_SORT if requested_sort is None else requested_sort``
+    — it never consulted ``is_rankable`` (since #327 it resolves no sort). So a **pool cursor** presented with a
     textless query answered ``sort_applied="rank"`` beside ``rankable=False``:
     the combination ``is_rankable``'s docstring says cannot occur, and the one
     the GUI renders as a checked *and* disabled Relevance radio above a note

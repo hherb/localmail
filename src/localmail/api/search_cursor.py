@@ -25,7 +25,10 @@ now rules out (#308): the request's ``sort`` was resolved to its default
 before the cursor was read, and a cursor the resulting mode could not read
 was dropped in silence. ``sort_order`` is the same defect on a second axis
 — a cursor carrying only ``(ts, id)`` would continue an ascending walk
-backwards — which is why the two axes are decided here, together.
+backwards — which is why the two axes are decided here, together, for a
+fresh request and a keyset cursor. A pool cursor's ordering lives in the
+cached pool, so for it this module only refuses what the caller stated and
+no pool could serve (#327); the rest is checked against the pool later.
 """
 from __future__ import annotations
 
@@ -47,6 +50,7 @@ from localmail.search.sort_axes import (
     SortOrder,
     resolve_sort,
     sort_applicability_error,
+    sort_order_applicability_error,
 )
 
 #: One prefix per (direction, walk) pair, spelled ``K`` + ``A`` when
@@ -150,7 +154,8 @@ class SearchCursor:
 class FreshPlan:
     """No cursor. The ordering is resolved: stated, else derived from the
     query (#324: ``TEXTLESS_SORT`` for a query with nothing to rank), else
-    the module defaults.
+    the module defaults. The resolver refuses rank + asc before building
+    one, so every ``FreshPlan`` it returns is a pair the request can run.
 
     Not forwarded to ``Searcher.search``, which is passed the caller's raw
     axes so it can still tell "unstated" from "stated" and resolve them from
@@ -282,7 +287,14 @@ def resolve_cursor_plan(
     requested_sort_order: SortOrder | None,
     free_text: str,
 ) -> CursorPlan:
-    """Decide the retrieval mode and both ordering axes — cursor first.
+    """Decide the retrieval mode and, where it can be known, the ordering.
+
+    Returns a ``FreshPlan`` (ordering resolved), a ``KeysetPlan`` (ordering
+    off the decoded cursor) or a ``PoolPlan`` (the decoded cursor plus what
+    was stated; the pool's own ordering is checked later, against its
+    metadata, by ``run_search``'s ``_check_pool_sort``). Both cursor kinds
+    are decoded here, so a malformed payload is refused ahead of the
+    empty-ACL short-circuit.
 
     ``free_text`` must be ``parse_query(...).free_text``, not the caller's
     raw query field: the filter operators are lifted out by then, and
@@ -315,7 +327,10 @@ def resolve_cursor_plan(
     A *stated* value the cursor cannot serve raises ``ValidationFailed``.
     Coercing it would ignore the caller silently; honouring it means
     dropping the cursor, which answers a paging request with page 1 of a
-    differently ordered search.
+    differently ordered search. For a pool cursor that is decided here only
+    when the stated pair is one no pool can hold (``rank`` + ``asc``);
+    anything else needs the pool, which the caller may not be allowed to
+    reach (an empty ACL) and which may have been evicted (a 409).
     """
     if cursor is None:
         # A fresh request's sort is resolved against its own query (#324):
@@ -332,11 +347,18 @@ def resolve_cursor_plan(
                                               free_text=free_text)
         if sort_error is not None:
             raise ValidationFailed(sort_error)
-        return FreshPlan(
+        plan = FreshPlan(
             sort=resolve_sort(requested=requested_sort, free_text=free_text),
             sort_order=(DEFAULT_SORT_ORDER if requested_sort_order is None
                         else requested_sort_order),
         )
+        # The *resolved* pair, as the Searcher judges it: an `asc` on a
+        # textless query resolves to the date walk and is honoured (#324).
+        order_error = sort_order_applicability_error(
+            sort=plan.sort, sort_order=plan.sort_order, continuing_pool=False)
+        if order_error is not None:
+            raise ValidationFailed(order_error)
+        return plan
     if is_keyset_cursor(cursor):
         # Decoded rather than prefix-scanned because the walk is needed
         # below, and carried on the plan so ``run_search`` does not decode
@@ -363,7 +385,19 @@ def resolve_cursor_plan(
             raise ValidationFailed(
                 KeysetCursorUnusable(walk_error).wire_message())
         return KeysetPlan(cursor=ks)
-    return PoolPlan(cursor=decode_search_cursor(cursor),
+    pool_cursor = decode_search_cursor(cursor)
+    # Only a *stated* pair: an unstated sort says nothing about the pool, and
+    # #327 was refusing from a default. A stated rank + asc contradicts every
+    # pool (a fresh rank + asc is refused, so none is ever built), so it is
+    # refused from the statement alone, ahead of the empty-ACL short-circuit
+    # and without a cache probe that could answer 409 instead.
+    if requested_sort is not None and requested_sort_order is not None:
+        order_error = sort_order_applicability_error(
+            sort=requested_sort, sort_order=requested_sort_order,
+            continuing_pool=True)
+        if order_error is not None:
+            raise ValidationFailed(order_error)
+    return PoolPlan(cursor=pool_cursor,
                     stated_sort=requested_sort,
                     stated_sort_order=requested_sort_order)
 

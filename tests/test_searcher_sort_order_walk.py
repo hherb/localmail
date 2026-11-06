@@ -401,8 +401,8 @@ def test_an_ascending_walk_paged_without_restating_the_order_keeps_ascending(
     end. No exception, no log line: it reads as a data problem, not a
     call-site one.
 
-    HTTP and MCP were safe only because ``run_search`` happens to pass
-    ``plan.sort_order`` on every hop, which is a property of one call site
+    HTTP and MCP were safe only because ``run_search`` happens to pass the
+    cursor's own direction on the keyset hop, which is a property of one call site
     rather than of the signature. The direction now rides on the cursor, so
     the pairing cannot be formed.
     """

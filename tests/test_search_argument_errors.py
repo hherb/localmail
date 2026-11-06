@@ -190,8 +190,10 @@ def test_the_keyset_branch_maps_every_family_member_to_a_400(
     reasoning a base class removes.
 
     The branch is asserted, not assumed. On ``pytest.raises(ValidationFailed)``
-    alone this test passed with ``elif plan.mode == "keyset"`` mutated to
-    ``elif False`` — control fell through to the pool branch, where
+    alone this test once passed with ``elif plan.mode == "keyset"`` mutated to
+    ``elif False`` (before #327 made the dispatch a ``match`` over plan types;
+    the equivalent mutation now reaches ``assert_never``) — control fell
+    through to the pool branch, where
     ``decode_search_cursor`` raises a *different* ``ValidationFailed`` over
     the same cursor. A test named for a branch that passes while the branch
     never runs is the shape this file exists to remove.

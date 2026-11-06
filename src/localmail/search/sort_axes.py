@@ -70,8 +70,8 @@ def is_rankable(*, free_text: str) -> bool:
     two *derivations* cannot disagree. That is not by itself the wire
     guarantee, and reading it as one is what let the contradictory pair ship:
     ``api.search.run_search``'s empty-ACL branch took ``sort_applied`` from
-    ``plan.sort`` raw, and ``resolve_cursor_plan``'s pool arm never consults
-    this function — so a pool cursor with a textless query answered
+    ``plan.sort`` raw, and ``resolve_cursor_plan``'s pool arm never consulted
+    this function (since #327 it resolves no sort) — so a pool cursor with a textless query answered
     ``sort_applied="rank"`` beside ``rankable=False``. What holds the pairing
     is that **every** emitter goes through this pair on one string: the two
     ``Searcher.search`` stamps, the three pool readers, and (since that fix)
@@ -142,6 +142,42 @@ def sort_applicability_error(
         "rank against here — filter operators alone (subject:, from:, lang:, "
         "has:attachment) or -excluded words alone leave no terms — so such a "
         "query is always answered date-ordered."
+    )
+
+
+def sort_order_applicability_error(
+    *, sort: SortMode, sort_order: SortOrder, continuing_pool: bool,
+) -> str | None:
+    """Why ``sort_order`` cannot run on ``sort``, or ``None``.
+
+    Only ``rank`` + ``asc``: the rank path serves a bounded candidate pool,
+    so reversing it would return the least relevant of the top hits rather
+    than of the archive. Refused rather than honoured or ignored (#308).
+
+    One rule for three call sites — ``Searcher.search`` and both of
+    ``resolve_cursor_plan``'s fresh and pool arms — so the wording cannot
+    drift; it had been hand-written twice, and the api copy was a prefix of
+    the Searcher's (review of #327).
+
+    ``continuing_pool`` picks the remedy, keyword-only with no default
+    (#234's shape) because each value is wrong for the other caller: a fresh
+    request is fixed by passing ``sort='date'``, while with a rank pool's
+    cursor in hand that same advice contradicts the pool and earns a
+    different 400, so there the fix is a fresh search.
+    """
+    if sort != "rank" or sort_order != "asc":
+        return None
+    remedy = (
+        "start a fresh sort='date' search for oldest-first (a cursor from a "
+        "rank-ordered search cannot be carried over)"
+        if continuing_pool
+        else "pass sort='date' for oldest-first"
+    )
+    return (
+        "sort_order='asc' is not applicable to sort='rank' (the default); "
+        f"{remedy}. The rank path serves a bounded candidate pool, so "
+        "reversing it returns the least relevant of the top hits, not of the "
+        "archive."
     )
 
 

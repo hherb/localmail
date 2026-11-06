@@ -36,6 +36,7 @@ from localmail.search.sort_axes import (
     resolve_sort,
     sort_applicability_error,
     sort_membership_error,
+    sort_order_applicability_error,
 )
 
 #: Queries whose ``parse_query(...).free_text`` is empty. The callers pass
@@ -290,3 +291,24 @@ def test_rankability_is_exactly_what_the_applicability_rule_judges(
         requested="rank", free_text=free_text,
     ) is not None
     assert refused is not is_rankable(free_text=free_text)
+
+
+@pytest.mark.parametrize("sort,order", [("rank", "desc"), ("date", "asc"),
+                                        ("date", "desc")])
+@pytest.mark.parametrize("continuing_pool", [False, True])
+def test_only_rank_asc_is_inapplicable(sort, order, continuing_pool) -> None:
+    assert sort_order_applicability_error(
+        sort=sort, sort_order=order, continuing_pool=continuing_pool) is None
+
+
+def test_the_rank_asc_remedy_depends_on_whether_a_pool_is_continued() -> None:
+    """A fresh caller fixes it with one field; with a rank pool's cursor in
+    hand, ``sort='date'`` contradicts the pool, so the fix is a fresh search."""
+    fresh = sort_order_applicability_error(sort="rank", sort_order="asc",
+                                           continuing_pool=False)
+    pool = sort_order_applicability_error(sort="rank", sort_order="asc",
+                                          continuing_pool=True)
+    assert fresh is not None and pool is not None
+    assert "pass sort='date' for oldest-first" in fresh
+    assert "cursor" not in fresh
+    assert "start a fresh sort='date' search" in pool

@@ -43,18 +43,29 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 | SHA | What |
 |---|---|
 | `8bb13fe` | #327: `resolve_cursor_plan` returns `FreshPlan(sort, sort_order)` / `KeysetPlan(cursor)` / `PoolPlan(cursor, stated_sort, stated_sort_order)`; `run_search` is a `match` over them; CLAUDE.md note |
-| handoff | this file + `docs/handoffs/2026-11-06T0800Z-327-cursor-plan-types.md` |
+| `cd3f486`, `e401e4b` | handoff (this file + `docs/handoffs/2026-11-06T0800Z-327-cursor-plan-types.md`), then the Dependabot #197 note |
+| review follow-up | shared rank+asc rule in `sort_axes`; a stated rank+asc on a pool cursor refused ahead of the empty-ACL branch; tests; stale comments |
 
 - **The defect it fixes:** a pool cursor paged with `sort_order="asc"` was
   refused by the fresh-request rank+asc rule, reasoning from a `sort`
   resolved to its default, before the pool was consulted. Now that rule is
   `FreshPlan`-only, and the request reaches `_check_pool_sort`, which names
   the pool's real order (`this cursor continues a descending search`). The
-  "cannot be carried over" remedy string is gone.
+  "cannot be carried over" remedy now applies only to a *stated*
+  `sort="rank"` + `sort_order="asc"` on a pool cursor, refused in the
+  resolver ahead of the empty-ACL short-circuit (review follow-up).
 - **Edge-path wire changes:** a malformed **pool** cursor is now a 400
   ahead of the empty-ACL short-circuit (it was a 200 empty page for a
   grant-nothing caller); `reject_pool_sort_mismatch`'s order half is now
-  reachable end to end. `run_search` decodes each cursor once.
+  reachable end to end; a stated `asc` with no stated sort on a pool cursor
+  is left to the pool, so it is a 200 empty page for a grant-nothing caller
+  and a 409 for an evicted pool (both were 400s). `run_search` decodes each
+  cursor once.
+- **Review follow-up:** the rank+asc rule is one function,
+  `sort_axes.sort_order_applicability_error`, asked by the Searcher and the
+  resolver's fresh and pool arms; tests added for the pool rank+asc 400, the
+  pool asc-only 200, a malformed pool cursor through `run_search`, and the
+  rule itself; stale comments updated.
 - Tests: `tests/test_api_search_cursor_plan_types.py` (8). RED first: the
   two `run_search` tests failed on `main` with the old default-`rank`
   message. 12 existing tests updated (type equality, two pool tests), one

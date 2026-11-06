@@ -408,24 +408,14 @@ def run_search(
     plan = resolve_cursor_plan(cursor=cursor, requested_sort=sort,
                                requested_sort_order=sort_order,
                                free_text=parsed_free_text)
-    # Refused here as well as in the Searcher so the caller gets a clean 400
-    # before any work; the Searcher's own guard is what covers CLI and
-    # library callers, who never reach this function. Ahead of the empty-ACL
-    # short-circuit below, which answers with an empty page indistinguishable
-    # from "you have reached the end" — a contradictory request must not be
-    # reported as a completed one. Worded as `Searcher.search`'s guard on the
-    # same condition is: two guards for one condition must not disagree.
-    #
-    # A fresh plan only (#327). A keyset plan's ordering came from the cursor
-    # and was validated against it above; a pool plan does not know what
-    # ordering will run, so a stated `asc` there is judged against the pool's
-    # own metadata by `_check_pool_sort`, which names the order the pool has.
-    if (isinstance(plan, FreshPlan) and plan.sort == "rank"
-            and plan.sort_order == "asc"):
-        raise ValidationFailed(
-            "sort_order='asc' is not applicable to sort='rank' (the "
-            "default); pass sort='date' for oldest-first"
-        )
+    # The resolver has refused rank + asc already — on a fresh plan from the
+    # resolved pair, on a pool plan from a stated pair — ahead of the
+    # empty-ACL short-circuit below, through the same `sort_axes` rule the
+    # Searcher asks. A stated `asc` alone on a pool cursor is not refused
+    # here: whether it contradicts depends on the pool, which
+    # `_check_pool_sort` reads after that short-circuit. So a grant-nothing
+    # caller gets the empty page for it, and a granted one whose pool was
+    # evicted gets the 409 (#327).
 
     scoped_filters = _scope_filters_by_acl(filters, allowed_account_ids)
     if scoped_filters is None:

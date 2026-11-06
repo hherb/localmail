@@ -30,6 +30,7 @@ from localmail.api.search_cursor import (
     resolve_cursor_plan,
 )
 from localmail.search.searcher import KeysetCursor, PoolMetadata
+from localmail.search.sort_axes import sort_order_applicability_error
 
 _KS = KeysetCursor(ts=datetime(2026, 5, 21, tzinfo=timezone.utc), id=100,
                    order="asc", walk="text")
@@ -57,9 +58,9 @@ def test_a_pool_cursor_is_a_pool_plan_carrying_only_what_was_stated() -> None:
     assert _plan("tok-1:2") == PoolPlan(
         cursor=SearchCursor(token="tok-1", page=2),
         stated_sort=None, stated_sort_order=None)
-    assert _plan("tok-1:2", sort="rank", sort_order="asc") == PoolPlan(
+    assert _plan("tok-1:2", sort="date", sort_order="asc") == PoolPlan(
         cursor=SearchCursor(token="tok-1", page=2),
-        stated_sort="rank", stated_sort_order="asc")
+        stated_sort="date", stated_sort_order="asc")
 
 
 def test_a_pool_plan_cannot_be_asked_what_ordering_will_run() -> None:
@@ -132,3 +133,49 @@ def test_the_empty_acl_branch_resolves_a_pool_plan_from_what_was_stated() -> Non
     assert out["results"] == []
     assert out["sort_applied"] == "date"
     s.get_pool_metadata.assert_not_called()
+
+
+# --- review of #327: what stays ahead of the empty-ACL short-circuit -------
+
+def test_a_stated_rank_asc_on_a_pool_cursor_is_refused_without_the_pool() -> None:
+    """No pool is rank-built ascending (a fresh rank + asc is refused), so the
+    stated pair contradicts every pool and needs no cache probe. Refused for
+    a grant-nothing caller, whose empty page would read as "end of results",
+    and for a granted one without consulting the pool, which if evicted would
+    have answered a misleading 409."""
+    for acl in ([], [1]):
+        s = _pool_searcher(sort="rank", sort_order="desc")
+        with pytest.raises(ValidationFailed) as exc:
+            run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                       allowed_account_ids=acl, user_id=1, sort="rank",
+                       sort_order="asc", cursor="tok-1:2")
+        assert str(exc.value) == sort_order_applicability_error(
+            sort="rank", sort_order="asc", continuing_pool=True)
+        s.get_pool_metadata.assert_not_called()
+
+
+def test_a_stated_asc_alone_on_a_pool_cursor_is_left_to_the_pool() -> None:
+    """Deliberate: with no stated sort, only the pool can say whether ``asc``
+    contradicts it, and a grant-nothing caller never reaches the pool."""
+    s = _pool_searcher(sort="rank", sort_order="desc")
+    out = run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                     allowed_account_ids=[], user_id=1, sort_order="asc",
+                     cursor="tok-1:2")
+    assert out["results"] == []
+    s.get_pool_metadata.assert_not_called()
+
+
+def test_a_malformed_pool_cursor_is_refused_ahead_of_the_empty_acl_branch() -> None:
+    s = _pool_searcher(sort="rank", sort_order="desc")
+    with pytest.raises(ValidationFailed, match="page"):
+        run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                   allowed_account_ids=[], user_id=1, cursor="tok-1:0")
+
+
+def test_the_fresh_refusal_is_the_shared_rule_s_wording() -> None:
+    s = _pool_searcher(sort="rank", sort_order="desc")
+    with pytest.raises(ValidationFailed) as exc:
+        run_search(searcher=s, free_text="invoice", filters={}, limit=2,
+                   allowed_account_ids=[], user_id=1, sort_order="asc")
+    assert str(exc.value) == sort_order_applicability_error(
+        sort="rank", sort_order="asc", continuing_pool=False)

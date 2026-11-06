@@ -149,16 +149,24 @@ mod tests {
 
     #[tokio::test]
     async fn a_transport_failure_mid_body_is_a_read_error() {
+        // The body fails only once the client holds the response. Failing
+        // at once races hyper's flush of the response head: on a fast host
+        // the connection is aborted first and `send()` itself errors.
+        let (headers_seen, wait) = std::sync::mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
         let mut server = mockito::Server::new_async().await;
         let _m = server
             .mock("GET", "/broken")
-            .with_chunked_body(|w| {
+            .with_chunked_body(move |w| {
                 w.write_all(b"x")?;
+                let _ = wait.lock().unwrap().recv();
                 Err(std::io::Error::other("boom"))
             })
             .create_async()
             .await;
-        let body = read_capped(get(&server, "/broken").await, SMALL_CAP).await;
+        let resp = get(&server, "/broken").await;
+        headers_seen.send(()).unwrap();
+        let body = read_capped(resp, SMALL_CAP).await;
         assert!(matches!(body, Err(BodyError::Read(_))), "{body:?}");
     }
 

@@ -1,20 +1,21 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-06 (session 91).** `main` is **`1e3b3a8`** (#455:
-> #330, the transports import `SortMode`/`SortOrder`).
+> **Status as of 2026-11-06 (session 92).** `main` is **`db31db5`** (#456:
+> #327, one plan type per cursor mode).
 >
-> This session has **one open PR** on `fix/327-cursor-plan-types` (#327). It
+> This session has **one open PR** on `deps/oauthlib-rustls-floors`. It
 > carries the code and this handoff.
 >
-> **Both hosts are deployed at `753133c`** (checked this session via
-> `/v1/version`). #330 and #327 change no wire behaviour on any normal path;
-> deploy both after #327 merges.
+> **Both hosts are still at `753133c`.** This session's deploy of `db31db5`
+> was **refused by the permission classifier** ("Remote Shell Writes"), so
+> nothing was deployed. #330, #327 and this PR change no wire behaviour on any
+> normal path. Deploy is yours (commands below), ideally after this PR merges.
 >
-> **Open issues: 26** (25 once this PR merges and closes #327). **Open
-> Dependabot alerts: 3**: #71, #185 (open on purpose) and **new #197**
-> (HIGH, `oauthlib < 4.0.1`, device-flow bearer leak in the *server*
-> endpoints; localmail is only an OAuth client, so hygiene — raise the
-> `oauthlib>=4.0.0` floor to `>=4.0.1` in its own small PR).
+> **Open issues: 25.** **Open Dependabot alerts: 7** before this PR merges:
+> #71, #185 (open on purpose), #115 (stale), #197 (fixed by this PR), #198,
+> #199, #200 (rustls, stale like #115: the lock already holds 0.23.46). After
+> the merge, dismiss #115 and #198–#200 as stale if Dependabot does not close
+> them itself.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
@@ -36,73 +37,49 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-- **#330 merged** as `1e3b3a8` (PR #455) before the session started.
+- **#327 merged** as `db31db5` (PR #456) before the session started.
 
-### PR on `fix/327-cursor-plan-types` (based on `main` at `1e3b3a8`)
+### PR on `deps/oauthlib-rustls-floors` (based on `main` at `db31db5`)
 
 | SHA | What |
 |---|---|
-| `8bb13fe` | #327: `resolve_cursor_plan` returns `FreshPlan(sort, sort_order)` / `KeysetPlan(cursor)` / `PoolPlan(cursor, stated_sort, stated_sort_order)`; `run_search` is a `match` over them; CLAUDE.md note |
-| `cd3f486`, `e401e4b` | handoff (this file + `docs/handoffs/2026-11-06T0800Z-327-cursor-plan-types.md`), then the Dependabot #197 note |
-| review follow-up | shared rank+asc rule in `sort_axes`; a stated rank+asc on a pool cursor refused ahead of the empty-ACL branch; tests; stale comments |
+| `7ac9b69` | `oauthlib>=4.0.1` (Dependabot #197), re-locked with `uv lock --upgrade-package oauthlib` (4.0.0 → 4.0.1, nothing else moved); `rustls` floor 0.23.45 → 0.23.46 in both `gui/src-tauri/Cargo.toml` entries (#198–#200; `Cargo.lock` unchanged, already 0.23.46) |
+| next | CLAUDE.md note (second November round) + this handoff |
 
-- **The defect it fixes:** a pool cursor paged with `sort_order="asc"` was
-  refused by the fresh-request rank+asc rule, reasoning from a `sort`
-  resolved to its default, before the pool was consulted. Now that rule is
-  `FreshPlan`-only, and the request reaches `_check_pool_sort`, which names
-  the pool's real order (`this cursor continues a descending search`). The
-  "cannot be carried over" remedy now applies only to a *stated*
-  `sort="rank"` + `sort_order="asc"` on a pool cursor, refused in the
-  resolver ahead of the empty-ACL short-circuit (review follow-up).
-- **Edge-path wire changes:** a malformed **pool** cursor is now a 400
-  ahead of the empty-ACL short-circuit (it was a 200 empty page for a
-  grant-nothing caller); `reject_pool_sort_mismatch`'s order half is now
-  reachable end to end; a stated `asc` with no stated sort on a pool cursor
-  is left to the pool, so it is a 200 empty page for a grant-nothing caller
-  and a 409 for an evicted pool (both were 400s). `run_search` decodes each
-  cursor once.
-- **Review follow-up:** the rank+asc rule is one function,
-  `sort_axes.sort_order_applicability_error`, asked by the Searcher and the
-  resolver's fresh and pool arms; tests added for the pool rank+asc 400, the
-  pool asc-only 200, a malformed pool cursor through `run_search`, and the
-  rule itself; stale comments updated.
-- Tests: `tests/test_api_search_cursor_plan_types.py` (8). RED first: the
-  two `run_search` tests failed on `main` with the old default-`rank`
-  message. 12 existing tests updated (type equality, two pool tests), one
-  deleted (the "cannot be carried over" pin).
-- Mutations (file snapshot, restored from copy): rank+asc re-applied to
-  pools, the pool arm dropping the stated order or sort, the empty-ACL
-  branch using a default for a pool, and removing rank+asc — each fails a
-  test. The empty-ACL one survived at first; the last test in the new file
-  pins it.
-
-## Verification
-
-| check | result |
-|---|---|
-| `uv run pytest -q` | **4723 passed**, 6 warnings (pre-existing), 5:28 at load ~23 |
-| mypy | Success, 169 files |
-| GUI | untouched |
-| CI | not yet run when this was written; check `gh pr checks` |
+- **Reach, checked:** #197 is in oauthlib's *server* device-flow endpoints;
+  localmail is only an OAuth client. #198 needs rustls' `brotli` feature,
+  #200 post-quantum key exchange (aws-lc-rs); `cargo tree -e features -i
+  rustls` shows only `ring`, `std`, `tls12`. #199 needs a Debug-formatted TLS
+  session; `gui/src-tauri/src` has none.
+- **Verification (in a throwaway worktree + venv, the Mac venv untouched):**
+  the 196 OAuth/Gmail tests pass on 4.0.1; the `InstalledAppFlow` consent URL
+  (fixed state + verifier) is byte-identical under 4.0.0 and 4.0.1;
+  `cargo metadata --locked` accepts the new floor.
+- **Not run:** the full Python suite (load ~22 on the Mac); CI runs it on both
+  legs, and `gui-ci` covers the Rust build. Check `gh pr checks`.
 
 ## What's next
 
-### 1. **Merge the #327 PR** (yours), once CI is green
-- **Acceptance:** `gh pr checks <PR>` all pass; `gh issue view 327` closed.
+### 1. **Merge this PR** (yours), once CI is green
+- **Acceptance:** `gh pr checks <PR>` all pass; Dependabot #197 closes.
 
-### 2. **Deploy `main` to both hosts** after the merge (#330 + #327)
-- **Acceptance:** `/v1/version` on both reports the merge SHA.
+### 2. **Deploy `main` to both hosts** (yours this time; the classifier blocked me)
+- **Acceptance:** `/v1/version` on both reports the merge SHA. The Mac venv
+  needs `uv sync` for oauthlib 4.0.1.
 
-### 3. **Re-authorise `hherb-dmc`** (yours, browser; carried)
+### 3. **Dismiss stale rustls alerts** #115, #198, #199, #200 if they stay open
+- **Acceptance:** `gh api …/dependabot/alerts?state=open` lists only #71 and
+  #185.
+
+### 4. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
-### 4. **Next small slice: pick with the operator**
-- The #322 type-design follow-ups are done with #327. Candidates:
-  **#285** (does mypy/ruff gate CI — needs a ruff-pin call), **#357**
-  (only worth it with #285), #369 (refuse-vs-keep call), #383 (one-way
-  door, `0039`), #365 (product call), #340 (harness lock DSN arguments),
-  #363 (rerank degradation on the wire — needs a renderer).
+### 5. **Next small slice: pick with the operator**
+- Candidates: **#285** (does mypy/ruff gate CI — needs a ruff-pin call),
+  **#357** (only worth it with #285), #369 (refuse-vs-keep call), #383
+  (one-way door, `0039`), #365 (product call), #340 (harness lock DSN
+  arguments), #363 (rerank degradation on the wire — needs a renderer).
 - **Acceptance (any):** a RED test first, then full `uv run pytest -q`
   green and mypy clean.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
@@ -110,11 +87,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   features, #373 (`'` is literal), #378 (an empty
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
-### 5. **Carried**
+### 6. **Carried**
 - **Migrations:** `0038` is taken. #319/#318/#320 need `0039`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
-- **Dependabot #71 / #185:** left open on purpose. **#197** (oauthlib
-  4.0.1): bump the floor, re-lock with `uv lock --upgrade-package oauthlib`.
+- **Dependabot #71 / #185:** left open on purpose.
 - **docling > 2.144:** probe the next release when it lands.
 - **emSign G3:** re-check the trust stores after OS updates.
 - **kastellan slice C:** ask whether it is still wanted.
@@ -125,46 +101,33 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## Rulings made this session
 
-1. **The operator picked #327.**
-2. **The issue's three-type shape, not its cheaper `__post_init__`
-   alternative** (mine): the alternative leaves the pool plan answering an
-   ordering question it cannot know, which is the defect.
-3. **The decoded cursor rides on the plan** (mine): it makes the `match`
-   total without narrowing `cursor`, and retires the double decode.
+1. **No slice picked with the operator**; I took the outstanding Dependabot
+   work (#197 was flagged last session as "its own small PR"), adding the
+   rustls floor because three new alerts arrived for it.
+2. **Raise the rustls floor even though the lock is already fixed** (mine):
+   the lock is the state, the floor is the constraint (the icalendar lesson).
 
 ## Open decisions & risks
 
-0. **Since #438, `localmail import` exits 1 on a failed job** (behaviour
-   change for scripts; none known on either host). Since #441, a contended
-   poison-pill record also fails the job / aborts the sync pass. Since #442,
-   an import whose final status write fails on all 5 attempts (~40 s) also
-   exits 1, and the row stays `running` until serve restarts. Since #440,
-   a re-imported pill bumps its existing `failed_messages` row; duplicates
-   made before #440 are not merged (none exist on either host, checked
-   2026-11-03). Since #373, `'` in a search query is literal text:
-   an undocumented `from:'Anna Schmidt'` now splits, and `has:'attachment`
-   is a 400 (unknown `has:` value). Since #374, in `localmail search` a
-   query operator out-votes the matching flag, and `--from '""'` exits 2.
-   Since #305's half, a malformed `localmail search` query exits 2 with a
-   one-line error instead of 1 with a traceback. Since #305, a missing
-   third-party dependency makes `localmail --version` print its line, exit 0
-   and write to stderr (the stderr contract widened); other commands exit 1
-   with one line instead of a traceback. Since #378, an empty
-   `after:`/`before:`/`has:`/`account_id:`/`folder_id:`, or a non-int id,
-   in a query is a 400 / exit 2 (it was served as free text). The GUI
-   shows it as an error banner.
-1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows carry a
-   `-0000` Date and are stored 8 h off. None has a NULL `internal_date`, so
-   the list/search/changes wire `date` is right; raw `date_sent` readers
-   (message-detail `date`, `after:`/`before:`, arm 4's cap, CLI search,
-   chunk `Date:` lines) see the skew. The DGX is correct (UTC session). A
-   repair should re-parse `raw_bytes`. Read-only count:
+0. **Behaviour changes still worth knowing** (carried): since #438
+   `localmail import` exits 1 on a failed job; #441 a contended poison-pill
+   record fails the job / aborts the sync pass; #442 a final status write that
+   fails 5 times (~40 s) exits 1 and leaves the row `running` until serve
+   restarts; #440 a re-imported pill bumps its existing `failed_messages` row;
+   #373 `'` in a search query is literal; #374 a query operator out-votes its
+   `localmail search` flag; #305 a malformed `localmail search` query exits 2,
+   and a missing dependency makes `--version` exit 0 with a stderr line;
+   #378 an empty fixed-shape operator or non-int id in a query is a 400 /
+   exit 2.
+1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows are
+   stored 8 h off in `date_sent` (wire `date` is right). A repair should
+   re-parse `raw_bytes`. Read-only count:
    `select count(*) from messages where exists (select 1 from jsonb_array_elements_text(case when jsonb_typeof(headers->'Date')='array' then headers->'Date' else '[]' end) d where d ~ '-0000\s*(\(.*\))?\s*$')`
-2. **`attachment_name` is unindexed** (~0.2 s warm at 132k for a filter-only
-   miss). A trigram index would be `0039`.
+2. **`attachment_name` is unindexed** (~0.2 s warm at 132k). A trigram index
+   would be `0039`.
 3. **Should a wire widening bump `api_minor`?** Still open.
 4. **3,194 rows keep a skewed `internal_date`** (Mac 2,720, DGX 474). Not
-   decided: leave them, NULL them, or apply a per-host SQL shift.
+   decided.
 5. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.** After a squash
    merge `main..origin/<branch>` is non-empty by construction; compare with
    `git diff main origin/<branch> --stat` (empty = landed).
@@ -174,9 +137,11 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~23 this session** (full suite 5½ min; a
-    bmlibrarian pytest was running beside it). Check
-    `uptime` before trusting any timing.
+10. **Load on the Mac was ~22 this session.** Check `uptime` before
+    trusting any timing.
+11. **Deploy needs your permission.** The auto-mode classifier refuses the
+    `ssh 10.0.0.3 '… git pull … systemctl restart'` line as a remote shell
+    write. Either run it yourself or add an allow rule.
 
 ## Exact commands to resume
 
@@ -185,9 +150,9 @@ cd /Users/hherb/src/localmail
 git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
-git diff main origin/fix/327-cursor-plan-types --stat   # empty once merged (squash)
+git diff main origin/deps/oauthlib-rustls-floors --stat   # empty once merged (squash)
 gh pr list --state all --limit 3
-gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq length   # 3 (#71, #185, #197)
+gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
 
 # Deploy — Mac (the repo is the install); restart BOTH

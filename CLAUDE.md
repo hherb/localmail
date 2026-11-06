@@ -3049,6 +3049,19 @@ declared pyasn1.** The re-lock moved exactly those two packages.
   in the lock. Loading the OAuth flow modules leaves `pyasn1` out of
   `sys.modules`.
 
+**The second November round (Dependabot #197–#200) raised two floors, both
+hygiene.**
+
+- **`oauthlib>=4.0.1`** (#197, HIGH): the device-flow bearer leak is in the
+  *server* endpoints, and localmail is only an OAuth client. The re-lock moved
+  oauthlib alone. The `InstalledAppFlow` consent URL is byte-identical under
+  4.0.0 and 4.0.1, and the 196 OAuth tests pass.
+- **`rustls >= 0.23.46`** in `gui/src-tauri/Cargo.toml` (#198–#200). The lock
+  already held 0.23.46, so the floor only records it; the alerts are stale
+  like #115. None is reachable anyway: the GUI enables `ring`/`std`/`tls12`
+  only (no `brotli`, no post-quantum key exchange), and its code never
+  Debug-formats a TLS session.
+
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +
 MRR@K per language. Phase-1 gates: recall@20 >= 80% and MRR@20 >= 0.5 for

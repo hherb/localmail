@@ -47,7 +47,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 |---|---|
 | `108d648` | `Searcher._hydrate` skips a fused hit whose message is gone (DEBUG line) instead of serving `msgs.get(id, {})` as a ghost row; keeps it out of the rerank input and the cached pool too. The `has_attachments … if m else False` guard (ghost-only) removed; its pin replaced by a DB test of `_hydrate` (`test_search_has_attachments_flag.py`). CLAUDE.md: one line under `_fetch_sort_dates` |
 
-### PR on `fix/319-not-a-key-principal`
+### PR #461 on `fix/319-not-a-key-principal`
 
 | SHA | What |
 |---|---|
@@ -66,7 +66,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 ## What's next
 
 ### 1. **Merge both PRs** (yours), once CI is green
-- **Acceptance:** `gh pr checks 460` and the #319 PR all pass; #372 and #319
+- **Acceptance:** `gh pr checks 460` and `gh pr checks 461` all pass; #372 and #319
   close (`Closes #N` in each body); `gh issue list` shows 23.
 
 ### 2. **Deploy both hosts** after merging (runtime code changed)
@@ -156,7 +156,7 @@ git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 gh pr list --state all --limit 4
-gh pr checks 460
+gh pr checks 460; gh pr checks 461
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
 

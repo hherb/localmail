@@ -45,6 +45,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 |---|---|
 | `7ac9b69` | `oauthlib>=4.0.1` (Dependabot #197), re-locked with `uv lock --upgrade-package oauthlib` (4.0.0 → 4.0.1, nothing else moved); `rustls` floor 0.23.45 → 0.23.46 in both `gui/src-tauri/Cargo.toml` entries (#198–#200; `Cargo.lock` unchanged, already 0.23.46) |
 | next | CLAUDE.md note (second November round) + this handoff |
+| next | `.claude/skills/finalcheck/SKILL.md`: the pre-merge review → fix → CI-green loop, adapted from `~/src/secretary` (localmail's workflows, no required checks, the 3.12 leg reproduced only in a worktree, no deploy from the skill) |
 
 - **Reach, checked:** #197 is in oauthlib's *server* device-flow endpoints;
   localmail is only an OAuth client. #198 needs rustls' `brotli` feature,

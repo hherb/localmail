@@ -1,0 +1,180 @@
+# NEXT_SESSION.md — localmail handoff
+
+> **Status as of 2026-11-07 (session 96).** `main` is **`ff5ef70`** (#463,
+> closes #218).
+>
+> **One open PR** on `fix/462-api-key-refusal-wording`, based on `main` at
+> `ff5ef70`, carrying the #462 code **and this handoff**.
+>
+> **Both hosts are deployed at `b6b9ab7`.** `ff5ef70` is GUI-only (no server
+> deploy needed). #462 touches `cli.py` and the admin panel, so after it
+> merges **deploy both hosts** (commands below).
+>
+> **Open issues: 25** (24 once the PR closes #462). **Open Dependabot alerts:
+> 2** — #71 and #185, both open on purpose (not re-checked this session).
+>
+> **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
+> re-checked). Fix (yours, needs a browser): `localmail oauth-login
+> hherb-dmc`, then `launchctl kickstart -k gui/$(id -u)/com.localmail.daemon`.
+>
+> **Leftover worktree:** `.claude/worktrees/bottie-bearer-token-dbc203`
+> (carried; ask before removing).
+
+## Project context (1-minute version)
+
+`localmail` mirrors IMAP accounts (Gmail OAuth or password) into Postgres, and
+is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
+
+- **Daemon** (IDLE + poll per account), **web admin UI** (HTMX).
+- **Hybrid search**, the HTTPS `/v1` server, a remote **MCP server**, and the
+  opt-in `--smart` rewriter.
+- **Tauri 2 + Svelte 5 GUI** under `gui/`.
+- **kastellan** consumes `/v1` over REST with an API key.
+
+## What we shipped this session
+
+- **Confirmed #463 merged** (`ff5ef70`); #218 closed; 25 issues open.
+- **Operator picked #462.**
+
+### PR on `fix/462-api-key-refusal-wording`
+
+| SHA | What |
+|---|---|
+| `812d0ae` | `cli.py`: `revoke-api-key`/`remove-api-key` catch `NotAnApiKeyPrincipal` ahead of `ApiKeyNotFound` and print `_person_not_a_key(name)` = `'amy' is a person's account, not an API key`, not the service's `user id=N` text. `api_keys_panel_router.py`: both refusal branches go through `_refused(...)`, which logs one WARNING on `localmail.serve.admin` (action, `user_id`, requesting admin) and returns the unchanged notice. 4 tests (2 CLI, 2 panel); CLAUDE.md #319 bullet extended |
+| next | this handoff |
+
+- **Verification:** RED first (all 4 new tests failed). Then the four API-key
+  test files 76 passed; **full suite 4765 passed** (6 warnings, all
+  third-party deprecations); mypy clean (169 files). Two mutations (drop the
+  WARNING; never match the CLI's new `except`) each fail their own tests.
+- **Not done (scoped out by the issue):** JSON routes still answer 404 for a
+  person's id.
+
+## What's next
+
+### 1. **Merge the #462 PR** (yours), once CI is green
+- **Acceptance:** `gh pr checks` all pass; #462 closes; `gh issue list` shows
+  24. Then **deploy both hosts** and confirm `/v1/version` reports the merge
+  SHA on each.
+
+### 2. **Re-authorise `hherb-dmc`** (yours, browser; carried)
+- **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
+  the kickstart; its `max(date_received)` moves past 2026-11-03.
+
+### 3. **Next small slice: pick with the operator**
+- Candidates: **#208** (DaemonPanel message never dismisses; acceptance in
+  the issue: fake-timer test, timer cleared on unmount), **#464 + #465** (GUI
+  download follow-ups: distinct body-timeout error; no truncated file on a
+  failed disk write), **#368** (MCP drops unknown args; design call),
+  **#285** (ruff/mypy in CI; ruff-pin call), **#369** (DSL contradictions;
+  design calls), #383 (`0039`), #365, #363.
+- **Acceptance (any):** a RED test first, then the touched suite green
+  (`uv run pytest -q` + mypy for Python; `cargo test` + `clippy --all-targets`
+  for Rust; `npm test -- --run && npm run check` for TS).
+- **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
+  `filters.lang` as a list, #419 syntax, #415 dates, `api_minor` 5 and 6
+  features, #373 (`'` is literal), #378 (an empty
+  `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
+
+### 4. **Carried**
+- **Migrations:** `0038` is taken. #318 and #320 need `0039`.
+- **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
+- **#459:** harness-lock DSN residual (helpers, rebinding).
+- **`ApiKeyNotFound` still derives from bare `Exception`** (latent; every
+  route catches it explicitly).
+- **GUI JSON helpers** in `http/client.rs` still read unbounded bodies (noted
+  in CLAUDE.md, not filed).
+- **Dependabot #71 / #185:** left open on purpose.
+- **docling > 2.144:** probe the next release when it lands.
+- **emSign G3:** re-check the trust stores after OS updates.
+- **kastellan slice C:** ask whether it is still wanted.
+- **Mac `failed_messages`:** one `iso2022_jp` decode failure from
+  2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
+- **Issues:** #464, #465 (GUI downloads); #383, #369, #368, #365; #375; #357; #363, #285;
+  robustness #226, #225/#227, #200/#211/#208, #206, #204, #25.
+
+## Rulings made this session
+
+1. **Operator picked #462** over #208, #464/#465 and #369.
+2. **The CLI wording lives in `cli.py`, not the service** (mine): only the CLI
+   knows the name the operator typed; the JSON routes and panel keep the
+   id-based text.
+3. **WARNING on `localmail.serve.admin`** (mine), matching `auth_router.py`'s
+   logger in the same package; the test accepts any `localmail.serve*` name.
+
+## Open decisions & risks
+
+0. **Behaviour changes still worth knowing** (carried): since #438
+   `localmail import` exits 1 on a failed job; #441 a contended poison-pill
+   record fails the job / aborts the sync pass; #442 a final status write that
+   fails 5 times (~40 s) exits 1 and leaves the row `running` until serve
+   restarts; #440 a re-imported pill bumps its existing `failed_messages` row;
+   #373 `'` in a search query is literal; #374 a query operator out-votes its
+   `localmail search` flag; #305 a malformed `localmail search` query exits 2,
+   and a missing dependency makes `--version` exit 0 with a stderr line;
+   #378 an empty fixed-shape operator or non-int id in a query is a 400 /
+   exit 2; #372 a page can hold fewer hits than `pool_size`
+   suggested only if a message was deleted mid-search; #319 a person's id now reads "… is a person, not an API-key principal"
+   in the 404 detail of all three JSON key routes (revoke, delete, grants);
+   #218 a GUI download over 100 MiB without `Content-Length` fails with a
+   lower-bound `size` instead of buffering first. **New:** #462
+   `revoke-api-key`/`remove-api-key` on a person's username print
+   `'<name>' is a person's account, not an API key`, and the panel's refusal
+   branch logs one WARNING on `localmail.serve.admin`.
+1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows are
+   stored 8 h off in `date_sent` (wire `date` is right). A repair should
+   re-parse `raw_bytes`. Read-only count:
+   `select count(*) from messages where exists (select 1 from jsonb_array_elements_text(case when jsonb_typeof(headers->'Date')='array' then headers->'Date' else '[]' end) d where d ~ '-0000\s*(\(.*\))?\s*$')`
+2. **`attachment_name` is unindexed** (~0.2 s warm at 132k). A trigram index
+   would be `0039`.
+3. **Should a wire widening bump `api_minor`?** Still open.
+4. **3,194 rows keep a skewed `internal_date`** (Mac 2,720, DGX 474). Not
+   decided.
+5. **THIS FILE IS NOT THE AUTHORITY; `git` and `gh` are.** After a squash
+   merge `main..origin/<branch>` is non-empty by construction; compare with
+   `git diff main origin/<branch> --stat` (empty = landed; errors once the
+   branch is deleted).
+6. **Never run two localmail pytest sessions against one test DB** (port
+   5532, the same cluster as the live archive).
+7. **Restore a mutation from a file copy, never with `git checkout`.**
+8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
+   `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
+9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
+10. **Load on the Mac was 12–15 this session (22–37 in 95)** (another project's rust
+    build and a consensus python job, not localmail). Check `uptime` before
+    trusting any timing.
+
+## Exact commands to resume
+
+```bash
+cd /Users/hherb/src/localmail
+git fetch --prune origin                 # ALWAYS first
+git switch main && git pull --ff-only
+git log --oneline -1 origin/main         # THE authority
+gh pr list --state all --limit 4
+gh pr checks <the #462 PR>
+gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
+gh issue list --limit 200 --json number --jq length
+
+# Deploy — Mac (the repo is the install); restart BOTH
+unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
+launchctl kickstart -k gui/$(id -u)/com.localmail.serve
+launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
+curl -sk https://127.0.0.1:8443/v1/version     # build_hash = merge SHA
+
+# Deploy — DGX
+ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user restart localmail-daemon localmail-serve && systemctl --user is-active localmail-daemon localmail-serve'
+ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
+
+# Load before trusting any timing; no other LOCALMAIL pytest may be running.
+uptime; pgrep -fl pytest
+
+# Suites.
+unset VIRTUAL_ENV && uv run pytest -q              # 4765, session 96 (5:37 under load ~12)
+uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
+cd gui && npm test -- --run && npm run check   # 530 at session 81
+cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 123, session 95
+```
+
+The latest migration is **`0038_messages_attachment_names_strict_idx.sql`**;
+the next free slot is `0039_*.sql`.

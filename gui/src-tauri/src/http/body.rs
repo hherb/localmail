@@ -14,7 +14,8 @@ pub enum BodyError {
     /// the server sent one, else the bytes received when the read stopped —
     /// a lower bound on the real size, which is unknown by construction.
     TooLarge { size: u64 },
-    /// The client's total timeout ran out mid-body (#464). Kept apart from
+    /// A timeout mid-body (#464): reqwest reports any in the cause chain, in
+    /// practice the client's total timeout, which fires first. Kept apart from
     /// `Read` because the remedy differs: a slow link, not a broken server.
     Timeout,
     /// The transport failed mid-body; the text carries the cause chain.

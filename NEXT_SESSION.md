@@ -39,23 +39,35 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | SHA | What |
 |---|---|
-| `da12c93` | **#464:** `BodyError::Timeout` (from `is_timeout()`); `body::error_chain` appends each `source()` not already in the text; `AttachmentError`/`RawMessageError` gain `Timeout { seconds }` and `send_failed` (timeout, else `Network(error_chain)`). **#465:** new `gui/src-tauri/src/save_file.rs::write_replacing` (hidden `create_new` temp beside `dest`, `write_all` + `sync_all`, `rename`, temp removed on failure), called on `spawn_blocking` by `download_attachment`. Attachment tests split to `attachments_tests.rs` (module was 594 lines). README (GUI "Downloads" paragraph) and CLAUDE.md (#218 bullet's follow-ups) updated |
+| `da12c93` | **#464:** `BodyError::Timeout` (from `is_timeout()`); `body::error_chain` appends each `source()` not already in the text; `AttachmentError`/`RawMessageError` gain `Timeout { seconds }` and `send_failed` (timeout, else `Network(error_chain)`). **#465:** new `gui/src-tauri/src/save_file.rs::write_replacing` (hidden `create_new` temp beside `dest`, `write_all` + `sync_all`, `rename`, temp removed on failure), called on `spawn_blocking` by `download_attachment`. Attachment tests split to `attachments_tests.rs` (the module would have been ~600 lines with the new tests). README (GUI "Downloads" paragraph) and CLAUDE.md (#218 bullet's follow-ups) updated |
 | `a298e35` | doc fix from review: 100 MiB in 15 s needs ~56 Mbit/s |
-| next | this handoff |
+| `2b49a6f` | this handoff |
+| next | **`/finalcheck` review fixes:** the three download/preview/raw views rendered every command error as `[object Object]` (`String(e)` on Tauri's `{kind, detail}` rejection), so none of #464 reached the screen; they use `formatError` now, which also renders a JS `Error` by its message. The temp name is `.localmail-<pid>-<nanos>.part`, no longer embedding the user's name (a ~225-byte name failed with "File name too long"). A temp that cannot be created says so; the file is closed before the rename; a failed save is pinned to fail the command. CLAUDE.md and comment corrections |
 
-- **Verification:** `cargo test --lib` **141 passing** (123 → 134 → 141);
-  `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt` applied. No
-  Python or TS touched, so pytest, mypy and vitest were not re-run.
+- **Verification:** `cargo test --locked` **144 passing** (123 → 134 → 141 →
+  144); `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt`
+  applied; `npm test -- --run` **540 passing**, `npm run check` clean. No
+  Python touched, so pytest and mypy were not re-run.
 - **Mutations, each failing its own test(s):** body read back to
-  `Read(e.to_string())` (2 fail); `send_failed` back to `to_string` with no
-  timeout branch (4); `error_chain` without its dedup (1); each call site
+  `Read(e.to_string())` (2 fail); `AttachmentError::send_failed` back to
+  `to_string` with no timeout branch (4; `RawMessageError`'s fails 3); `error_chain` without its dedup (1); each call site
   back to `Network(e.to_string())` (3, one per command); temp clean-up
-  removed (1); truncate-then-write inside `replace_with` (1).
+  removed (2); truncate-then-write inside `replace_with` (1). Review round: the temp
+  name embedding `dest`'s (2); no temp context in the error (1); dropping the
+  `?` on the save's `Write` mapping (1); each view back to `String(e)` (1
+  each, 3).
 - **Known unpinned:** `download_attachment` calling `write_replacing` vs
   `fs::write` (they agree on success; said so in the test and CLAUDE.md),
   and a timeout driven *through* a command (15 s; `send_failed` is pinned
   directly instead).
 - **Review (one agent):** nothing significant; one doc number fixed.
+- **`/finalcheck` review (four agents):** found the `[object Object]`
+  rendering (pre-existing, but it hid the whole of #464), the long-name
+  regression, the untested failed-save path and four false doc claims; all
+  fixed above. Left as noted, not filed: `send_failed` duplicates
+  `HttpError::from_reqwest` and so reports a pin mismatch as `Network`;
+  a failed temp removal is swallowed; no directory fsync after the rename;
+  the refused-port tests reuse a freed port (a tiny race).
 
 ## What's next
 
@@ -105,6 +117,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 3. **The `Timeout` wire shape matches `HttpError::Timeout`**
    (`{kind:"Timeout", detail:{seconds}}`, rendered `Timeout: {"seconds":15}`)
    (mine). A nicer `formatError` rendering would cover both; not done.
+   (Until the review round the views did not call `formatError` at all.)
 4. **No `tempfile` dependency** (mine): `write_replacing` is std-only.
 
 ## Open decisions & risks
@@ -114,10 +127,12 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
     on WireGuard it now fails *legibly* (`Timeout`) but still fails. Option:
     `RequestBuilder::timeout(DOWNLOAD_TIMEOUT_SECS)` on the three download
     requests (and teach the error its own number). Your call.
-0b. **`write_replacing` limits** (marked `shortcut:`): an overwritten
+0b. **`write_replacing` limits**: two marked `shortcut:` (an overwritten
     file's permissions are not carried over, a symlink at the destination
-    is replaced rather than followed, and a SIGKILL mid-write strands a
-    hidden `.<name>.<pid>.<nanos>.part` beside it.
+    is replaced rather than followed), plus a SIGKILL or panic mid-write
+    strands a hidden `.localmail-<pid>-<nanos>.part` beside it, and a
+    writable file in a read-only folder can no longer be overwritten (the
+    error now names the temp).
 0. **Behaviour changes still worth knowing** (carried): since #438
    `localmail import` exits 1 on a failed job; #441 a contended poison-pill
    record fails the job / aborts the sync pass; #442 a final status write that

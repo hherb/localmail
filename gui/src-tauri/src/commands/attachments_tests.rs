@@ -12,7 +12,8 @@ fn fake_store() -> KeyringStore {
 }
 
 // The capped read reports only the size; the command's own ceiling must
-// be what reaches the wire as `max`, and a read error keep its text.
+// be what reaches the wire as `max`, a timeout carry the client's budget,
+// and a read error keep its text.
 #[test]
 fn body_errors_map_onto_this_commands_ceiling() {
     assert!(matches!(
@@ -69,8 +70,7 @@ async fn fetch_bytes_cuts_an_oversized_chunked_body_off_at_the_cap() {
     assert_cut_off_at_the_cap(err);
 }
 
-// No success test existed for the download. It checks the file is
-// replaced whole with no temp left beside it; it cannot tell
+// The file is replaced whole with no temp left beside it. This cannot tell
 // `write_replacing` from `fs::write`, which agree on success — the
 // failure paths are pinned in `save_file`.
 #[tokio::test]
@@ -101,6 +101,35 @@ async fn download_replaces_the_destination_and_leaves_no_temp() {
     assert_eq!(result.unwrap().bytes_written, 20);
     assert_eq!(contents, b"new attachment bytes");
     assert_eq!(names, ["saved.bin"]);
+}
+
+// A save that fails must fail the command: reporting `bytes_written` for a
+// file that was never written is the #465 class, silently.
+#[tokio::test]
+async fn download_reports_a_failed_save_as_a_write_error() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("GET", format!("/v1/attachments/{VALID_SHA}").as_str())
+        .with_body("bytes")
+        .create_async()
+        .await;
+    let s = fake_store();
+    s.put(Slot::ServerUrl, &format!("{}/", server.url()))
+        .unwrap();
+    s.put(Slot::CertPin, "deadbeef").unwrap();
+    s.put(Slot::BearerToken, "tok").unwrap();
+    // A directory at the chosen path makes the rename fail.
+    let dest = std::env::temp_dir().join(format!("localmail-465-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir(&dest).unwrap();
+    let result = download_attachment(&s, VALID_SHA, dest.clone()).await;
+    let _ = std::fs::remove_dir_all(&dest);
+    match result {
+        Err(AttachmentError::Write { path, .. }) => {
+            assert_eq!(path, dest.display().to_string())
+        }
+        other => panic!("expected Write, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -309,8 +338,9 @@ fn auth_pre_check_wraps_via_from_auth_error() {
 }
 
 // A store pointing at a port nothing listens on, so every command's
-// send() fails with a refusal: pins that the call site goes through
-// `send_failed` rather than its old `Network(e.to_string())`.
+// send() fails with a refusal: pins that the call site keeps the cause
+// chain. Not its timeout branch: that is pinned on `send_failed` itself,
+// since driving a command to its 15 s budget would cost 15 s a test.
 fn refused_store() -> KeyringStore {
     let addr = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -347,8 +377,9 @@ async fn fetch_bytes_reports_a_refused_send_with_its_cause() {
     assert_network_with_cause(err);
 }
 
-// #464: a send() that times out names the timeout. A listener that
-// accepts and never answers stalls the request without a server.
+// #464: a send() that times out names the timeout. A bound listener
+// nobody accepts from: the kernel completes the handshake and no reply
+// ever comes, so the request stalls without a server.
 #[tokio::test]
 async fn a_send_timeout_is_reported_as_a_timeout() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

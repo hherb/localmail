@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { fetchAttachmentBytes } from "../lib/tauri";
+  import { formatError } from "../lib/format_error";
 
   let { sha256, filename, onClose } = $props<{
     sha256: string;
@@ -101,7 +102,7 @@
         await renderPage();
       }
     } catch (e: unknown) {
-      error = String(e);
+      error = formatError(e);
     }
   });
 

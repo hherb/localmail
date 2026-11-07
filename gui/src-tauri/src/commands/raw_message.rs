@@ -263,8 +263,9 @@ mod tests {
     }
 
     // A store pointing at a port nothing listens on, so every command's
-    // send() fails with a refusal: pins that the call site goes through
-    // `send_failed` rather than its old `Network(e.to_string())`.
+    // send() fails with a refusal: pins that the call site keeps the cause
+    // chain. Not its timeout branch: that is pinned on `send_failed` itself,
+    // since driving a command to its 15 s budget would cost 15 s a test.
     fn refused_store() -> KeyringStore {
         let addr = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -291,8 +292,9 @@ mod tests {
         assert_network_with_cause(err);
     }
 
-    // #464: a send() that times out names the timeout. A listener that
-    // accepts and never answers stalls the request without a server.
+    // #464: a send() that times out names the timeout. A bound listener
+    // nobody accepts from: the kernel completes the handshake and no reply
+    // ever comes, so the request stalls without a server.
     #[tokio::test]
     async fn a_send_timeout_is_reported_as_a_timeout() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

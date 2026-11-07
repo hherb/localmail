@@ -1290,7 +1290,8 @@ request, body included, has a 15 s budget; running out of it is reported as
 `Timeout: {"seconds":15}` rather than a generic read error, and other
 transport failures name their cause (e.g. `Connection refused`). A saved
 attachment is written to a temporary file and renamed into place, so a failed
-save (a full disk) leaves the chosen file as it was, never truncated.
+save (a full disk) leaves the chosen file as it was, never truncated. The
+temporary file sits beside the chosen one, so its folder must be writable.
 
 **Admin mode.** When the logged-in user has `is_admin`, the header shows an
 **Admin** button opening an admin overlay, driven over the same bearer token

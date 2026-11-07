@@ -7335,32 +7335,65 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     `.json()` and the error-path `resp.text()` reads in all six (including
     `http_post_empty`, `http_post_json_no_resp` and `http_delete`).
   - **A timeout says so, and every other failure names its cause (#464).**
-    reqwest's `Display` stops at "error sending request for url (…)", so a
-    timeout, a reset and a truncated body read alike. `BodyError` gained
-    `Timeout` (from `e.is_timeout()`, which walks the source chain), both
-    download enums gained `Timeout { seconds }` (`REQUEST_TIMEOUT_SECS`, the
-    pinned client's total budget, body included), and the rest go through
-    `body::error_chain`, which appends each `source()` not already in the
-    text. `send()` failures use the same rule via each enum's `send_failed`;
-    a refused connection now reads `…): client error (Connect): tcp connect
-    error: Connection refused`. Pinned per call site by a refused-port test
-    (reverting any one to `Network(e.to_string())` fails it), plus a
-    stalled-body timeout test against mockito and a never-answering
-    `TcpListener` for `send()`. **The 15 s budget is unchanged**: a 100 MiB
-    attachment needs ~56 Mbit/s to finish inside it. Whether downloads get a
-    longer one (`RequestBuilder::timeout`) is open.
+    reqwest's `Display` stops at its kind: "error sending request for url
+    (…)" for `send()`, "error decoding response body" for a body read, so a
+    timeout, a reset and a truncated body read alike within each.
+    `BodyError` gained `Timeout` (from `e.is_timeout()`, which walks the
+    source chain), both download enums gained `Timeout { seconds }`
+    (`REQUEST_TIMEOUT_SECS`, the pinned client's total budget, body
+    included), and the rest go through `body::error_chain`, which appends
+    each `source()` not already in the text. `send()` failures use the same
+    rule via each enum's `send_failed`; a refused connection now reads
+    `…): client error (Connect): tcp connect error: Connection refused (os
+    error 61)` (the errno is the OS's: 111 on Linux). Pinned per call site by
+    a refused-port test (reverting any one to `Network(e.to_string())` fails
+    it), plus a stalled-body timeout test against mockito and a bound
+    `TcpListener` nobody accepts from for `send()`. **Not pinned:** a call
+    site's timeout branch — those tests call `send_failed` directly, since
+    driving a command to its 15 s budget costs 15 s a test. **The 15 s budget
+    is unchanged**: a 100 MiB attachment needs ~56 Mbit/s to finish inside
+    it. Whether downloads get a longer one (`RequestBuilder::timeout`) is
+    open. A pin mismatch on these three commands still reads as `Network`,
+    not `HttpError`'s `CertMismatch`: `send_failed` does not reuse
+    `HttpError::from_reqwest` (pre-existing, now at least carrying its cause).
+    - **None of it reached the screen until the review of #468.**
+      `AttachmentRow`, `AttachmentPreviewModal` and `RawBodyView` rendered
+      the rejection with `String(e)`, and Tauri rejects with the `{kind,
+      detail}` object, so every download, preview and raw-message failure
+      showed `[object Object]`. All three use `formatError` now, which also
+      learned to render a JS `Error` by its message (`JSON.stringify` of one
+      is `"{}"`). `RawBodyView`'s only rejection test mocked `new Error`, a
+      shape the command never produces; each component is pinned with a
+      real `{kind: "Timeout"}` rejection now (`AttachmentRow.test.ts` is
+      new).
   - **A save never leaves a truncated file (#465).** `download_attachment`
     called `fs::write`, which truncates first. It now calls
     [gui/src-tauri/src/save_file.rs](gui/src-tauri/src/save_file.rs)`::write_replacing`
     on `spawn_blocking`: a `create_new` hidden temp beside `dest`, `write_all`
-    + `sync_all`, `rename` over `dest`, the temp removed on any failure. The
-    partial-write case is pinned through `replace_with`, a seam taking the
-    write as a closure, because no fixture provokes a full disk portably; a
-    truncate-then-write mutation fails it. **Not pinned:** the command
-    calling `write_replacing` rather than `fs::write` (the two agree on
-    success). Known limit, marked `shortcut:` there: the rename does not
-    carry an overwritten file's permissions over, and replaces a symlink
-    rather than following it. The tests moved to `attachments_tests.rs`.
+    + `sync_all`, the file closed, `rename` over `dest`, the temp removed on
+    any failure. The partial-write case is pinned through `replace_with`, a
+    seam taking the write as a closure, because no fixture provokes a full
+    disk portably; a truncate-then-write mutation fails it.
+    - **The temp name is `.localmail-<pid>-<nanos>.part`, never derived from
+      `dest`'s** (review of #468). It first embedded the user's name, ~32
+      bytes longer, so a name over ~220 bytes passed the 255-byte limit and a
+      save `fs::write` would have made failed with "File name too long".
+      Pinned with a 250-byte name.
+    - **A temp that cannot be created says so.** The caller reports `dest`,
+      so a read-only folder holding a writable file (which `fs::write` could
+      replace and this cannot) used to read as "permission denied" on a file
+      the user can write. Still refused, now naming the temp.
+    - **A failed save fails the command**, pinned by a directory at `dest`:
+      dropping the `?` on the `Write` mapping used to leave every test green
+      while reporting `bytes_written` for a file never written.
+    - **Not pinned:** the command calling `write_replacing` rather than
+      `fs::write` (the two agree on success). Known limits, marked
+      `shortcut:` there: the rename does not carry an overwritten file's
+      permissions over, and replaces a symlink rather than following it.
+      Also unmarked: a SIGKILL or a panic mid-write strands the hidden temp,
+      a failed temp removal is swallowed (the original error wins), and the
+      directory is not fsynced after the rename (a power cut can leave the
+      old file, never a prefix). The tests moved to `attachments_tests.rs`.
 - **`--all-targets` clippy is clean now, and CI still doesn't run it.** The
   long-standing `approx_constant` failure in
   `gui/src-tauri/src/commands/search.rs` (a `3.14` dummy `took_ms`) is fixed.

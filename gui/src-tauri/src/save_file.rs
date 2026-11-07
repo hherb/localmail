@@ -28,10 +28,21 @@ pub fn write_replacing(dest: &Path, bytes: &[u8]) -> io::Result<()> {
 fn replace_with(dest: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
     let tmp = temp_path(dest)?;
     // `create_new`, so a name we did not mint is never written or removed.
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-    let result = write(&mut file)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| fs::rename(&tmp, dest));
+    // The caller reports `dest`, so say it was the temp beside it that failed
+    // (a read-only folder holding a writable file `fs::write` could replace).
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("cannot create a temporary file beside it: {e}"),
+            )
+        })?;
+    let result = write(&mut file).and_then(|()| file.sync_all());
+    drop(file); // closed first, so the rename never moves an open file
+    let result = result.and_then(|()| fs::rename(&tmp, dest));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -39,19 +50,21 @@ fn replace_with(dest: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) ->
 }
 
 /// A hidden sibling of `dest`, unique to this process and moment. Same
-/// directory, so the rename never crosses a filesystem.
+/// directory, so the rename never crosses a filesystem. The name does not
+/// embed `dest`'s: that would push a valid ~225-byte name past the 255-byte
+/// limit, failing a save `fs::write` would have made.
 fn temp_path(dest: &Path) -> io::Result<PathBuf> {
-    let name = dest.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name")
-    })?;
+    if dest.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination has no file name",
+        ));
+    }
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let mut tmp = std::ffi::OsString::from(".");
-    tmp.push(name);
-    tmp.push(format!(".{}.{nanos}.part", std::process::id()));
-    Ok(dest.with_file_name(tmp))
+    Ok(dest.with_file_name(format!(".localmail-{}-{nanos}.part", std::process::id())))
 }
 
 #[cfg(test)]
@@ -107,9 +120,8 @@ mod tests {
         assert_eq!(dir.entries(), ["a.txt"]);
     }
 
-    // The #465 defect: a failure after the write started. A non-empty
-    // directory at `dest` makes the rename fail once every byte is written,
-    // which exercises the same clean-up a full disk would.
+    // A failure after every byte is written (the rename): a directory at
+    // `dest` makes it fail, and its contents show `dest` was untouched.
     #[test]
     fn a_failed_replace_removes_the_temp_and_leaves_dest_alone() {
         let dir = Scratch::new("fail");
@@ -152,8 +164,32 @@ mod tests {
         assert_eq!(tmp.parent(), Some(Path::new("/d")));
         let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
-            name.starts_with(".report.pdf.") && name.ends_with(".part"),
+            name.starts_with(".localmail-") && name.ends_with(".part"),
             "{name}"
         );
+    }
+
+    // A name `fs::write` accepts must still save: the temp may not be longer.
+    #[test]
+    fn a_name_near_the_filesystem_limit_still_saves() {
+        let dir = Scratch::new("long");
+        let dest = dir.0.join(format!("{}.pdf", "a".repeat(246))); // 250 bytes
+        write_replacing(&dest, b"x").unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_uncreatable_temp_is_named_in_the_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Scratch::new("ro");
+        let dest = dir.0.join("existing.pdf");
+        fs::write(&dest, b"old").unwrap();
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o555)).unwrap();
+        let err = write_replacing(&dest, b"new").unwrap_err();
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("temporary file"), "{err}");
+        assert_eq!(fs::read(&dest).unwrap(), b"old");
     }
 }

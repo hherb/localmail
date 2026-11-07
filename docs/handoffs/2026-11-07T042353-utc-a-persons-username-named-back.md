@@ -3,7 +3,7 @@
 > **Status as of 2026-11-07 (session 96).** `main` is **`ff5ef70`** (#463,
 > closes #218).
 >
-> **One open PR** on `fix/462-api-key-refusal-wording`, based on `main` at
+> **One open PR: #466** on `fix/462-api-key-refusal-wording`, based on `main` at
 > `ff5ef70`, carrying the #462 code **and this handoff**.
 >
 > **Both hosts are deployed at `b6b9ab7`.** `ff5ef70` is GUI-only (no server
@@ -152,7 +152,7 @@ git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 gh pr list --state all --limit 4
-gh pr checks <the #462 PR>
+gh pr checks 466
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
 

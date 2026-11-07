@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod http;
+pub mod save_file;
 pub mod storage;
 
 use serde::Serialize;

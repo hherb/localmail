@@ -7334,9 +7334,33 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   - **Still unbounded:** the JSON helpers in `http/client.rs`, both
     `.json()` and the error-path `resp.text()` reads in all six (including
     `http_post_empty`, `http_post_json_no_resp` and `http_delete`).
-  - Filed from the same review: #464 (a body timeout reads as a generic
-    "read body" error) and #465 (a failed disk write leaves a truncated
-    file).
+  - **A timeout says so, and every other failure names its cause (#464).**
+    reqwest's `Display` stops at "error sending request for url (…)", so a
+    timeout, a reset and a truncated body read alike. `BodyError` gained
+    `Timeout` (from `e.is_timeout()`, which walks the source chain), both
+    download enums gained `Timeout { seconds }` (`REQUEST_TIMEOUT_SECS`, the
+    pinned client's total budget, body included), and the rest go through
+    `body::error_chain`, which appends each `source()` not already in the
+    text. `send()` failures use the same rule via each enum's `send_failed`;
+    a refused connection now reads `…): client error (Connect): tcp connect
+    error: Connection refused`. Pinned per call site by a refused-port test
+    (reverting any one to `Network(e.to_string())` fails it), plus a
+    stalled-body timeout test against mockito and a never-answering
+    `TcpListener` for `send()`. **The 15 s budget is unchanged**: a 100 MiB
+    attachment needs ~53 Mbit/s to finish inside it. Whether downloads get a
+    longer one (`RequestBuilder::timeout`) is open.
+  - **A save never leaves a truncated file (#465).** `download_attachment`
+    called `fs::write`, which truncates first. It now calls
+    [gui/src-tauri/src/save_file.rs](gui/src-tauri/src/save_file.rs)`::write_replacing`
+    on `spawn_blocking`: a `create_new` hidden temp beside `dest`, `write_all`
+    + `sync_all`, `rename` over `dest`, the temp removed on any failure. The
+    partial-write case is pinned through `replace_with`, a seam taking the
+    write as a closure, because no fixture provokes a full disk portably; a
+    truncate-then-write mutation fails it. **Not pinned:** the command
+    calling `write_replacing` rather than `fs::write` (the two agree on
+    success). Known limit, marked `shortcut:` there: the rename does not
+    carry an overwritten file's permissions over, and replaces a symlink
+    rather than following it. The tests moved to `attachments_tests.rs`.
 - **`--all-targets` clippy is clean now, and CI still doesn't run it.** The
   long-standing `approx_constant` failure in
   `gui/src-tauri/src/commands/search.rs` (a `3.14` dummy `took_ms`) is fixed.

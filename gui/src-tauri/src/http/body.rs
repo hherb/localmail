@@ -14,8 +14,39 @@ pub enum BodyError {
     /// the server sent one, else the bytes received when the read stopped —
     /// a lower bound on the real size, which is unknown by construction.
     TooLarge { size: u64 },
-    /// The transport failed mid-body.
+    /// The client's total timeout ran out mid-body (#464). Kept apart from
+    /// `Read` because the remedy differs: a slow link, not a broken server.
+    Timeout,
+    /// The transport failed mid-body; the text carries the cause chain.
     Read(String),
+}
+
+/// An error's message followed by each cause in its `source()` chain,
+/// joined by `": "` (#464). reqwest's own `Display` writes only its kind and
+/// URL, so a reset and a truncated body would otherwise read alike. A cause
+/// whose text the message already contains is skipped.
+pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut cause = err.source();
+    while let Some(e) = cause {
+        let text = e.to_string();
+        if !text.is_empty() && !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = e.source();
+    }
+    out
+}
+
+/// How a failed reqwest call maps onto [`BodyError`]: a timeout, or the
+/// failure with its causes.
+fn transport_error(e: reqwest::Error) -> BodyError {
+    if e.is_timeout() {
+        BodyError::Timeout
+    } else {
+        BodyError::Read(error_chain(&e))
+    }
 }
 
 /// Read the whole body of `resp`, refusing anything larger than `max` bytes.
@@ -31,11 +62,7 @@ pub async fn read_capped(mut resp: reqwest::Response, max: u64) -> Result<Vec<u8
     // shortcut: with no Content-Length the Vec grows by doubling, so its
     // capacity can reach ~2x `max`; fine at the GUI's 100 MiB caps.
     let mut body = Vec::with_capacity(declared.unwrap_or(0) as usize);
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| BodyError::Read(e.to_string()))?
-    {
+    while let Some(chunk) = resp.chunk().await.map_err(transport_error)? {
         let size = (body.len() + chunk.len()) as u64;
         // Checked before extending, so `body` never grows past `max`.
         if size > max {
@@ -167,7 +194,77 @@ mod tests {
         let resp = get(&server, "/broken").await;
         headers_seen.send(()).unwrap();
         let body = read_capped(resp, SMALL_CAP).await;
-        assert!(matches!(body, Err(BodyError::Read(_))), "{body:?}");
+        // The cause is what tells a reset from a timeout or a bad server;
+        // reqwest's own Display stops at "error decoding response body".
+        match body {
+            Err(BodyError::Read(msg)) => assert!(msg.contains(": "), "no cause in {msg:?}"),
+            other => panic!("expected Read, got {other:?}"),
+        }
+    }
+
+    // #464: a body that stalls past the client's timeout is a Timeout, not
+    // a generic read failure.
+    #[tokio::test]
+    async fn a_body_stalled_past_the_client_timeout_is_a_timeout() {
+        const CLIENT_TIMEOUT: Duration = Duration::from_millis(300);
+        const STALL: Duration = Duration::from_secs(5);
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/slow")
+            .with_chunked_body(move |w| {
+                w.write_all(b"x")?;
+                // Released by the test once it has its answer.
+                let _ = wait.lock().unwrap().recv_timeout(STALL);
+                Ok(())
+            })
+            .create_async()
+            .await;
+        let resp = reqwest::Client::builder()
+            .timeout(CLIENT_TIMEOUT)
+            .build()
+            .unwrap()
+            .get(format!("{}/slow", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let body = read_capped(resp, SMALL_CAP).await;
+        let _ = done.send(());
+        assert_eq!(body, Err(BodyError::Timeout));
+    }
+
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|e| e as _)
+        }
+    }
+
+    #[test]
+    fn error_chain_appends_every_cause() {
+        let e = Layer(
+            "outer",
+            Some(Box::new(Layer("mid", Some(Box::new(Layer("root", None)))))),
+        );
+        assert_eq!(error_chain(&e), "outer: mid: root");
+    }
+
+    #[test]
+    fn error_chain_skips_a_cause_the_message_already_says() {
+        let e = Layer("read failed: reset", Some(Box::new(Layer("reset", None))));
+        assert_eq!(error_chain(&e), "read failed: reset");
+    }
+
+    #[test]
+    fn error_chain_of_a_causeless_error_is_its_message() {
+        assert_eq!(error_chain(&Layer("alone", None)), "alone");
     }
 
     #[tokio::test]

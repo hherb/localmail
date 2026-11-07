@@ -30,7 +30,9 @@ pub struct ListMessagesRequest {
     pub cursor: Option<String>,
 }
 
-fn default_limit() -> u32 { 50 }
+fn default_limit() -> u32 {
+    50
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ListMessagesResponse {
@@ -45,10 +47,16 @@ pub async fn list_messages(
     let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
     let mut qs: Vec<(String, String)> = Vec::new();
-    for a in &req.account_ids { qs.push(("account_id".into(), a.clone())); }
-    for f in &req.folder_ids { qs.push(("folder_id".into(), f.clone())); }
+    for a in &req.account_ids {
+        qs.push(("account_id".into(), a.clone()));
+    }
+    for f in &req.folder_ids {
+        qs.push(("folder_id".into(), f.clone()));
+    }
     qs.push(("limit".into(), req.limit.to_string()));
-    if let Some(c) = &req.cursor { qs.push(("cursor".into(), c.clone())); }
+    if let Some(c) = &req.cursor {
+        qs.push(("cursor".into(), c.clone()));
+    }
     let mut endpoint = format!("{url}v1/messages?");
     endpoint.push_str(
         &qs.into_iter()

@@ -38,7 +38,9 @@ pub async fn get_capabilities(store: &KeyringStore) -> Result<Capabilities, Capa
         .ok_or(AuthError::NotLoggedIn)?;
     let client = build_pinned_client(&pin).map_err(AuthError::from)?;
     let endpoint = format!("{url}v1/capabilities");
-    let caps: Capabilities = http_get_json(&client, &endpoint, Some(&token)).await.map_err(AuthError::from)?;
+    let caps: Capabilities = http_get_json(&client, &endpoint, Some(&token))
+        .await
+        .map_err(AuthError::from)?;
     Ok(caps)
 }
 
@@ -60,7 +62,9 @@ mod tests {
     #[tokio::test]
     async fn capabilities_without_login_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = get_capabilities(&store).await.unwrap_err();
         match err {

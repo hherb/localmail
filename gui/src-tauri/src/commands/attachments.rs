@@ -1,6 +1,7 @@
 //! Attachment download.
 //!
-//! GET /v1/attachments/{sha256} → stream bytes to disk, return byte count.
+//! GET /v1/attachments/{sha256} → read the body (bounded, see
+//! [`crate::http::body::read_capped`]), write it to disk, return byte count.
 //! Caller (Svelte) provides the destination path obtained from a save dialog.
 //!
 //! Errors surface via the dedicated [`AttachmentError`] enum so the auth-domain
@@ -15,6 +16,7 @@ use thiserror::Error;
 
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
+use crate::http::body::{read_capped, BodyError};
 use crate::http::client::build_pinned_client;
 use crate::http::errors::HttpError;
 use crate::storage::keyring::KeyringStore;
@@ -54,6 +56,8 @@ pub enum AttachmentError {
     #[error("invalid sha256: {0}")]
     InvalidSha256(String),
 
+    /// `size` is the declared `Content-Length`, or without one the bytes
+    /// received when the read stopped (a lower bound).
     #[error("attachment too large: {size} bytes (max {max})")]
     TooLarge { size: u64, max: u64 },
 
@@ -77,16 +81,16 @@ fn validate_sha256(sha256: &str) -> Result<(), AttachmentError> {
     Ok(())
 }
 
-fn check_content_length(resp: &reqwest::Response) -> Result<(), AttachmentError> {
-    if let Some(len) = resp.content_length() {
-        if len > MAX_ATTACHMENT_BYTES {
-            return Err(AttachmentError::TooLarge {
-                size: len,
+impl From<BodyError> for AttachmentError {
+    fn from(e: BodyError) -> Self {
+        match e {
+            BodyError::TooLarge { size } => AttachmentError::TooLarge {
+                size,
                 max: MAX_ATTACHMENT_BYTES,
-            });
+            },
+            BodyError::Read(msg) => AttachmentError::Read(msg),
         }
     }
-    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -113,18 +117,7 @@ pub async fn download_attachment(
     if !resp.status().is_success() {
         return Err(AttachmentError::Http(resp.status().as_u16()));
     }
-    check_content_length(&resp)?;
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| AttachmentError::Read(e.to_string()))?;
-    // Post-check in case Content-Length was missing or understated the body.
-    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
-        return Err(AttachmentError::TooLarge {
-            size: bytes.len() as u64,
-            max: MAX_ATTACHMENT_BYTES,
-        });
-    }
+    let bytes = read_capped(resp, MAX_ATTACHMENT_BYTES).await?;
     std::fs::write(&dest, &bytes).map_err(|e| AttachmentError::Write {
         path: dest.display().to_string(),
         error: e.to_string(),
@@ -167,24 +160,14 @@ pub async fn fetch_attachment_bytes(
     if !resp.status().is_success() {
         return Err(AttachmentError::Http(resp.status().as_u16()));
     }
-    check_content_length(&resp)?;
     let content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| AttachmentError::Read(e.to_string()))?;
-    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
-        return Err(AttachmentError::TooLarge {
-            size: bytes.len() as u64,
-            max: MAX_ATTACHMENT_BYTES,
-        });
-    }
+    let bytes = read_capped(resp, MAX_ATTACHMENT_BYTES).await?;
     Ok(AttachmentBlob {
-        bytes: bytes.to_vec(),
+        bytes,
         content_type,
     })
 }
@@ -198,14 +181,79 @@ pub async fn fetch_attachment_bytes_cmd(sha256: String) -> Result<AttachmentBlob
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::body::test_support::{write_past, MAX_OVERSHOOT};
     use crate::storage::keyring::{MemKeyring, Slot};
 
     // 64 lowercase 'a' — passes validate_sha256.
-    const VALID_SHA: &str =
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const VALID_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn fake_store() -> KeyringStore {
         KeyringStore::with_backend(MemKeyring::new())
+    }
+
+    // The capped read reports only the size; the command's own ceiling must
+    // be what reaches the wire as `max`, and a read error keep its text.
+    #[test]
+    fn body_errors_map_onto_this_commands_ceiling() {
+        assert!(matches!(
+            AttachmentError::from(BodyError::TooLarge { size: 7 }),
+            AttachmentError::TooLarge {
+                size: 7,
+                max: MAX_ATTACHMENT_BYTES
+            }
+        ));
+        assert!(matches!(
+            AttachmentError::from(BodyError::Read("reset".into())),
+            AttachmentError::Read(m) if m == "reset"
+        ));
+    }
+
+    // Pins the wiring, not just the helper: a command that went back to
+    // buffering the body and checking afterwards would report the full size.
+    async fn oversized_attachment_server() -> (mockito::ServerGuard, mockito::Mock, KeyringStore) {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", format!("/v1/attachments/{VALID_SHA}").as_str())
+            .with_chunked_body(write_past(MAX_ATTACHMENT_BYTES))
+            .create_async()
+            .await;
+        let s = fake_store();
+        s.put(Slot::ServerUrl, &format!("{}/", server.url()))
+            .unwrap();
+        s.put(Slot::CertPin, "deadbeef").unwrap();
+        s.put(Slot::BearerToken, "tok").unwrap();
+        (server, mock, s)
+    }
+
+    fn assert_cut_off_at_the_cap(err: AttachmentError) {
+        assert!(
+            matches!(
+                err,
+                AttachmentError::TooLarge { size, max: MAX_ATTACHMENT_BYTES }
+                    if size > MAX_ATTACHMENT_BYTES && size <= MAX_ATTACHMENT_BYTES + MAX_OVERSHOOT
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_bytes_cuts_an_oversized_chunked_body_off_at_the_cap() {
+        let (_server, _m, s) = oversized_attachment_server().await;
+        let err = fetch_attachment_bytes(&s, VALID_SHA).await.unwrap_err();
+        assert_cut_off_at_the_cap(err);
+    }
+
+    #[tokio::test]
+    async fn download_cuts_an_oversized_chunked_body_off_and_writes_nothing() {
+        let (_server, _m, s) = oversized_attachment_server().await;
+        let dest =
+            std::env::temp_dir().join(format!("localmail-218-{}-{VALID_SHA}", std::process::id()));
+        let _ = std::fs::remove_file(&dest);
+        let err = download_attachment(&s, VALID_SHA, dest.clone())
+            .await
+            .unwrap_err();
+        assert_cut_off_at_the_cap(err);
+        assert!(!dest.exists(), "nothing may be written on refusal");
     }
 
     #[tokio::test]
@@ -228,10 +276,7 @@ mod tests {
         let err = download_attachment(&s, VALID_SHA, PathBuf::from("/tmp/x"))
             .await
             .unwrap_err();
-        assert!(matches!(
-            err,
-            AttachmentError::Auth(AuthError::NotLoggedIn)
-        ));
+        assert!(matches!(err, AttachmentError::Auth(AuthError::NotLoggedIn)));
     }
 
     #[tokio::test]
@@ -250,10 +295,7 @@ mod tests {
         s.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
         s.put(Slot::CertPin, "deadbeef").unwrap();
         let err = fetch_attachment_bytes(&s, VALID_SHA).await.unwrap_err();
-        assert!(matches!(
-            err,
-            AttachmentError::Auth(AuthError::NotLoggedIn)
-        ));
+        assert!(matches!(err, AttachmentError::Auth(AuthError::NotLoggedIn)));
     }
 
     #[test]

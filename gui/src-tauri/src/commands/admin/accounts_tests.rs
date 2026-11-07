@@ -12,7 +12,9 @@ fn fake_store() -> KeyringStore {
 #[tokio::test]
 async fn list_without_token_returns_not_logged_in() {
     let store = fake_store();
-    store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+    store
+        .put(Slot::ServerUrl, "https://localhost:8443/")
+        .unwrap();
     store.put(Slot::CertPin, "deadbeef").unwrap();
     let err = list_admin_accounts(&store).await.unwrap_err();
     assert!(matches!(err, AuthError::NotLoggedIn));
@@ -136,7 +138,9 @@ async fn patch_update_omits_unset_fields_entirely() {
         sync_enabled: Some(false),
         ..AdminAccountPatch::default()
     };
-    patch_update(&client, &base, "tok", "9", &patch).await.unwrap();
+    patch_update(&client, &base, "tok", "9", &patch)
+        .await
+        .unwrap();
     m.assert_async().await;
 }
 
@@ -200,7 +204,9 @@ async fn delete_maps_409_cascade_refusal() {
         .await;
     let client = Client::new();
     let base = format!("{}/", server.url());
-    let err = delete_one(&client, &base, "tok", "9", false).await.unwrap_err();
+    let err = delete_one(&client, &base, "tok", "9", false)
+        .await
+        .unwrap_err();
     match err {
         AuthError::Http(crate::http::errors::HttpError::HttpStatus { status, .. }) => {
             assert_eq!(status, 409);
@@ -223,7 +229,9 @@ async fn post_password_sends_body_and_accepts_204() {
         .await;
     let client = Client::new();
     let base = format!("{}/", server.url());
-    post_password(&client, &base, "tok", "9", "hunter2").await.unwrap();
+    post_password(&client, &base, "tok", "9", "hunter2")
+        .await
+        .unwrap();
     m.assert_async().await;
 }
 
@@ -239,7 +247,9 @@ async fn post_test_connection_decodes_probed_folders() {
         .await;
     let client = Client::new();
     let base = format!("{}/", server.url());
-    let got = post_test_connection(&client, &base, "tok", "9").await.unwrap();
+    let got = post_test_connection(&client, &base, "tok", "9")
+        .await
+        .unwrap();
     assert_eq!(got.folders.len(), 1);
     assert_eq!(got.folders[0].name, "INBOX");
     assert_eq!(got.folders[0].flags, vec!["\\HasNoChildren".to_string()]);
@@ -256,7 +266,9 @@ async fn post_test_connection_maps_400_connect_failure() {
         .await;
     let client = Client::new();
     let base = format!("{}/", server.url());
-    let err = post_test_connection(&client, &base, "tok", "9").await.unwrap_err();
+    let err = post_test_connection(&client, &base, "tok", "9")
+        .await
+        .unwrap_err();
     match err {
         AuthError::Http(crate::http::errors::HttpError::HttpStatus { status, .. }) => {
             assert_eq!(status, 400);

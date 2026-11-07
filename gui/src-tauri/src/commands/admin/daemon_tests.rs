@@ -90,7 +90,9 @@ async fn post_lifecycle_start_decodes_the_transitional_status() {
         .await;
     let client = Client::new();
     let base = format!("{}/", server.url());
-    let status = post_lifecycle(&client, &base, "tok", "start").await.unwrap();
+    let status = post_lifecycle(&client, &base, "tok", "start")
+        .await
+        .unwrap();
     assert_eq!(status.state, "starting");
     m.assert_async().await;
 }
@@ -164,7 +166,9 @@ async fn post_restart_sync_maps_404_unknown_account() {
         .await;
     let client = Client::new();
     let base = format!("{}/", server.url());
-    let err = post_restart_sync(&client, &base, "tok", "7").await.unwrap_err();
+    let err = post_restart_sync(&client, &base, "tok", "7")
+        .await
+        .unwrap_err();
     match err {
         AuthError::Http(crate::http::errors::HttpError::HttpStatus { status, .. }) => {
             assert_eq!(status, 404);
@@ -176,7 +180,9 @@ async fn post_restart_sync_maps_404_unknown_account() {
 #[tokio::test]
 async fn fetch_without_token_returns_not_logged_in() {
     let store = fake_store();
-    store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+    store
+        .put(Slot::ServerUrl, "https://localhost:8443/")
+        .unwrap();
     store.put(Slot::CertPin, "deadbeef").unwrap();
     let err = get_admin_daemon(&store).await.unwrap_err();
     assert!(matches!(err, AuthError::NotLoggedIn));

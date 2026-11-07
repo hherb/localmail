@@ -1,19 +1,17 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-07 (session 94).** `main` is **`84ed6ee`** (#458:
-> harness lock DSN rule, closes #340).
+> **Status as of 2026-11-07 (session 95).** `main` is **`b6b9ab7`** (#461,
+> closes #319; #460 closed #372 just before it).
 >
-> This session has **two open PRs**, both based on `main` at `84ed6ee`:
-> **#460** (`fix/372-ghost-hits`, code only, CI green when written) and the
-> **#461** (`fix/319-not-a-key-principal`), which carries its code **and this
-> handoff**. They touch different files and can merge in either order.
+> **One open PR: #463** on `fix/218-bounded-gui-download`, based on `main` at
+> `b6b9ab7`, carrying the #218 code **and this handoff**.
 >
-> **Both hosts are deployed at `2234775`** (carried from session 93; #458 was
-> test-only). #460 and #319 change runtime code, so **deploy after merging**.
+> **Both hosts are deployed at `b6b9ab7`** (this session; `/v1/version`
+> verified on each). #218 is GUI-only (Tauri), so merging it needs **no server
+> deploy**; the desktop GUI needs a rebuild to pick it up.
 >
-> **Open issues: 26** (24 once both PRs close #372 and #319; #462, filed by
-> #461's pre-merge review, holds its two optional low-severity leftovers). **Open
-> Dependabot alerts: 2** — #71 and #185, both open on purpose.
+> **Open issues: 26** (25 once #463 closes #218; #464 and #465 filed in review). **Open Dependabot alerts: 2**
+> — #71 and #185, both open on purpose.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
@@ -35,83 +33,86 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-- **Confirmed #458 merged** (`84ed6ee`) and #340 closed.
-- **The 6 test warnings are all third-party deprecations** (starlette's
-  `anyio.abc.BlockingPortal`, three from docling, the two websockets ones of
-  #25). The `force_full_page_ocr` one fires inside docling's own serializer
-  even though we set `mode=FULL_PAGE`. Nothing to fix. Earlier sessions
-  recorded 2 because their runs had no `[extraction]` docling tests.
+- **Confirmed #460 and #461 merged** (`9ed57c6`, `b6b9ab7`); #372 and #319
+  closed.
+- **Deployed both hosts to `b6b9ab7`** (Mac: `uv sync` + both launchd
+  kickstarts; DGX: pull + sync + `systemctl --user restart`). Both report
+  `build_hash: b6b9ab7`.
+- **Operator picked #218** as the next slice.
 
-### PR #460 on `fix/372-ghost-hits`
-
-| SHA | What |
-|---|---|
-| `108d648` | `Searcher._hydrate` skips a fused hit whose message is gone (DEBUG line) instead of serving `msgs.get(id, {})` as a ghost row; keeps it out of the rerank input and the cached pool too. The `has_attachments … if m else False` guard (ghost-only) removed; its pin replaced by a DB test of `_hydrate` (`test_search_has_attachments_flag.py`). CLAUDE.md: one line under `_fetch_sort_dates` |
-
-### PR #461 on `fix/319-not-a-key-principal`
+### PR #463 on `fix/218-bounded-gui-download`
 
 | SHA | What |
 |---|---|
-| `471d303` | `api/admin/api_keys.py`: `NotAnApiKeyPrincipal(ApiKeyNotFound)` raised by `revoke_key`, `delete_key_principal` and `set_grant` when the id is a person's (via `_not_found`). Panel's revoke/delete catch it and render a `role="alert"` "Refused: …" notice above the table on a 200. JSON routes (404) and CLI unchanged (subclass), though the JSON 404 detail and the CLI error message now name the person case. 5 new tests + 3 tightened; the finalcheck review added 4 more (person's id on all three JSON routes, unknown id plain at delete/grant, repeated revoke/delete shows no refusal). CLAUDE.md API-keys bullet |
-| next | this handoff |
+| `b56a2e6` | New `gui/src-tauri/src/http/body.rs::read_capped(resp, max)`: refuses an over-cap `Content-Length` up front, then reads `resp.chunk()` and returns `BodyError::TooLarge` once the running total would pass `max`. `download_attachment`, `fetch_attachment_bytes` and `get_message_raw` use it (via `From<BodyError>` per command error enum), replacing three copies of buffer-then-check; `check_content_length` deleted. 5 helper tests + 1 mapping test per module. CLAUDE.md bullet in the GUI section |
+| `27e8861` | this handoff |
+| next | `/finalcheck` review fixes: a server-driven wiring test per caller (reverting any caller to `resp.bytes()` passed every test before), three helper tests closing surviving mutations (fast-fail removed, `>=` there, the `Read` branch), `Vec` pre-sized from a declared length, doc corrections. Six mutations each fail their own test. #464 and #465 filed |
 
-- **Verification:** both RED first. Mutations caught: #319 — dropping the
-  panel's notice (2 tests fail), making `_not_found` never see a person (6
-  fail since the finalcheck round; it was 5, not the 3 first written), a
-  notice on the panel's plain not-found branch (1 fail, added by finalcheck). #372's fix was RED-then-green; no separate mutation run. Full suite
-  **4761 passed, 6 warnings** on the #319 branch (4752 on #460's); mypy clean,
-  169 files.
-- **Not done (#319's "related" half):** `ApiKeyNotFound` still derives from
-  bare `Exception`, not `api.errors.NotFound`. Every route catches it
-  explicitly, so it is latent; noted in CLAUDE.md.
+- **Verification:** RED first. The helper landed holding today's logic, and
+  the endless-chunked-body test timed out (`Elapsed`) while the other four
+  passed. The loop made it green. After the review fixes `cargo test --lib`:
+  **123 passed**; `cargo clippy` with and without `--all-targets` and
+  `cargo fmt --check` are clean. No Python or TS changed, so neither suite
+  was re-run.
+- **The commit also carries rustfmt reflows** in ~15 untouched Rust files
+  (behaviour-neutral, checked line by line in review). gui-ci has no
+  `cargo fmt --check`, so nothing gated them.
+- **Wire nuance:** without a `Content-Length`, `TooLarge.size` is the bytes
+  received when the read stopped. That is a lower bound, not the real size.
+- **Not done (scoped out):** the JSON helpers in `http/client.rs` still read
+  unbounded bodies, both `.json()` and the error-path `.text()` in all six.
+  Noted in CLAUDE.md, not filed.
+- **Filed from review:** #464 (a body timeout reads as a generic "read body"
+  error), #465 (a failed disk write leaves a truncated file).
 
 ## What's next
 
-### 1. **Merge both PRs** (yours), once CI is green
-- **Acceptance:** `gh pr checks 460` and `gh pr checks 461` all pass; #372 and #319
-  close (`Closes #N` in each body); `gh issue list` shows 23.
+### 1. **Merge #463** (yours), once CI is green
+- **Acceptance:** `gh pr checks 463` all pass (gui-ci runs the Rust tests);
+  #218 closes; `gh issue list` shows 25. No server deploy needed.
 
-### 2. **Deploy both hosts** after merging (runtime code changed)
-- **Acceptance:** `/v1/version` on both hosts reports the newer merge SHA.
-
-### 3. **Re-authorise `hherb-dmc`** (yours, browser; carried)
+### 2. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
-### 4. **Next small slice: pick with the operator**
-- Candidates: **#368** (MCP ignores unknown args — no supported FastMCP
-  hook, needs a design call), **#208** (DaemonPanel message never
-  dismisses; small GUI), **#218** (GUI download buffers before the size
-  cap), **#285** (ruff/mypy in CI — needs a ruff-pin call), #369, #383
-  (`0039`), #365, #363.
-- **Acceptance (any):** a RED test first, then full `uv run pytest -q`
-  green and mypy clean.
+### 3. **Next small slice: pick with the operator**
+- Candidates: **#462** (tiny: the CLI names the typed username, plus one
+  WARNING on the panel's refusal branch), **#208** (DaemonPanel message
+  never dismisses), **#368** (MCP drops unknown args; needs a design call),
+  **#285** (ruff/mypy in CI; needs a ruff-pin call), **#369** (DSL
+  contradictions; needs design calls), #383 (`0039`), #365, #363.
+- **Acceptance (any):** a RED test first, then the touched suite green
+  (`uv run pytest -q` + mypy for Python; `cargo test` + `clippy --all-targets`
+  for Rust; `npm test -- --run && npm run check` for TS).
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
   `filters.lang` as a list, #419 syntax, #415 dates, `api_minor` 5 and 6
   features, #373 (`'` is literal), #378 (an empty
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
-### 5. **Carried**
-- **Migrations:** `0038` is taken. #319's sibling #318 and #320 need `0039`.
+### 4. **Carried**
+- **Migrations:** `0038` is taken. #318 and #320 need `0039`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
 - **#459:** harness-lock DSN residual (helpers, rebinding).
+- **#462:** API-key leftovers (see slice candidates).
+- **`ApiKeyNotFound` still derives from bare `Exception`** (latent; every
+  route catches it explicitly).
 - **Dependabot #71 / #185:** left open on purpose.
 - **docling > 2.144:** probe the next release when it lands.
 - **emSign G3:** re-check the trust stores after OS updates.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #368, #365; #375; #357; #363, #285;
-  robustness #218, #226, #225/#227, #200/#211/#208, #206, #204, #25.
+- **Issues:** #464, #465 (GUI downloads); #383, #369, #368, #365; #375; #357; #363, #285;
+  robustness #226, #225/#227, #200/#211/#208, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **Operator picked "both, one PR each"** for #372 and #319.
-2. **#372 fixed in `_hydrate`, not `_build_results`** (mine): the issue
-   proposed the page builder, but the hydrated pool is what gets reranked and
-   cached, so dropping there removes the ghost from every downstream stage.
-3. **#319 as a subclass, not a `RevokeOutcome` enum** (mine): one new class,
-   zero changes to the JSON route and CLI.
+1. **Operator picked #218** over #462, #208 and #369.
+2. **One shared helper in `http/`, not a fix per command** (mine): the three
+   copies are why the bug existed three times.
+3. **Still buffered in memory, just bounded** (mine): `download_attachment`
+   could stream to disk, but the 100 MiB ceiling is the documented contract
+   and a bounded `Vec` keeps one code path for all three commands.
 
 ## Open decisions & risks
 
@@ -124,10 +125,12 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    `localmail search` flag; #305 a malformed `localmail search` query exits 2,
    and a missing dependency makes `--version` exit 0 with a stderr line;
    #378 an empty fixed-shape operator or non-int id in a query is a 400 /
-   exit 2. **New:** #372 a page can hold fewer hits than `pool_size`
+   exit 2; #372 a page can hold fewer hits than `pool_size`
    suggested only if a message was deleted mid-search; #319 a person's id now reads "… is a person, not an API-key principal"
    in the 404 detail of all three JSON key routes (revoke, delete, grants)
-   and in `revoke-api-key` / `remove-api-key`'s CLI error.
+   and in `revoke-api-key` / `remove-api-key`'s CLI error. **New:** #218 a GUI
+   download over 100 MiB without `Content-Length` now fails with a
+   lower-bound `size` instead of buffering first.
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows are
    stored 8 h off in `date_sent` (wire `date` is right). A repair should
    re-parse `raw_bytes`. Read-only count:
@@ -147,7 +150,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was 7–18 this session.** Check `uptime` before
+10. **Load on the Mac was 22–37 this session** (another project's rust
+    build and a consensus python job, not localmail). Check `uptime` before
     trusting any timing.
 
 ## Exact commands to resume
@@ -158,7 +162,7 @@ git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 gh pr list --state all --limit 4
-gh pr checks 460; gh pr checks 461
+gh pr checks 463
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
 
@@ -176,9 +180,10 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4761 on the #319 branch, session 94
+unset VIRTUAL_ENV && uv run pytest -q              # 4761 at session 94 (not re-run in 95)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 530 at session 81
+cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 123, session 95
 ```
 
 The latest migration is **`0038_messages_attachment_names_strict_idx.sql`**;

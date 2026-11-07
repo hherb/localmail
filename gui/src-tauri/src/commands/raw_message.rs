@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
+use crate::http::body::{read_capped, BodyError};
 use crate::http::client::build_pinned_client;
 use crate::http::errors::HttpError;
 use crate::storage::keyring::KeyringStore;
@@ -37,6 +38,8 @@ pub enum RawMessageError {
     #[error("{0}")]
     Setup(#[from] HttpError),
 
+    /// `size` is the declared `Content-Length`, or without one the bytes
+    /// received when the read stopped (a lower bound).
     #[error("raw message too large: {size} bytes (max {max})")]
     TooLarge { size: u64, max: u64 },
 
@@ -48,6 +51,18 @@ pub enum RawMessageError {
 
     #[error("read body: {0}")]
     Read(String),
+}
+
+impl From<BodyError> for RawMessageError {
+    fn from(e: BodyError) -> Self {
+        match e {
+            BodyError::TooLarge { size } => RawMessageError::TooLarge {
+                size,
+                max: MAX_RAW_BYTES,
+            },
+            BodyError::Read(msg) => RawMessageError::Read(msg),
+        }
+    }
 }
 
 pub async fn get_message_raw(
@@ -68,25 +83,7 @@ pub async fn get_message_raw(
     if !resp.status().is_success() {
         return Err(RawMessageError::Http(resp.status().as_u16()));
     }
-    if let Some(len) = resp.content_length() {
-        if len > MAX_RAW_BYTES {
-            return Err(RawMessageError::TooLarge {
-                size: len,
-                max: MAX_RAW_BYTES,
-            });
-        }
-    }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| RawMessageError::Read(e.to_string()))?;
-    if bytes.len() as u64 > MAX_RAW_BYTES {
-        return Err(RawMessageError::TooLarge {
-            size: bytes.len() as u64,
-            max: MAX_RAW_BYTES,
-        });
-    }
-    Ok(bytes.to_vec())
+    Ok(read_capped(resp, MAX_RAW_BYTES).await?)
 }
 
 #[tauri::command]
@@ -98,10 +95,55 @@ pub async fn get_message_raw_cmd(message_id: String) -> Result<Vec<u8>, RawMessa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::body::test_support::{write_past, MAX_OVERSHOOT};
     use crate::storage::keyring::{MemKeyring, Slot};
 
     fn fake_store() -> KeyringStore {
         KeyringStore::with_backend(MemKeyring::new())
+    }
+
+    // The capped read reports only the size; the command's own ceiling must
+    // be what reaches the wire as `max`, and a read error keep its text.
+    #[test]
+    fn body_errors_map_onto_this_commands_ceiling() {
+        assert!(matches!(
+            RawMessageError::from(BodyError::TooLarge { size: 7 }),
+            RawMessageError::TooLarge {
+                size: 7,
+                max: MAX_RAW_BYTES
+            }
+        ));
+        assert!(matches!(
+            RawMessageError::from(BodyError::Read("reset".into())),
+            RawMessageError::Read(m) if m == "reset"
+        ));
+    }
+
+    // Pins the wiring, not just the helper: a command that went back to
+    // buffering the body and checking afterwards would report the full size.
+    #[tokio::test]
+    async fn get_message_raw_cuts_an_oversized_chunked_body_off_at_the_cap() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/messages/7/raw")
+            .with_chunked_body(write_past(MAX_RAW_BYTES))
+            .create_async()
+            .await;
+        let store = fake_store();
+        store
+            .put(Slot::ServerUrl, &format!("{}/", server.url()))
+            .unwrap();
+        store.put(Slot::CertPin, "deadbeef").unwrap();
+        store.put(Slot::BearerToken, "tok").unwrap();
+        let err = get_message_raw(&store, "7").await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RawMessageError::TooLarge { size, max: MAX_RAW_BYTES }
+                    if size > MAX_RAW_BYTES && size <= MAX_RAW_BYTES + MAX_OVERSHOOT
+            ),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -122,10 +164,7 @@ mod tests {
             .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = get_message_raw(&store, "1").await.unwrap_err();
-        assert!(matches!(
-            err,
-            RawMessageError::Auth(AuthError::NotLoggedIn)
-        ));
+        assert!(matches!(err, RawMessageError::Auth(AuthError::NotLoggedIn)));
     }
 
     #[tokio::test]

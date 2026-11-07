@@ -42,9 +42,7 @@ pub async fn get_message_full_headers(
 }
 
 #[tauri::command]
-pub async fn get_message_full_headers_cmd(
-    message_id: String,
-) -> Result<MessageDetail, AuthError> {
+pub async fn get_message_full_headers_cmd(message_id: String) -> Result<MessageDetail, AuthError> {
     let store = KeyringStore::new();
     get_message_full_headers(&store, &message_id).await
 }
@@ -68,7 +66,9 @@ mod tests {
     #[tokio::test]
     async fn get_message_full_headers_without_token_returns_not_logged_in() {
         let store = fake_store();
-        store.put(Slot::ServerUrl, "https://localhost:8443/").unwrap();
+        store
+            .put(Slot::ServerUrl, "https://localhost:8443/")
+            .unwrap();
         store.put(Slot::CertPin, "deadbeef").unwrap();
         let err = get_message_full_headers(&store, "1").await.unwrap_err();
         assert!(matches!(err, AuthError::NotLoggedIn));
@@ -97,7 +97,10 @@ mod tests {
         }"#;
         let _m = server
             .mock("GET", "/v1/messages/msg-42")
-            .match_query(mockito::Matcher::UrlEncoded("headers".into(), "full".into()))
+            .match_query(mockito::Matcher::UrlEncoded(
+                "headers".into(),
+                "full".into(),
+            ))
             .match_header("authorization", "Bearer tok")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -124,7 +127,10 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let _m = server
             .mock("GET", "/v1/messages/missing")
-            .match_query(mockito::Matcher::UrlEncoded("headers".into(), "full".into()))
+            .match_query(mockito::Matcher::UrlEncoded(
+                "headers".into(),
+                "full".into(),
+            ))
             .with_status(404)
             .with_body("not found")
             .create_async()

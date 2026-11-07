@@ -14,8 +14,9 @@ use thiserror::Error;
 
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
-use crate::http::body::{read_capped, BodyError};
+use crate::http::body::{error_chain, read_capped, BodyError};
 use crate::http::client::build_pinned_client;
+use crate::http::client::REQUEST_TIMEOUT_SECS;
 use crate::http::errors::HttpError;
 use crate::storage::keyring::KeyringStore;
 
@@ -46,6 +47,10 @@ pub enum RawMessageError {
     #[error("network error: {0}")]
     Network(String),
 
+    /// The pinned client's total timeout, which includes the body (#464).
+    #[error("request timed out after {seconds}s")]
+    Timeout { seconds: u64 },
+
     #[error("server returned HTTP {0}")]
     Http(u16),
 
@@ -60,7 +65,23 @@ impl From<BodyError> for RawMessageError {
                 size,
                 max: MAX_RAW_BYTES,
             },
+            BodyError::Timeout => RawMessageError::Timeout {
+                seconds: REQUEST_TIMEOUT_SECS,
+            },
             BodyError::Read(msg) => RawMessageError::Read(msg),
+        }
+    }
+}
+
+impl RawMessageError {
+    /// A failed `send()`: a timeout says so; anything else keeps its causes.
+    fn send_failed(e: reqwest::Error) -> Self {
+        if e.is_timeout() {
+            RawMessageError::Timeout {
+                seconds: REQUEST_TIMEOUT_SECS,
+            }
+        } else {
+            RawMessageError::Network(error_chain(&e))
         }
     }
 }
@@ -79,7 +100,7 @@ pub async fn get_message_raw(
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| RawMessageError::Network(e.to_string()))?;
+        .map_err(RawMessageError::send_failed)?;
     if !resp.status().is_success() {
         return Err(RawMessageError::Http(resp.status().as_u16()));
     }
@@ -111,6 +132,12 @@ mod tests {
             RawMessageError::TooLarge {
                 size: 7,
                 max: MAX_RAW_BYTES
+            }
+        ));
+        assert!(matches!(
+            RawMessageError::from(BodyError::Timeout),
+            RawMessageError::Timeout {
+                seconds: REQUEST_TIMEOUT_SECS
             }
         ));
         assert!(matches!(
@@ -210,6 +237,12 @@ mod tests {
             serde_json::json!({"kind": "Network", "detail": "connection refused"}),
         );
 
+        let timeout = RawMessageError::Timeout { seconds: 15 };
+        assert_eq!(
+            serde_json::to_value(&timeout).unwrap(),
+            serde_json::json!({"kind": "Timeout", "detail": {"seconds": 15}}),
+        );
+
         let read = RawMessageError::Read("stream closed".into());
         assert_eq!(
             serde_json::to_value(&read).unwrap(),
@@ -227,5 +260,77 @@ mod tests {
             serde_json::to_value(&wrapped).unwrap(),
             serde_json::json!({"kind": "Auth", "detail": {"kind": "NotConnected"}}),
         );
+    }
+
+    // A store pointing at a port nothing listens on, so every command's
+    // send() fails with a refusal: pins that the call site keeps the cause
+    // chain. Not its timeout branch: that is pinned on `send_failed` itself,
+    // since driving a command to its 15 s budget would cost 15 s a test.
+    fn refused_store() -> KeyringStore {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let s = fake_store();
+        s.put(Slot::ServerUrl, &format!("http://{addr}/")).unwrap();
+        s.put(Slot::CertPin, "deadbeef").unwrap();
+        s.put(Slot::BearerToken, "tok").unwrap();
+        s
+    }
+
+    fn assert_network_with_cause(err: RawMessageError) {
+        match err {
+            // reqwest's own Display ends at "(<url>)"; the cause follows it.
+            RawMessageError::Network(msg) => assert!(msg.contains("): "), "no cause in {msg:?}"),
+            other => panic!("expected Network, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_raw_reports_a_refused_send_with_its_cause() {
+        let err = get_message_raw(&refused_store(), "1").await.unwrap_err();
+        assert_network_with_cause(err);
+    }
+
+    // #464: a send() that times out names the timeout. A bound listener
+    // nobody accepts from: the kernel completes the handshake and no reply
+    // ever comes, so the request stalls without a server.
+    #[tokio::test]
+    async fn a_send_timeout_is_reported_as_a_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let err = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap()
+            .get(format!("http://{}/", listener.local_addr().unwrap()))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            RawMessageError::send_failed(err),
+            RawMessageError::Timeout {
+                seconds: REQUEST_TIMEOUT_SECS
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_send_is_a_network_error_with_its_cause() {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap(); // dropped: nothing listens there now
+        let err = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap_err();
+        let plain = err.to_string();
+        match RawMessageError::send_failed(err) {
+            RawMessageError::Network(msg) => {
+                assert!(msg.len() > plain.len(), "no cause in {msg:?}")
+            }
+            other => panic!("expected Network, got {other:?}"),
+        }
     }
 }

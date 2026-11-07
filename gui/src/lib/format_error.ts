@@ -61,6 +61,9 @@ function safeStringify(value: unknown): string {
 }
 
 export function formatError(err: unknown): string {
+  // A JS-side throw (a dialog, pdfjs): its own fields are not enumerable,
+  // so the JSON fallback below would render it as "{}".
+  if (err instanceof Error) return err.message || err.name;
   if (err && typeof err === "object") {
     const o = err as { kind?: unknown; detail?: unknown };
     const kind = typeof o.kind === "string" ? o.kind : null;

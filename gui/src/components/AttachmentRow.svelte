@@ -1,6 +1,7 @@
 <script lang="ts">
   import { save } from "@tauri-apps/plugin-dialog";
   import { downloadAttachment } from "../lib/tauri";
+  import { formatError } from "../lib/format_error";
 
   let { filename, sha256, onPreview = null } = $props<{
     filename: string | null;
@@ -30,7 +31,7 @@
       if (!dest) { downloading = false; return; }
       await downloadAttachment(sha256, dest as string);
     } catch (e: unknown) {
-      error = String(e);
+      error = formatError(e);
     } finally {
       downloading = false;
     }

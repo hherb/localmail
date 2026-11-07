@@ -11,6 +11,7 @@
    * charset is wrong or missing.
    */
   import { getRawMessage } from "../lib/api/raw_message";
+  import { formatError } from "../lib/format_error";
   import {
     AUTO_CHARSET,
     SUPPORTED_CHARSETS,
@@ -47,7 +48,7 @@
     try {
       raw = await getRawMessage(messageId);
     } catch (err: unknown) {
-      errorMessage = err instanceof Error ? err.message : String(err);
+      errorMessage = formatError(err);
     } finally {
       loading = false;
     }

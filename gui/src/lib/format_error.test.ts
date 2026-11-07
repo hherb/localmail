@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import { formatError } from "./format_error";
 
 describe("formatError", () => {
+  // A JS-side throw: JSON.stringify(new Error("x")) is "{}".
+  it("renders an Error by its message", () => {
+    expect(formatError(new Error("dialog failed"))).toBe("dialog failed");
+  });
+
   it("returns plain strings unchanged", () => {
     expect(formatError("boom")).toBe("boom");
   });

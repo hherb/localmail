@@ -207,6 +207,83 @@ describe("DaemonPanel", () => {
     // Only the mount fetch happened; no leaked interval kept polling.
     expect(api.getAdminDaemon).toHaveBeenCalledTimes(1);
   });
+
+  // #208: "Request accepted." used to linger next to a live-updating table.
+  // Must match ACCEPTED_DISMISS_MS in DaemonPanel.svelte.
+  const DISMISS_MS = 5000;
+
+  async function clickReload(getByTestId: (id: string) => HTMLElement) {
+    await fireEvent.click(getByTestId("daemon-reload"));
+    await vi.advanceTimersByTimeAsync(0); // settle the action + refresh fetch
+  }
+
+  it("auto-dismisses the accepted message (#208)", async () => {
+    vi.useFakeTimers();
+    const { getByTestId, queryByTestId } = render(DaemonPanel);
+    await vi.advanceTimersByTimeAsync(0);
+    await clickReload(getByTestId);
+    expect(getByTestId("daemon-action-message").textContent).toBe("Request accepted.");
+
+    await vi.advanceTimersByTimeAsync(DISMISS_MS - 100);
+    expect(queryByTestId("daemon-action-message")).toBeTruthy();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(queryByTestId("daemon-action-message")).toBeNull();
+  });
+
+  it("keeps a rejection visible until the next action (#148)", async () => {
+    vi.useFakeTimers();
+    api.startAdminDaemon.mockRejectedValueOnce(CONFLICT);
+    const { getByTestId } = render(DaemonPanel);
+    await vi.advanceTimersByTimeAsync(0);
+    await fireEvent.click(getByTestId("daemon-start"));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(3 * DISMISS_MS);
+    expect(getByTestId("daemon-action-message").textContent?.toLowerCase()).toContain(
+      "progress",
+    );
+  });
+
+  it("does not let an earlier dismiss cut a later message short", async () => {
+    vi.useFakeTimers();
+    const { getByTestId, queryByTestId } = render(DaemonPanel);
+    await vi.advanceTimersByTimeAsync(0);
+    await clickReload(getByTestId);
+    await vi.advanceTimersByTimeAsync(DISMISS_MS / 2);
+    await clickReload(getByTestId); // a fresh "Request accepted."
+
+    // The first action's deadline passes; the second message must survive it.
+    await vi.advanceTimersByTimeAsync(DISMISS_MS / 2 + 100);
+    expect(queryByTestId("daemon-action-message")).toBeTruthy();
+  });
+
+  it("leaves no timer behind after unmount, dismiss timer included", async () => {
+    vi.useFakeTimers();
+    const { getByTestId, unmount } = render(DaemonPanel);
+    await vi.advanceTimersByTimeAsync(0);
+    await clickReload(getByTestId); // poll interval + dismiss timeout pending
+    expect(vi.getTimerCount()).toBeGreaterThanOrEqual(2);
+
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("schedules no dismiss when an action resolves after unmount", async () => {
+    vi.useFakeTimers();
+    let resolveReload: (v: unknown) => void = () => {};
+    api.reloadAdminDaemon.mockReturnValueOnce(
+      new Promise((res) => {
+        resolveReload = res;
+      }),
+    );
+    const { getByTestId, unmount } = render(DaemonPanel);
+    await vi.advanceTimersByTimeAsync(0);
+    await fireEvent.click(getByTestId("daemon-reload")); // action in flight
+
+    unmount();
+    resolveReload({ command_id: "1" });
+    await vi.advanceTimersByTimeAsync(0); // run runAction's continuation
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 function container_hasNote(getByTestId: (id: string) => HTMLElement): boolean {

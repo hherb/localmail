@@ -7196,7 +7196,13 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   per-account restart-sync stay enabled — those are DB-mediated (Plane A) and
   work regardless of who owns the process. A rejected control (busy-guard /
   external-stub **409**, mapped by `isConflict`) surfaces as a visible
-  `daemon-action-message`, never an inert button. The per-account restart-sync
+  `daemon-action-message`, never an inert button. **Only the success message
+  auto-dismisses (#208)**, after `ACCEPTED_DISMISS_MS` (5 s); a rejection stays
+  until the next action, since dismissing it would bring #148's silent control
+  back. The timer is cleared on every new action (so an earlier deadline cannot
+  cut a later message short), in `onDestroy`, and never scheduled once the
+  `destroyed` flag is set; each of the three is mutation-pinned, the leak tests
+  by `vi.getTimerCount() === 0` after unmount. The per-account restart-sync
   dedup (idle+poll workers → one button) is the pure, unit-tested
   [gui/src/lib/daemon_view.ts](gui/src/lib/daemon_view.ts)`::restartSyncAccountIds`.
   **CI-trap note:** any admin panel that fetches on mount MUST be stubbed in

@@ -33,6 +33,8 @@
   // Mirrors the web panel's DAEMON_PANEL_POLL_SECONDS = 2.
   const POLL_INTERVAL_MS = 2000;
   const ACCEPTED_MESSAGE = "Request accepted.";
+  // Success only: a rejection stays until the next action (#148) (#208).
+  const ACCEPTED_DISMISS_MS = 5000;
   const BUSY_MESSAGE =
     "Another daemon operation is already in progress. Try again in a moment.";
 
@@ -44,6 +46,7 @@
   let actionKind: "ok" | "error" = $state("ok");
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let dismissTimer: ReturnType<typeof setTimeout> | null = null;
   // The initial fetch is awaited before the poll interval is started, so an
   // unmount *during* that fetch would otherwise run onDestroy (pollTimer still
   // null) and then start an interval onto the dead component. This flag makes
@@ -66,7 +69,17 @@
       clearInterval(pollTimer);
       pollTimer = null;
     }
+    clearDismiss();
   });
+
+  // Cleared on every new message too, so an earlier deadline cannot cut a
+  // later message short.
+  function clearDismiss(): void {
+    if (dismissTimer !== null) {
+      clearTimeout(dismissTimer);
+      dismissTimer = null;
+    }
+  }
 
   async function fetchView(opts: { showSpinner: boolean }): Promise<void> {
     if (opts.showSpinner) loading = true;
@@ -94,11 +107,18 @@
 
   async function runAction(action: () => Promise<unknown>): Promise<void> {
     busy = true;
+    clearDismiss();
     actionMessage = null;
     try {
       await action();
       actionKind = "ok";
       actionMessage = ACCEPTED_MESSAGE;
+      if (!destroyed) {
+        dismissTimer = setTimeout(() => {
+          dismissTimer = null;
+          actionMessage = null;
+        }, ACCEPTED_DISMISS_MS);
+      }
       await fetchView({ showSpinner: false });
     } catch (err: unknown) {
       report(err);

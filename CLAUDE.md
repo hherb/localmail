@@ -7347,7 +7347,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     (reverting any one to `Network(e.to_string())` fails it), plus a
     stalled-body timeout test against mockito and a never-answering
     `TcpListener` for `send()`. **The 15 s budget is unchanged**: a 100 MiB
-    attachment needs ~53 Mbit/s to finish inside it. Whether downloads get a
+    attachment needs ~56 Mbit/s to finish inside it. Whether downloads get a
     longer one (`RequestBuilder::timeout`) is open.
   - **A save never leaves a truncated file (#465).** `download_attachment`
     called `fs::write`, which truncates first. It now calls

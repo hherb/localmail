@@ -41,14 +41,22 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | SHA | What |
 |---|---|
-| `b6001f8` | `DaemonPanel.svelte`: "Request accepted." clears after `ACCEPTED_DISMISS_MS` (5 s). A rejection stays until the next action (#148). `dismissTimer` is cleared by `clearDismiss()` at the start of each action and in `onDestroy`, and is not scheduled once `destroyed` is set. 5 fake-timer tests; README (GUI daemon tab) and CLAUDE.md (Daemon panel bullet) updated |
+| `b6001f8` | `DaemonPanel.svelte`: "Request accepted." clears after `ACCEPTED_DISMISS_MS` (5 s). A rejection stays until the next action (#148). `dismissTimer` is cleared by `clearDismiss()` at the start of each action and in `onDestroy`, and is not scheduled once `destroyed` is set. 6 fake-timer tests (the sixth from review); README (GUI daemon tab) and CLAUDE.md (Daemon panel bullet) updated |
 | next | this handoff |
 
-- **Verification:** RED first (2 of the new tests failed; the stale-timer
-  test passes vacuously until a timer exists). Then the panel file has 17
-  passing tests; the **GUI suite has 535 passing**; `npm run check` reports 0
-  errors. Three mutations, each failing only its own test: drop the clear in
-  `runAction`, drop the clear in `onDestroy`, drop the `destroyed` guard.
+- **Verification:** RED first (2 of the new tests failed; 3 passed at RED:
+  the stale-timer and post-unmount tests vacuously, since no timer existed,
+  and the rejection test because it pins existing behaviour). Then the panel
+  file has 17 passing tests; the **GUI suite has 535 passing**; `npm run
+  check` reports 0 errors. Three mutations, each failing only its own test:
+  drop the clear in `runAction`, drop the clear in `onDestroy`, drop the
+  `destroyed` guard.
+- **`/finalcheck` review round:** moving the clear from the top of
+  `runAction` into the success branch passed all 17, yet lets a pending
+  success timer wipe a later rejection (#148). A sixth test pins it
+  (success, then a 409 within 5 s, still shown 5 s later); that mutation now
+  fails only it. The "until the next action" test, which never ran one, is
+  renamed "past the dismiss window". Panel file 18 passing.
 - **No Python or Rust touched**, so pytest, mypy and cargo were not re-run.
 
 ## What's next

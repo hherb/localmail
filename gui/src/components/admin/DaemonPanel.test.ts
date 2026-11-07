@@ -230,7 +230,7 @@ describe("DaemonPanel", () => {
     expect(queryByTestId("daemon-action-message")).toBeNull();
   });
 
-  it("keeps a rejection visible until the next action (#148)", async () => {
+  it("keeps a rejection visible past the dismiss window (#148)", async () => {
     vi.useFakeTimers();
     api.startAdminDaemon.mockRejectedValueOnce(CONFLICT);
     const { getByTestId } = render(DaemonPanel);
@@ -254,6 +254,24 @@ describe("DaemonPanel", () => {
     // The first action's deadline passes; the second message must survive it.
     await vi.advanceTimersByTimeAsync(DISMISS_MS / 2 + 100);
     expect(queryByTestId("daemon-action-message")).toBeTruthy();
+  });
+
+  // Pins that the clear sits at the top of runAction, not in the success
+  // branch: there, a pending success timer would wipe this rejection (#148).
+  it("does not let a pending success dismiss wipe a later rejection", async () => {
+    vi.useFakeTimers();
+    api.startAdminDaemon.mockRejectedValueOnce(CONFLICT);
+    const { getByTestId } = render(DaemonPanel);
+    await vi.advanceTimersByTimeAsync(0);
+    await clickReload(getByTestId);
+    await vi.advanceTimersByTimeAsync(DISMISS_MS / 2);
+    await fireEvent.click(getByTestId("daemon-start"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(DISMISS_MS);
+    expect(getByTestId("daemon-action-message").textContent?.toLowerCase()).toContain(
+      "progress",
+    );
   });
 
   it("leaves no timer behind after unmount, dismiss timer included", async () => {

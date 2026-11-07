@@ -1784,6 +1784,14 @@ def list_api_keys(ctx: click.Context) -> None:
         click.echo(f"  accounts: {', '.join(row.account_names) or '(none)'}")
 
 
+def _person_not_a_key(name: str) -> str:
+    """The refusal for a person's username, naming what the operator typed (#462).
+
+    The service layer words it by user id, which the operator never typed.
+    """
+    return f"{name!r} is a person's account, not an API key"
+
+
 @main.command("revoke-api-key")
 @click.argument("name")
 @click.pass_context
@@ -1801,6 +1809,8 @@ def revoke_api_key(ctx: click.Context, name: str) -> None:
             raise click.ClickException(f"no such API key: {name!r}")
         try:
             svc.revoke_key(conn, user_id)
+        except svc.NotAnApiKeyPrincipal:
+            raise click.ClickException(_person_not_a_key(name))
         except svc.ApiKeyNotFound as e:
             raise click.ClickException(str(e))
         conn.commit()
@@ -1820,6 +1830,8 @@ def remove_api_key(ctx: click.Context, name: str) -> None:
             raise click.ClickException(f"no such API key: {name!r}")
         try:
             svc.delete_key_principal(conn, user_id)
+        except svc.NotAnApiKeyPrincipal:
+            raise click.ClickException(_person_not_a_key(name))
         except svc.ApiKeyNotFound as e:
             raise click.ClickException(str(e))
         conn.commit()

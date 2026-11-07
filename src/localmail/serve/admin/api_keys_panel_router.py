@@ -12,6 +12,7 @@ it is stored as a SHA-256 and cannot be recovered afterwards.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import psycopg
@@ -29,6 +30,8 @@ from localmail.serve.admin.dependencies import require_admin_session
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+_log = logging.getLogger("localmail.serve.admin")
 
 router = APIRouter()
 
@@ -117,7 +120,7 @@ def revoke_api_key(
         except svc.NotAnApiKeyPrincipal as e:
             # A guard refusal, not "already done": say so (#319).
             conn.rollback()
-            notice = str(e)
+            notice = _refused(admin, uid, "revoke", e)
         except svc.ApiKeyNotFound:
             # Already gone IS success for an idempotent delete, and re-rendering
             # the table shows the operator the current truth. Raising instead
@@ -141,11 +144,26 @@ def delete_api_key_principal(
             conn.commit()
         except svc.NotAnApiKeyPrincipal as e:
             conn.rollback()
-            notice = str(e)
+            notice = _refused(admin, uid, "delete", e)
         except svc.ApiKeyNotFound:
             # Idempotent, for the reason given in revoke_api_key above.
             conn.rollback()
     return _table_response(request, admin, notice)
+
+
+def _refused(
+    admin: AdminUser, uid: int, action: str, exc: svc.NotAnApiKeyPrincipal,
+) -> str:
+    """Log a person's-id refusal and return its notice text (#462).
+
+    The panel renders revoke/delete for service rows only, so reaching this
+    means a hand-crafted POST; the WARNING is its only trace.
+    """
+    _log.warning(
+        "API-key %s refused: user_id=%d is a person, requested by admin %r",
+        action, uid, admin.username,
+    )
+    return str(exc)
 
 
 def _table_response(

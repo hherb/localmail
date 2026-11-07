@@ -4,6 +4,7 @@
 """HTMX admin screens for API keys."""
 from __future__ import annotations
 
+import logging
 import re
 
 import psycopg
@@ -245,6 +246,20 @@ def test_a_person_s_id_is_reported_as_refused_not_done(client, db_conn, admin_id
         cur.execute("SELECT count(*) FROM api_users WHERE id = %s", (admin_id,))
         row = cur.fetchone()
     assert row is not None and row[0] == 1
+
+
+@pytest.mark.parametrize("action", ["revoke", "delete"])
+def test_a_person_s_id_leaves_a_warning(client, admin_id, action, caplog):
+    """#462: the panel renders these buttons for service rows only, so a
+    person's id here is a hand-crafted POST. One WARNING leaves a trace."""
+    path = f"/admin/api-keys/{admin_id}/{action}"
+    with caplog.at_level(logging.WARNING, logger="localmail.serve"):
+        client.post(path, headers={"X-CSRF-Token": _csrf(admin_id, "POST", path)})
+    hits = [r for r in caplog.records
+            if r.name.startswith("localmail.serve") and r.levelno == logging.WARNING]
+    assert len(hits) == 1
+    msg = hits[0].getMessage()
+    assert f"user_id={admin_id}" in msg and action in msg
 
 
 @pytest.mark.parametrize("action", ["revoke", "delete"])

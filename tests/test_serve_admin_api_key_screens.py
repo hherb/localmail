@@ -4,6 +4,7 @@
 """HTMX admin screens for API keys."""
 from __future__ import annotations
 
+import logging
 import re
 
 import psycopg
@@ -248,7 +249,21 @@ def test_a_person_s_id_is_reported_as_refused_not_done(client, db_conn, admin_id
 
 
 @pytest.mark.parametrize("action", ["revoke", "delete"])
-def test_repeating_an_action_shows_no_refusal(client, admin_id, action):
+def test_a_person_s_id_leaves_a_warning(client, admin_id, action, caplog):
+    """#462: the panel renders these buttons for service rows only, so a
+    person's id here is a hand-crafted POST. One WARNING leaves a trace."""
+    path = f"/admin/api-keys/{admin_id}/{action}"
+    with caplog.at_level(logging.WARNING, logger="localmail.serve"):
+        client.post(path, headers={"X-CSRF-Token": _csrf(admin_id, "POST", path)})
+    hits = [r for r in caplog.records
+            if r.name.startswith("localmail.serve") and r.levelno == logging.WARNING]
+    assert len(hits) == 1
+    msg = hits[0].getMessage()
+    assert f"user_id={admin_id} " in msg and action in msg and "'root'" in msg
+
+
+@pytest.mark.parametrize("action", ["revoke", "delete"])
+def test_repeating_an_action_shows_no_refusal(client, admin_id, action, caplog):
     """A double-click reaches the plain not-found branch the second time; that
     is the idempotent "already done", so it must not read as a refusal."""
     client.post(
@@ -258,7 +273,11 @@ def test_repeating_an_action_shows_no_refusal(client, admin_id, action):
     uid_match = re.search(r'id="api-key-row-(\d+)"', client.get("/admin/api-keys").text)
     assert uid_match
     path = f"/admin/api-keys/{uid_match.group(1)}/{action}"
-    for _ in range(2):
-        resp = client.post(path, headers={"X-CSRF-Token": _csrf(admin_id, "POST", path)})
-        assert resp.status_code == 200
-        assert 'role="alert"' not in resp.text
+    with caplog.at_level(logging.WARNING, logger="localmail.serve"):
+        for _ in range(2):
+            resp = client.post(path, headers={"X-CSRF-Token": _csrf(admin_id, "POST", path)})
+            assert resp.status_code == 200
+            assert 'role="alert"' not in resp.text
+    # #462: the WARNING means a hand-crafted POST; a double-click is not one.
+    assert not [r for r in caplog.records
+                if r.name.startswith("localmail.serve") and r.levelno >= logging.WARNING]

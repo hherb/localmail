@@ -113,6 +113,19 @@ def test_revoke_refuses_a_persons_username(runner, db_conn):
     assert row is not None and row[0] == 1
 
 
+@pytest.mark.parametrize("command", ["revoke-api-key", "remove-api-key"])
+def test_a_persons_username_is_named_back_not_as_an_id(runner, db_conn, command):
+    """#462: the operator typed a name, so the refusal names that name. The
+    service layer's wording ("user id=N is a person…") quotes an id they never
+    typed."""
+    setup = runner.invoke(main, ["add-api-user", "amy", "--password", "pw"])
+    assert setup.exit_code == 0, setup.output
+    result = runner.invoke(main, [command, "amy"])
+    assert result.exit_code != 0
+    assert "'amy' is a person's account, not an API key" in result.output
+    assert "user id=" not in result.output
+
+
 def test_a_key_in_use_reports_when_it_was_last_used(runner, db_conn):
     """last_used_at is the whole signal for "is this bot live or abandoned", and
     it travels through a LEFT JOIN projection plus verify_token's

@@ -3392,7 +3392,11 @@ for the full design.
       as "already gone" and re-render the table as if it had succeeded; it now shows a
       `role="alert"` notice, still on a 200 so htmx swaps it (#148); a
       repeated (double-clicked) revoke or delete still shows none, pinned.
-      `ApiKeyNotFound` still derives from bare `Exception`, not
+      Since #462 that branch also logs one WARNING on
+      `localmail.serve.admin` (the buttons render for service rows only, so
+      it means a hand-crafted POST), and `revoke-api-key`/`remove-api-key`
+      name the username typed (`'amy' is a person's account, not an API
+      key`) rather than the service's `user id=N`. `ApiKeyNotFound` still derives from bare `Exception`, not
       `api.errors.NotFound`; every route catches it explicitly, so that is
       latent.
   - **`create_key` runs in one transaction.** A failure after the principal is

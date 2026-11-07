@@ -1298,7 +1298,8 @@ ambient credential). Two panels are built:
   daemon process; the start/stop/restart lifecycle buttons are disabled when
   the daemon is supervised externally (launchd / systemd), which is the case
   under the recommended two-agent deployment. A rejected control (a busy-guard
-  **409**) surfaces as a visible message, never an inert button.
+  **409**) surfaces as a visible message, never an inert button; it stays
+  until your next action, while "Request accepted." clears after 5 seconds.
 
 Users and Imports panels are not built yet; use the web admin at `/admin/*`
 for those. Gmail **Connect** (OAuth) is likewise still web-only.

@@ -114,12 +114,12 @@ def test_revoke_refuses_a_persons_username(runner, db_conn):
 
 
 @pytest.mark.parametrize("command", ["revoke-api-key", "remove-api-key"])
-def test_a_persons_username_is_named_back_not_as_an_id(runner, command):
+def test_a_persons_username_is_named_back_not_as_an_id(runner, db_conn, command):
     """#462: the operator typed a name, so the refusal names that name. The
     service layer's wording ("user id=N is a person…") quotes an id they never
     typed."""
-    runner.invoke(main, ["add-api-user", "amy", "--password", "pw"],
-                  catch_exceptions=False)
+    setup = runner.invoke(main, ["add-api-user", "amy", "--password", "pw"])
+    assert setup.exit_code == 0, setup.output
     result = runner.invoke(main, [command, "amy"])
     assert result.exit_code != 0
     assert "'amy' is a person's account, not an API key" in result.output

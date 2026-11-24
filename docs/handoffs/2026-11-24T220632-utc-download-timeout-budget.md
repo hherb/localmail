@@ -10,8 +10,8 @@
 > #468 and #469 are GUI-only: no server deploy needed.
 >
 > **Open issues: 21.** #469 closes none (it was an open decision, not an
-> issue). **Open Dependabot alerts: 2**: #71 and #185, both open on purpose
-> (carried, not re-checked).
+> issue). **Open Dependabot alerts: 14** (was 2): a new round, see What's
+> next §3. #185 is no longer open; #71 still is, on purpose.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
@@ -69,7 +69,17 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
 ### 3. **Next small slice: pick with the operator**
-- Candidates: **#368** (MCP drops unknown args; design call), **#285**
+- **New Dependabot round (found at push, 2026-11-25, not triaged):**
+  - `mail-parser` #205–#209 (2 high; lock 4.3.0, fixed 4.6.3) and
+    `soupsieve` #201–#204 (2 high; lock 2.9.1, fixed 4.0.0). Both arrive
+    **only** via `docling-slim[standard]` under `[extraction]`
+    (`uv tree --frozen --invert --package mail-parser --package soupsieve`).
+    `grep` finds neither imported in `src/`, and docling converts PDFs only
+    (#399), so likely hygiene. Check whether docling-slim 2.142.1 (capped
+    `<2.143`) admits the fixed versions (`uv lock --dry-run`, read-only), then
+    floor them with the OCR probe, in a worktree (memory: dependency bumps).
+  - `rustls` #115, #198–#200: stale; `Cargo.lock` holds 0.23.46. Dismiss.
+- Other candidates: **#368** (MCP drops unknown args; design call), **#285**
   (ruff/mypy in CI; ruff-pin call), **#383** (`0039`: drop the write-only
   headers GIN), **#369** (DSL contradictions; design calls), #365, #363,
   the unbounded GUI JSON helpers in `http/client.rs` (not filed).
@@ -87,7 +97,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **#459:** harness-lock DSN residual (helpers, rebinding).
 - **`ApiKeyNotFound` still derives from bare `Exception`** (latent).
 - **GUI JSON helpers** in `http/client.rs` still read unbounded bodies.
-- **Dependabot #71 / #185:** left open on purpose.
+- **Dependabot #71:** left open on purpose (no fixed release).
 - **docling > 2.144:** probe the next release when it lands.
 - **emSign G3:** re-check the trust stores after OS updates.
 - **kastellan slice C:** ask whether it is still wanted.

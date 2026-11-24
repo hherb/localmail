@@ -7335,24 +7335,25 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     `.json()` and the error-path `resp.text()` reads in all six (including
     `http_post_empty`, `http_post_json_no_resp` and `http_delete`).
   - **A timeout says so, and every other failure names its cause (#464).**
-    reqwest's `Display` stops at its kind: "error sending request for url
-    (…)" for `send()`, "error decoding response body" for a body read, so a
-    timeout, a reset and a truncated body read alike within each.
-    `BodyError` gained `Timeout` (from `e.is_timeout()`, which walks the
-    source chain), both download enums gained `Timeout { seconds }`
-    (the download budget, `DOWNLOAD_TIMEOUT_SECS` since the bullet
-    below; body included), and the rest go through `body::error_chain`,
-    which appends each `source()` not already in the text. `send()` failures
-    use the same rule via each enum's `send_failed`; a refused connection now reads
-    `…): client error (Connect): tcp connect error: Connection refused (os
-    error 61)` (the errno is the OS's: 111 on Linux). Pinned per call site by
-    a refused-port test (reverting any one to `Network(e.to_string())` fails
-    it), plus a stalled-body timeout test against mockito and a bound
-    `TcpListener` nobody accepts from for `send()`. **Not pinned:** a call
-    site's timeout branch — those tests call `send_failed` directly, since
-    driving a command to its budget costs that budget per test. A pin mismatch on these three commands still reads as `Network`,
-    not `HttpError`'s `CertMismatch`: `send_failed` does not reuse
-    `HttpError::from_reqwest` (pre-existing, now at least carrying its cause).
+    reqwest's `Display` stops at its kind: "error sending request for url (…)"
+    for `send()`, "error decoding response body" for a body read, so a timeout,
+    a reset and a truncated body read alike within each. `BodyError` gained
+    `Timeout` (from `e.is_timeout()`, which walks the source chain), both
+    download enums gained `Timeout { seconds }` (the download budget,
+    `DOWNLOAD_TIMEOUT_SECS` since the bullet below; body included), and the rest
+    go through `body::error_chain`, which appends each `source()` not already in
+    the text. `send()` failures use the same rule via each enum's `send_failed`;
+    a refused connection now reads
+    `…): client error (Connect): tcp connect error: Connection refused (os error 61)`
+    (the errno is the OS's: 111 on Linux). Pinned per call site by a
+    refused-port test (reverting any one to `Network(e.to_string())` fails it),
+    plus a stalled-body timeout test against mockito and a bound `TcpListener`
+    nobody accepts from for `send()`. **Not pinned:** a call site's timeout
+    branch — those tests call `send_failed` directly, since driving a command to
+    its budget costs that budget per test. A pin mismatch on these three
+    commands still reads as `Network`, not `HttpError`'s `CertMismatch`:
+    `send_failed` does not reuse `HttpError::from_reqwest` (pre-existing, now at
+    least carrying its cause).
     - **Downloads have their own 300 s budget** (`body::DOWNLOAD_TIMEOUT_SECS`,
       set per request by `body::download_request`, which overrides the
       client's 15 s `REQUEST_TIMEOUT_SECS`). At 15 s a 100 MiB body needed

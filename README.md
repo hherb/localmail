@@ -1285,9 +1285,10 @@ running `localmail serve` instance over HTTPS and provides search,
 message-reading, attachment download, and connection / account management.
 See [gui/README.md](gui/README.md) for develop / build instructions.
 
-**Downloads.** An attachment or raw message over 100 MiB is refused. Every
-request, body included, has a 15 s budget; running out of it is reported as
-`Timeout: {"seconds":15}` rather than a generic read error, and other
+**Downloads.** An attachment or raw message over 100 MiB is refused. A
+download has a 300 s budget, body included (other GUI requests have 15 s), so
+100 MiB fits on a link of ~2.8 Mbit/s; running out of it is reported as
+`Timeout: {"seconds":300}` rather than a generic read error, and other
 transport failures name their cause (e.g. `Connection refused`). A saved
 attachment is written to a temporary file and renamed into place, so a failed
 save (a full disk) leaves the chosen file as it was, never truncated. The

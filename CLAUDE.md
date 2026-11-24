@@ -7340,22 +7340,31 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     timeout, a reset and a truncated body read alike within each.
     `BodyError` gained `Timeout` (from `e.is_timeout()`, which walks the
     source chain), both download enums gained `Timeout { seconds }`
-    (`REQUEST_TIMEOUT_SECS`, the pinned client's total budget, body
-    included), and the rest go through `body::error_chain`, which appends
-    each `source()` not already in the text. `send()` failures use the same
-    rule via each enum's `send_failed`; a refused connection now reads
+    (the download budget, `DOWNLOAD_TIMEOUT_SECS` since the bullet
+    below; body included), and the rest go through `body::error_chain`,
+    which appends each `source()` not already in the text. `send()` failures
+    use the same rule via each enum's `send_failed`; a refused connection now reads
     `…): client error (Connect): tcp connect error: Connection refused (os
     error 61)` (the errno is the OS's: 111 on Linux). Pinned per call site by
     a refused-port test (reverting any one to `Network(e.to_string())` fails
     it), plus a stalled-body timeout test against mockito and a bound
     `TcpListener` nobody accepts from for `send()`. **Not pinned:** a call
     site's timeout branch — those tests call `send_failed` directly, since
-    driving a command to its 15 s budget costs 15 s a test. **The 15 s budget
-    is unchanged**: a 100 MiB attachment needs ~56 Mbit/s to finish inside
-    it. Whether downloads get a longer one (`RequestBuilder::timeout`) is
-    open. A pin mismatch on these three commands still reads as `Network`,
+    driving a command to its budget costs that budget per test. A pin mismatch on these three commands still reads as `Network`,
     not `HttpError`'s `CertMismatch`: `send_failed` does not reuse
     `HttpError::from_reqwest` (pre-existing, now at least carrying its cause).
+    - **Downloads have their own 300 s budget** (`body::DOWNLOAD_TIMEOUT_SECS`,
+      set per request by `body::download_request`, which overrides the
+      client's 15 s `REQUEST_TIMEOUT_SECS`). At 15 s a 100 MiB body needed
+      ~56 Mbit/s, so a big attachment over WireGuard always timed out; 300 s
+      needs ~2.8 Mbit/s. All three commands report a timeout as that number.
+      Every other GUI request keeps 15 s. Pinned by the builder's own
+      `timeout()` and, per command module, a source count requiring every
+      `.send()` to come from `download_request` (a bare `client.get` would
+      silently fall back to 15 s with every behavioural test green; driving
+      it for real would cost 300 s a test). Each of the four mutations
+      (no `.timeout`, a bare get in either module, the old number in
+      `send_failed`) fails its own test.
     - **None of it reached the screen until the review of #468.**
       `AttachmentRow`, `AttachmentPreviewModal` and `RawBodyView` rendered
       the rejection with `String(e)`, and Tauri rejects with the `{kind,

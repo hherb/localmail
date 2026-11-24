@@ -14,9 +14,10 @@ use thiserror::Error;
 
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
-use crate::http::body::{error_chain, read_capped, BodyError};
+use crate::http::body::{
+    download_request, error_chain, read_capped, BodyError, DOWNLOAD_TIMEOUT_SECS,
+};
 use crate::http::client::build_pinned_client;
-use crate::http::client::REQUEST_TIMEOUT_SECS;
 use crate::http::errors::HttpError;
 use crate::storage::keyring::KeyringStore;
 
@@ -47,7 +48,7 @@ pub enum RawMessageError {
     #[error("network error: {0}")]
     Network(String),
 
-    /// The pinned client's total timeout, which includes the body (#464).
+    /// The download's total budget, body included (`DOWNLOAD_TIMEOUT_SECS`).
     #[error("request timed out after {seconds}s")]
     Timeout { seconds: u64 },
 
@@ -66,7 +67,7 @@ impl From<BodyError> for RawMessageError {
                 max: MAX_RAW_BYTES,
             },
             BodyError::Timeout => RawMessageError::Timeout {
-                seconds: REQUEST_TIMEOUT_SECS,
+                seconds: DOWNLOAD_TIMEOUT_SECS,
             },
             BodyError::Read(msg) => RawMessageError::Read(msg),
         }
@@ -78,7 +79,7 @@ impl RawMessageError {
     fn send_failed(e: reqwest::Error) -> Self {
         if e.is_timeout() {
             RawMessageError::Timeout {
-                seconds: REQUEST_TIMEOUT_SECS,
+                seconds: DOWNLOAD_TIMEOUT_SECS,
             }
         } else {
             RawMessageError::Network(error_chain(&e))
@@ -95,9 +96,7 @@ pub async fn get_message_raw(
     let encoded_id =
         ::url::form_urlencoded::byte_serialize(message_id.as_bytes()).collect::<String>();
     let endpoint = format!("{url}v1/messages/{encoded_id}/raw");
-    let resp = client
-        .get(&endpoint)
-        .bearer_auth(&token)
+    let resp = download_request(&client, &endpoint, &token)
         .send()
         .await
         .map_err(RawMessageError::send_failed)?;
@@ -137,7 +136,7 @@ mod tests {
         assert!(matches!(
             RawMessageError::from(BodyError::Timeout),
             RawMessageError::Timeout {
-                seconds: REQUEST_TIMEOUT_SECS
+                seconds: DOWNLOAD_TIMEOUT_SECS
             }
         ));
         assert!(matches!(
@@ -265,7 +264,7 @@ mod tests {
     // A store pointing at a port nothing listens on, so every command's
     // send() fails with a refusal: pins that the call site keeps the cause
     // chain. Not its timeout branch: that is pinned on `send_failed` itself,
-    // since driving a command to its 15 s budget would cost 15 s a test.
+    // since driving a command to its 300 s budget would cost 300 s a test.
     fn refused_store() -> KeyringStore {
         let addr = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -309,7 +308,7 @@ mod tests {
         assert!(matches!(
             RawMessageError::send_failed(err),
             RawMessageError::Timeout {
-                seconds: REQUEST_TIMEOUT_SECS
+                seconds: DOWNLOAD_TIMEOUT_SECS
             }
         ));
     }
@@ -332,5 +331,17 @@ mod tests {
             }
             other => panic!("expected Network, got {other:?}"),
         }
+    }
+
+    // See attachments' twin: a bare `client.get(…).send()` would fall back
+    // to the client's 15 s with every other test still green.
+    #[test]
+    fn every_request_carries_the_download_budget() {
+        let prod = include_str!("raw_message.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(prod.matches("download_request(").count(), 1);
+        assert_eq!(prod.matches(".send()").count(), 1);
     }
 }

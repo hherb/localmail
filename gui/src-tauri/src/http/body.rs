@@ -7,6 +7,27 @@
 //! could exhaust memory. [`read_capped`] reads chunk by chunk and stops as
 //! soon as the running total passes the ceiling.
 
+use std::time::Duration;
+
+/// Total budget for one download, headers and body (#464 follow-up). It
+/// overrides the client's `REQUEST_TIMEOUT_SECS` (15 s), which needs
+/// ~56 Mbit/s to move a 100 MiB body; 300 s needs ~2.8 Mbit/s. A stalled
+/// server is still cut off, just later.
+pub const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+
+/// The GET every capped download sends: bearer auth plus the download
+/// budget. Callers report a timeout as `DOWNLOAD_TIMEOUT_SECS`.
+pub fn download_request(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .get(url)
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
+}
+
 /// Why a capped read failed. Callers map this onto their own error enum.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BodyError {
@@ -15,7 +36,7 @@ pub enum BodyError {
     /// a lower bound on the real size, which is unknown by construction.
     TooLarge { size: u64 },
     /// A timeout mid-body (#464): reqwest reports any in the cause chain, in
-    /// practice the client's total timeout, which fires first. Kept apart from
+    /// practice the request's total budget, which fires first. Kept apart from
     /// `Read` because the remedy differs: a slow link, not a broken server.
     Timeout,
     /// The transport failed mid-body; the text carries the cause chain.
@@ -98,7 +119,6 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     // Long enough for a real read on a loaded machine; short enough that a
     // regression to buffer-then-check (which never returns on an endless
@@ -109,6 +129,18 @@ mod tests {
     // hyper may hand back several written chunks as one read, so "stopped
     // near the cap" is asserted with slack rather than to the byte.
     use super::test_support::MAX_OVERSHOOT;
+
+    #[test]
+    fn a_download_request_carries_the_download_budget() {
+        let req = download_request(&reqwest::Client::new(), "http://h/x", "tok")
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.timeout(),
+            Some(&Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
+        );
+        assert_eq!(req.headers()[reqwest::header::AUTHORIZATION], "Bearer tok");
+    }
 
     async fn get(server: &mockito::Server, path: &str) -> reqwest::Response {
         reqwest::Client::new()

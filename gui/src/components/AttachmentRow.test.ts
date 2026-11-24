@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("../lib/tauri", () => ({
   downloadAttachment: vi.fn(async () => {
     // What the command really rejects with (#464).
-    throw { kind: "Timeout", detail: { seconds: 15 } };
+    throw { kind: "Timeout", detail: { seconds: 300 } };
   }),
 }));
 
@@ -19,6 +19,6 @@ describe("AttachmentRow", () => {
       props: { filename: "report.pdf", sha256: "a".repeat(64) },
     });
     await fireEvent.click(getByRole("button", { name: /download/i }));
-    expect(await findByText('Timeout: {"seconds":15}')).toBeTruthy();
+    expect(await findByText('Timeout: {"seconds":300}')).toBeTruthy();
   });
 });

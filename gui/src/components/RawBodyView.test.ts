@@ -40,10 +40,10 @@ describe("RawBodyView", () => {
   // What the command really rejects with (#464): a {kind, detail} object,
   // which String() rendered as "[object Object]".
   it("renders a command error, not [object Object]", async () => {
-    invokeMock.mockRejectedValue({ kind: "Timeout", detail: { seconds: 15 } });
+    invokeMock.mockRejectedValue({ kind: "Timeout", detail: { seconds: 300 } });
     const { getByRole, findByText } = render(RawBodyView, { props: { messageId: "42" } });
     await fireEvent.click(getByRole("button", { name: /load/i }));
-    expect(await findByText('Timeout: {"seconds":15}')).toBeTruthy();
+    expect(await findByText('Timeout: {"seconds":300}')).toBeTruthy();
   });
 
   it("renders the encoding dropdown once bytes are loaded", async () => {

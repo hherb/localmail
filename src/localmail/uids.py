@@ -27,6 +27,33 @@ import psycopg
 ARCHIVE_AUTH_METHOD = "archive"
 
 
+#: UIDs per SEARCH window. imaplib refuses a response line over 1,000,000
+#: bytes (``imaplib._MAXLINE``) and a SEARCH reply is one line, so a full sync
+#: of a large ``[Gmail]/All Mail`` crashed every pass. At the widest UID (10
+#: digits) plus a separator a full window is 550,000 bytes.
+UID_SEARCH_WINDOW = 50_000
+
+
+def uid_search_specs(first: int, server_uidnext: int, *, window: int) -> list[str]:
+    """UID SEARCH ranges covering ``first`` onward, each at most `window` UIDs.
+
+    Closed windows tile ``first .. server_uidnext - 1``; the last range is
+    open (``lo:*``) so a UID at or past a stale or missing UIDNEXT is still
+    found. With no usable UIDNEXT (0, or at/below `first`) it is the single
+    ``first:*`` sweep sync always used. The ``*`` quirk (``N:*`` returns the
+    last UID even when it is below N) is the caller's filter to apply.
+    """
+    if window < 1:
+        raise ValueError(f"window must be positive, got {window}")
+    specs = []
+    lo = first
+    while lo + window < server_uidnext:
+        specs.append(f"{lo}:{lo + window - 1}")
+        lo += window
+    specs.append(f"{lo}:*")
+    return specs
+
+
 def next_uid_after(max_uid: int | None) -> int:
     """First free UID in a mailbox whose highest stored UID is `max_uid`.
 

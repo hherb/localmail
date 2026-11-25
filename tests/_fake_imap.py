@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import imaplib
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -45,6 +46,10 @@ class FakeIMAPClient:
         # message was expunged between SEARCH and FETCH. Neither the FETCH nor
         # the targeted probe finds them.
         self.phantom_uids: set[int] = set()
+        # imaplib refuses a response line over ``_MAXLINE`` bytes, and a SEARCH
+        # reply is one line of UIDs. Modelled as a cap on the result count: a
+        # SEARCH answering more raises what imaplib raises.
+        self.max_search_results: int | None = None
 
     # --- test setup helpers (not part of the IMAP protocol) ------------------
 
@@ -106,6 +111,12 @@ class FakeIMAPClient:
         """
         self.search_call_count += 1
         assert self._selected is not None
+        hits = self._search(criteria)
+        if self.max_search_results is not None and len(hits) > self.max_search_results:
+            raise imaplib.IMAP4.error("command: SEARCH => got more than 1000000 bytes")
+        return hits
+
+    def _search(self, criteria) -> list[int]:
         if criteria == "ALL" or criteria == ["ALL"]:
             return sorted(set(self._selected.messages) | self.phantom_uids)
         if isinstance(criteria, list) and len(criteria) == 2 and criteria[0] == "UID":

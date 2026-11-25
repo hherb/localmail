@@ -17,9 +17,10 @@ use thiserror::Error;
 
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
-use crate::http::body::{error_chain, read_capped, BodyError};
+use crate::http::body::{
+    download_request, error_chain, is_budget_timeout, read_capped, BodyError, DOWNLOAD_TIMEOUT_SECS,
+};
 use crate::http::client::build_pinned_client;
-use crate::http::client::REQUEST_TIMEOUT_SECS;
 use crate::http::errors::HttpError;
 use crate::save_file::write_replacing;
 use crate::storage::keyring::KeyringStore;
@@ -67,7 +68,7 @@ pub enum AttachmentError {
     #[error("network error: {0}")]
     Network(String),
 
-    /// The pinned client's total timeout, which includes the body (#464).
+    /// The download's total budget, body included (`DOWNLOAD_TIMEOUT_SECS`).
     #[error("request timed out after {seconds}s")]
     Timeout { seconds: u64 },
 
@@ -96,7 +97,7 @@ impl From<BodyError> for AttachmentError {
                 max: MAX_ATTACHMENT_BYTES,
             },
             BodyError::Timeout => AttachmentError::Timeout {
-                seconds: REQUEST_TIMEOUT_SECS,
+                seconds: DOWNLOAD_TIMEOUT_SECS,
             },
             BodyError::Read(msg) => AttachmentError::Read(msg),
         }
@@ -104,11 +105,12 @@ impl From<BodyError> for AttachmentError {
 }
 
 impl AttachmentError {
-    /// A failed `send()`: a timeout says so; anything else keeps its causes.
+    /// A failed `send()`: the budget running out says so; anything else,
+    /// an OS timeout included, keeps its causes.
     fn send_failed(e: reqwest::Error) -> Self {
-        if e.is_timeout() {
+        if is_budget_timeout(&e) {
             AttachmentError::Timeout {
-                seconds: REQUEST_TIMEOUT_SECS,
+                seconds: DOWNLOAD_TIMEOUT_SECS,
             }
         } else {
             AttachmentError::Network(error_chain(&e))
@@ -131,9 +133,7 @@ pub async fn download_attachment(
     let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
     let endpoint = format!("{url}v1/attachments/{sha256}");
-    let resp = client
-        .get(&endpoint)
-        .bearer_auth(&token)
+    let resp = download_request(&client, &endpoint, &token)
         .send()
         .await
         .map_err(AttachmentError::send_failed)?;
@@ -181,9 +181,7 @@ pub async fn fetch_attachment_bytes(
     let (url, pin, token) = read_authenticated(store)?;
     let client = build_pinned_client(&pin)?;
     let endpoint = format!("{url}v1/attachments/{sha256}");
-    let resp = client
-        .get(&endpoint)
-        .bearer_auth(&token)
+    let resp = download_request(&client, &endpoint, &token)
         .send()
         .await
         .map_err(AttachmentError::send_failed)?;

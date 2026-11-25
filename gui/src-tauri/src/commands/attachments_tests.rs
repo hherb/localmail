@@ -26,7 +26,7 @@ fn body_errors_map_onto_this_commands_ceiling() {
     assert!(matches!(
         AttachmentError::from(BodyError::Timeout),
         AttachmentError::Timeout {
-            seconds: REQUEST_TIMEOUT_SECS
+            seconds: DOWNLOAD_TIMEOUT_SECS
         }
     ));
     assert!(matches!(
@@ -300,10 +300,10 @@ fn attachment_error_serializes_with_kind_and_detail_tags() {
         serde_json::json!({"kind": "Network", "detail": "connection refused"}),
     );
 
-    let timeout = AttachmentError::Timeout { seconds: 15 };
+    let timeout = AttachmentError::Timeout { seconds: 300 };
     assert_eq!(
         serde_json::to_value(&timeout).unwrap(),
-        serde_json::json!({"kind": "Timeout", "detail": {"seconds": 15}}),
+        serde_json::json!({"kind": "Timeout", "detail": {"seconds": 300}}),
     );
 
     let read = AttachmentError::Read("stream closed".into());
@@ -340,7 +340,7 @@ fn auth_pre_check_wraps_via_from_auth_error() {
 // A store pointing at a port nothing listens on, so every command's
 // send() fails with a refusal: pins that the call site keeps the cause
 // chain. Not its timeout branch: that is pinned on `send_failed` itself,
-// since driving a command to its 15 s budget would cost 15 s a test.
+// since driving a command to its 300 s budget would cost 300 s a test.
 fn refused_store() -> KeyringStore {
     let addr = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -394,7 +394,7 @@ async fn a_send_timeout_is_reported_as_a_timeout() {
     assert!(matches!(
         AttachmentError::send_failed(err),
         AttachmentError::Timeout {
-            seconds: REQUEST_TIMEOUT_SECS
+            seconds: DOWNLOAD_TIMEOUT_SECS
         }
     ));
 }
@@ -417,4 +417,19 @@ async fn a_refused_send_is_a_network_error_with_its_cause() {
         }
         other => panic!("expected Network, got {other:?}"),
     }
+}
+
+// The download budget holds only if every request here goes through
+// `download_request`: a bare `client.get(…).send()` falls back to the
+// client's 15 s with every other test still green.
+#[test]
+fn every_request_carries_the_download_budget() {
+    let prod = include_str!("attachments.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap();
+    assert_eq!(prod.matches("download_request(").count(), 2);
+    assert_eq!(prod.matches(".send()").count(), 2);
+    // And none re-chains its own `.timeout(…)` over the budget.
+    assert_eq!(prod.matches(".timeout(").count(), 0);
 }

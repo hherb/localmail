@@ -154,11 +154,11 @@ describe("AttachmentPreviewModal", () => {
   // What the command really rejects with (#464): a {kind, detail} object,
   // which String() rendered as "[object Object]".
   it("renders a fetch error, not [object Object]", async () => {
-    mockFetch.mockRejectedValue({ kind: "Timeout", detail: { seconds: 15 } });
+    mockFetch.mockRejectedValue({ kind: "Timeout", detail: { seconds: 300 } });
     const { container } = render(AttachmentPreviewModal, {
       props: { sha256: "abc", filename: "photo.png", onClose: () => {} },
     });
     await new Promise((r) => setTimeout(r, 50));
-    expect(container.querySelector(".error")?.textContent).toBe('Timeout: {"seconds":15}');
+    expect(container.querySelector(".error")?.textContent).toBe('Timeout: {"seconds":300}');
   });
 });

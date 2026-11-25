@@ -7335,27 +7335,55 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     `.json()` and the error-path `resp.text()` reads in all six (including
     `http_post_empty`, `http_post_json_no_resp` and `http_delete`).
   - **A timeout says so, and every other failure names its cause (#464).**
-    reqwest's `Display` stops at its kind: "error sending request for url
-    (…)" for `send()`, "error decoding response body" for a body read, so a
-    timeout, a reset and a truncated body read alike within each.
-    `BodyError` gained `Timeout` (from `e.is_timeout()`, which walks the
-    source chain), both download enums gained `Timeout { seconds }`
-    (`REQUEST_TIMEOUT_SECS`, the pinned client's total budget, body
-    included), and the rest go through `body::error_chain`, which appends
-    each `source()` not already in the text. `send()` failures use the same
-    rule via each enum's `send_failed`; a refused connection now reads
-    `…): client error (Connect): tcp connect error: Connection refused (os
-    error 61)` (the errno is the OS's: 111 on Linux). Pinned per call site by
-    a refused-port test (reverting any one to `Network(e.to_string())` fails
-    it), plus a stalled-body timeout test against mockito and a bound
-    `TcpListener` nobody accepts from for `send()`. **Not pinned:** a call
-    site's timeout branch — those tests call `send_failed` directly, since
-    driving a command to its 15 s budget costs 15 s a test. **The 15 s budget
-    is unchanged**: a 100 MiB attachment needs ~56 Mbit/s to finish inside
-    it. Whether downloads get a longer one (`RequestBuilder::timeout`) is
-    open. A pin mismatch on these three commands still reads as `Network`,
-    not `HttpError`'s `CertMismatch`: `send_failed` does not reuse
-    `HttpError::from_reqwest` (pre-existing, now at least carrying its cause).
+    reqwest's `Display` stops at its kind: "error sending request for url (…)"
+    for `send()`, "error decoding response body" for a body read, so a timeout,
+    a reset and a truncated body read alike within each. `BodyError` gained
+    `Timeout` (from `e.is_timeout()`, which walks the source chain), both
+    download enums gained `Timeout { seconds }` (the download budget,
+    `DOWNLOAD_TIMEOUT_SECS` since the bullet below; body included), and the rest
+    go through `body::error_chain`, which appends each `source()` not already in
+    the text. `send()` failures use the same rule via each enum's `send_failed`;
+    a refused connection now reads
+    `…): client error (Connect): tcp connect error: Connection refused (os error 61)`
+    (the errno is the OS's: 111 on Linux). Pinned per call site by a
+    refused-port test (reverting any one to `Network(e.to_string())` fails it),
+    plus a stalled-body timeout test against mockito and a bound `TcpListener`
+    nobody accepts from for `send()`. **Not pinned:** a call site's timeout
+    branch — those tests call `send_failed` directly, since driving a command to
+    its budget costs that budget per test. A pin mismatch on these three
+    commands still reads as `Network`, not `HttpError`'s `CertMismatch`:
+    `send_failed` does not reuse `HttpError::from_reqwest` (pre-existing, now at
+    least carrying its cause).
+    - **Downloads have their own 300 s budget** (`body::DOWNLOAD_TIMEOUT_SECS`,
+      set per request by `body::download_request`, which overrides the
+      client's 15 s `REQUEST_TIMEOUT_SECS`). At 15 s a 100 MiB body needed
+      ~56 Mbit/s, so it timed out on any slower link (e.g. over WireGuard);
+      300 s needs at least ~2.8 Mbit/s. All three commands report a timeout
+      as that number. Every other GUI request keeps 15 s. Pinned by the
+      builder's own `timeout()`, the literal 300 (every other assertion
+      compares the constant with itself, so a budget put back to 15 s left
+      them green), and, per command module, source counts: exactly N
+      `download_request(` and N `.send()`, and no `.timeout(` (a bare
+      `client.get` would silently fall back to 15 s with every behavioural
+      test green; driving it for real would cost 300 s a test).
+    - **Only reqwest's own timeout is the budget (`body::is_budget_timeout`,
+      review of #469).** `reqwest::Error::is_timeout()` is also true for an
+      `io::Error` of kind `TimedOut` anywhere in the chain, which reqwest
+      never builds: it is the kernel's ETIMEDOUT. With 300 s two of those
+      fire first: keepalive (reqwest's default, 15 s + 3 × 15 s) giving up on
+      a server gone mid-body at ~60 s, and an unanswered connect at ~75 s on
+      macOS (~127 s on Linux). Both were reported as `Timeout {seconds: 300}`
+      and lost the `os error 60` cause; they are `Network`/`Read` with their
+      chain now. All three sites (`transport_error` and both `send_failed`)
+      are pinned by a source count, since no test can raise a kernel
+      ETIMEDOUT; the rule itself by a fabricated chain. Not reproduced end to
+      end. Each of seven mutations fails its own test: `.timeout` removed, a
+      bare get in either module, a re-chained `.timeout`, the old number in
+      `RawMessageError::send_failed`, the constant at 15, and a site back on
+      `is_timeout()`. **Known cost:** a dead host now takes the OS connect
+      timeout (~75 s) to fail where it took 15 s; a client `connect_timeout`
+      would bring that back but would be reported as the 300 s budget, so it
+      was not added.
     - **None of it reached the screen until the review of #468.**
       `AttachmentRow`, `AttachmentPreviewModal` and `RawBodyView` rendered
       the rejection with `String(e)`, and Tauri rejects with the `{kind,

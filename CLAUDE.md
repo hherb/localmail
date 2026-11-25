@@ -7357,15 +7357,33 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     - **Downloads have their own 300 s budget** (`body::DOWNLOAD_TIMEOUT_SECS`,
       set per request by `body::download_request`, which overrides the
       client's 15 s `REQUEST_TIMEOUT_SECS`). At 15 s a 100 MiB body needed
-      ~56 Mbit/s, so a big attachment over WireGuard always timed out; 300 s
-      needs ~2.8 Mbit/s. All three commands report a timeout as that number.
-      Every other GUI request keeps 15 s. Pinned by the builder's own
-      `timeout()` and, per command module, a source count requiring every
-      `.send()` to come from `download_request` (a bare `client.get` would
-      silently fall back to 15 s with every behavioural test green; driving
-      it for real would cost 300 s a test). Each of the four mutations
-      (no `.timeout`, a bare get in either module, the old number in
-      `send_failed`) fails its own test.
+      ~56 Mbit/s, so it timed out on any slower link (e.g. over WireGuard);
+      300 s needs at least ~2.8 Mbit/s. All three commands report a timeout
+      as that number. Every other GUI request keeps 15 s. Pinned by the
+      builder's own `timeout()`, the literal 300 (every other assertion
+      compares the constant with itself, so a budget put back to 15 s left
+      them green), and, per command module, source counts: exactly N
+      `download_request(` and N `.send()`, and no `.timeout(` (a bare
+      `client.get` would silently fall back to 15 s with every behavioural
+      test green; driving it for real would cost 300 s a test).
+    - **Only reqwest's own timeout is the budget (`body::is_budget_timeout`,
+      review of #469).** `reqwest::Error::is_timeout()` is also true for an
+      `io::Error` of kind `TimedOut` anywhere in the chain, which reqwest
+      never builds: it is the kernel's ETIMEDOUT. With 300 s two of those
+      fire first: keepalive (reqwest's default, 15 s + 3 × 15 s) giving up on
+      a server gone mid-body at ~60 s, and an unanswered connect at ~75 s on
+      macOS (~127 s on Linux). Both were reported as `Timeout {seconds: 300}`
+      and lost the `os error 60` cause; they are `Network`/`Read` with their
+      chain now. All three sites (`transport_error` and both `send_failed`)
+      are pinned by a source count, since no test can raise a kernel
+      ETIMEDOUT; the rule itself by a fabricated chain. Not reproduced end to
+      end. Each of seven mutations fails its own test: `.timeout` removed, a
+      bare get in either module, a re-chained `.timeout`, the old number in
+      `RawMessageError::send_failed`, the constant at 15, and a site back on
+      `is_timeout()`. **Known cost:** a dead host now takes the OS connect
+      timeout (~75 s) to fail where it took 15 s; a client `connect_timeout`
+      would bring that back but would be reported as the 300 s budget, so it
+      was not added.
     - **None of it reached the screen until the review of #468.**
       `AttachmentRow`, `AttachmentPreviewModal` and `RawBodyView` rendered
       the rejection with `String(e)`, and Tauri rejects with the `{kind,

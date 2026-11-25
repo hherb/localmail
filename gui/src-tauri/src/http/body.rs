@@ -5,14 +5,16 @@
 //! header) has none, and `resp.bytes().await` then buffers the whole body
 //! before any post-hoc length check runs — so an endless or huge response
 //! could exhaust memory. [`read_capped`] reads chunk by chunk and stops as
-//! soon as the running total passes the ceiling.
+//! soon as the running total passes the ceiling. It also owns the download
+//! time budget ([`download_request`]) and what counts as running out of it
+//! ([`is_budget_timeout`]).
 
 use std::time::Duration;
 
-/// Total budget for one download, headers and body (#464 follow-up). It
-/// overrides the client's `REQUEST_TIMEOUT_SECS` (15 s), which needs
-/// ~56 Mbit/s to move a 100 MiB body; 300 s needs ~2.8 Mbit/s. A stalled
-/// server is still cut off, just later.
+/// Total budget for one download: connect, headers and body (#464
+/// follow-up). It overrides the client's `REQUEST_TIMEOUT_SECS` (15 s), which
+/// needs ~56 Mbit/s to move a 100 MiB body; 300 s needs ~2.8 Mbit/s. A
+/// stalled server is still cut off, just later.
 pub const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 
 /// The GET every capped download sends: bearer auth plus the download
@@ -28,6 +30,29 @@ pub fn download_request(
         .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
 }
 
+/// Whether `e` is the request's own time budget running out. `is_timeout()`
+/// alone also matches an `io::Error` of kind `TimedOut` anywhere in the chain,
+/// which reqwest never builds itself: it is the kernel's ETIMEDOUT (keepalive
+/// giving up on a dead peer after ~60 s, an unanswered connect after ~75 s on
+/// macOS). Both fire inside the 300 s budget, so reporting them as it would
+/// name the wrong number and drop the cause `error_chain` keeps.
+pub fn is_budget_timeout(e: &reqwest::Error) -> bool {
+    e.is_timeout() && !os_timeout_in_chain(e)
+}
+
+fn os_timeout_in_chain(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur = Some(err);
+    while let Some(e) = cur {
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            if io.kind() == std::io::ErrorKind::TimedOut {
+                return true;
+            }
+        }
+        cur = e.source();
+    }
+    false
+}
+
 /// Why a capped read failed. Callers map this onto their own error enum.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BodyError {
@@ -35,9 +60,9 @@ pub enum BodyError {
     /// the server sent one, else the bytes received when the read stopped —
     /// a lower bound on the real size, which is unknown by construction.
     TooLarge { size: u64 },
-    /// A timeout mid-body (#464): reqwest reports any in the cause chain, in
-    /// practice the request's total budget, which fires first. Kept apart from
-    /// `Read` because the remedy differs: a slow link, not a broken server.
+    /// The request's time budget ran out mid-body (#464); an OS timeout is a
+    /// `Read` ([`is_budget_timeout`]). Kept apart from `Read` because the
+    /// remedy differs: a slow link, not a broken server.
     Timeout,
     /// The transport failed mid-body; the text carries the cause chain.
     Read(String),
@@ -64,7 +89,7 @@ pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 /// How a failed reqwest call maps onto [`BodyError`]: a timeout, or the
 /// failure with its causes.
 fn transport_error(e: reqwest::Error) -> BodyError {
-    if e.is_timeout() {
+    if is_budget_timeout(&e) {
         BodyError::Timeout
     } else {
         BodyError::Read(error_chain(&e))
@@ -129,6 +154,82 @@ mod tests {
     // hyper may hand back several written chunks as one read, so "stopped
     // near the cap" is asserted with slack rather than to the byte.
     use super::test_support::MAX_OVERSHOOT;
+
+    // Pinned as a literal: every other assertion compares the constant with
+    // itself, so a budget put back to 15 s left them all green.
+    #[test]
+    fn the_download_budget_is_300_seconds() {
+        assert_eq!(DOWNLOAD_TIMEOUT_SECS, 300);
+    }
+
+    // A kernel timeout reaches reqwest as an io::Error under hyper's wrapper.
+    #[derive(Debug)]
+    struct Wrap(std::io::Error);
+    impl std::fmt::Display for Wrap {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrapped")
+        }
+    }
+    impl std::error::Error for Wrap {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn an_os_timeout_in_the_chain_is_not_the_budget() {
+        let etimedout = std::io::Error::from(std::io::ErrorKind::TimedOut);
+        assert!(os_timeout_in_chain(&Wrap(etimedout)));
+        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        assert!(!os_timeout_in_chain(&Wrap(reset)));
+        assert!(!os_timeout_in_chain(&Layer(
+            "outer",
+            Some(Box::new(Layer("root", None)))
+        )));
+    }
+
+    // All three classification sites must ask `is_budget_timeout`: a bare
+    // `is_timeout()` labels an OS timeout as the budget, with every
+    // behavioural test still green (none can raise a kernel ETIMEDOUT).
+    #[test]
+    fn every_timeout_check_goes_through_is_budget_timeout() {
+        for (name, src, sites) in [
+            ("body.rs", include_str!("body.rs"), 1),
+            (
+                "attachments.rs",
+                include_str!("../commands/attachments.rs"),
+                1,
+            ),
+            (
+                "raw_message.rs",
+                include_str!("../commands/raw_message.rs"),
+                1,
+            ),
+        ] {
+            let prod = src.split("#[cfg(test)]").next().unwrap();
+            assert_eq!(
+                prod.matches("if is_budget_timeout(&e)").count(),
+                sites,
+                "{name}"
+            );
+        }
+        let prod = include_str!("body.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(
+            prod.matches(".is_timeout()").count(),
+            1,
+            "only inside is_budget_timeout"
+        );
+        for src in [
+            include_str!("../commands/attachments.rs"),
+            include_str!("../commands/raw_message.rs"),
+        ] {
+            let prod = src.split("#[cfg(test)]").next().unwrap();
+            assert_eq!(prod.matches("is_timeout()").count(), 0);
+        }
+    }
 
     #[test]
     fn a_download_request_carries_the_download_budget() {

@@ -300,10 +300,10 @@ fn attachment_error_serializes_with_kind_and_detail_tags() {
         serde_json::json!({"kind": "Network", "detail": "connection refused"}),
     );
 
-    let timeout = AttachmentError::Timeout { seconds: 15 };
+    let timeout = AttachmentError::Timeout { seconds: 300 };
     assert_eq!(
         serde_json::to_value(&timeout).unwrap(),
-        serde_json::json!({"kind": "Timeout", "detail": {"seconds": 15}}),
+        serde_json::json!({"kind": "Timeout", "detail": {"seconds": 300}}),
     );
 
     let read = AttachmentError::Read("stream closed".into());
@@ -430,4 +430,6 @@ fn every_request_carries_the_download_budget() {
         .unwrap();
     assert_eq!(prod.matches("download_request(").count(), 2);
     assert_eq!(prod.matches(".send()").count(), 2);
+    // And none re-chains its own `.timeout(…)` over the budget.
+    assert_eq!(prod.matches(".timeout(").count(), 0);
 }

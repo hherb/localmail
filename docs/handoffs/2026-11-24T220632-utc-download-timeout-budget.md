@@ -44,19 +44,27 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 |---|---|
 | `ff598ba` | `http::body::DOWNLOAD_TIMEOUT_SECS = 300` and `body::download_request` (bearer + `RequestBuilder::timeout`, overriding the client's 15 s `REQUEST_TIMEOUT_SECS`). `download_attachment`, `fetch_attachment_bytes`, `get_message_raw` use it; their `Timeout { seconds }` now reports 300. 100 MiB needed ~56 Mbit/s at 15 s, ~2.8 Mbit/s at 300 s. Other GUI requests keep 15 s. README "Downloads" and CLAUDE.md (#464 bullet) updated; TS test fixtures say 300 |
 | `c0a90a6` | CLAUDE.md reflow of the #464 bullet |
-| next | this handoff |
+| `454f568`, `74dce05` | this handoff |
+| next | `/finalcheck` fixes: `body::is_budget_timeout` (an OS `ETIMEDOUT` in the chain is `Network`/`Read` with its cause, not the 300 s budget); the 300 pinned as a literal; a `.timeout(` count of 0 per command module; serde fixtures at 300; doc wording |
 
-- **Verification:** `cargo test --lib` **147 passing** (144 → 147);
+- **Verification:** `cargo test --lib` **150 passing** (144 → 147 → 150 after
+  `/finalcheck`);
   `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt --check`
   clean; `npm test -- --run` **540 passing**, `npm run check` clean. No
   Python touched, so pytest and mypy were not re-run.
 - **Mutations, each failing its own test:** `.timeout` removed from
   `download_request`; a bare `client.get(…).send()` in `attachments.rs`; the
   same in `raw_message.rs`; the old number in `RawMessageError::send_failed`.
-- **How the callers are pinned:** a source count per module (every `.send()`
-  must come from `download_request`). Behavioural would cost 300 s a test.
-- **No review agents were run** this session (small diff). `/finalcheck`
-  before merging is your call.
+- **How the callers are pinned:** source counts per module (exactly N
+  `download_request(` and N `.send()`, no `.timeout(`). Behavioural would
+  cost 300 s a test.
+- **`/finalcheck` review** (four agents) found one real defect:
+  `is_timeout()` also matches the kernel's `ETIMEDOUT`, which the 15 s budget
+  used to beat and 300 s does not (keepalive ~60 s on a dead peer, connect
+  ~75 s). Fixed by `body::is_budget_timeout`; three more mutations (constant
+  at 15, re-chained `.timeout`, a site back on `is_timeout()`) each fail
+  their own test. Not reproduced end to end: drop WireGuard mid-download and
+  the message should name `os error 60`, not 300 s.
 
 ## What's next
 
@@ -110,16 +118,18 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 1. **Operator picked the download budget** (decision 0a).
 2. **300 s** (mine): 100 MiB at ~2.8 Mbit/s; a stalled server is still cut
-   off. Applied per request, not by a second client, so the TLS pin and
-   everything else stay shared.
+   off. Applied per request, not by a second client builder, so the TLS
+   pin and verifier stay one code path.
 3. **Raw-message download gets it too** (mine): same 100 MiB cap, same
    problem.
 
 ## Open decisions & risks
 
 0a. **A stalled download now waits up to 300 s** before it says
-    `Timeout: {"seconds":300}` (was 15 s). The GUI has no cancel button for
-    a download in flight.
+    `Timeout: {"seconds":300}` (was 15 s), and a dead host takes the OS
+    connect timeout (~75 s on macOS) where it took 15 s. The GUI has no
+    cancel button for a download in flight. A client `connect_timeout` was
+    not added: it would be reported as the 300 s budget.
 0b. **`write_replacing` limits**: two marked `shortcut:` (an overwritten
     file's permissions are not carried over, a symlink at the destination
     is replaced rather than followed), plus a SIGKILL or panic mid-write

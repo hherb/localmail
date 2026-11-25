@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::commands::auth::AuthError;
 use crate::commands::session::read_authenticated;
 use crate::http::body::{
-    download_request, error_chain, read_capped, BodyError, DOWNLOAD_TIMEOUT_SECS,
+    download_request, error_chain, is_budget_timeout, read_capped, BodyError, DOWNLOAD_TIMEOUT_SECS,
 };
 use crate::http::client::build_pinned_client;
 use crate::http::errors::HttpError;
@@ -75,9 +75,10 @@ impl From<BodyError> for RawMessageError {
 }
 
 impl RawMessageError {
-    /// A failed `send()`: a timeout says so; anything else keeps its causes.
+    /// A failed `send()`: the budget running out says so; anything else,
+    /// an OS timeout included, keeps its causes.
     fn send_failed(e: reqwest::Error) -> Self {
-        if e.is_timeout() {
+        if is_budget_timeout(&e) {
             RawMessageError::Timeout {
                 seconds: DOWNLOAD_TIMEOUT_SECS,
             }
@@ -236,10 +237,10 @@ mod tests {
             serde_json::json!({"kind": "Network", "detail": "connection refused"}),
         );
 
-        let timeout = RawMessageError::Timeout { seconds: 15 };
+        let timeout = RawMessageError::Timeout { seconds: 300 };
         assert_eq!(
             serde_json::to_value(&timeout).unwrap(),
-            serde_json::json!({"kind": "Timeout", "detail": {"seconds": 15}}),
+            serde_json::json!({"kind": "Timeout", "detail": {"seconds": 300}}),
         );
 
         let read = RawMessageError::Read("stream closed".into());
@@ -343,5 +344,7 @@ mod tests {
             .unwrap();
         assert_eq!(prod.matches("download_request(").count(), 1);
         assert_eq!(prod.matches(".send()").count(), 1);
+        // And none re-chains its own `.timeout(…)` over the budget.
+        assert_eq!(prod.matches(".timeout(").count(), 0);
     }
 }

@@ -1,27 +1,25 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-25 (session 100).** `main` is **`d4a06ef`** (#469
-> merged: the 300 s GUI download budget).
+> **Status as of 2026-11-25 (session 101).** `main` is **`c206ad7`** (#470
+> merged: mail-parser/soupsieve floors).
 >
-> **One open PR, #470**, on `fix/dependabot-mail-parser-soupsieve`, based on
-> `main` at `d4a06ef`, carrying the dependency floors **and this handoff**.
+> **One open PR, #471**, on `fix/383-drop-headers-gin`, based on `main` at
+> `c206ad7`, carrying migration `0039` **and this handoff**.
 >
 > **Both hosts are deployed at `eef2972`** (carried, not re-checked).
-> #467–#469 are GUI-only. #470 changes only `[extraction]` dependencies: a
-> deploy is a `uv sync` plus a restart (see the commands below), optional.
+> #467–#470 need no deploy. **#471 does**: `localmail init-db` before the
+> restart, since `serve` refuses to start with a pending migration.
 >
-> **Open issues: 21.** **Open Dependabot alerts: 10** before #470
-> (mail-parser #205–#209, soupsieve #201–#204, accelerate #71); #470 should
-> leave only #71. The four rustls alerts (#115, #198–#200) were **dismissed**
-> this session as stale (operator approved).
+> **Open issues: 21** before #471 (it closes #383). **Open Dependabot alerts:
+> 1** (#71, accelerate, no fixed release). #201–#209 closed this session
+> once GitHub's dependency graph re-read `uv.lock`, ~10 h after #470 merged.
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
 > hherb-dmc`, then `launchctl kickstart -k gui/$(id -u)/com.localmail.daemon`.
 >
-> **Leftover worktrees:** `.claude/worktrees/bottie-bearer-token-dbc203`
-> (carried; ask before removing) and `../localmail-depbump` (this session's;
-> remove after #470 merges: `git worktree remove ../localmail-depbump`).
+> **Leftover worktree:** `.claude/worktrees/bottie-bearer-token-dbc203`
+> (carried; ask before removing). `../localmail-depbump` was removed.
 
 ## Project context (1-minute version)
 
@@ -36,52 +34,43 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-- **Confirmed #469 merged** (`d4a06ef`).
-- **Dismissed Dependabot #115, #198, #199, #200** (rustls, stale: the lock
-  holds 0.23.46), reason `inaccurate`, with a comment naming the lock.
-- **Operator picked the Dependabot round** over #383, #285 and #368.
+- **Confirmed #470 merged** (`c206ad7`); removed `../localmail-depbump` and
+  its local branch. Dependabot #201–#209 closed during the session (the
+  SBOM still listed the old versions at session start: graph lag, not a
+  bad lock).
+- **Operator picked #383** over the GUI JSON caps, #285 and #368.
 
-### PR #470 on `fix/dependabot-mail-parser-soupsieve`
+### PR #471 on `fix/383-drop-headers-gin`
 
 | SHA | What |
 |---|---|
-| `7293380` | `[extraction]` declares `mail-parser>=4.6.3` (#205–#209, two HIGH) and `soupsieve>=4.0.0` (#201–#204, two HIGH). Re-lock moved exactly those two: mail-parser 4.3.0 → 4.11.0, soupsieve 2.9.1 → 4.1.3 (two majors). CLAUDE.md gains "The third November round" entry and a note on the rustls dismissals |
+| `a451374` | `migrations/0039_drop_messages_headers_gin.sql` drops `messages_headers_gin` (355 MB on the Mac, more than the 260 MB heap; nothing reads the column since #379). Column kept as the sync-time snapshot (#383 option 1). New `tests/test_messages_headers_snapshot.py` (RED first); `test_api_browse_plan.py` loses the index from its three competing-index lists. CLAUDE.md: the #379 "write-only" note becomes the snapshot rule; latest migration `0039`, next `0040` |
 | next | this handoff |
 
-- **Why hygiene:** both arrive only via `docling-slim[standard]` (EML
-  backend; bs4 under the HTML backends). `src/` imports neither, and
-  `_converter_kwargs` refuses every non-PDF format (#399).
-- **Verification (in the worktree's own venv):** docling's `html_backend`,
-  `email_backend` and `document_converter` import; a bs4 `.select()` works
-  under soupsieve 4; **85** extraction/docling tests pass
-  (`test_extractor`, `test_docling_input_formats`,
-  `test_docling_import_state`, `test_ocr_language_default`,
-  `test_docling_ocr_probe`); `uv lock --check` clean; mypy clean (169
-  files). **OCR probe** (`auto`, `rapidocr`, `ocrmac`) main vs branch on the
-  Mac: all 9 cells byte-identical, exit 0, `ocrmac` selected on both.
-- **Not run:** the full pytest suite locally (Mac load ~42, other projects'
-  pytest running; only `[extraction]` deps changed, and CI installs no
-  `[extraction]`, so CI's suite does not see the bump either). The DGX probe
-  was not run (neither package is on the PDF path).
+- **Verification:** full suite `4767 passed` (7:24, load ~42); the new
+  test failed before the migration and passes after.
+- **Not run:** mypy (no `src/` change); the migration against the live
+  archive (that is the deploy step).
 
 ## What's next
 
-### 1. **Merge #470** (yours), once CI is green
-- **Acceptance:** `gh pr checks 470` all pass; merged; Dependabot then shows
-  only #71 open (alerts close on the default-branch lock).
-- **Optional deploy** (both hosts): `uv sync --frozen --extra mcp --extra
-  extraction` and restart both services. Nothing behaves differently; it only
-  replaces the two installed packages.
+### 1. **Merge #471** (yours), once CI is green, then deploy
+- **Acceptance:** `gh pr checks 471` all pass; merged; #383 closed (verify
+  with `gh issue view 383`).
+- **Deploy (both hosts):** `git pull`, `uv run localmail init-db` (applies
+  `0039`; a catalog-only drop), restart both services. Then
+  `select 1 from pg_indexes where indexname='messages_headers_gin'` returns
+  no row on each host.
 
 ### 2. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
 ### 3. **Next small slice: pick with the operator**
-- Candidates: **#383** (`0039`: drop the write-only `messages.headers` GIN),
-  **#285** (ruff/mypy in CI; ruff-pin call), **#368** (MCP drops unknown
-  args; design call), **#369** (DSL contradictions; design calls), #365,
-  #363, the unbounded GUI JSON helpers in `http/client.rs` (not filed).
+- Candidates: the unbounded **GUI JSON helpers** in `http/client.rs` (not
+  filed; reuse `body::read_capped`), **#285** (ruff/mypy in CI; ruff-pin
+  call), **#368** (MCP drops unknown args; design call), **#369** (DSL
+  contradictions; design calls), #365, #363.
 - **Acceptance (any):** a RED test first, then the touched suite green
   (`uv run pytest -q` + mypy for Python; `cargo test` + `clippy --all-targets`
   for Rust; `npm test -- --run && npm run check` for TS).
@@ -91,7 +80,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   `after:`/`before:`/`has:` or a non-int id in `query` is a 400).
 
 ### 4. **Carried**
-- **Migrations:** `0038` is taken. #318 and #320 need `0039`.
+- **Migrations:** `0039` is taken (#471). #318 and #320 need `0040`.
 - **#414 watchdog:** waits for a stack dump (SIGUSR1 works on the DGX).
 - **#459:** harness-lock DSN residual (helpers, rebinding).
 - **`ApiKeyNotFound` still derives from bare `Exception`** (latent).
@@ -102,17 +91,15 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **kastellan slice C:** ask whether it is still wanted.
 - **Mac `failed_messages`:** one `iso2022_jp` decode failure from
   2026-07-25 (`hherb-dmc/[Gmail]/Important` uid 5263). Not investigated.
-- **Issues:** #383, #369, #368, #365; #375; #357; #363, #285;
+- **docling deprecations in the suite:** `force_full_page_ocr` is
+  deprecated (pydantic warning, docling 2.142); check whether our
+  `_ocr_the_whole_page` or docling itself sets it before the next bump.
+- **Issues:** #369, #368, #365; #375; #357; #363, #285;
   robustness #226, #225/#227, #200/#211, #206, #204, #25.
 
 ## Rulings made this session
 
-1. **Operator picked the Dependabot round** and approved dismissing the four
-   stale rustls alerts.
-2. **Locked at the newest releases** (mine): mail-parser 4.11.0 (published
-   2026-11-15) and soupsieve 4.1.3 (2026-11-20, five days old), not the first
-   fixed ones. Same call as docling 2.141.0; the floors are what matter, and
-   neither package is reachable.
+1. **Operator picked #383**, option 1 (keep the column, drop the index).
 
 ## Open decisions & risks
 
@@ -152,7 +139,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    re-parse `raw_bytes`. Read-only count:
    `select count(*) from messages where exists (select 1 from jsonb_array_elements_text(case when jsonb_typeof(headers->'Date')='array' then headers->'Date' else '[]' end) d where d ~ '-0000\s*(\(.*\))?\s*$')`
 2. **`attachment_name` is unindexed** (~0.2 s warm at 132k). A trigram index
-   would be `0039`.
+   would be `0040`.
 3. **Should a wire widening bump `api_minor`?** Still open.
 4. **3,194 rows keep a skewed `internal_date`** (Mac 2,720, DGX 474). Not
    decided.
@@ -166,7 +153,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~42 in session 100** (drugref and consensus
+10. **Load on the Mac was ~42 in sessions 100–101** (drugref and consensus
     pytest runs, not localmail). Check `uptime` before trusting any timing.
 
 ## Exact commands to resume
@@ -177,29 +164,30 @@ git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 gh pr list --state all --limit 4
-gh pr checks 470
+gh pr checks 471
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
 
-# Deploy — Mac (the repo is the install); restart BOTH
+# Deploy — Mac (the repo is the install); migrate, then restart BOTH
 unset VIRTUAL_ENV && uv sync --frozen --extra mcp --extra extraction
+uv run localmail init-db
 launchctl kickstart -k gui/$(id -u)/com.localmail.serve
 launchctl kickstart -k gui/$(id -u)/com.localmail.daemon
 curl -sk https://127.0.0.1:8443/v1/version     # build_hash = merge SHA
 
 # Deploy — DGX
-ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && systemctl --user restart localmail-daemon localmail-serve && systemctl --user is-active localmail-daemon localmail-serve'
+ssh 10.0.0.3 'cd ~/src/localmail && git pull --ff-only && ~/.local/bin/uv sync --frozen --extra mcp --extra extraction && ~/.local/bin/uv run localmail init-db && systemctl --user restart localmail-daemon localmail-serve && systemctl --user is-active localmail-daemon localmail-serve'
 ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 
 # Load before trusting any timing; no other LOCALMAIL pytest may be running.
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4765, session 96 (5:37 under load ~12)
+unset VIRTUAL_ENV && uv run pytest -q              # 4767, session 101 (7:24 under load ~42)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 540, session 99
 cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 147, session 99
 ```
 
-The latest migration is **`0038_messages_attachment_names_strict_idx.sql`**;
-the next free slot is `0039_*.sql`.
+The latest migration is **`0039_drop_messages_headers_gin.sql`** (#471);
+the next free slot is `0040_*.sql`.

@@ -3061,6 +3061,27 @@ hygiene.**
   like #115. None is reachable anyway: the GUI enables `ring`/`std`/`tls12`
   only (no `brotli`, no post-quantum key exchange), and its code never
   Debug-formats a TLS session.
+- **The four rustls alerts (#115, #198–#200) were dismissed** during the
+  third November round (below) as stale (`inaccurate`), naming the lock's
+  0.23.46.
+
+**The third November round (Dependabot #201–#209, four HIGH) declared
+`mail-parser>=4.6.3` and `soupsieve>=4.0.0` in `[extraction]`, both
+hygiene.** The re-lock moved exactly those two (4.3.0 → 4.11.0, 2.9.1 →
+4.1.3, two soupsieve majors).
+
+- **Both arrive only through `docling-slim[standard]`**: mail-parser is its
+  EML backend, soupsieve sits under beautifulsoup4 for its HTML backends
+  (`uv tree --frozen --invert`). `src/` imports neither, and
+  `_converter_kwargs` refuses every non-PDF format (#399), so no mail reaches
+  either. Declared for the `transformers` reason: no floor, and the lock sat
+  inside every range.
+- **Verified**: docling's `html_backend` and `email_backend` still import, a
+  bs4 `.select()` works under soupsieve 4, the 85 extraction/docling tests
+  pass, and the OCR probe (`auto`, `rapidocr`, `ocrmac`, on the Mac) is
+  byte-identical to `main` in all nine cells, exit 0, `ocr_selection`
+  `ocrmac` on both. The DGX was not probed: neither package is on the PDF
+  path, so there is nothing aarch64-specific to see.
 
 **Acceptance eval harness**: `tests/acceptance/run_recall_eval.py` seeds the
 synthetic multilingual corpus, runs the embed worker, and reports recall@K +

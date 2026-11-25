@@ -1,24 +1,27 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-25 (session 99).** `main` is **`78f5cec`** (#468,
-> closes #464 and #465).
+> **Status as of 2026-11-25 (session 100).** `main` is **`d4a06ef`** (#469
+> merged: the 300 s GUI download budget).
 >
-> **One open PR, #469**, on `fix/download-timeout-budget`, based on `main` at
-> `78f5cec`, carrying the download-budget change **and this handoff**.
+> **One open PR, #470**, on `fix/dependabot-mail-parser-soupsieve`, based on
+> `main` at `d4a06ef`, carrying the dependency floors **and this handoff**.
 >
-> **Both hosts are deployed at `eef2972`** (carried, not re-checked). #467,
-> #468 and #469 are GUI-only: no server deploy needed.
+> **Both hosts are deployed at `eef2972`** (carried, not re-checked).
+> #467–#469 are GUI-only. #470 changes only `[extraction]` dependencies: a
+> deploy is a `uv sync` plus a restart (see the commands below), optional.
 >
-> **Open issues: 21.** #469 closes none (it was an open decision, not an
-> issue). **Open Dependabot alerts: 14** (was 2): a new round, see What's
-> next §3. #185 is no longer open; #71 still is, on purpose.
+> **Open issues: 21.** **Open Dependabot alerts: 10** before #470
+> (mail-parser #205–#209, soupsieve #201–#204, accelerate #71); #470 should
+> leave only #71. The four rustls alerts (#115, #198–#200) were **dismissed**
+> this session as stale (operator approved).
 >
 > **`hherb-dmc`'s Gmail refresh token is expired on the Mac** (carried, not
 > re-checked). Fix (yours, needs a browser): `localmail oauth-login
 > hherb-dmc`, then `launchctl kickstart -k gui/$(id -u)/com.localmail.daemon`.
 >
-> **Leftover worktree:** `.claude/worktrees/bottie-bearer-token-dbc203`
-> (carried; ask before removing).
+> **Leftover worktrees:** `.claude/worktrees/bottie-bearer-token-dbc203`
+> (carried; ask before removing) and `../localmail-depbump` (this session's;
+> remove after #470 merges: `git worktree remove ../localmail-depbump`).
 
 ## Project context (1-minute version)
 
@@ -33,64 +36,52 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-- **Confirmed #468 merged** (`78f5cec`), which closed #464 and #465; 21
-  issues open.
-- **Operator picked the download timeout budget** (last handoff's open
-  decision 0a) over #368, #285 and #383.
+- **Confirmed #469 merged** (`d4a06ef`).
+- **Dismissed Dependabot #115, #198, #199, #200** (rustls, stale: the lock
+  holds 0.23.46), reason `inaccurate`, with a comment naming the lock.
+- **Operator picked the Dependabot round** over #383, #285 and #368.
 
-### PR #469 on `fix/download-timeout-budget`
+### PR #470 on `fix/dependabot-mail-parser-soupsieve`
 
 | SHA | What |
 |---|---|
-| `ff598ba` | `http::body::DOWNLOAD_TIMEOUT_SECS = 300` and `body::download_request` (bearer + `RequestBuilder::timeout`, overriding the client's 15 s `REQUEST_TIMEOUT_SECS`). `download_attachment`, `fetch_attachment_bytes`, `get_message_raw` use it; their `Timeout { seconds }` now reports 300. 100 MiB needed ~56 Mbit/s at 15 s, ~2.8 Mbit/s at 300 s. Other GUI requests keep 15 s. README "Downloads" and CLAUDE.md (#464 bullet) updated; TS test fixtures say 300 |
-| `c0a90a6` | CLAUDE.md reflow of the #464 bullet |
-| `454f568`, `74dce05` | this handoff |
-| next | `/finalcheck` fixes: `body::is_budget_timeout` (an OS `ETIMEDOUT` in the chain is `Network`/`Read` with its cause, not the 300 s budget); the 300 pinned as a literal; a `.timeout(` count of 0 per command module; serde fixtures at 300; doc wording |
+| `7293380` | `[extraction]` declares `mail-parser>=4.6.3` (#205–#209, two HIGH) and `soupsieve>=4.0.0` (#201–#204, two HIGH). Re-lock moved exactly those two: mail-parser 4.3.0 → 4.11.0, soupsieve 2.9.1 → 4.1.3 (two majors). CLAUDE.md gains "The third November round" entry and a note on the rustls dismissals |
+| next | this handoff |
 
-- **Verification:** `cargo test --lib` **150 passing** (144 → 147 → 150 after
-  `/finalcheck`);
-  `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt --check`
-  clean; `npm test -- --run` **540 passing**, `npm run check` clean. No
-  Python touched, so pytest and mypy were not re-run.
-- **Mutations, each failing its own test:** `.timeout` removed from
-  `download_request`; a bare `client.get(…).send()` in `attachments.rs`; the
-  same in `raw_message.rs`; the old number in `RawMessageError::send_failed`.
-- **How the callers are pinned:** source counts per module (exactly N
-  `download_request(` and N `.send()`, no `.timeout(`). Behavioural would
-  cost 300 s a test.
-- **`/finalcheck` review** (four agents) found one real defect:
-  `is_timeout()` also matches the kernel's `ETIMEDOUT`, which the 15 s budget
-  used to beat and 300 s does not (keepalive ~60 s on a dead peer, connect
-  ~75 s). Fixed by `body::is_budget_timeout`; three more mutations (constant
-  at 15, re-chained `.timeout`, a site back on `is_timeout()`) each fail
-  their own test. Not reproduced end to end: drop WireGuard mid-download and
-  the message should name `os error 60`, not 300 s.
+- **Why hygiene:** both arrive only via `docling-slim[standard]` (EML
+  backend; bs4 under the HTML backends). `src/` imports neither, and
+  `_converter_kwargs` refuses every non-PDF format (#399).
+- **Verification (in the worktree's own venv):** docling's `html_backend`,
+  `email_backend` and `document_converter` import; a bs4 `.select()` works
+  under soupsieve 4; **85** extraction/docling tests pass
+  (`test_extractor`, `test_docling_input_formats`,
+  `test_docling_import_state`, `test_ocr_language_default`,
+  `test_docling_ocr_probe`); `uv lock --check` clean; mypy clean (169
+  files). **OCR probe** (`auto`, `rapidocr`, `ocrmac`) main vs branch on the
+  Mac: all 9 cells byte-identical, exit 0, `ocrmac` selected on both.
+- **Not run:** the full pytest suite locally (Mac load ~42, other projects'
+  pytest running; only `[extraction]` deps changed, and CI installs no
+  `[extraction]`, so CI's suite does not see the bump either). The DGX probe
+  was not run (neither package is on the PDF path).
 
 ## What's next
 
-### 1. **Merge #469** (yours), once CI is green
-- **Acceptance:** `gh pr checks 469` all pass; merged; no deploy (GUI-only).
-  Rebuild the GUI app to get it.
+### 1. **Merge #470** (yours), once CI is green
+- **Acceptance:** `gh pr checks 470` all pass; merged; Dependabot then shows
+  only #71 open (alerts close on the default-branch lock).
+- **Optional deploy** (both hosts): `uv sync --frozen --extra mcp --extra
+  extraction` and restart both services. Nothing behaves differently; it only
+  replaces the two installed packages.
 
 ### 2. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
   the kickstart; its `max(date_received)` moves past 2026-11-03.
 
 ### 3. **Next small slice: pick with the operator**
-- **New Dependabot round (found at push, 2026-11-25, not triaged):**
-  - `mail-parser` #205–#209 (2 high; lock 4.3.0, fixed 4.6.3) and
-    `soupsieve` #201–#204 (2 high; lock 2.9.1, fixed 4.0.0). Both arrive
-    **only** via `docling-slim[standard]` under `[extraction]`
-    (`uv tree --frozen --invert --package mail-parser --package soupsieve`).
-    `grep` finds neither imported in `src/`, and docling converts PDFs only
-    (#399), so likely hygiene. Check whether docling-slim 2.142.1 (capped
-    `<2.143`) admits the fixed versions (`uv lock --dry-run`, read-only), then
-    floor them with the OCR probe, in a worktree (memory: dependency bumps).
-  - `rustls` #115, #198–#200: stale; `Cargo.lock` holds 0.23.46. Dismiss.
-- Other candidates: **#368** (MCP drops unknown args; design call), **#285**
-  (ruff/mypy in CI; ruff-pin call), **#383** (`0039`: drop the write-only
-  headers GIN), **#369** (DSL contradictions; design calls), #365, #363,
-  the unbounded GUI JSON helpers in `http/client.rs` (not filed).
+- Candidates: **#383** (`0039`: drop the write-only `messages.headers` GIN),
+  **#285** (ruff/mypy in CI; ruff-pin call), **#368** (MCP drops unknown
+  args; design call), **#369** (DSL contradictions; design calls), #365,
+  #363, the unbounded GUI JSON helpers in `http/client.rs` (not filed).
 - **Acceptance (any):** a RED test first, then the touched suite green
   (`uv run pytest -q` + mypy for Python; `cargo test` + `clippy --all-targets`
   for Rust; `npm test -- --run && npm run check` for TS).
@@ -116,19 +107,19 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## Rulings made this session
 
-1. **Operator picked the download budget** (decision 0a).
-2. **300 s** (mine): 100 MiB at ~2.8 Mbit/s; a stalled server is still cut
-   off. Applied per request, not by a second client builder, so the TLS
-   pin and verifier stay one code path.
-3. **Raw-message download gets it too** (mine): same 100 MiB cap, same
-   problem.
+1. **Operator picked the Dependabot round** and approved dismissing the four
+   stale rustls alerts.
+2. **Locked at the newest releases** (mine): mail-parser 4.11.0 (published
+   2026-11-15) and soupsieve 4.1.3 (2026-11-20, five days old), not the first
+   fixed ones. Same call as docling 2.141.0; the floors are what matter, and
+   neither package is reachable.
 
 ## Open decisions & risks
 
-0a. **A stalled download now waits up to 300 s** before it says
-    `Timeout: {"seconds":300}` (was 15 s), and a dead host takes the OS
-    connect timeout (~75 s on macOS) where it took 15 s. The GUI has no
-    cancel button for a download in flight. A client `connect_timeout` was
+0a. **A stalled GUI download waits up to 300 s** (carried, #469)
+    before it says `Timeout: {"seconds":300}` (was 15 s), and a dead host
+    takes the OS connect timeout (~75 s on macOS) where it took 15 s. The
+    GUI has no cancel button for a download in flight. A client `connect_timeout` was
     not added: it would be reported as the 300 s budget.
 0b. **`write_replacing` limits**: two marked `shortcut:` (an overwritten
     file's permissions are not carried over, a symlink at the destination
@@ -155,8 +146,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
    branch logs one WARNING on `localmail.serve.admin`. #208 the GUI
    daemon tab's "Request accepted." clears after 5 s. #464 GUI
    download errors carry their cause; #465 a failed save leaves the chosen
-   file as it was. **New:** #469 a GUI download times out after 300 s, not
-   15 s.
+   file as it was; #469 a GUI download times out after 300 s, not 15 s.
 1. **Repair the pre-#431 `-0000` rows?** Mac: 2,865 of 132,320 rows are
    stored 8 h off in `date_sent` (wire `date` is right). A repair should
    re-parse `raw_bytes`. Read-only count:
@@ -176,9 +166,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~25 in session 97 (not re-checked since)** (another project's rust
-    build and a consensus python job, not localmail). Check `uptime` before
-    trusting any timing.
+10. **Load on the Mac was ~42 in session 100** (drugref and consensus
+    pytest runs, not localmail). Check `uptime` before trusting any timing.
 
 ## Exact commands to resume
 
@@ -188,7 +177,7 @@ git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 gh pr list --state all --limit 4
-gh pr checks 469
+gh pr checks 470
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
 

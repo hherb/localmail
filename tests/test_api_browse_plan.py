@@ -234,8 +234,9 @@ def _explain_messages_recent_idx_only(
         "messages_acct_rawsha_uniq",
         "messages_attachments_gin",
         "messages_body_lang_idx",
-        "messages_body_lang_pending_idx",
+        "messages_body_lang_claimable_idx",
         "messages_fts_v2_idx",
+        "messages_attachment_names_strict_idx",
     ]
     with conn.cursor() as cur:
         cur.execute("SAVEPOINT plan_probe_strict")
@@ -351,8 +352,9 @@ def _explain_mid_keyset_recent_idx_only(
         "messages_acct_rawsha_uniq",
         "messages_attachments_gin",
         "messages_body_lang_idx",
-        "messages_body_lang_pending_idx",
+        "messages_body_lang_claimable_idx",
         "messages_fts_v2_idx",
+        "messages_attachment_names_strict_idx",
     ]
     with conn.cursor() as cur:
         cur.execute("SAVEPOINT plan_probe_mid_keyset")
@@ -538,8 +540,9 @@ def _explain_folder_filter_recent_idx_only(
         "messages_acct_rawsha_uniq",
         "messages_attachments_gin",
         "messages_body_lang_idx",
-        "messages_body_lang_pending_idx",
+        "messages_body_lang_claimable_idx",
         "messages_fts_v2_idx",
+        "messages_attachment_names_strict_idx",
     ]
     with conn.cursor() as cur:
         cur.execute("SAVEPOINT plan_probe_folder_filter")

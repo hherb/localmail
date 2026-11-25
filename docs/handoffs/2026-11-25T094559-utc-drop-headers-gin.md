@@ -58,7 +58,10 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - **Acceptance:** `gh pr checks 471` all pass; merged; #383 closed (verify
   with `gh issue view 383`).
 - **Deploy (both hosts):** `git pull`, `uv run localmail init-db` (applies
-  `0039`; a catalog-only drop), restart both services. Then
+  `0039`; a catalog-only drop, but it waits behind the running daemon's open
+  transactions on `messages` and every query queues behind it meanwhile, so
+  expect a short stall and a few `QueryCanceled` retries, or stop the daemon
+  first), restart both services. Then
   `select 1 from pg_indexes where indexname='messages_headers_gin'` returns
   no row on each host.
 

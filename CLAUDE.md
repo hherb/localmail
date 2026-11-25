@@ -3061,13 +3061,14 @@ hygiene.**
   like #115. None is reachable anyway: the GUI enables `ring`/`std`/`tls12`
   only (no `brotli`, no post-quantum key exchange), and its code never
   Debug-formats a TLS session.
-- **The four rustls alerts (#115, #198–#200) were dismissed** in the November
-  2026 third round as stale (`inaccurate`), naming the lock's 0.23.46.
+- **The four rustls alerts (#115, #198–#200) were dismissed** during the
+  third November round (below) as stale (`inaccurate`), naming the lock's
+  0.23.46.
 
 **The third November round (Dependabot #201–#209, four HIGH) declared
 `mail-parser>=4.6.3` and `soupsieve>=4.0.0` in `[extraction]`, both
 hygiene.** The re-lock moved exactly those two (4.3.0 → 4.11.0, 2.9.1 →
-4.1.3, a soupsieve major).
+4.1.3, two soupsieve majors).
 
 - **Both arrive only through `docling-slim[standard]`**: mail-parser is its
   EML backend, soupsieve sits under beautifulsoup4 for its HTML backends

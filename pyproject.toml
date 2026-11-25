@@ -193,17 +193,19 @@ extraction = [
     # Neither host is Windows and nothing installs wheels at runtime: hygiene.
     "setuptools>=84.1.0",
     # Transitive via `docling-slim[standard]` (its EML backend), declared for
-    # the `transformers` reason: Dependabot #205–#209 (two HIGH: header ReDoS,
-    # sender-IP spoofing; path traversal on attachment extraction). The lock
-    # sat at 4.3.0, inside every range; 4.6.3 is the last fix (#209). localmail
-    # never imports it and `_converter_kwargs` refuses every non-PDF format
+    # the `transformers` reason: Dependabot #205–#209 (two HIGH: header ReDoS
+    # #205, sender-IP spoofing #207; three MEDIUM, path traversal on
+    # attachment extraction among them). The lock sat at 4.3.0, inside every
+    # range; 4.6.3 is the last fix (#209). localmail never imports it and
+    # `_converter_kwargs` refuses every non-PDF format
     # (#399), so mail never reaches it: hygiene.
     "mail-parser>=4.6.3",
     # Transitive via beautifulsoup4 ← `docling-slim[standard]` (its HTML
-    # backends), same reason: Dependabot #201–#204 (two HIGH: quadratic and
-    # polynomial selector matching, ReDoS in selector compilation). 4.0.0 is
-    # the last fix (#202). Selectors are docling's own, never mail-borne, and
-    # the HTML backend is unreachable (#399): hygiene.
+    # backends), same reason: Dependabot #201–#204 (two HIGH: polynomial
+    # descendant-combinator matching #202, ReDoS in selector compilation #204;
+    # two MEDIUM). 4.0.0 is the last fix (#202). #201/#202 are driven by the
+    # HTML document, which would be mail-borne; what keeps it out is that
+    # every bs4 backend is unreachable (#399): hygiene.
     "soupsieve>=4.0.0",
 ]
 mcp = [

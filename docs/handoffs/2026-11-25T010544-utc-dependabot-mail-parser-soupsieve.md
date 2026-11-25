@@ -45,7 +45,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | SHA | What |
 |---|---|
-| `7293380` | `[extraction]` declares `mail-parser>=4.6.3` (#205–#209, two HIGH) and `soupsieve>=4.0.0` (#201–#204, two HIGH). Re-lock moved exactly those two: mail-parser 4.3.0 → 4.11.0, soupsieve 2.9.1 → 4.1.3 (a major). CLAUDE.md gains "The third November round" entry and a note on the rustls dismissals |
+| `7293380` | `[extraction]` declares `mail-parser>=4.6.3` (#205–#209, two HIGH) and `soupsieve>=4.0.0` (#201–#204, two HIGH). Re-lock moved exactly those two: mail-parser 4.3.0 → 4.11.0, soupsieve 2.9.1 → 4.1.3 (two majors). CLAUDE.md gains "The third November round" entry and a note on the rustls dismissals |
 | next | this handoff |
 
 - **Why hygiene:** both arrive only via `docling-slim[standard]` (EML

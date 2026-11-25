@@ -1,0 +1,16 @@
+-- #383: since #379 nothing reads `messages.headers` (the read path parses the
+-- raw header block out of `raw_bytes`), so 0001's GIN index on it served no
+-- query while every INSERT maintained it. 355 MB on the 132k-message Mac
+-- archive, more than the table's heap.
+--
+-- The column is kept, deliberately: it is the parser's view at sync time,
+-- which a fresh parse of `raw_bytes` does not reproduce (#379 measured 11.6%
+-- of 900 sampled rows disagreeing, whitespace only).
+--
+-- Lock cost: nothing is scanned or rebuilt, and the ACCESS EXCLUSIVE lock on
+-- `messages` is held only until this migration commits. But it is granted only
+-- once every open transaction on `messages` ends (a sync batch, a worker
+-- claim), and every query on the table queues behind it meanwhile; init-db
+-- sets no lock_timeout. Stop the daemon first, or expect a short stall and some
+-- QueryCanceled retries in the daemon log.
+DROP INDEX IF EXISTS messages_headers_gin;

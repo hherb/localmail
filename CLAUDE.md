@@ -913,7 +913,7 @@ src/localmail/
                     #   in the lexical match; must equal 0038's index (#426, #429)
                     #   + NAME_CONTAINS_SQL, the attachment_name: filter
     hit_dates.py    # date_local: each hit's Date: on the sender's clock (#426)
-migrations/         # 0001_init.sql … 0038_messages_attachment_names_strict_idx.sql (0023_daemon_heartbeats.sql also applied)
+migrations/         # 0001_init.sql … 0039_drop_messages_headers_gin.sql (0023_daemon_heartbeats.sql also applied)
 tests/
   acceptance/       # standalone eval harnesses — FIVE (run_recall_eval.py,
                     # run_attachment_eval.py, run_rrf_k_sweep.py,
@@ -4067,13 +4067,19 @@ for the full design.
   not positionally: the SELECT's shape is conditional on the mode, so an index
   would have to agree with a column list two branches away (#119/#123 made the
   same call).
-  - **Consequences filed, not fixed:** the read path no longer touches
-    `messages.headers`, so that column and `messages_headers_gin` are now
-    **write-only** (#383); the per-occurrence broad catch moved onto the
-    serving path still discards its exception, and now runs per request rather
-    than once at sync (#382); and the `substring()` prefix read may not be cheap
-    if `raw_bytes` is LZ4-compressed in TOAST, which is partly answered
-    by #426's `date_local` timing (#384; see that entry).
+  - **`messages.headers` is a sync-time snapshot, not a read path (#383).**
+    The read path no longer touches it, so migration `0039` dropped its GIN
+    index (`messages_headers_gin`, 355 MB on the Mac, more than the table's
+    heap, maintained on every INSERT for no query). The column is kept on
+    purpose: it is what the parser saw at sync time, which a re-parse of
+    `raw_bytes` does not reproduce (the 11.6% above). Do not add a reader
+    that treats it as current; parse `raw_bytes` (`header_block`). Pinned by
+    `tests/test_messages_headers_snapshot.py`.
+  - **Consequences filed, not fixed:** the per-occurrence broad catch moved
+    onto the serving path still discards its exception, and now runs per
+    request rather than once at sync (#382); and the `substring()` prefix
+    read may not be cheap if `raw_bytes` is LZ4-compressed in TOAST, which is
+    partly answered by #426's `date_local` timing (#384; see that entry).
   - **A lone surrogate in a header value is replaced, at the same seam as the
     NUL strip (#380).** The #314 fallback keeps a header's raw text, which for
     8-bit bytes is surrogate-escaped, and Starlette's `JSONResponse` raises
@@ -7504,7 +7510,7 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
   and the violation passes silently, so annotate every new DB helper.
 - New SQL goes in a new numbered migration file. **Never edit a migration
   that has been applied anywhere** — add the next-numbered file instead.
-  Latest is `0038_messages_attachment_names_strict_idx.sql`; next free slot `0039_*.sql`.
+  Latest is `0039_drop_messages_headers_gin.sql`; next free slot `0040_*.sql`.
   (2B.4 and 2B.5 added no migration — the supervisor, routes, CLI, and admin
   panel are stateless and reuse `0023_daemon_heartbeats.sql` +
   `0024_daemon_commands.sql`.)

@@ -236,7 +236,6 @@ def _explain_messages_recent_idx_only(
         "messages_body_lang_idx",
         "messages_body_lang_pending_idx",
         "messages_fts_v2_idx",
-        "messages_headers_gin",
     ]
     with conn.cursor() as cur:
         cur.execute("SAVEPOINT plan_probe_strict")
@@ -354,7 +353,6 @@ def _explain_mid_keyset_recent_idx_only(
         "messages_body_lang_idx",
         "messages_body_lang_pending_idx",
         "messages_fts_v2_idx",
-        "messages_headers_gin",
     ]
     with conn.cursor() as cur:
         cur.execute("SAVEPOINT plan_probe_mid_keyset")
@@ -542,7 +540,6 @@ def _explain_folder_filter_recent_idx_only(
         "messages_body_lang_idx",
         "messages_body_lang_pending_idx",
         "messages_fts_v2_idx",
-        "messages_headers_gin",
     ]
     with conn.cursor() as cur:
         cur.execute("SAVEPOINT plan_probe_folder_filter")
@@ -677,9 +674,9 @@ def test_plan_probe_savepoint_restores_dropped_indexes(
         )
         row = cur.fetchone()
     assert row is not None
-    # 10 expected indexes per the 0019 schema: pkey, acct_date,
-    # acct_msgid_uniq, acct_rawsha_uniq, attachments_gin, body_lang,
-    # body_lang_pending, fts_v2, headers_gin, recent.
+    # At least 10 indexes on messages since 0039 dropped headers_gin: pkey,
+    # acct_date, acct_msgid_uniq, acct_rawsha_uniq, attachments_gin, body_lang,
+    # body_lang_claimable, fts_v2, attachment_names_strict, recent.
     assert row[0] >= 10, (
         f"expected at least 10 indexes on messages after SAVEPOINT "
         f"rollback, found {row[0]} — rollback is broken"

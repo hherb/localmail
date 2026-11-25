@@ -1,0 +1,12 @@
+-- #383: since #379 nothing reads `messages.headers` (the read path parses the
+-- raw header block out of `raw_bytes`), so 0001's GIN index on it served no
+-- query while every INSERT maintained it. 355 MB on the 132k-message Mac
+-- archive, more than the table's heap.
+--
+-- The column is kept, deliberately: it is the parser's view at sync time,
+-- which a fresh parse of `raw_bytes` does not reproduce (#379 measured 11.6%
+-- of 900 sampled rows disagreeing, whitespace only).
+--
+-- Lock cost: DROP INDEX takes an ACCESS EXCLUSIVE lock on `messages` only for
+-- the catalog update; nothing is scanned or rebuilt.
+DROP INDEX IF EXISTS messages_headers_gin;

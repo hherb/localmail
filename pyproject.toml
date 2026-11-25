@@ -197,8 +197,8 @@ extraction = [
     # #205, sender-IP spoofing #207; three MEDIUM, path traversal on
     # attachment extraction among them). The lock sat at 4.3.0, inside every
     # range; 4.6.3 is the last fix (#209). localmail never imports it and
-    # `_converter_kwargs` refuses every non-PDF format
-    # (#399), so mail never reaches it: hygiene.
+    # `_converter_kwargs` refuses every non-PDF format (#399), so mail never
+    # reaches it: hygiene.
     "mail-parser>=4.6.3",
     # Transitive via beautifulsoup4 ← `docling-slim[standard]` (its HTML
     # backends), same reason: Dependabot #201–#204 (two HIGH: polynomial

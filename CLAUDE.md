@@ -7374,9 +7374,16 @@ is skipped for bearer, see `serve/admin/csrf.py::check_csrf`).
     client timeout. Pinned clients speak plain HTTP to mockito, so no TLS is
     needed. All six mutations (each caller, fast-fail removed, `>=` there, a
     read error reported as `TooLarge`) fail their own test.
-  - **Still unbounded:** the JSON helpers in `http/client.rs`, both
-    `.json()` and the error-path `resp.text()` reads in all six (including
-    `http_post_empty`, `http_post_json_no_resp` and `http_delete`).
+  - **The JSON helpers in `http/client.rs` are capped too.** A success body
+    goes through `decode_json` (`read_capped` at `MAX_JSON_BYTES`, 100 MiB,
+    the raw-message cap, then `serde_json::from_slice`), and an over-cap one
+    is the new `HttpError::TooLarge { size, max }`. Every error body, in all
+    six helpers, goes through `status_error` at `MAX_ERROR_BODY_BYTES`
+    (64 KiB): the status is kept and an over-cap or unreadable body is named
+    in `body` (`<error body over 65536 bytes>`), where `unwrap_or_default()`
+    used to give `""`. Pinned per helper in `http/client_caps_tests.rs` with
+    `write_past`; reverting one helper to `.json()` or `.text()`, or lifting
+    the cap, each fails its own test.
   - **A timeout says so, and every other failure names its cause (#464).**
     reqwest's `Display` stops at its kind: "error sending request for url (…)"
     for `send()`, "error decoding response body" for a body read, so a timeout,

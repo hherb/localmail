@@ -1293,7 +1293,9 @@ failures name their cause (e.g. `Connection refused`, or the OS's own timeout
 for a server gone mid-download). A saved attachment is written to a temporary
 file and renamed into place, so a failed save (a full disk) leaves the chosen
 file as it was, never truncated. The temporary file sits beside the chosen
-one, so its folder must be writable.
+one, so its folder must be writable. Every other server response is capped
+too: a JSON reply over 100 MiB fails with `TooLarge`, and an error reply's
+text is kept only up to 64 KiB (the HTTP status is always reported).
 
 **Admin mode.** When the logged-in user has `is_admin`, the header shows an
 **Admin** button opening an admin overlay, driven over the same bearer token

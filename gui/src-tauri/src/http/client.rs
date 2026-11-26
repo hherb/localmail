@@ -9,10 +9,20 @@ use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use crate::http::body::{read_capped, BodyError};
 use crate::http::errors::HttpError;
 use crate::http::verifier::{TofuMode, TofuVerifier};
 
 pub const REQUEST_TIMEOUT_SECS: u64 = 15;
+
+/// Ceiling on a JSON response body. The largest is a message detail, whose
+/// bodies are decoded from a raw message the GUI refuses past 100 MiB
+/// (`MAX_RAW_BYTES`), so the same figure.
+pub const MAX_JSON_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Ceiling on an error response's body, which is only kept for the message
+/// (a problem+json document is a few hundred bytes).
+pub const MAX_ERROR_BODY_BYTES: u64 = 64 * 1024;
 
 pub struct ProbeClient {
     pub client: Client,
@@ -48,6 +58,40 @@ fn build_reqwest_with_verifier(verifier: Arc<TofuVerifier>) -> Result<Client, Ht
         .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))
 }
 
+/// Decode a success body as JSON, reading at most `MAX_JSON_BYTES` of it
+/// rather than buffering whatever the server sends (`resp.json()`).
+async fn decode_json<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, HttpError> {
+    let body = read_capped(resp, MAX_JSON_BYTES)
+        .await
+        .map_err(|e| match e {
+            BodyError::TooLarge { size } => HttpError::TooLarge {
+                size,
+                max: MAX_JSON_BYTES,
+            },
+            BodyError::Timeout => HttpError::Timeout {
+                seconds: REQUEST_TIMEOUT_SECS,
+            },
+            BodyError::Read(msg) => HttpError::Network(msg),
+        })?;
+    serde_json::from_slice(&body).map_err(|e| HttpError::Decode(e.to_string()))
+}
+
+/// A non-success response as `HttpStatus`. The status is what callers branch
+/// on, so a body that is too large or unreadable is named in the text rather
+/// than failing the call.
+async fn status_error(resp: reqwest::Response) -> HttpError {
+    let status = resp.status().as_u16();
+    let body = match read_capped(resp, MAX_ERROR_BODY_BYTES).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(BodyError::TooLarge { .. }) => {
+            format!("<error body over {MAX_ERROR_BODY_BYTES} bytes>")
+        }
+        Err(BodyError::Timeout) => "<error body timed out>".to_string(),
+        Err(BodyError::Read(msg)) => format!("<error body unreadable: {msg}>"),
+    };
+    HttpError::HttpStatus { status, body }
+}
+
 pub async fn http_get_json<T: DeserializeOwned>(
     client: &Client,
     url: &str,
@@ -63,15 +107,9 @@ pub async fn http_get_json<T: DeserializeOwned>(
         .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(HttpError::HttpStatus {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(status_error(resp).await);
     }
-    resp.json::<T>()
-        .await
-        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))
+    decode_json(resp).await
 }
 
 pub async fn http_post_json<B: Serialize, T: DeserializeOwned>(
@@ -90,15 +128,9 @@ pub async fn http_post_json<B: Serialize, T: DeserializeOwned>(
         .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(HttpError::HttpStatus {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(status_error(resp).await);
     }
-    resp.json::<T>()
-        .await
-        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))
+    decode_json(resp).await
 }
 
 pub async fn http_post_empty(
@@ -116,11 +148,7 @@ pub async fn http_post_empty(
         .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() && status.as_u16() != 204 {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(HttpError::HttpStatus {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(status_error(resp).await);
     }
     Ok(())
 }
@@ -144,11 +172,7 @@ pub async fn http_post_json_no_resp<B: Serialize>(
         .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() && status.as_u16() != 204 {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(HttpError::HttpStatus {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(status_error(resp).await);
     }
     Ok(())
 }
@@ -169,15 +193,9 @@ pub async fn http_patch_json<B: Serialize, T: DeserializeOwned>(
         .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(HttpError::HttpStatus {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(status_error(resp).await);
     }
-    resp.json::<T>()
-        .await
-        .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))
+    decode_json(resp).await
 }
 
 pub async fn http_delete(
@@ -195,14 +213,14 @@ pub async fn http_delete(
         .map_err(|e| HttpError::from_reqwest(e, REQUEST_TIMEOUT_SECS))?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(HttpError::HttpStatus {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(status_error(resp).await);
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "client_caps_tests.rs"]
+mod caps_tests;
 
 #[cfg(test)]
 mod tests {

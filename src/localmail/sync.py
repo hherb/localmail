@@ -46,10 +46,12 @@ from .fetch_retry import (
 from .imap_dates import aware_internal_date
 from .parser import ParsedMessage, parse_message
 from .uids import (
+    UID_SEARCH_WINDOW,
     checkpoint_uidnext,
     max_label_uid,
     next_uid_after,
     should_reallocate_uid,
+    uid_search_specs,
 )
 
 log = logging.getLogger(__name__)
@@ -753,14 +755,14 @@ def sync_mailbox(
         clear_mailbox_holds(conn, mailbox.id)
         conn.commit()
 
-    if full_sync:
-        uids = sorted(imap.search("ALL"))
-    else:
-        last = mailbox.uidnext or 1
-        # SEARCH "UID N:*" always returns at least one result on a non-empty
-        # mailbox, even if no messages have UID >= N. Filter manually below.
-        candidate = imap.search(["UID", f"{last}:*"])
-        uids = _filter_new_uids(candidate, last)
+    last = 1 if full_sync else (mailbox.uidnext or 1)
+    candidate: list[int] = []
+    for spec in uid_search_specs(last, server_uidnext, window=UID_SEARCH_WINDOW):
+        candidate.extend(imap.search(["UID", spec]))
+    # The final "lo:*" window always returns at least one UID (the highest),
+    # even if none is >= lo: set() drops its echo of a UID an earlier window
+    # found, and the filter drops one below `last`.
+    uids = _filter_new_uids(sorted(set(candidate)), last)
 
     total_candidates = len(uids)
     if max_messages is not None and total_candidates > max_messages:

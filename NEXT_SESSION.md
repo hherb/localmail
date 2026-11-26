@@ -1,15 +1,13 @@
 # NEXT_SESSION.md — localmail handoff
 
-> **Status as of 2026-11-26 (session 102).** `main` is **`e98125a`** (#471
-> merged: migration `0039`).
+> **Status as of 2026-11-26 (session 103).** `main` is **`24636e5`** (#472
+> merged: SEARCH windows).
 >
-> **One open PR, #472**, on `fix/search-uid-windows`, based on `main` at
-> `e98125a`, carrying the SEARCH-window fix **and this handoff**.
+> **One open PR, #473**, on `fix/gui-json-body-caps`, based on `main` at
+> `24636e5`, carrying the GUI JSON body caps **and this handoff**.
 >
-> **Both hosts are deployed at `e98125a`** this session, `0039` applied on
-> each, `messages_headers_gin` gone on each (checked). **#472 needs a Mac
-> deploy** (restart the daemon; no migration). The DGX lacks the affected
-> account, but deploy it too to keep the hosts level.
+> **Both hosts are deployed at `24636e5`** this session (no migration).
+> #473 is GUI-only (Rust), so it needs no host deploy, only a GUI rebuild.
 >
 > **Open issues: 20.** **Open Dependabot alerts: 1** (#71, accelerate, no
 > fixed release).
@@ -34,44 +32,35 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## What we shipped this session
 
-- **Deployed #471 to both hosts**: daemon stopped, `init-db` applied `0039`
-  (under a second on each), both services restarted, `build_hash` `e98125a`
-  on each, `messages_headers_gin` absent on each. The sync also pulled #470's
-  soupsieve 4.1.3 onto both venvs (they had not been re-synced since).
-- **Found a live crash-loop while reading the Mac logs**: the
-  `List-subscriptions` account (added 2026-11-07) crashed its poll pass ~1,000
-  times a day from that day on with `imaplib.IMAP4.error: SEARCH => got more
-  than 1000000 bytes`. Its `[Gmail]/All Mail` had never synced (`uidnext`
-  NULL), so every pass was a full `SEARCH ALL`, whose one-line reply is over
-  imaplib's `_MAXLINE`. The operator chose to fix it ahead of the GUI JSON
-  caps.
+- **Deployed #472 to both hosts** (`build_hash` `24636e5` on each). On the
+  Mac the `List-subscriptions` crash-loop is gone: **0** `got more than
+  1000000 bytes` lines (and no ERROR at all) since the 22:10 restart, and
+  `[Gmail]/All Mail` (account 61) went from `uidnext` NULL to 5609, then 7448
+  within minutes. Its first full pass is still running; expect an embed/lang
+  backlog after it.
 
-### PR #472 on `fix/search-uid-windows`
+### PR #473 on `fix/gui-json-body-caps`
 
 | SHA | What |
 |---|---|
-| `6c34f6f` | `uids.UID_SEARCH_WINDOW` (50,000) + pure `uids.uid_search_specs`: closed windows over `first .. UIDNEXT-1`, last one open (`lo:*`). `sync_mailbox` runs one `UID` SEARCH per window (a full sync windows from UID 1, not `ALL`). `FakeIMAPClient.max_search_results` models the cap. New `tests/test_sync_uid_windows.py` (12 tests, RED first). CLAUDE.md note under the sync model |
+| `38c71dc` | `http/client.rs`: `decode_json` (`read_capped` at `MAX_JSON_BYTES` = 100 MiB, then `serde_json::from_slice`) for the three JSON helpers; `status_error` (`read_capped` at `MAX_ERROR_BODY_BYTES` = 64 KiB) for all six error paths. New `HttpError::TooLarge { size, max }`. New `client_caps_tests.rs` (5 tests, RED first). README + CLAUDE.md notes |
 | next | this handoff |
-| next | `/finalcheck` review fixes: crash start date corrected to 2026-11-07; stale comments and docstrings; `FakeIMAPClient.reported_uidnext` seam; closed sweep windows report `phantom_uids` (only the `N:N` probe stays exact); 5 new pins (dedup of the tail's echo, stale UIDNEXT, the `*`-quirk filter, the fake's own cap, a phantom below the last window), each mutation-checked |
 
-- **Verification:** full suite `4784 passed` after the review fixes (6:49,
-  load ~8 from other projects); mypy clean (169 files). Mutation: forcing a
-  10⁹ window fails both sync tests, and each of the five review pins fails
-  alone against its own mutation.
-- **Not run:** the fix against the real `List-subscriptions` All Mail (that
-  is the deploy step).
+- **Verification:** `cargo test --lib` 155 passed, clippy `--all-targets
+  -D warnings` and `cargo fmt --check` clean. Mutations (one helper back to
+  `.json()`, one back to `.text()`, cap lifted to `u64::MAX`) each fail
+  their own test.
+- **Not run:** vitest / svelte-check (no TS changed), the Python suite (no
+  Python changed).
 
 ## What's next
 
-### 1. **Merge #472** (yours), once CI is green, then deploy the Mac
-- **Acceptance:** `gh pr checks 472` all pass; merged.
-- **Deploy (Mac):** `git pull`, `uv sync …`, kickstart the daemon. Then no
-  new `got more than 1000000 bytes` in `daemon.err.log`, and
-  `select uidnext from mailboxes where account_id=61 and name='[Gmail]/All Mail'`
-  turns non-NULL once the first full pass checkpoints (All Mail is large, so
-  the first pass will take a while; the embed/lang workers will have a
-  backlog after it).
-- DGX: pull and restart too, to keep the hosts level.
+### 1. **Merge #473** (yours), once CI is green
+- **Acceptance:** `gh pr checks 473` all pass; merged. No host deploy
+  needed (GUI only); rebuild the GUI app when convenient.
+- Check the `List-subscriptions` All Mail pass finished: `uidnext` for
+  account 61 / `[Gmail]/All Mail` stops moving and still no SEARCH error in
+  `daemon.err.log`.
 
 ### 2. **Re-authorise `hherb-dmc`** (yours, browser; carried)
 - **Acceptance:** no new `crashed for hherb-dmc` in `daemon.err.log` after
@@ -79,14 +68,12 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - Note: `horst-gmail` also logs ~30 poll crashes a day since 2026-11-22.
   Not looked at; check the traceback before assuming it is the same cause.
 
-### 3. **GUI JSON body caps** (the slice the operator picked this session)
-- The JSON helpers in `gui/src-tauri/src/http/client.rs` (`.json()` and the
-  error-path `resp.text()` in all six) read unbounded bodies. Reuse
-  `body::read_capped`, then `serde_json::from_slice`.
-- **Acceptance:** a RED mockito test per helper with a finite chunked body
-  past the cap (`body::test_support::write_past`), reporting a size near the
-  cap; `cargo test --lib` + `cargo clippy --all-targets -- -D warnings` clean.
-- Other candidates: **#285**, **#368**, **#369**, #365, #363.
+### 3. **Next code slice** (pick one)
+- Candidates: **#285** (ruff in CI?), **#368** (MCP drops unknown args),
+  **#369** (silent last-token-wins), #365, #363, #459.
+- `HttpError::from_reqwest` still uses bare `is_timeout()`, so an OS
+  ETIMEDOUT on a JSON request reads as the 15 s budget (the #469 lesson,
+  not applied to `client.rs`). Small, could ride with any GUI slice.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
   `filters.lang` as a list, #419 syntax, #415 dates, `api_minor` 5 and 6
   features, #373 (`'` is literal), #378.
@@ -110,12 +97,15 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 ## Rulings made this session
 
-1. **Deploy #471 to both hosts** (done).
-2. **Fix the SEARCH crash before the GUI JSON caps**, by windowing the
-   SEARCH rather than raising `imaplib._MAXLINE`.
+1. **Deploy #472 to both hosts** (done).
+2. **GUI JSON body caps next** (done, #473).
 
 ## Open decisions & risks
 
+000. **A GUI JSON reply over 100 MiB now fails** with `TooLarge` (#473), and
+     an error reply over 64 KiB shows `<error body over 65536 bytes>`
+     instead of its text (it used to be read whole). A message detail with
+     >100 MiB of decoded bodies can no longer be opened in the GUI.
 00. **A full sync now costs one SEARCH per 50,000 UIDs** (#472) where it
     cost one. On All Mail that is a handful of round trips, each bounded by
     `imap_timeout_s`. A server whose UIDNEXT is far below its real UIDs would
@@ -170,7 +160,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~42 in sessions 100–101 and ~97 in 102**
+10. **Load on the Mac was ~42 in sessions 100–101 and ~97 in 102, ~19 in 103**
     (drugref and consensus pytest runs, not localmail). Check `uptime` before trusting any timing.
 
 ## Exact commands to resume
@@ -181,7 +171,7 @@ git fetch --prune origin                 # ALWAYS first
 git switch main && git pull --ff-only
 git log --oneline -1 origin/main         # THE authority
 gh pr list --state all --limit 4
-gh pr checks 472
+gh pr checks 473
 gh api 'repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100' --jq '.[].number'
 gh issue list --limit 200 --json number --jq length
 
@@ -203,7 +193,7 @@ uptime; pgrep -fl pytest
 unset VIRTUAL_ENV && uv run pytest -q              # 4784, session 102 (6:49 under load ~8)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 540, session 99
-cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 147, session 99
+cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 155, session 103
 ```
 
 The latest migration is **`0039_drop_messages_headers_gin.sql`** (#471);

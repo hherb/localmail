@@ -759,8 +759,9 @@ def sync_mailbox(
     candidate: list[int] = []
     for spec in uid_search_specs(last, server_uidnext, window=UID_SEARCH_WINDOW):
         candidate.extend(imap.search(["UID", spec]))
-    # SEARCH "UID N:*" always returns at least one result on a non-empty
-    # mailbox, even if no messages have UID >= N, so filter here.
+    # The final "lo:*" window always returns at least one UID (the highest),
+    # even if none is >= lo: set() drops its echo of a UID an earlier window
+    # found, and the filter drops one below `last`.
     uids = _filter_new_uids(sorted(set(candidate)), last)
 
     total_candidates = len(uids)

@@ -1492,13 +1492,17 @@ invariants follow; all are pinned by
   reply is one line, so a full sync of a large `[Gmail]/All Mail` raised
   `SEARCH => got more than 1000000 bytes` on every poll pass forever (live on
   the Mac's `List-subscriptions` account, ~1,000 crashes a day from
-  2026-11-19, All Mail never synced). The pure `uids.uid_search_specs` tiles
-  `first .. UIDNEXT-1` with closed ranges and keeps the **last one open**
-  (`lo:*`), so a stale or missing UIDNEXT still finds every UID; with no
-  usable UIDNEXT it is the single `first:*` sweep sync always used. A full
-  sync now asks `UID 1:*` rather than `ALL`. Not a global `imaplib._MAXLINE`
-  patch: that is a private name, and the reply would stay unbounded.
-  `FakeIMAPClient.max_search_results` models the cap.
+  2026-11-07, the day it was added; All Mail never synced). The pure
+  `uids.uid_search_specs` tiles `first .. UIDNEXT-1` with closed ranges and
+  keeps the **last one open** (`lo:*`), so a stale or missing UIDNEXT still
+  finds every UID; with no usable UIDNEXT it is the single `first:*` sweep
+  incremental sync always used, and that tail stays unbounded. A full sync
+  now windows from UID 1 (`1:50000`, …, `lo:*`) rather than asking `ALL`.
+  The open tail can echo a UID an earlier window found (the `*` quirk), which
+  `sorted(set(...))` drops. Not a global `imaplib._MAXLINE` patch: that is a
+  private name, and the reply would stay unbounded.
+  `FakeIMAPClient.max_search_results` models the cap and `reported_uidnext`
+  a stale or expunged-tail UIDNEXT.
 - **Every blocking IMAP call is bounded** by `[daemon] imap_timeout_s`
   (default 60s), threaded through `WorkerContext.imap_timeout_s`. Unbounded,
   imapclient blocks forever on a network black-hole and the worker holds its

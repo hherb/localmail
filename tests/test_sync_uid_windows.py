@@ -55,8 +55,17 @@ def test_only_the_last_window_is_open():
 
 
 def test_a_non_positive_window_is_refused():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="window must be positive"):
         uid_search_specs(1, 100, window=0)
+
+
+def test_the_fake_refuses_a_reply_over_its_cap():
+    """Both sync tests below mean something only because this raises."""
+    imap = _mailbox_with(5)
+    imap.select_folder("INBOX")
+    with pytest.raises(imaplib.IMAP4.error, match="got more than 1000000 bytes"):
+        imap.search(["UID", "1:*"])
+    assert imap.search(["UID", "1:4"]) == [1, 2, 3, 4]
 
 
 def _distinct(i: int) -> bytes:
@@ -103,3 +112,69 @@ def test_an_incremental_sync_larger_than_one_reply_completes(
 
     assert second == {"INBOX": 9}
     assert _labels(db_conn) == (11, 11)
+
+
+def _candidate_lines(conn, imap, tmp_path: Path) -> list[str]:
+    lines: list[str] = []
+    _sync(conn, imap, account=make_account(), attachments_root=tmp_path,
+          progress=lines.append)
+    return [line for line in lines if "candidate UID" in line]
+
+
+def test_the_open_tail_s_echo_of_an_earlier_uid_is_counted_once(
+    db_conn, tmp_path: Path, monkeypatch,
+):
+    """An expunged tail leaves UIDNEXT high, so ``17:*`` echoes UID 6.
+
+    Window ``5:8`` already returned it; without the dedup it is a second
+    candidate, processed twice and spending a ``max_messages`` slot.
+    """
+    monkeypatch.setattr(sync, "UID_SEARCH_WINDOW", 4)
+    imap = _mailbox_with(6)
+    imap.reported_uidnext = 20
+
+    assert _candidate_lines(db_conn, imap, tmp_path) == [
+        "  INBOX: 6 of 6 candidate UID(s) this run",
+    ]
+
+
+def test_uids_past_a_stale_uidnext_are_still_found(
+    db_conn, tmp_path: Path, monkeypatch,
+):
+    """The last window stays open, so a UIDNEXT reported too low loses nothing."""
+    monkeypatch.setattr(sync, "UID_SEARCH_WINDOW", 4)
+    imap = _mailbox_with(12)
+    imap.reported_uidnext = 11
+
+    results = _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    assert results == {"INBOX": 12}
+    assert _labels(db_conn) == (12, 12)
+
+
+def test_an_incremental_pass_with_no_new_mail_has_no_candidates(
+    db_conn, tmp_path: Path,
+):
+    """``3:*`` echoes UID 2 (the ``*`` quirk); the filter must drop it."""
+    imap = _mailbox_with(2)
+    _sync(db_conn, imap, account=make_account(), attachments_root=tmp_path)
+
+    assert _candidate_lines(db_conn, imap, tmp_path) == [
+        "  INBOX: 0 of 0 candidate UID(s) this run",
+    ]
+
+
+def test_a_phantom_below_the_last_window_is_still_swept(
+    db_conn, tmp_path: Path, monkeypatch,
+):
+    """A closed sweep window sees the same snapshot as the open tail does."""
+    monkeypatch.setattr(sync, "UID_SEARCH_WINDOW", 4)
+    imap = _mailbox_with(10)
+    del imap.folders["INBOX"].messages[2]
+    imap.phantom_uids = {2}                 # swept in 1:4, already gone
+
+    assert _candidate_lines(db_conn, imap, tmp_path) == [
+        "  INBOX: 10 of 10 candidate UID(s) this run",
+    ]
+    assert _labels(db_conn) == (9, 10)
+    assert imap.search(["UID", "2:2"]) == [], "the single-UID probe stays exact"

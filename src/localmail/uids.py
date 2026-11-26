@@ -39,9 +39,11 @@ def uid_search_specs(first: int, server_uidnext: int, *, window: int) -> list[st
 
     Closed windows tile ``first .. server_uidnext - 1``; the last range is
     open (``lo:*``) so a UID at or past a stale or missing UIDNEXT is still
-    found. With no usable UIDNEXT (0, or at/below `first`) it is the single
-    ``first:*`` sweep sync always used. The ``*`` quirk (``N:*`` returns the
-    last UID even when it is below N) is the caller's filter to apply.
+    found. With no usable UIDNEXT (0, or at/below `first`), or a range that
+    fits one window, it is the single ``first:*`` sweep incremental sync
+    always used. That tail is unbounded: past a stale or missing UIDNEXT it
+    can still outgrow imaplib's line cap. The ``*`` quirk (``N:*`` returns
+    the last UID even when it is below N) is the caller's to filter.
     """
     if window < 1:
         raise ValueError(f"window must be positive, got {window}")

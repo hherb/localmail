@@ -40,7 +40,7 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
   soupsieve 4.1.3 onto both venvs (they had not been re-synced since).
 - **Found a live crash-loop while reading the Mac logs**: the
   `List-subscriptions` account (added 2026-11-07) crashed its poll pass ~1,000
-  times a day from 2026-11-19 with `imaplib.IMAP4.error: SEARCH => got more
+  times a day from that day on with `imaplib.IMAP4.error: SEARCH => got more
   than 1000000 bytes`. Its `[Gmail]/All Mail` had never synced (`uidnext`
   NULL), so every pass was a full `SEARCH ALL`, whose one-line reply is over
   imaplib's `_MAXLINE`. The operator chose to fix it ahead of the GUI JSON
@@ -50,12 +50,14 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 | SHA | What |
 |---|---|
-| `6c34f6f` | `uids.UID_SEARCH_WINDOW` (50,000) + pure `uids.uid_search_specs`: closed windows over `first .. UIDNEXT-1`, last one open (`lo:*`). `sync_mailbox` runs one `UID` SEARCH per window (full sync asks `UID 1:*`, not `ALL`). `FakeIMAPClient.max_search_results` models the cap. New `tests/test_sync_uid_windows.py` (12 tests, RED first). CLAUDE.md note under the sync model |
+| `6c34f6f` | `uids.UID_SEARCH_WINDOW` (50,000) + pure `uids.uid_search_specs`: closed windows over `first .. UIDNEXT-1`, last one open (`lo:*`). `sync_mailbox` runs one `UID` SEARCH per window (a full sync windows from UID 1, not `ALL`). `FakeIMAPClient.max_search_results` models the cap. New `tests/test_sync_uid_windows.py` (12 tests, RED first). CLAUDE.md note under the sync model |
 | next | this handoff |
+| next | `/finalcheck` review fixes: crash start date corrected to 2026-11-07; stale comments and docstrings; `FakeIMAPClient.reported_uidnext` seam; closed sweep windows report `phantom_uids` (only the `N:N` probe stays exact); 5 new pins (dedup of the tail's echo, stale UIDNEXT, the `*`-quirk filter, the fake's own cap, a phantom below the last window), each mutation-checked |
 
-- **Verification:** full suite `4779 passed` (10:09, load ~97 from other
-  projects); mypy clean (169 files). Mutation: forcing a 10⁹ window fails
-  both sync tests.
+- **Verification:** full suite `4784 passed` after the review fixes (6:49,
+  load ~8 from other projects); mypy clean (169 files). Mutation: forcing a
+  10⁹ window fails both sync tests, and each of the five review pins fails
+  alone against its own mutation.
 - **Not run:** the fix against the real `List-subscriptions` All Mail (that
   is the deploy step).
 
@@ -168,8 +170,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 8. **Always sync with `--extra mcp --extra extraction`.** On the DGX use
    `~/.local/bin/uv`. `uv sync --dry-run` is not read-only.
 9. **No ROADMAP.md.** That `/nextsession` step is a no-op.
-10. **Load on the Mac was ~42 in sessions 100–101 and ~97 in 102** (drugref and consensus
-    pytest runs, not localmail). Check `uptime` before trusting any timing.
+10. **Load on the Mac was ~42 in sessions 100–101 and ~97 in 102**
+    (drugref and consensus pytest runs, not localmail). Check `uptime` before trusting any timing.
 
 ## Exact commands to resume
 
@@ -198,7 +200,7 @@ ssh 10.0.0.3 'curl -sk https://10.0.0.3:8443/v1/version'
 uptime; pgrep -fl pytest
 
 # Suites.
-unset VIRTUAL_ENV && uv run pytest -q              # 4779, session 102 (10:09 under load ~97)
+unset VIRTUAL_ENV && uv run pytest -q              # 4784, session 102 (6:49 under load ~8)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 540, session 99
 cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 147, session 99

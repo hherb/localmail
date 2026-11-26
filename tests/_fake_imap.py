@@ -50,6 +50,9 @@ class FakeIMAPClient:
         # reply is one line of UIDs. Modelled as a cap on the result count: a
         # SEARCH answering more raises what imaplib raises.
         self.max_search_results: int | None = None
+        # The UIDNEXT SELECT reports, when not the folder's real one: a server
+        # whose tail was expunged (higher) or whose answer is stale (lower).
+        self.reported_uidnext: int | None = None
 
     # --- test setup helpers (not part of the IMAP protocol) ------------------
 
@@ -96,18 +99,22 @@ class FakeIMAPClient:
         self._selected = self.folders[folder]
         return {
             b"UIDVALIDITY": self._selected.uidvalidity,
-            b"UIDNEXT": self._selected.uidnext,
+            b"UIDNEXT": (
+                self._selected.uidnext if self.reported_uidnext is None
+                else self.reported_uidnext
+            ),
             b"EXISTS": len(self._selected.messages),
         }
 
     def search(self, criteria) -> list[int]:
         """SEARCH over the selected folder.
 
-        The open-ended sweep forms sync uses ("ALL", "N:*") also report
-        `phantom_uids` — modelling a message that was still listed when the
-        mailbox was swept but has since been expunged. The closed-range form
-        ("N:N"), which sync uses to probe a single UID after an empty FETCH,
-        reflects current reality and never reports a phantom.
+        The sweep forms sync uses (its "lo:hi" windows and final "lo:*")
+        also report `phantom_uids` — modelling a message that was still
+        listed when the mailbox was swept but has since been expunged. The
+        single-UID form ("N:N"), which sync uses to probe a UID after an
+        empty FETCH, reflects current reality and never reports a phantom.
+        "ALL" is no longer sent by sync and is kept for direct callers.
         """
         self.search_call_count += 1
         assert self._selected is not None
@@ -131,7 +138,10 @@ class FakeIMAPClient:
                     return [max(uids)]
                 return hits
             hi = int(hi_s)
-            return [u for u in sorted(self._selected.messages) if lo <= u <= hi]
+            swept = set(self._selected.messages)
+            if lo != hi:
+                swept |= self.phantom_uids
+            return [u for u in sorted(swept) if lo <= u <= hi]
         raise NotImplementedError(f"unsupported search criteria: {criteria!r}")
 
     # IDLE protocol surface (test-only, deterministic).

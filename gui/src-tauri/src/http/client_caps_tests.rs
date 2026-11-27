@@ -149,3 +149,103 @@ async fn malformed_json_is_still_a_decode_error() {
         assert!(matches!(err, HttpError::Decode(_)), "{helper:?}: {err:?}");
     }
 }
+
+// The Timeout and Read arms of both mappers, driven directly (the helpers'
+// wiring to them is pinned above). The test holds the response before the
+// body faults, as body.rs's own tests do, so nothing races hyper's flush.
+#[derive(Clone, Copy)]
+enum Fault {
+    Stall,
+    Break,
+}
+
+const CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+const STALL: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn faulty(
+    status: usize,
+    fault: Fault,
+) -> (
+    mockito::ServerGuard,
+    mockito::Mock,
+    reqwest::Response,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let wait = std::sync::Mutex::new(wait);
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("GET", "/f")
+        .with_status(status)
+        .with_chunked_body(move |w| {
+            w.write_all(b"x")?;
+            let _ = wait.lock().unwrap().recv_timeout(STALL);
+            match fault {
+                Fault::Stall => Ok(()),
+                Fault::Break => Err(std::io::Error::other("boom")),
+            }
+        })
+        .create_async()
+        .await;
+    let timeout = match fault {
+        Fault::Stall => CLIENT_TIMEOUT,
+        Fault::Break => STALL * 2,
+    };
+    let resp = Client::builder()
+        .timeout(timeout)
+        .build()
+        .unwrap()
+        .get(format!("{}/f", server.url()))
+        .send()
+        .await
+        .unwrap();
+    if let Fault::Break = fault {
+        release.send(()).unwrap();
+    }
+    (server, mock, resp, release)
+}
+
+#[tokio::test]
+async fn a_stalled_json_body_is_the_request_timeout() {
+    let (_s, _m, resp, release) = faulty(200, Fault::Stall).await;
+    let err = decode_json::<Any>(resp).await.unwrap_err();
+    let _ = release.send(());
+    match err {
+        HttpError::Timeout { seconds } => assert_eq!(seconds, REQUEST_TIMEOUT_SECS),
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_broken_json_body_is_a_network_error_with_its_cause() {
+    let (_s, _m, resp, _release) = faulty(200, Fault::Break).await;
+    match decode_json::<Any>(resp).await.unwrap_err() {
+        HttpError::Network(msg) => assert!(msg.contains(": "), "no cause in {msg:?}"),
+        other => panic!("expected Network, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_error_body_is_named_and_keeps_the_status() {
+    let (_s, _m, resp, release) = faulty(500, Fault::Stall).await;
+    let err = status_error(resp).await;
+    let _ = release.send(());
+    match err {
+        HttpError::HttpStatus { status, body } => {
+            assert_eq!((status, body.as_str()), (500, "<error body timed out>"));
+        }
+        other => panic!("expected HttpStatus, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_broken_error_body_is_named_and_keeps_the_status() {
+    let (_s, _m, resp, _release) = faulty(500, Fault::Break).await;
+    match status_error(resp).await {
+        HttpError::HttpStatus { status, body } => {
+            assert_eq!(status, 500);
+            assert!(body.starts_with("<error body unreadable: "), "{body:?}");
+        }
+        other => panic!("expected HttpStatus, got {other:?}"),
+    }
+}

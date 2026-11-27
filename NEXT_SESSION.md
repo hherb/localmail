@@ -45,8 +45,9 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 |---|---|
 | `38c71dc` | `http/client.rs`: `decode_json` (`read_capped` at `MAX_JSON_BYTES` = 100 MiB, then `serde_json::from_slice`) for the three JSON helpers; `status_error` (`read_capped` at `MAX_ERROR_BODY_BYTES` = 64 KiB) for all six error paths. New `HttpError::TooLarge { size, max }`. New `client_caps_tests.rs` (5 tests, RED first). README + CLAUDE.md notes |
 | next | this handoff |
+| review | 4 tests pinning the `Timeout`/`Read` arms of `decode_json` and `status_error` (each arm mutation-checked); `MAX_JSON_BYTES` rationale corrected (a policy, not bounded by the raw cap) |
 
-- **Verification:** `cargo test --lib` 155 passed, clippy `--all-targets
+- **Verification:** `cargo test --lib` 159 passed, clippy `--all-targets
   -D warnings` and `cargo fmt --check` clean. Mutations (one helper back to
   `.json()`, one back to `.text()`, cap lifted to `u64::MAX`) each fail
   their own test.
@@ -72,8 +73,9 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 - Candidates: **#285** (ruff in CI?), **#368** (MCP drops unknown args),
   **#369** (silent last-token-wins), #365, #363, #459.
 - `HttpError::from_reqwest` still uses bare `is_timeout()`, so an OS
-  ETIMEDOUT on a JSON request reads as the 15 s budget (the #469 lesson,
-  not applied to `client.rs`). Small, could ride with any GUI slice.
+  ETIMEDOUT during a JSON request's `send()` reads as the 15 s budget (the
+  #469 lesson; body reads already follow it since #473). Small, could ride
+  with any GUI slice.
 - **Tell kastellan** (yours; carried): problem+json 400s on `/v1/search`,
   `filters.lang` as a list, #419 syntax, #415 dates, `api_minor` 5 and 6
   features, #373 (`'` is literal), #378.
@@ -104,8 +106,8 @@ is **strictly read-only w.r.t. IMAP**. The database is canonical for accounts.
 
 000. **A GUI JSON reply over 100 MiB now fails** with `TooLarge` (#473), and
      an error reply over 64 KiB shows `<error body over 65536 bytes>`
-     instead of its text (it used to be read whole). A message detail with
-     >100 MiB of decoded bodies can no longer be opened in the GUI.
+     instead of its text (it used to be read whole). A message detail whose
+     JSON reply exceeds 100 MiB can no longer be opened in the GUI.
 00. **A full sync now costs one SEARCH per 50,000 UIDs** (#472) where it
     cost one. On All Mail that is a handful of round trips, each bounded by
     `imap_timeout_s`. A server whose UIDNEXT is far below its real UIDs would
@@ -193,7 +195,7 @@ uptime; pgrep -fl pytest
 unset VIRTUAL_ENV && uv run pytest -q              # 4784, session 102 (6:49 under load ~8)
 uvx mypy --python-executable .venv/bin/python src/localmail   # Success, 169 files
 cd gui && npm test -- --run && npm run check   # 540, session 99
-cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 155, session 103
+cd gui/src-tauri && cargo test --lib && cargo clippy --all-targets -- -D warnings   # 159, session 103
 ```
 
 The latest migration is **`0039_drop_messages_headers_gin.sql`** (#471);

@@ -15,9 +15,10 @@ use crate::http::verifier::{TofuMode, TofuVerifier};
 
 pub const REQUEST_TIMEOUT_SECS: u64 = 15;
 
-/// Ceiling on a JSON response body. The largest is a message detail, whose
-/// bodies are decoded from a raw message the GUI refuses past 100 MiB
-/// (`MAX_RAW_BYTES`), so the same figure.
+/// Ceiling on a JSON response body. The largest is a message detail (bodies,
+/// sanitized HTML, headers, JSON-escaped), which can exceed its raw message,
+/// so this is a policy matching the raw-message cap, not derived from it: a
+/// larger detail fails with `TooLarge`.
 pub const MAX_JSON_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Ceiling on an error response's body, which is only kept for the message

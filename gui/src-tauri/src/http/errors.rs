@@ -24,6 +24,11 @@ pub enum HttpError {
 
     #[error("request timed out after {seconds}s")]
     Timeout { seconds: u64 },
+
+    /// The response body is over `max` bytes (#218 follow-up). `size` is the
+    /// declared `Content-Length`, else a lower bound (bytes read when refused).
+    #[error("response body of {size} bytes exceeds the {max}-byte limit")]
+    TooLarge { size: u64, max: u64 },
 }
 
 impl HttpError {
